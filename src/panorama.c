@@ -21,6 +21,7 @@
 
 #include "utils.h"
 #include "data.h"
+#include "image.h"
 
 
 /* flags to toggle features */
@@ -73,7 +74,7 @@ void setup_default(struct Panorama *p) {
   p->res = 16;
 
   p->source = OST50;
-  p->blockmax = 9;
+  p->blockmax = 500;
   p->dmax = 82000;
   p->nlevels = 2;
   p->levels = malloc(p->nlevels*sizeof(int));
@@ -251,16 +252,9 @@ int main(int argc, char const *argv[]) {
     err = get_block(By[Ib], Bx[Jb], source, X, Y, Zb);
     if (err != 0) {
       /* skip data blocks that don't exist */
-      // TODO: try returning a zero block instead or computing the intersections exactly
-      fprintf(stderr, "  WARNING: skipping block [%d, %d]\n", By[Ib], Bx[Jb]);
       continue;
     }
     fill_multigrid(ny, nx, nlevels, levels, Z);
-
-    /* log progress */
-    if (LOG_FLAG) {
-      fprintf(stderr, "block %d [%d, %d] of %d (%d rays)\n", block+1, Ib, Jb, blockmax, rays[block][nrays]);
-    }
 
     /* ================================== */
     /*  Propagate rays through the block  */
@@ -594,37 +588,26 @@ int main(int argc, char const *argv[]) {
     } // k end (loop over all rays in block)
   } // block end (loop over all data blocks)
 
-  // output the data to a file
-  FILE *fp = fopen("out/img_d.dat", "w");
-  for (int j = 0; j < nw; j++) {
-    for (int i = 0; i < nh; i++) {
-      fprintf(fp, "%lf ", img_d[j][i]);
-    } // i end
-    fprintf(fp, "\n");
-  } // j end
-  fclose(fp);
 
-  fp = fopen("out/img_h.dat", "w");
-  for (int j = 0; j < nw; j++) {
-    for (int i = 0; i < nh; i++) {
-      fprintf(fp, "%lf ", img_h[j][i]);
-    } // i end
-    fprintf(fp, "\n");
-  } // j end
-  fclose(fp);
+  /* ====================================================================== */
+  /*   GENERATE IMAGE                                                       */
+  /* ====================================================================== */
+  /* pack data into struct */
+  struct Image img;
+  img.nw = nw;
+  img.nh = nh;
+  img.img_x = img_x;
+  img.img_y = img_y;
+  img.img_d = img_d;
+  img.img_h = img_h;
+  img.img_n = img_n;
+  img.dmax = dmax;
 
-  fp = fopen("out/img_n.dat", "w");
-  for (int j = 0; j < nw; j++) {
-    for (int i = 0; i < nh; i++) {
-      fprintf(fp, "%d ", img_n[j][i]);
-    } // i end
-    fprintf(fp, "\n");
-  } // j end
-  fclose(fp);
-
-  // TODO: generate image
+  /* write to file */
+  image_write("out/img.png", &img);
 
   // TODO: output profiling
+
 
   /* ====================================================================== */
   /*   Clean Up                                                             */

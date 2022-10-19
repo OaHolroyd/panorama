@@ -79,10 +79,11 @@ void block_index(data_source source, double y0, int *I0, double x0, int *J0) {
 }
 
 /* fills X, Y, and Z with the eastings, northings, and heights from the data
-   block (I0, J0) from the given data source. Returns an integer error code:
+   block (I0, J0) from the given data source. If the file containing the data
+   is not found, it defaults to returning a height of zero for the entire block.
+   Returns an integer error code:
       0 on success
-     -1 failed to open file,
-     -2 failed to read correct number of entries
+     -1 failed to read correct number of entries
    The data must be saved in row-major format from the lower-left corner to the
    upper-right corner */
 int get_block(int I0, int J0, data_source source, double **X, double **Y, double **Z) {
@@ -118,14 +119,22 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
   /* read data from file */
   FILE *fp = fopen(file, "rb");
   if (!fp) {
-    return -1;
+    /* fill X, Y, and Z values */
+    for (int i = 0; i < ny; i++) {
+      for (int j = 0; j < nx; j++) {
+        Y[i][j] = y0 + (i+0.5)*ch;
+        X[i][j] = x0 + (j+0.5)*cw;
+        Z[i][j] = 0.0;
+      } // j end
+    } // i end
+    return 0;
   }
   size_t err = fread(*Z, sizeof(double), ny*nx, fp);
   fclose(fp);
 
   /* return if error has occured */
   if (err != (size_t)ny*nx) {
-    return -2;
+    return -1;
   }
 
   /* fill X and Y values */

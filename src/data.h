@@ -27,10 +27,11 @@ void get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By)
 void block_index(data_source source, double y0, int *I0, double x0, int *J0);
 
 /* fills X, Y, and Z with the eastings, northings, and heights from the data
-   block (I0, J0) from the given data source. Returns an integer error code:
+   block (I0, J0) from the given data source. If the file containing the data
+   is not found, it defaults to returning a height of zero for the entire block.
+   Returns an integer error code:
       0 on success
-     -1 failed to open file,
-     -2 failed to read correct number of entries
+     -1 failed to read correct number of entries
    The data must be saved in row-major format from the lower-left corner to the
    upper-right corner */
 int get_block(int I0, int J0, data_source source, double **X, double **Y, double **Z);
