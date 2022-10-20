@@ -23,8 +23,8 @@ int image_write(const char * restrict path, struct Image *img) {
   /* extract data from container */
   int nw = img->nw;
   int nh = img->nh;
-  double **img_x = img->img_x;
-  double **img_y = img->img_y;
+  int *wlim = img->wlim;
+  int *hlim = img->hlim;
   double **img_d = img->img_d;
   double **img_h = img->img_h;
   int **img_n = img->img_n;

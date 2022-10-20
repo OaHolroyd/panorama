@@ -9,7 +9,7 @@ LD=$(CC)
 CFLAGS=-Wall -Wextra
 # CFLAGS=-O0 -g -Wall -Wextra -DDEBUG -fbounds-check \
 #        -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
-CFLAGS+=-O0 -g -pedantic -Wno-unused-parameter -Wshadow \
+CFLAGS+=-Ofast -pedantic -Wno-unused-parameter -Wshadow \
        -Waggregate-return -Wbad-function-cast -Wcast-align -Wcast-qual \
        -Wfloat-equal -Wformat=2 -Wlogical-op -Wmissing-include-dirs \
        -Wnested-externs -Wpointer-arith -Wconversion -Wno-sign-conversion \

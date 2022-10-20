@@ -91,6 +91,98 @@ int read_intputs(struct Panorama *p, int argc, char const *argv[]) {
   return 0;
 }
 
+/* takes the block distances and fills blocks with the indices of the blocks
+   in the order that they should be covered, and iblocks with the positions of
+   each block (so iblocks[blocks[i]] = i and blocks[iblocks[j]] = j). Uses a
+   breadth-first search of von Neumann neighbours */
+void order_blocks(int *blocks, int *iblocks, int nby, int nbx, int I0, int J0, int *By, int *Bx) {
+  /* indicate that none of the blocks have been visited */
+  int nblocks = nby*nbx;
+  for (int i = 0; i < nblocks; i++) {
+    iblocks[i] = -1;
+  } // i end
+
+  /* find the origin index */
+  for (int i = 0; i < nby; i++) {
+    if (By[i] == I0) {
+      I0 = i;
+      break;
+    }
+  } // i end
+  for (int j = 0; j < nbx; j++) {
+    if (Bx[j] == J0) {
+      J0 = j;
+      break;
+    }
+  } // i end
+  int K0 = I0*nbx + J0;
+
+  /* start with the root index */
+  int q0 = 0;
+  int q1 = 0;
+  int k = K0;
+  blocks[q1] = k;
+  iblocks[k] = q1;
+  q1++;
+
+  /* breadth-first traversal of von Neumann neighbours. blocks is the queue,
+     iblocks records visited nodes */
+  while (q1-q0 != 0) {
+    /* finish if we've added all of the blocks */
+    if (q1 == nblocks) {
+      break;
+    }
+
+    /* get next index from start of queue */
+    k = blocks[q0];
+    q0++;
+
+    /* convert to double index */
+    int ik = k/nbx;
+    int jk = k - ik*nbx;
+
+    /* attempt to add [ik-1, jk] */
+    if (ik > 0) {
+      int k1 = k - nbx;
+      if (iblocks[k1] == -1) {
+        blocks[q1] = k1;
+        iblocks[k1] = q1;
+        q1++;
+      }
+    }
+
+    /* attempt to add [ik, jk-1] */
+    if (jk > 0) {
+      int k1 = k - 1;
+      if (iblocks[k1] == -1) {
+        blocks[q1] = k1;
+        iblocks[k1] = q1;
+        q1++;
+      }
+    }
+
+    /* attempt to add [ik+1, jk] */
+    if (ik < nby-1) {
+      int k1 = k + nbx;
+      if (iblocks[k1] == -1) {
+        blocks[q1] = k1;
+        iblocks[k1] = q1;
+        q1++;
+      }
+    }
+
+    /* attempt to add [ik, jk+1] */
+    if (jk < nbx-1) {
+      int k1 = k + 1;
+      if (iblocks[k1] == -1) {
+        blocks[q1] = k1;
+        iblocks[k1] = q1;
+        q1++;
+      }
+    }
+  } // end while
+}
+
 
 /* ========================================================================== */
 /*   MAIN                                                                     */
@@ -141,15 +233,19 @@ int main(int argc, char const *argv[]) {
   double **img_d = malloc_2d(nw, nh, sizeof(double));
   double **img_h = malloc_2d(nw, nh, sizeof(double));
   int **img_n = malloc_2d(nw, nh, sizeof(int));
-  double **img_x = malloc_2d(nw, nh, sizeof(double));
-  double **img_y = malloc_2d(nw, nh, sizeof(double));
+  double **img_u = malloc_2d(nw, nh, sizeof(double));
+  double **img_v = malloc_2d(nw, nh, sizeof(double));
+  double **img_dz = malloc_2d(nw, nh, sizeof(double));
   for (int j = 0; j < nw; j++) {
     for (int i = 0; i < nh; i++) {
       img_d[j][i] = -DBL_MAX;
       img_h[j][i] = -DBL_MAX;
       img_n[j][i] = 0;
-      img_x[j][i] = wlim[0] + j*dpx;
-      img_y[j][i] = hlim[0] + i*dpx;
+
+      double theta = M_PI*(0.5 - (wlim[0]+j*dpx)/180.0);
+      img_u[j][i] = cos(theta);
+      img_v[j][i] = sin(theta);
+      img_dz[j][i] = tan((hlim[0]+i*dpx)*M_PI/180.0);
     } // i end
   } // j end
 
@@ -187,39 +283,14 @@ int main(int argc, char const *argv[]) {
   double ***Z;
   create_multigrid(ny, nx, nlevels, levels, Zb, &Z);
 
-  /* compute block distances */
+  /* order of block traversal */
   int nbx, nby;
   int *Bx, *By;
   get_data_extent(source, &nbx, &nby, &Bx, &By);
   int nblocks = nbx*nby;
-  double *blocks_d = malloc(nblocks*sizeof(double));
-  for (int k = 0; k < nblocks; k++) {
-    int i = k/nbx;
-    int j = k-i*nbx;
-    blocks_d[k] = (I0-By[i])*(I0-By[i]) + (J0-Bx[j])*(J0-Bx[j]);
-  } // k end
-
-  // TODO: use better sorting algorithm
-  int *blocks = malloc(nblocks*sizeof(int)); // block ordering
-  int *iblocks = malloc(nblocks*sizeof(int));
-  for (int k = 0; k < nblocks; k++) {
-    // find the kth minimum
-    int imin = 0;
-    double dmin = blocks_d[imin];
-    for (int i = 0; i < nblocks; i++) {
-      if (dmin > blocks_d[i]) {
-        imin = i;
-        dmin = blocks_d[i];
-      }
-    } // i end
-
-    // "remove" from list
-    blocks_d[imin] = DBL_MAX;
-
-    // place in blocks and iblocks
-    blocks[k] = imin;
-    iblocks[imin] = k;
-  } // k end
+  int *blocks = malloc(nblocks*sizeof(int)); // block order
+  int *iblocks = malloc(nblocks*sizeof(int)); // position of block in order
+  order_blocks(blocks, iblocks, nby, nbx, I0, J0, By, Bx);
 
 
   /* ====================================================================== */
@@ -286,14 +357,13 @@ int main(int argc, char const *argv[]) {
       int J = IJ/nh; // column index (recalling that img is column-major)
 
       /* variables */
-      double theta = M_PI*(0.5 - img_x[0][IJ]/180.0); // heading
-      double u = cos(theta); // ray direction vector
-      double v = sin(theta); // TODO: maybe try using u = sqrt(1 - v*v)
+      double u = img_u[0][IJ]; // ray direction vector
+      double v = img_v[0][IJ]; // TODO: maybe try using u = sqrt(1 - v*v)
       int stepy = (v>0.0) - (v<0.0); // step directions
       int stepx = (u>0.0) - (u<0.0);
       double dty = fabs(ch/v); // dt to cross one cell
       double dtx = fabs(cw/u);
-      double dz = tan(img_y[0][IJ]*M_PI/180.0);
+      double dz = img_dz[0][IJ];
 
       /* =============================== */
       /* start position, index, and edge */
@@ -614,8 +684,8 @@ int main(int argc, char const *argv[]) {
   struct Image img;
   img.nw = nw;
   img.nh = nh;
-  img.img_x = img_x;
-  img.img_y = img_y;
+  img.wlim = wlim;
+  img.hlim = hlim;
   img.img_d = img_d;
   img.img_h = img_h;
   img.img_n = img_n;
@@ -656,15 +726,15 @@ int main(int argc, char const *argv[]) {
   free_2d(img_d);
   free_2d(img_h);
   free_2d(img_n);
-  free_2d(img_x);
-  free_2d(img_y);
+  free_2d(img_u);
+  free_2d(img_v);
+  free_2d(img_dz);
   free_2d(X);
   free_2d(Y);
   free_2d(Zb);
   free_multigrid(nlevels, Z);
   free(Bx);
   free(By);
-  free(blocks_d);
   free(blocks);
   free(iblocks);
   free_2d(rays);

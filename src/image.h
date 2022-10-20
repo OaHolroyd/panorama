@@ -10,8 +10,8 @@
 /* container for image data */
 struct Image {
   int nw, nh; // dimensions
-  double **img_x; // x coordinates
-  double **img_y; // y coordinates
+  int *wlim; // width limits
+  int *hlim; // height limits
   double **img_d; // distances
   double **img_h; // heights
   int **img_n; // step counts
