@@ -99,6 +99,16 @@ int main(int argc, char const *argv[]) {
   /* ====================================================================== */
   /*   Set Up                                                               */
   /* ====================================================================== */
+  /* basic profiling */
+  clock_t ttotal = 0;
+  clock_t tsetup = 0;
+  clock_t tread = 0;
+  clock_t tgrid = 0;
+  clock_t tray = 0;
+  clock_t tpng = 0;
+  clock_t t0;
+  clock_t tstart = clock();
+
   /* get inputs from command line */
   struct Panorama p; // wrapper for input data
   read_intputs(&p, argc, argv);
@@ -116,15 +126,6 @@ int main(int argc, char const *argv[]) {
   double dmax = p.dmax;
   int nlevels = p.nlevels;
   int *levels = p.levels;
-
-  /* basic profiling */
-  clock_t ttotal = 0;
-  clock_t tread = 0;
-  clock_t tgrid = 0;
-  clock_t tray = 0;
-  clock_t tpng = 0;
-  clock_t t0;
-  clock_t tstart = clock();
 
 
   /* ====================================================================== */
@@ -240,6 +241,7 @@ int main(int argc, char const *argv[]) {
 
   /* ray block entry side (0, 1, 2, 3 - top, bottom, right, left) */
   enum Exit_side *rays_entry = malloc(nrays*sizeof(enum Exit_side));
+  tsetup = clock() - tstart;
 
 
   /* ====================================================================== */
@@ -631,16 +633,20 @@ int main(int argc, char const *argv[]) {
   ttotal = clock() - tstart;
 
   double stotal = ((double)ttotal)/CLOCKS_PER_SEC;
+  double ssetup = ((double)tsetup)/CLOCKS_PER_SEC;
   double sread = ((double)tread)/CLOCKS_PER_SEC;
   double sgrid = ((double)tgrid)/CLOCKS_PER_SEC;
   double sray = ((double)tray)/CLOCKS_PER_SEC;
   double spng = ((double)tpng)/CLOCKS_PER_SEC;
+  double sother = stotal - (ssetup+sread+sgrid+sray+spng);
 
   fprintf(stderr, "total: %6.3lf [%6.2lf%%]\n", stotal, 100.0*stotal/stotal);
+  fprintf(stderr, "setup: %6.3lf [%6.2lf%%]\n", ssetup, 100.0*ssetup/stotal);
   fprintf(stderr, " read: %6.3lf [%6.2lf%%]\n", sread, 100.0*sread/stotal);
   fprintf(stderr, " grid: %6.3lf [%6.2lf%%]\n", sgrid, 100.0*sgrid/stotal);
   fprintf(stderr, "  ray: %6.3lf [%6.2lf%%]\n", sray, 100.0*sray/stotal);
   fprintf(stderr, "  png: %6.3lf [%6.2lf%%]\n", spng, 100.0*spng/stotal);
+  fprintf(stderr, "other: %6.3lf [%6.2lf%%]\n", sother, 100.0*sother/stotal);
 
 
   /* ====================================================================== */
