@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <float.h>
-#include <stdint.h>
+#include <time.h>
 
 #include "utils.h"
 #include "data.h"
@@ -116,6 +116,15 @@ int main(int argc, char const *argv[]) {
   double dmax = p.dmax;
   int nlevels = p.nlevels;
   int *levels = p.levels;
+
+  /* basic profiling */
+  clock_t ttotal = 0;
+  clock_t tread = 0;
+  clock_t tgrid = 0;
+  clock_t tray = 0;
+  clock_t tpng = 0;
+  clock_t t0;
+  clock_t tstart = clock();
 
 
   /* ====================================================================== */
@@ -246,6 +255,7 @@ int main(int argc, char const *argv[]) {
     /* ======================== */
     /*  Fill elevation pyramid  */
     /* ======================== */
+    t0 = clock();
     int IJb = blocks[block]; // single index
     int Ib = IJb/nbx; // row index
     int Jb = IJb-Ib*nbx; // column index
@@ -254,11 +264,16 @@ int main(int argc, char const *argv[]) {
       /* skip data blocks that don't exist */
       continue;
     }
+    tread += clock() - t0;
+
+    t0 = clock();
     fill_multigrid(ny, nx, nlevels, levels, Z);
+    tgrid += clock() - t0;
 
     /* ================================== */
     /*  Propagate rays through the block  */
     /* ================================== */
+    t0 = clock();
     int Jprev = -1; // previous column
     for (int k = 0; k < rays[block][nrays]; k++) {
       /* ============== */
@@ -586,6 +601,7 @@ int main(int argc, char const *argv[]) {
         }
       } // while end (loop across cells)
     } // k end (loop over all rays in block)
+    tray += clock() - t0;
   } // block end (loop over all data blocks)
 
 
@@ -604,9 +620,27 @@ int main(int argc, char const *argv[]) {
   img.dmax = dmax;
 
   /* write to file */
+  t0 = clock();
   image_write("out/img.png", &img);
+  tpng = clock() - t0;
 
-  // TODO: output profiling
+
+  /* ====================================================================== */
+  /*   Basic Profiling                                                      */
+  /* ====================================================================== */
+  ttotal = clock() - tstart;
+
+  double stotal = ((double)ttotal)/CLOCKS_PER_SEC;
+  double sread = ((double)tread)/CLOCKS_PER_SEC;
+  double sgrid = ((double)tgrid)/CLOCKS_PER_SEC;
+  double sray = ((double)tray)/CLOCKS_PER_SEC;
+  double spng = ((double)tpng)/CLOCKS_PER_SEC;
+
+  fprintf(stderr, "total: %6.3lf [%6.2lf%%]\n", stotal, 100.0*stotal/stotal);
+  fprintf(stderr, " read: %6.3lf [%6.2lf%%]\n", sread, 100.0*sread/stotal);
+  fprintf(stderr, " grid: %6.3lf [%6.2lf%%]\n", sgrid, 100.0*sgrid/stotal);
+  fprintf(stderr, "  ray: %6.3lf [%6.2lf%%]\n", sray, 100.0*sray/stotal);
+  fprintf(stderr, "  png: %6.3lf [%6.2lf%%]\n", spng, 100.0*spng/stotal);
 
 
   /* ====================================================================== */

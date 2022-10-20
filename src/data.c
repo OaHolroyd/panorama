@@ -179,6 +179,7 @@ void free_multigrid(int nlevels, double ***Z) {
 /* fills the multigrid with coarsened values going up the levels (see mipmap).
    Note that this assumes that Z[0] = Zb */
 void fill_multigrid(int ny, int nx, int nlevels, int *levels, double ***Z) {
+  // TODO: this is very slow, try to go row-by-row (not blockwise) over the fine grid
   int l, im0, jm0;
   for (int k = 1; k < nlevels; k++) {
     l = levels[k];
