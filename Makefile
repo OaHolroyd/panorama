@@ -6,15 +6,15 @@ CC=gcc-12
 LD=$(CC)
 
 # flags
-CFLAGS=-Wall -Wextra
-# CFLAGS=-O0 -g -Wall -Wextra -DDEBUG -fbounds-check \
-#        -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
-CFLAGS+=-Ofast -pedantic -Wno-unused-parameter -Wshadow \
-       -Waggregate-return -Wbad-function-cast -Wcast-align -Wcast-qual \
-       -Wfloat-equal -Wformat=2 -Wlogical-op -Wmissing-include-dirs \
-       -Wnested-externs -Wpointer-arith -Wconversion -Wno-sign-conversion \
-       -Wredundant-decls -Wsequence-point -Wstrict-prototypes -Wswitch -Wundef \
-       -Wunused-but-set-parameter -Wwrite-strings
+WARNINGS=-Wall -Wextra -pedantic -Wno-unused-parameter -Wshadow \
+         -Waggregate-return -Wbad-function-cast -Wcast-align -Wcast-qual \
+         -Wfloat-equal -Wformat=2 -Wlogical-op -Wmissing-include-dirs \
+         -Wnested-externs -Wpointer-arith -Wconversion -Wno-sign-conversion \
+         -Wredundant-decls -Wsequence-point -Wstrict-prototypes -Wswitch -Wundef \
+         -Wunused-but-set-parameter -Wwrite-strings
+DEBUG=-O0 -DDEBUG -fbounds-check \
+      -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
+CFLAGS=-Ofast $(WARNINGS)
 LDLIBS=-lpng
 
 # executable
@@ -36,13 +36,13 @@ DEPS=$(patsubst %.o,%.d,$(OBJ)) # dependency files
 # ============================================================================ #
 # link objects into single binary
 $(EXE): directories $(OBJ)
-	@printf "`tput bold``tput setaf 2`Linking`tput sgr0`\n"
-	$(LD) $(CFLAGS) $(LDFLAGS) -o $(EXE) $(OBJ) $(LDLIBS)
+  @printf "`tput bold``tput setaf 2`Linking`tput sgr0`\n"
+  $(LD) $(CFLAGS) $(LDFLAGS) -o $(EXE) $(OBJ) $(LDLIBS)
 
 # compile/assemble object files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c Makefile
-	@printf "`tput bold``tput setaf 6`Compiling %s`tput sgr0`\n" $@
-	$(CC) $(CFLAGS) $(LDFLAGS) -MMD -MP -c -o $@ $< $(LDLIBS)
+  @printf "`tput bold``tput setaf 6`Compiling %s`tput sgr0`\n" $@
+  $(CC) $(CFLAGS) $(LDFLAGS) -MMD -MP -c -o $@ $< $(LDLIBS)
 
 # include dependency information
 -include $(DEPS)
@@ -51,14 +51,19 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c Makefile
 .PHONY: all
 all: clean $(EXE)
 
+# forces a debug build
+.PHONY: debug
+debug: CFLAGS=$(DEBUG) $(WARNINGS)
+debug: all
+
 # create required directories
 .PHONY: directories
 directories:
-	@printf "`tput bold``tput setaf 3`Creating directories`tput sgr0`\n"
-	mkdir -p $(OBJ_DIR) $(OUT_DIR)
+  @printf "`tput bold``tput setaf 3`Creating directories`tput sgr0`\n"
+  mkdir -p $(OBJ_DIR) $(OUT_DIR)
 
 # purge build files and executable
 .PHONY: clean
 clean:
-	@printf "`tput bold``tput setaf 1`Cleaning`tput sgr0`\n"
-	rm -rf $(OBJ_DIR)/* $(EXE)
+  @printf "`tput bold``tput setaf 1`Cleaning`tput sgr0`\n"
+  rm -rf $(OBJ_DIR)/* $(EXE)
