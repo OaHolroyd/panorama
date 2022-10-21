@@ -36,13 +36,13 @@ DEPS=$(patsubst %.o,%.d,$(OBJ)) # dependency files
 # ============================================================================ #
 # link objects into single binary
 $(EXE): directories $(OBJ)
-  @printf "`tput bold``tput setaf 2`Linking`tput sgr0`\n"
-  $(LD) $(CFLAGS) $(LDFLAGS) -o $(EXE) $(OBJ) $(LDLIBS)
+	@printf "`tput bold``tput setaf 2`Linking`tput sgr0`\n"
+	$(LD) $(CFLAGS) $(LDFLAGS) -o $(EXE) $(OBJ) $(LDLIBS)
 
 # compile/assemble object files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c Makefile
-  @printf "`tput bold``tput setaf 6`Compiling %s`tput sgr0`\n" $@
-  $(CC) $(CFLAGS) $(LDFLAGS) -MMD -MP -c -o $@ $< $(LDLIBS)
+	@printf "`tput bold``tput setaf 6`Compiling %s`tput sgr0`\n" $@
+	$(CC) $(CFLAGS) $(LDFLAGS) -MMD -MP -c -o $@ $< $(LDLIBS)
 
 # include dependency information
 -include $(DEPS)
@@ -59,11 +59,11 @@ debug: all
 # create required directories
 .PHONY: directories
 directories:
-  @printf "`tput bold``tput setaf 3`Creating directories`tput sgr0`\n"
-  mkdir -p $(OBJ_DIR) $(OUT_DIR)
+	@printf "`tput bold``tput setaf 3`Creating directories`tput sgr0`\n"
+	mkdir -p $(OBJ_DIR) $(OUT_DIR)
 
 # purge build files and executable
 .PHONY: clean
 clean:
-  @printf "`tput bold``tput setaf 1`Cleaning`tput sgr0`\n"
-  rm -rf $(OBJ_DIR)/* $(EXE)
+	@printf "`tput bold``tput setaf 1`Cleaning`tput sgr0`\n"
+	rm -rf $(OBJ_DIR)/* $(EXE)
