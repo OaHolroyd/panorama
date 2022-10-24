@@ -64,14 +64,20 @@ enum Exit_side {
 /* sets the default parameters */
 void setup_default(struct Panorama *p) {
   /* Sgurr Fhuaran summit (NG 978 167) */
-  p->x0 = 197800.0;
-  p->y0 = 816700.0;
+  // p->x0 = 197800.0;
+  // p->y0 = 816700.0;
+  // p->z0 = 50.0;
+  // p->d0 = 100.0;
+
+  /* Sgurr Alasdair summit (NG 45007 20772) */
+  p->x0 = 145007.0;
+  p->y0 = 820772.0;
   p->z0 = 50.0;
   p->d0 = 100.0;
 
   p->wlim[0] = 0; p->wlim[1] = 360;
   p->hlim[0] = -6; p->hlim[1] = 2;
-  p->res = 16;
+  p->res = 64;
 
   p->source = OST50;
   p->blockmax = 500;
@@ -230,12 +236,12 @@ int main(int argc, char const *argv[]) {
 
   // note that the image is stored rotated so that we can iterate over the
   // columns for speed
-  double **img_d = malloc_2d(nw, nh, sizeof(double));
-  double **img_h = malloc_2d(nw, nh, sizeof(double));
-  int **img_n = malloc_2d(nw, nh, sizeof(int));
-  double **img_u = malloc_2d(nw, nh, sizeof(double));
-  double **img_v = malloc_2d(nw, nh, sizeof(double));
-  double **img_dz = malloc_2d(nw, nh, sizeof(double));
+  double **img_d = malloc_2d(nw, nh, sizeof(double)); // distance
+  double **img_h = malloc_2d(nw, nh, sizeof(double)); // height (and water cover)
+  int **img_n = malloc_2d(nw, nh, sizeof(int)); // number of steps to collision
+  double **img_u = malloc_2d(nw, nh, sizeof(double)); // step x-direction
+  double **img_v = malloc_2d(nw, nh, sizeof(double)); // step y-direction
+  double **img_dz = malloc_2d(nw, nh, sizeof(double)); // step z-direction
   for (int j = 0; j < nw; j++) {
     for (int i = 0; i < nh; i++) {
       img_d[j][i] = -DBL_MAX;
@@ -300,6 +306,9 @@ int main(int argc, char const *argv[]) {
   /* ====================================================================== */
   int nrays = nw*nh;
   int **rays = malloc_2d(blockmax, nrays+1, sizeof(int));
+  if (!rays) {
+    ERROR("failed to allocate ray memory");
+  }
 
   /* the number of rays in the kth block is stored in rays[k][nrays] */
   for (int k = 0; k < blockmax; k++) {
@@ -494,6 +503,124 @@ int main(int argc, char const *argv[]) {
             Jprev = J;
             img_d[0][IJ] = t + d00;
             img_h[0][IJ] = Z[0][i][j];
+
+            /* check for water */
+            double zc = Z[0][i][j];
+            const double watertol = 0.0;
+            if (i <= 1) {
+              if (fabs(Z[0][i+1][j]-zc) > watertol) {
+                break;
+              }
+              if (fabs(Z[0][i+2][j]-zc) > watertol) {
+                break;
+              }
+              if (j <= 1) {
+                if (fabs(Z[0][i][j+1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j+2]-zc) > watertol) {
+                  break;
+                }
+              } else if (j >= nx-2) {
+                if (fabs(Z[0][i][j-1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-2]-zc) > watertol) {
+                  break;
+                }
+              } else {
+                if (fabs(Z[0][i][j+1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j+2]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-2]-zc) > watertol) {
+                  break;
+                }
+              }
+            } else if (i >= ny-2) {
+              if (fabs(Z[0][i-1][j]-zc) > watertol) {
+                break;
+              }
+              if (fabs(Z[0][i-2][j]-zc) > watertol) {
+                break;
+              }
+              if (j <= 1) {
+                if (fabs(Z[0][i][j+1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j+2]-zc) > watertol) {
+                  break;
+                }
+              } else if (j >= nx-2) {
+                if (fabs(Z[0][i][j-1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-2]-zc) > watertol) {
+                  break;
+                }
+              } else {
+                if (fabs(Z[0][i][j+1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j+2]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-2]-zc) > watertol) {
+                  break;
+                }
+              }
+            } else {
+              if (fabs(Z[0][i+1][j]-zc) > watertol) {
+                break;
+              }
+              if (fabs(Z[0][i+2][j]-zc) > watertol) {
+                break;
+              }
+              if (fabs(Z[0][i-1][j]-zc) > watertol) {
+                break;
+              }
+              if (fabs(Z[0][i-2][j]-zc) > watertol) {
+                break;
+              }
+              if (j <= 1) {
+                if (fabs(Z[0][i][j+1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j+2]-zc) > watertol) {
+                  break;
+                }
+              } else if (j >= nx-2) {
+                if (fabs(Z[0][i][j-1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-2]-zc) > watertol) {
+                  break;
+                }
+              } else {
+                if (fabs(Z[0][i][j+1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-1]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j+2]-zc) > watertol) {
+                  break;
+                }
+                if (fabs(Z[0][i][j-2]-zc) > watertol) {
+                  break;
+                }
+              }
+            }
+
+            img_h[0][IJ] = -DBL_MAX; // leave as -DBL_MAX if it's water
             break;
           } else { // potential collision at lower level
             /* go down a level */

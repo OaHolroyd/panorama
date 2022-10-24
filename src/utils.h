@@ -21,7 +21,7 @@ void debug(const char *format, ...);
 
 /* Allocate memory for a 2D array of arbitrary type with a given size, matching
    row indices to the corresponding memory locations. */
-void* malloc_2d(int ni, int nj, size_t size);
+void* malloc_2d(size_t ni, size_t nj, size_t size);
 
 /* Frees memory associated with a 2D array */
 #define free_2d(A) internal_free_2d((void **)A)

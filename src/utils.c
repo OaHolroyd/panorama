@@ -39,7 +39,7 @@ void debug(const char *format, ...) { UNUSED(format); }
 
 /* Allocate memory for a 2D array of arbitrary type with a given size, matching
    row indices to the corresponding memory locations. */
-void* malloc_2d(int ni, int nj, size_t size) {
+void* malloc_2d(size_t ni, size_t nj, size_t size) {
   /* allocate row memory */
   void **p_2arr = malloc(ni*sizeof(void*));
   if (!p_2arr) { return NULL; }
@@ -49,7 +49,7 @@ void* malloc_2d(int ni, int nj, size_t size) {
   if (!mem) { free(p_2arr); return NULL; }
 
   /* match rows to memory */
-  for (int i = 0; i < ni; i++) {
+  for (size_t i = 0; i < ni; i++) {
     p_2arr[i] = &(mem[i*nj*size]);
   } // i end
 

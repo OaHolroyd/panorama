@@ -12,7 +12,7 @@ WARNINGS=-Wall -Wextra -pedantic -Wno-unused-parameter -Wshadow \
          -Wnested-externs -Wpointer-arith -Wconversion -Wno-sign-conversion \
          -Wredundant-decls -Wsequence-point -Wstrict-prototypes -Wswitch -Wundef \
          -Wunused-but-set-parameter -Wwrite-strings
-DEBUG=-O0 -DDEBUG -fbounds-check \
+DEBUG=-O0 -g3 -DDEBUG -fbounds-check \
       -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
 CFLAGS=-Ofast $(WARNINGS)
 LDLIBS=-lpng
