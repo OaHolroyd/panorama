@@ -272,6 +272,8 @@ int main(int argc, char const *argv[]) {
   /* grid spacing */
   double cw = X[0][1] - X[0][0];
   double ch = Y[1][0] - Y[0][0];
+  // double inv_cw = 1.0/cw;
+  // double inv_ch = 1.0/ch;
 
   /* check levels are valid */
   err = validate_levels(ny, nx, nlevels, levels);
@@ -319,8 +321,8 @@ int main(int argc, char const *argv[]) {
   /*   Ray Tracing                                                          */
   /* ====================================================================== */
   /* absolute viewpoint height */
-  int i0 = (y0 - Y[0][0] + 0.5*ch)/ch;
-  int j0 = (x0 - X[0][0] + 0.5*cw)/cw;
+  int i0 = (y0 - Y[0][0])/ch + 0.5;
+  int j0 = (x0 - X[0][0])/cw + 0.5;
   z0 += Zb[i0][j0];
 
   /* loop over the data blocks in order of distance from the origin block */
@@ -358,7 +360,7 @@ int main(int argc, char const *argv[]) {
 
       /* variables */
       double u = img_u[0][IJ]; // ray direction vector
-      double v = img_v[0][IJ]; // TODO: maybe try using u = sqrt(1 - v*v)
+      double v = img_v[0][IJ];
       int stepy = (v>0.0) - (v<0.0); // step directions
       int stepx = (u>0.0) - (u<0.0);
       double dty = fabs(ch/v); // dt to cross one cell
@@ -438,8 +440,8 @@ int main(int argc, char const *argv[]) {
         }
 
         /* start index */
-        i00 = (y00 - Y[0][0] + 0.5*ch)/ch;
-        j00 = (x00 - X[0][0] + 0.5*cw)/cw;
+        i00 = (y00 - Y[0][0])/ch + 0.5;
+        j00 = (x00 - X[0][0])/cw + 0.5;
         i = i00; j = j00;
 
         /* handle corner cases */
@@ -506,14 +508,10 @@ int main(int argc, char const *argv[]) {
               ty -= l1*dty;
 
               /* find correct i index */
-              if (stepy == 1) {
-                i = l1*(i/l1);
-              } else {
-                i = l1*(i/l1) + (l1-1);
-              }
+              i = l1*(i/l1) + (stepy!=1)*(l1-1);
 
               /* find correct j index */
-              j = ((x00+ty*u) - X[0][0] + 0.5*cw)/cw;
+              j = ((x00+ty*u) - X[0][0])/cw + 0.5;
 
               /* handle corner cases */
               // TODO: handle corner cases better
@@ -528,8 +526,8 @@ int main(int argc, char const *argv[]) {
                 j = nx-1;
               }
 
-              /* rewind tx */
-              tx -= rint((tx-(X[i][j]-x00+stepx*0.5*l*cw)/u)/(l*dtx))*l*dtx;
+              /* rewind tx (used to use rint) */
+              tx -= ((tx-(X[i][j]-x00+stepx*0.5*l*cw)/u)/(l*dtx))*l*dtx;
 
               /* move back forwards again (at the lower level) */
               ty += l*dty;
@@ -538,14 +536,10 @@ int main(int argc, char const *argv[]) {
               tx -= l1*dtx;
 
               /* find correct j index */
-              if (stepx == 1) {
-                j = l1*(j/l1);
-              } else {
-                j = l1*(j/l1) + (l1-1);
-              }
+              j = l1*(j/l1) + (stepx!=1)*(l1-1);
 
               /* find correct i index */
-              i = ((y00+tx*v) - Y[0][0] + 0.5*ch)/ch;
+              i = ((y00+tx*v) - Y[0][0])/ch + 0.5;
 
               /* handle corner cases */
               // TODO: handle corner cases better
@@ -560,8 +554,8 @@ int main(int argc, char const *argv[]) {
                 j = nx-1;
               }
 
-              /* rewind ty */
-              ty -= rint((ty-(Y[i][j]-y00+stepy*0.5*l*ch)/v)/(l*dty))*l*dty;
+              /* rewind ty (used to use rint) */
+              ty -= ((ty-(Y[i][j]-y00+stepy*0.5*l*ch)/v)/(l*dty))*l*dty;
 
               /* move back forwards again (at the lower level) */
               tx += l*dtx;
@@ -710,13 +704,13 @@ int main(int argc, char const *argv[]) {
   double spng = ((double)tpng)/CLOCKS_PER_SEC;
   double sother = stotal - (ssetup+sread+sgrid+sray+spng);
 
-  fprintf(stderr, "total: %6.3lf [%6.2lf%%]\n", stotal, 100.0*stotal/stotal);
   fprintf(stderr, "setup: %6.3lf [%6.2lf%%]\n", ssetup, 100.0*ssetup/stotal);
   fprintf(stderr, " read: %6.3lf [%6.2lf%%]\n", sread, 100.0*sread/stotal);
   fprintf(stderr, " grid: %6.3lf [%6.2lf%%]\n", sgrid, 100.0*sgrid/stotal);
   fprintf(stderr, "  ray: %6.3lf [%6.2lf%%]\n", sray, 100.0*sray/stotal);
   fprintf(stderr, "  png: %6.3lf [%6.2lf%%]\n", spng, 100.0*spng/stotal);
   fprintf(stderr, "other: %6.3lf [%6.2lf%%]\n", sother, 100.0*sother/stotal);
+  fprintf(stderr, "total: %6.3lf [%6.2lf%%]\n", stotal, 100.0*stotal/stotal);
 
 
   /* ====================================================================== */
