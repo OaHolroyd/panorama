@@ -122,7 +122,9 @@ int image_write(const char * restrict path, struct Image *img) {
   for (int i = 0; i < nh; i++) {
     for (int j = 0; j < nw; j++) {
       if (img_d[j][i] < 0.0) {
-        image[i][j] = COLOR_WHITE;
+        image[i][j] = COLOR_SKY;
+      } else if (img_h[j][i] < 0.0) {
+        image[i][j] = COLOR_WATER;
       } else {
         double d = img_d[j][i]/dmax;
         if (d > 1.0) { d = 1.0; }

@@ -14,13 +14,18 @@
 /* individual color indices */
 #define COLOR_BLACK 0
 #define COLOR_WHITE 1
-#define COLOR_RED 3
+#define COLOR_GREY 2
+#define COLOR_WATER 3
+#define COLOR_SKY 4
+#define COLOR_RED 5
 
 /* individual colors */
 #define INDIVIDUAL_COLORS \
   {  0,   0,   0}, /* black */ \
   {255, 255, 255}, /* white */ \
   {128, 128, 128}, /* grey */ \
+  { 51, 153, 255}, /* water */ \
+  {255, 255, 255}, /* sky */ \
   {255,   0,   0}  /* red */
 
 /* colormap colors */
