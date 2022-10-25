@@ -16,15 +16,17 @@ typedef enum data_source {
 /*   FUNCTION DECLARATIONS                                                    */
 /* ========================================================================== */
 /* sets ny and nx to the number of columns and rows in a block from the given
-   data source */
-void get_block_dims(data_source source, int *ny, int *nx);
+   data source. Returns non-zero error code on failure. */
+int get_block_dims(data_source source, int *ny, int *nx);
 
 /* allocates *Bx and *By (with length nbx, nby respectively) and fills them
-   with the x and y range of the data source */
-void get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By);
+   with the x and y range of the data source. Returns non-zero error code on
+   failure.  */
+int get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By);
 
-/* get the block coords containing the point (x0, y0) */
-void block_index(data_source source, double y0, int *I0, double x0, int *J0);
+/* get the block coords containing the point (x0, y0). Returns non-zero error
+   code on failure. */
+int block_index(data_source source, double y0, int *I0, double x0, int *J0);
 
 /* fills X, Y, and Z with the eastings, northings, and heights from the data
    block (I0, J0) from the given data source. If the file containing the data

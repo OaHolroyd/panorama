@@ -13,8 +13,8 @@
 /*   FUNCTION DEFINITIONS                                                     */
 /* ========================================================================== */
 /* sets ny and nx to the number of columns and rows in a block from the given
-   data source */
-void get_block_dims(data_source source, int *ny, int *nx) {
+   data source. Returns non-zero error code on failure. */
+int get_block_dims(data_source source, int *ny, int *nx) {
   switch (source) {
     case OST50:
       *ny = 200;
@@ -25,13 +25,15 @@ void get_block_dims(data_source source, int *ny, int *nx) {
       *nx = 500;
       break;
     default :
-      ERROR("data source not recognised");
+      return 1;
   }
+  return 0;
 }
 
 /* allocates *Bx and *By (with length nbx, nby respectively) and fills them
-   with the x and y range of the data source */
-void get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By) {
+   with the x and y range of the data source. Returns non-zero error code on
+   failure.  */
+int get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By) {
   switch (source) {
     case OST50:
       *nbx = 51;
@@ -47,7 +49,7 @@ void get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By)
       } // i end
       break;
     case SWISSALTI3D:
-      ERROR("SWISSALTI3D get_data_extent not implemented");
+      return 1;
       *nbx = 51;
       *Bx = malloc(*nbx*sizeof(int));
       for (int i = 0; i < *nbx; i++) {
@@ -61,24 +63,28 @@ void get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By)
       } // i end
       break;
     default :
-      ERROR("data source not recognised");
+      return 1;
   }
+  return 0;
 }
 
-/* get the block coords containing the point (x0, y0) */
-void block_index(data_source source, double y0, int *I0, double x0, int *J0) {
+/* get the block coords containing the point (x0, y0). Returns non-zero error
+   code on failure. */
+int block_index(data_source source, double y0, int *I0, double x0, int *J0) {
   switch (source) {
     case OST50:
       *I0 = 10*(((int)y0)/10000);
       *J0 = 10*(((int)x0)/10000);
       break;
     case SWISSALTI3D:
+      return 1;
       *I0 = ((int)y0)/1000;
       *J0 = ((int)x0)/1000;
       break;
     default :
-      ERROR("data source not recognised");
+      return 1;
   }
+  return 0;
 }
 
 /* fills X, Y, and Z with the eastings, northings, and heights from the data
@@ -87,6 +93,7 @@ void block_index(data_source source, double y0, int *I0, double x0, int *J0) {
    Returns an integer error code:
       0 on success
      -1 failed to read correct number of entries
+      1 unsupported data source
    The data must be saved in row-major format from the lower-left corner to the
    upper-right corner */
 int get_block(int I0, int J0, data_source source, double **X, double **Y, double **Z) {
@@ -106,7 +113,7 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
       ch = 50;
       break;
     case SWISSALTI3D:
-      ERROR("SWISSALTI3D get_block not implemented");
+      return 1;
       sprintf(file, "./data/swissalti3d/SWISSALTI3D-500-500-%04d-%04d.gzd", I0, J0);
       ny = 500;
       nx = 500;
@@ -116,7 +123,7 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
       ch = 2;
       break;
     default :
-      ERROR("data source not recognised");
+      return 1;
   }
 
   /* read data from file */

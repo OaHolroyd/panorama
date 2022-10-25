@@ -90,7 +90,7 @@ void setup_default(struct Panorama *p) {
 }
 
 /* reads inputs from the command line */
-int read_intputs(struct Panorama *p, int argc, char * const *argv) {
+int read_inputs(struct Panorama *p, int argc, char * const *argv) {
   setup_default(p);
 
   int c, err;
@@ -104,16 +104,16 @@ int read_intputs(struct Panorama *p, int argc, char * const *argv) {
         /* resolution */
         err = sscanf(optarg, "%d", &p->res);
         if (err != 1) {
-          ERROR("failed to read resolution argument '%s'", optarg);
+          fprintf(stderr, "failed to read resolution argument '%s'", optarg);
+          return 1;
         }
         break;
       case 'v':
         /* viewpoint */
         err = osng_to_ne(optarg, &p->y0, &p->x0);
-        fprintf(stderr, "%lf %lf\n", p->x0, p->y0);
-        fprintf(stderr, "%lf %lf\n", 197800.0, 816700.0);
         if (err) {
-          ERROR("failed to read viewpoint argument '%s'", optarg);
+          fprintf(stderr, "failed to read viewpoint argument '%s'", optarg);
+          return 1;
         }
         break;
       case 'd':
@@ -123,7 +123,8 @@ int read_intputs(struct Panorama *p, int argc, char * const *argv) {
           if (!strncmp(optarg, "auto", 4)) {
             p->dmax = -1.0;
           } else {
-            ERROR("failed to read dmax argument '%s'", optarg);
+            fprintf(stderr, "failed to read dmax argument '%s'", optarg);
+            return 1;
           }
         }
         p->dmax *= 1000.0;
@@ -132,26 +133,29 @@ int read_intputs(struct Panorama *p, int argc, char * const *argv) {
         /* minimum cutoff */
         err = sscanf(optarg, "%lf", &p->d0);
         if (err != 1) {
-          ERROR("failed to read cutoff argument '%s'", optarg);
+          fprintf(stderr, "failed to read cutoff argument '%s'", optarg);
+          return 1;
         }
         break;
       case 'b':
         /* blockmax */
         err = sscanf(optarg, "%d", &p->blockmax);
         if (err != 1) {
-          ERROR("failed to read blockmax argument '%s'", optarg);
+          fprintf(stderr, "failed to read blockmax argument '%s'", optarg);
+          return 1;
         }
         break;
       case 'z':
         /* viewpoint height */
         err = sscanf(optarg, "%lf", &p->z0);
         if (err != 1) {
-          ERROR("failed to read height argument '%s'", optarg);
+          fprintf(stderr, "failed to read height argument '%s'", optarg);
+          return 1;
         }
         break;
       case 'h':
       default :
-        static char helptext[] =
+        fprintf(stderr,
           "Usage: panorama [options]\n"
           "Options:\n"
           "  -h             Display this information.\n"
@@ -169,14 +173,10 @@ int read_intputs(struct Panorama *p, int argc, char * const *argv) {
           "  -b <blockmax>  Limits the raytracing to <blockmax> data blocks. (Defaults to\n"
           "                 500)\n"
           "  -s             Output the image as a single strip rather than divided into 8\n"
-          "                 sections.\n";
-        fprintf(stderr, helptext);
+          "                 sections.\n");
         return 1;
     }
   }
-
-  // TODO: read inputs (with getopt)
-  debug("TODO: read inputs with getopt");
   return 0;
 }
 
@@ -277,6 +277,8 @@ void order_blocks(int *blocks, int *iblocks, int nby, int nbx, int I0, int J0, i
 /*   MAIN                                                                     */
 /* ========================================================================== */
 int main(int argc, char * const *argv) {
+  int exit_code = EXIT_SUCCESS;
+
   /* ====================================================================== */
   /*   Set Up                                                               */
   /* ====================================================================== */
@@ -292,9 +294,11 @@ int main(int argc, char * const *argv) {
 
   /* get inputs from command line */
   struct Panorama p; // wrapper for input data
-  int err = read_intputs(&p, argc, argv);
+  int err = read_inputs(&p, argc, argv);
   if (err) {
-    ERROR("failed to read inputs");
+    fprintf(stderr, "ERROR: failed to read options\n");
+    exit_code = EXIT_FAILURE;
+    goto cleanup0;
   }
 
   /* extract from struct */
@@ -348,7 +352,12 @@ int main(int argc, char * const *argv) {
   /* ====================================================================== */
   /* dimensions */
   int ny, nx;
-  get_block_dims(source, &ny, &nx);
+  err = get_block_dims(source, &ny, &nx);
+  if (!err) {
+    fprintf(stderr, "ERROR: failed to recognise data source\n");
+    exit_code = EXIT_FAILURE;
+    goto cleanup1;
+  }
 
   double **X = malloc_2d(ny, nx, sizeof(double)); // eastings grid
   double **Y = malloc_2d(ny, nx, sizeof(double)); // northings grid
@@ -356,10 +365,17 @@ int main(int argc, char * const *argv) {
 
   /* read origin block */
   int I0, J0;
-  block_index(source, y0, &I0, x0, &J0);
-  err = get_block(I0, J0, source, X, Y, Zb);
+  err = block_index(source, y0, &I0, x0, &J0);
   if (err != 0) {
-    ERROR("failed to read block [%d, %d] (returned %d)", I0, J0, err);
+    fprintf(stderr, "ERROR: block index for [%lf, %lf] not found\n", x0, y0);
+    exit_code = EXIT_FAILURE;
+    goto cleanup2;
+  }
+  err = get_block(I0, J0, source, X, Y, Zb);
+  if (err) {
+    fprintf(stderr, "ERROR: failed to read block [%d, %d] (returned %d)\n", I0, J0, err);
+    exit_code = EXIT_FAILURE;
+    goto cleanup2;
   }
 
   /* grid spacing */
@@ -368,8 +384,10 @@ int main(int argc, char * const *argv) {
 
   /* check levels are valid */
   err = validate_levels(ny, nx, nlevels, levels);
-  if (err != 0) {
-    ERROR("level structure invalid");
+  if (err) {
+    fprintf(stderr, "ERROR: level structure invalid\n");
+    exit_code = EXIT_FAILURE;
+    goto cleanup3;
   }
 
   /* set up multigrid */
@@ -379,7 +397,12 @@ int main(int argc, char * const *argv) {
   /* order of block traversal */
   int nbx, nby;
   int *Bx, *By;
-  get_data_extent(source, &nbx, &nby, &Bx, &By);
+  err = get_data_extent(source, &nbx, &nby, &Bx, &By);
+  if (err) {
+    fprintf(stderr, "ERROR: bad data source\n");
+    exit_code = EXIT_FAILURE;
+    goto cleanup4;
+  }
   int nblocks = nbx*nby;
   int *blocks = malloc(nblocks*sizeof(int)); // block order
   int *iblocks = malloc(nblocks*sizeof(int)); // position of block in order
@@ -392,7 +415,9 @@ int main(int argc, char * const *argv) {
   int nrays = nw*nh;
   int **rays = malloc_2d(blockmax, nrays+1, sizeof(int));
   if (!rays) {
-    ERROR("failed to allocate ray memory");
+    fprintf(stderr, "ERROR: failed to allocate ray memory\n");
+    exit_code = EXIT_FAILURE;
+    goto cleanup5;
   }
 
   /* the number of rays in the kth block is stored in rays[k][nrays] */
@@ -772,7 +797,9 @@ int main(int argc, char * const *argv) {
               /* move back forwards again (at the lower level) */
               tx += l*dtx;
             } else {
-              ERROR("(unreachable) go down level at start");
+              fprintf(stderr, "ERROR: (unreachable) go down level at start\n");
+              exit_code = EXIT_FAILURE;
+              goto cleanup6;
             }
             continue;
           }
@@ -939,23 +966,36 @@ int main(int argc, char * const *argv) {
   /* ====================================================================== */
   /*   Clean Up                                                             */
   /* ====================================================================== */
-  free(levels);
+  cleanup6:
+  free(rays_entry);
+
+  cleanup5:
+  free(blocks);
+  free(iblocks);
+  free_2d(rays);
+
+  cleanup4:
+  free(Bx);
+  free(By);
+
+  cleanup3:
+  free_multigrid(nlevels, Z);
+
+  cleanup2:
+  free_2d(X);
+  free_2d(Y);
+  free_2d(Zb);
+
+  cleanup1:
   free_2d(img_d);
   free_2d(img_h);
   free_2d(img_n);
   free_2d(img_u);
   free_2d(img_v);
   free_2d(img_dz);
-  free_2d(X);
-  free_2d(Y);
-  free_2d(Zb);
-  free_multigrid(nlevels, Z);
-  free(Bx);
-  free(By);
-  free(blocks);
-  free(iblocks);
-  free_2d(rays);
-  free(rays_entry);
 
-  return EXIT_SUCCESS;
+  cleanup0:
+  free(p.levels);
+
+  return exit_code;
 }
