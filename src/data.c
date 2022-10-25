@@ -248,8 +248,13 @@ int validate_levels(int ny, int nx, int nlevels, int *levels) {
       2 if invalid leading character code
       3 if invalid grid reference */
 int osng_to_ne(char *gridref, double *y, double *x) {
-  /* assert that the string has the correct format */
-  int len = strlen(gridref);
+  /* get string length (capped at 15) */
+  int len;
+  for (len = 0; len < 15; len++) {
+    if (gridref[len] == '\0') {
+      break;
+    }
+  } // i end
 
   /* must be a 6, 8, or 10 figure grid ref */
   if (len != 8 && len != 10 && len != 12) {
@@ -280,8 +285,7 @@ int osng_to_ne(char *gridref, double *y, double *x) {
 
   /* add the grid reference */
   int p = (len-2)/2;
-  int p10 = pow(10, 8-p);
-  fprintf(stderr, "%d %d\n", p, p10);
+  int p10 = 100000;
   for (int i = 0; i < p; i++) {
     p10 /= 10;
 
