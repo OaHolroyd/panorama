@@ -353,7 +353,7 @@ int main(int argc, char * const *argv) {
   /* dimensions */
   int ny, nx;
   err = get_block_dims(source, &ny, &nx);
-  if (!err) {
+  if (err) {
     fprintf(stderr, "ERROR: failed to recognise data source\n");
     exit_code = EXIT_FAILURE;
     goto cleanup1;
@@ -366,7 +366,7 @@ int main(int argc, char * const *argv) {
   /* read origin block */
   int I0, J0;
   err = block_index(source, y0, &I0, x0, &J0);
-  if (err != 0) {
+  if (err) {
     fprintf(stderr, "ERROR: block index for [%lf, %lf] not found\n", x0, y0);
     exit_code = EXIT_FAILURE;
     goto cleanup2;
