@@ -9,7 +9,9 @@
 /*                                                                            */
 /*  TODO                                                                      */
 /* - start at the maximum level possible                                      */
-/* - correct for missing data blocks (eg holes over the sea for OST50)        */
+/* - exit gracefully                                                          */
+/* - figure out optimum level structure                                       */
+/* - make nicer images                                                        */
 /* - allow use of multiple UTM sources                                        */
 /* - allow use of lat/lon data (via interpolation)                            */
 
@@ -18,6 +20,8 @@
 #include <math.h>
 #include <float.h>
 #include <time.h>
+#include <unistd.h>
+#include <string.h>
 
 #include "utils.h"
 #include "data.h"
@@ -63,35 +67,106 @@ enum Exit_side {
 /* ========================================================================== */
 /* sets the default parameters */
 void setup_default(struct Panorama *p) {
-  /* Sgurr Fhuaran summit (NG 978 167) */
-  // p->x0 = 197800.0;
-  // p->y0 = 816700.0;
-  // p->z0 = 50.0;
-  // p->d0 = 100.0;
-
-  /* Sgurr Alasdair summit (NG 45007 20772) */
-  p->x0 = 145007.0;
-  p->y0 = 820772.0;
+  /* Ben Nevis summit (NN16677128) */
+  p->x0 = 216670.0;
+  p->y0 = 771280.0;
   p->z0 = 50.0;
-  p->d0 = 100.0;
+  p->d0 = 200.0;
 
   p->wlim[0] = 0; p->wlim[1] = 360;
   p->hlim[0] = -6; p->hlim[1] = 2;
-  p->res = 64;
+  p->res = 32;
 
   p->source = OST50;
   p->blockmax = 500;
-  p->dmax = 82000;
-  p->nlevels = 2;
+  p->dmax = 90000;
+  p->nlevels = 3;
   p->levels = malloc(p->nlevels*sizeof(int));
   p->levels[0] = 1;
-  p->levels[1] = 10;
-  // p->levels[2] = 2;
+  p->levels[1] = 5;
+  p->levels[2] = 2;
 }
 
 /* reads inputs from the command line */
-int read_intputs(struct Panorama *p, int argc, char const *argv[]) {
+int read_intputs(struct Panorama *p, int argc, char * const *argv) {
   setup_default(p);
+
+  int c, err;
+  while ((c = getopt(argc, argv, "r:v:d:c:b:z:")) != -1) {
+    switch (c) {
+      case 'r':
+        /* resolution */
+        err = sscanf(optarg, "%d", &p->res);
+        if (err != 1) {
+          ERROR("failed to read resolution argument '%s'", optarg);
+        }
+        break;
+      case 'v':
+        /* viewpoint */
+        err = osng_to_ne(optarg, &p->y0, &p->x0);
+        fprintf(stderr, "%lf %lf\n", p->x0, p->y0);
+        fprintf(stderr, "%lf %lf\n", 197800.0, 816700.0);
+        if (err) {
+          ERROR("failed to read viewpoint argument '%s'", optarg);
+        }
+        break;
+      case 'd':
+        /* dmax */
+        err = sscanf(optarg, "%lf", &p->dmax);
+        if (err != 1) {
+          if (!strncmp(optarg, "auto", 4)) {
+            p->dmax = -1.0;
+          } else {
+            ERROR("failed to read dmax argument '%s'", optarg);
+          }
+        }
+        p->dmax *= 1000.0;
+        break;
+      case 'c':
+        /* minimum cutoff */
+        err = sscanf(optarg, "%lf", &p->d0);
+        if (err != 1) {
+          ERROR("failed to read cutoff argument '%s'", optarg);
+        }
+        break;
+      case 'b':
+        /* blockmax */
+        err = sscanf(optarg, "%d", &p->blockmax);
+        if (err != 1) {
+          ERROR("failed to read blockmax argument '%s'", optarg);
+        }
+        break;
+      case 'z':
+        /* viewpoint height */
+        err = sscanf(optarg, "%lf", &p->z0);
+        if (err != 1) {
+          ERROR("failed to read height argument '%s'", optarg);
+        }
+        break;
+      case 'h':
+      default :
+        static char helptext[] =
+          "Usage: panorama [options]\n"
+          "Options:\n"
+          "  -h             Display this information."
+          "  -v <gridref>   Specify an 6, 8, or 10 figure OS grid reference for the\n"
+          "                 viewpoint location. Must include the grid square identifier\n"
+          "                 code and have spaces removed. (Defaults to NN16677128)\n"
+          "  -z <height>    Place the viewpoint at a height of <height> metres above the\n"
+          "                 ground. (Defaults to 50)\n"
+          "  -r <res>       Output an image with a resolution of <res> pixels per degree.\n"
+          "                 (Defaults to 32)\n"
+          "  -c <cutoff>    Neglect terrain  under <cutoff> metres from the viewpoint.\n"
+          "                 (Defaults to 200)\n"
+          "  -d <dmax>      Scales the colors between 0 and <dmax> kms from the viewpoint.\n"
+          "                 (Defaults to 90)\n"
+          "  -b <blockmax>  Limits the raytracing to <blockmax> data blocks. (Defaults to\n"
+          "                 500)\n";
+        fprintf(stderr, helptext);
+        return 1;
+    }
+  }
+
   // TODO: read inputs (with getopt)
   debug("TODO: read inputs with getopt");
   return 0;
@@ -193,7 +268,7 @@ void order_blocks(int *blocks, int *iblocks, int nby, int nbx, int I0, int J0, i
 /* ========================================================================== */
 /*   MAIN                                                                     */
 /* ========================================================================== */
-int main(int argc, char const *argv[]) {
+int main(int argc, char * const *argv) {
   /* ====================================================================== */
   /*   Set Up                                                               */
   /* ====================================================================== */
@@ -209,7 +284,10 @@ int main(int argc, char const *argv[]) {
 
   /* get inputs from command line */
   struct Panorama p; // wrapper for input data
-  read_intputs(&p, argc, argv);
+  int err = read_intputs(&p, argc, argv);
+  if (err) {
+    ERROR("failed to read inputs");
+  }
 
   /* extract from struct */
   double x0 = p.x0;
@@ -270,7 +348,7 @@ int main(int argc, char const *argv[]) {
   /* read origin block */
   int I0, J0;
   block_index(source, y0, &I0, x0, &J0);
-  int err = get_block(I0, J0, source, X, Y, Zb);
+  err = get_block(I0, J0, source, X, Y, Zb);
   if (err != 0) {
     ERROR("failed to read block [%d, %d] (returned %d)", I0, J0, err);
   }
@@ -278,8 +356,6 @@ int main(int argc, char const *argv[]) {
   /* grid spacing */
   double cw = X[0][1] - X[0][0];
   double ch = Y[1][0] - Y[0][0];
-  // double inv_cw = 1.0/cw;
-  // double inv_ch = 1.0/ch;
 
   /* check levels are valid */
   err = validate_levels(ny, nx, nlevels, levels);
@@ -801,6 +877,16 @@ int main(int argc, char const *argv[]) {
   /* ====================================================================== */
   /*   GENERATE IMAGE                                                       */
   /* ====================================================================== */
+  /* check dmax */
+  if (dmax < 0.0) {
+    /* find maximum */
+    for (int IJ = 0; IJ < nrays; IJ++) {
+      if (img_d[0][IJ] > dmax && img_h[0][IJ] > -DBL_MAX) {
+        dmax = img_d[0][IJ];
+      }
+    } // IJ end
+  }
+
   /* pack data into struct */
   struct Image img;
   img.nw = nw;

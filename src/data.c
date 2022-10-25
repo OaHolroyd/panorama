@@ -2,6 +2,9 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <math.h>
 
 #include "utils.h"
 
@@ -225,6 +228,58 @@ int validate_levels(int ny, int nx, int nlevels, int *levels) {
     }
     ny /= l;
     nx /= l;
+  } // i end
+
+  return 0;
+}
+
+/* converts an OS National Grid coordinate string gridref (which must begin with
+   a valid two-letter grid identifier, followed by a 6, 8, or 10 figure numeric
+   grid reference) to a Northing y and Easting x. Returns an error code:
+      0 on success
+      1 if invalid length
+      2 if invalid leading character code
+      3 if invalid grid reference */
+int osng_to_ne(char *gridref, double *y, double *x) {
+  /* assert that the string has the correct format */
+  int len = strlen(gridref);
+
+  /* must be a 6, 8, or 10 figure grid ref */
+  if (len != 8 && len != 10 && len != 12) {
+    return 1;
+  }
+
+  /* check if letters are valid */
+  int G1 = gridref[0]-'A';
+  int G2 = gridref[1]-'A';
+  if (G1 < 0 || G1 >= 26 || gridref[0] == 'I' || G2 < 0 || G2 >= 26 || gridref[1] == 'I') {
+    return 2;
+  }
+
+  /* check that remaining characters are numbers */
+  for (int i = 2; i < len; i++) {
+    if (!isdigit(gridref[i])) {
+      return 3;
+    }
+  } // i end
+
+  /* contributions from letter code */
+  double dE1[26] = {-2, -1, 0, 1, 2, -2, -1, 0, -9, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2};
+  double dN1[26] = {3, 3, 3, 3, 3, 2, 2, 2, -9, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1};
+  double dE2[26] = {0, 1, 2, 3, 4, 0, 1, 2, -9, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4};
+  double dN2[26] = {4, 4, 4, 4, 4, 3, 3, 3, -9, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0};
+  *y = 500000.0*dN1[G1] + 100000.0*dN2[G2];
+  *x = 500000.0*dE1[G1] + 100000.0*dE2[G2];
+
+  /* add the grid reference */
+  int p = (len-2)/2;
+  int p10 = pow(10, 8-p);
+  fprintf(stderr, "%d %d\n", p, p10);
+  for (int i = 0; i < p; i++) {
+    p10 /= 10;
+
+    *x += (gridref[2+i]-'0') * p10;
+    *y += (gridref[2+p+i]-'0') * p10;
   } // i end
 
   return 0;

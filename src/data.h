@@ -54,5 +54,14 @@ void fill_multigrid(int ny, int nx, int nlevels, int *levels, double ***Z);
    Returns 1 if valid, 0 otherwise */
 int validate_levels(int ny, int nx, int nlevels, int *levels);
 
+/* converts an OS National Grid coordinate string gridref (which must begin with
+   a valid two-letter grid identifier, followed by a 6, 8, or 10 figure numeric
+   grid reference) to a Northing y and Easting x. Returns an error code:
+      0 on success
+      1 if invalid length
+      2 if invalid leading character code
+      3 if invalid grid reference */
+int osng_to_ne(char *gridref, double *y, double *x);
+
 
 #endif
