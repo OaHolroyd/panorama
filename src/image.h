@@ -16,6 +16,7 @@ struct Image {
   double **img_h; // heights
   int **img_n; // step counts
   double dmax; // maximum distance
+  int split; // split image across multiple lines
 };
 
 

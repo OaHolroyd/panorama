@@ -29,6 +29,7 @@ int image_write(const char * restrict path, struct Image *img) {
   double **img_h = img->img_h;
   int **img_n = img->img_n;
   double dmax = img->dmax;
+  int split = img->split;
 
 
   /* ====================== */
@@ -70,10 +71,21 @@ int image_write(const char * restrict path, struct Image *img) {
   // TODO: see if setting compression level is useful
   // png_set_compression_level(png, Z_BEST_COMPRESSION);
 
+  /* compute size of output image */
+  const int pad = 10;
+  int w, h;
+  if (split) {
+    w = nw/8 + 2*pad;
+    h = nh*8 + 2*pad + 7*pad;
+  } else {
+    w = nw + 2*pad;
+    h = nh + 2*pad;
+  }
+
   /* fill the image header chunk */
   png_set_IHDR(
     png, info,
-    nw, nh, // image dimensions
+    w, h, // image dimensions
     8, // color bit-depth
     PNG_COLOR_TYPE_PALETTE, // index into a defined color palette
     PNG_INTERLACE_NONE, // disable interlacing
@@ -116,22 +128,50 @@ int image_write(const char * restrict path, struct Image *img) {
   /* ========================= */
   /* image (represented as 8-bit indices into the palette) */
   // TODO: should this use png_malloc?
-  png_byte **image = malloc_2d(nh, nw, sizeof(png_byte));
+  png_byte **image = malloc_2d(h, w, sizeof(png_byte));
 
-  // TODO: write this properly
-  for (int i = 0; i < nh; i++) {
-    for (int j = 0; j < nw; j++) {
-      if (img_d[j][i] < 0.0) {
-        image[i][j] = COLOR_SKY;
-      } else if (img_h[j][i] < 0.0) {
-        image[i][j] = COLOR_WATER;
-      } else {
-        double d = img_d[j][i]/dmax;
-        if (d > 1.0) { d = 1.0; }
-        image[i][j] = COLORMAP(d);
-      }
+  /* white background */
+  for (int i = 0; i < h; i++) {
+    for (int j = 0; j < w; j++) {
+      image[i][j] = COLOR_WHITE;
     } // j end
   } // i end
+
+  /* write distance data */
+  if (split) {
+    for (int i = 0; i < nh; i++) {
+      for (int j = 0; j < nw; j++) {
+        int k = j/(nw/8);
+        int ii = i + pad + k*(nh+pad);
+        int jj = j + pad - k*(nw/8);
+        if (img_d[j][i] < 0.0) {
+          image[ii][jj] = COLOR_SKY;
+        } else if (img_h[j][i] < 0.0) {
+          image[ii][jj] = COLOR_WATER;
+        } else {
+          double d = img_d[j][i]/dmax;
+          if (d > 1.0) { d = 1.0; }
+          image[ii][jj] = COLORMAP(d);
+        }
+      } // j end
+    } // i end
+  } else {
+    for (int i = 0; i < nh; i++) {
+      for (int j = 0; j < nw; j++) {
+        int ii = i + pad;
+        int jj = j + pad;
+        if (img_d[j][i] < 0.0) {
+          image[ii][jj] = COLOR_SKY;
+        } else if (img_h[j][i] < 0.0) {
+          image[ii][jj] = COLOR_WATER;
+        } else {
+          double d = img_d[j][i]/dmax;
+          if (d > 1.0) { d = 1.0; }
+          image[ii][jj] = COLORMAP(d);
+        }
+      } // j end
+    } // i end
+  }
 
 
   /* ================= */
@@ -139,9 +179,9 @@ int image_write(const char * restrict path, struct Image *img) {
   /* ================= */
   /* set up rows of pixels */
   // TODO: should this use png_malloc?
-  png_bytep *rows = malloc(nh*sizeof(png_bytep));
-  for (int i = 0; i < nh; i++) {
-    rows[i] = image[nh-i-1];
+  png_bytep *rows = malloc(h*sizeof(png_bytep));
+  for (int i = 0; i < h; i++) {
+    rows[i] = image[h-i-1];
   } // i end
 
   /* write the image data */

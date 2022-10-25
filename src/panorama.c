@@ -44,6 +44,7 @@ struct Panorama {
   /* panorama */
   int wlim[2], hlim[2]; // panorama image limits (in degrees)
   int res; // resolution (pixels per degree)
+  int split;
 
   /* data */
   data_source source; // data source (with associated projection/datum)
@@ -76,6 +77,7 @@ void setup_default(struct Panorama *p) {
   p->wlim[0] = 0; p->wlim[1] = 360;
   p->hlim[0] = -6; p->hlim[1] = 2;
   p->res = 32;
+  p->split = 1;
 
   p->source = OST50;
   p->blockmax = 500;
@@ -92,8 +94,12 @@ int read_intputs(struct Panorama *p, int argc, char * const *argv) {
   setup_default(p);
 
   int c, err;
-  while ((c = getopt(argc, argv, "r:v:d:c:b:z:")) != -1) {
+  while ((c = getopt(argc, argv, "hsr:v:d:c:b:z:")) != -1) {
     switch (c) {
+      case 's':
+        /* strip (ie not split) image */
+        p->split = 0;
+        break;
       case 'r':
         /* resolution */
         err = sscanf(optarg, "%d", &p->res);
@@ -148,7 +154,7 @@ int read_intputs(struct Panorama *p, int argc, char * const *argv) {
         static char helptext[] =
           "Usage: panorama [options]\n"
           "Options:\n"
-          "  -h             Display this information."
+          "  -h             Display this information.\n"
           "  -v <gridref>   Specify an 6, 8, or 10 figure OS grid reference for the\n"
           "                 viewpoint location. Must include the grid square identifier\n"
           "                 code and have spaces removed. (Defaults to NN16677128)\n"
@@ -161,7 +167,9 @@ int read_intputs(struct Panorama *p, int argc, char * const *argv) {
           "  -d <dmax>      Scales the colors between 0 and <dmax> kms from the viewpoint.\n"
           "                 (Defaults to 90)\n"
           "  -b <blockmax>  Limits the raytracing to <blockmax> data blocks. (Defaults to\n"
-          "                 500)\n";
+          "                 500)\n"
+          "  -s             Output the image as a single strip rather than divided into 8\n"
+          "                 sections.\n";
         fprintf(stderr, helptext);
         return 1;
     }
@@ -297,6 +305,7 @@ int main(int argc, char * const *argv) {
   int wlim[2] = {p.wlim[0], p.wlim[1]};
   int hlim[2] = {p.hlim[0], p.hlim[1]};
   int res = p.res;
+  int split = p.split;
   data_source source = p.source;
   int blockmax = p.blockmax;
   double dmax = p.dmax;
@@ -897,6 +906,7 @@ int main(int argc, char * const *argv) {
   img.img_h = img_h;
   img.img_n = img_n;
   img.dmax = dmax;
+  img.split = split;
 
   /* write to file */
   t0 = clock();
