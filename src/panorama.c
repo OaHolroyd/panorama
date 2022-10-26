@@ -440,8 +440,8 @@ int main(int argc, char * const *argv) {
   /*   Ray Tracing                                                          */
   /* ====================================================================== */
   /* absolute viewpoint height */
-  int i0 = (y0 - Y[0][0])/ch + 0.5;
-  int j0 = (x0 - X[0][0])/cw + 0.5;
+  int i0 = (int)((y0 - Y[0][0])/ch + 0.5);
+  int j0 = (int)((x0 - X[0][0])/cw + 0.5);
   z0 += Zb[i0][j0];
 
   /* loop over the data blocks in order of distance from the origin block */
@@ -467,6 +467,13 @@ int main(int argc, char * const *argv) {
     /* ================================== */
     /*  Propagate rays through the block  */
     /* ================================== */
+    int i00, j00; // start index
+    int i = -4, j = -4; // current index
+    double y00, x00, z00; // start position
+    int block1; // next block
+    int dprev = -1; // previous step (0 for vertical, 1 for horizontal)
+    double ty, tx; // vertical and horizontal distance
+
     t0 = clock();
     int Jprev = -1; // previous column
     for (int k = 0; k < rays[block][nrays]; k++) {
@@ -489,13 +496,6 @@ int main(int argc, char * const *argv) {
       /* =============================== */
       /* start position, index, and edge */
       /* =============================== */
-      int i00, j00; // start index
-      int i, j; // current index
-      double y00, x00, z00; // start position
-      int block1; // next block
-      int dprev = -1; // previous step (0 for vertical, 1 for horizontal)
-      double ty, tx; // vertical and horizontal distance
-
       /* if we're in the same column as the previous ray we can just continue
          from where it finished (provided we go up the columns of the image) */
       if (J == Jprev) {
@@ -549,8 +549,12 @@ int main(int argc, char * const *argv) {
               dy1 = 1.0;
               dprev = 1;
               break;
+            default:
+              fprintf(stderr, "ERROR: exit side not valid\n");
+              exit_code = EXIT_FAILURE;
+              goto cleanup6;
           }
-          if (v != 0.0) {
+          if (stepy != 0) { // if stepy == 0 then v == 0 and u/v is not defined
             t1 = (x0-x1 + (u/v)*(y1-y0)) / (dx1 - (u/v)*dy1);
           } else {
             t1 = (y0-y1) / dy1;
@@ -559,8 +563,8 @@ int main(int argc, char * const *argv) {
         }
 
         /* start index */
-        i00 = (y00 - Y[0][0])/ch + 0.5;
-        j00 = (x00 - X[0][0])/cw + 0.5;
+        i00 = (int)((y00 - Y[0][0])/ch + 0.5);
+        j00 = (int)((x00 - X[0][0])/cw + 0.5);
         i = i00; j = j00;
 
         /* handle corner cases */
@@ -748,7 +752,7 @@ int main(int argc, char * const *argv) {
               i = l1*(i/l1) + (stepy!=1)*(l1-1);
 
               /* find correct j index */
-              j = ((x00+ty*u) - X[0][0])/cw + 0.5;
+              j = (int)(((x00+ty*u) - X[0][0])/cw + 0.5);
 
               /* handle corner cases */
               // TODO: handle corner cases better
@@ -776,7 +780,7 @@ int main(int argc, char * const *argv) {
               j = l1*(j/l1) + (stepx!=1)*(l1-1);
 
               /* find correct i index */
-              i = ((y00+tx*v) - Y[0][0])/ch + 0.5;
+              i = (int)(((y00+tx*v) - Y[0][0])/ch + 0.5);
 
               /* handle corner cases */
               // TODO: handle corner cases better
