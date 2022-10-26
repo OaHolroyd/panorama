@@ -75,8 +75,8 @@ void setup_default(struct Panorama *p) {
   p->d0 = 200.0;
 
   p->wlim[0] = 0; p->wlim[1] = 360;
-  p->hlim[0] = -6; p->hlim[1] = 2;
-  p->res = 32;
+  p->hlim[0] = -5; p->hlim[1] = 1;
+  p->res = 96;
   p->split = 1;
 
   p->source = OST50;

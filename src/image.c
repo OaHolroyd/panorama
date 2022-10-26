@@ -1,11 +1,15 @@
 #include "image.h"
 
 #include <stdlib.h>
+#include <math.h>
 #include <png.h>
 // #include <zlib.h>
 
 #include "colors.h"
 #include "utils.h"
+
+/* lower bound for feasible height (lowest point visible is -430m) */
+#define MIN_H (-500.0)
 
 
 /* ========================================================================== */
@@ -130,6 +134,25 @@ int image_write(const char * restrict path, struct Image *img) {
   // TODO: should this use png_malloc?
   png_byte **image = malloc_2d(h, w, sizeof(png_byte));
 
+  /* find edges */
+  int **edges = malloc_2d(nw, nh, sizeof(int));
+  for (int j = 0; j < nw; j++) {
+    for (int i = 1; i < nh; i++) {
+      if (fabs(1.0 - img_d[j][i-1]/img_d[j][i]) > 0.05) {
+        /* big distance jump */
+        edges[j][i] = 1;
+      } else if (img_h[j][i] < MIN_H && img_h[j][i-1] > MIN_H) {
+        /* turn from land to water */
+        edges[j][i] = 1;
+      } else if (img_h[j][i] > MIN_H && img_h[j][i-1] < MIN_H) {
+        /* turn from water to land */
+        edges[j][i] = 1;
+      } else {
+        edges[j][i] = 0;
+      }
+    } // i end
+  } // j end
+
   /* white background */
   for (int i = 0; i < h; i++) {
     for (int j = 0; j < w; j++) {
@@ -144,9 +167,11 @@ int image_write(const char * restrict path, struct Image *img) {
         int k = j/(nw/8);
         int ii = i + pad + k*(nh+pad);
         int jj = j + pad - k*(nw/8);
-        if (img_d[j][i] < 0.0) {
+        if (edges[j][i]) {
+          image[ii][jj] = COLOR_BLACK;
+        } else if (img_d[j][i] < 0.0) {
           image[ii][jj] = COLOR_SKY;
-        } else if (img_h[j][i] < 0.0) {
+        } else if (img_h[j][i] < MIN_H) {
           image[ii][jj] = COLOR_WATER;
         } else {
           double d = img_d[j][i]/dmax;
@@ -192,6 +217,7 @@ int image_write(const char * restrict path, struct Image *img) {
 
 
   /* clean up */
+  free_2d(edges);
   free_2d(image);
   free(rows);
   png_destroy_write_struct(&png, &info);
