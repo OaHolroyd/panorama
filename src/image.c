@@ -2,14 +2,54 @@
 
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 #include <png.h>
 // #include <zlib.h>
 
+#include "data.h"
 #include "colors.h"
+#include "font.h"
 #include "utils.h"
 
 /* lower bound for feasible height (lowest point visible is -430m) */
 #define MIN_H (-500.0)
+
+
+/* ========================================================================== */
+/*   AUXILIARY FUNCTION DEFINITIONS                                           */
+/* ========================================================================== */
+/* adds the characters in the string str to the image, scaled by size. (i0, j0)
+   denotes the upper left corner of the string. Returns the x coordinate of the
+   next blank space. */
+int add_text(const char *str, int i0, int j0, int size, png_byte **image) {
+  int len = (int)strlen(str);
+  const unsigned char *c;
+
+  int j1 = j0;
+  for (int k = 0; k < len; k++) {
+    int i1 = i0;
+    c = CHAR_8BIT(str[k]);
+
+    /* print character */
+    for (int i = CHAR_H-1; i >= 0; i--) {
+      j1 = j0 + k*CHAR_W*size;
+      for (int j = CHAR_W-1; j >= 0; j--) {
+        png_byte set = (c[i] & 1 << j) ? COLOR_BLACK : COLOR_WHITE;
+
+        /* scale pixels by size */
+        for (int l0 = 0; l0 < size; l0++) {
+          for (int l1 = 0; l1 < size; l1++) {
+            image[i1+l0][j1+l1] = set;
+          } // l1 end
+        } // l0 end
+        j1 += size;
+      } // j end
+      i1 -= size;
+    } // i end
+  } // k end
+
+  return j1;
+}
 
 
 /* ========================================================================== */
@@ -23,17 +63,17 @@
      3 - subsequent write failure
      4 - color palette too large
   */
-int image_write(const char * restrict path, struct Image *img) {
+int image_write(const char * restrict path, struct Image *img, struct Panorama *p) {
   /* extract data from container */
   int nw = img->nw;
   int nh = img->nh;
-  int *wlim = img->wlim;
-  int *hlim = img->hlim;
+  int *wlim = p->wlim;
+  int *hlim = p->hlim;
   double **img_d = img->img_d;
   double **img_h = img->img_h;
   int **img_n = img->img_n;
-  double dmax = img->dmax;
-  int split = img->split;
+  double dmax = p->dmax;
+  int split = p->split;
 
 
   /* ====================== */
@@ -76,14 +116,16 @@ int image_write(const char * restrict path, struct Image *img) {
   // png_set_compression_level(png, Z_BEST_COMPRESSION);
 
   /* compute size of output image */
-  const int pad = 10;
+  const int pad = nh/20; // padding between split rows
+  const int head = nh/4; // space for header
+  const int foot = nh/4; // space for footer
   int w, h;
   if (split) {
     w = nw/8 + 2*pad;
-    h = nh*8 + 2*pad + 7*pad;
+    h = nh*8 + head + foot + 7*pad;
   } else {
     w = nw + 2*pad;
-    h = nh + 2*pad;
+    h = nh + head + foot;
   }
 
   /* fill the image header chunk */
@@ -138,7 +180,10 @@ int image_write(const char * restrict path, struct Image *img) {
   int **edges = malloc_2d(nw, nh, sizeof(int));
   for (int j = 0; j < nw; j++) {
     for (int i = 1; i < nh; i++) {
-      if (fabs(1.0 - img_d[j][i-1]/img_d[j][i]) > 0.05) {
+      if (img_h[j][i] < MIN_H && img_h[j][i-1] < MIN_H) {
+        /* water has no edges */
+        edges[j][i] = 0;
+      } else if (fabs(1.0 - img_d[j][i-1]/img_d[j][i]) > 0.05) {
         /* big distance jump */
         edges[j][i] = 1;
       } else if (img_h[j][i] < MIN_H && img_h[j][i-1] > MIN_H) {
@@ -165,7 +210,7 @@ int image_write(const char * restrict path, struct Image *img) {
     for (int i = 0; i < nh; i++) {
       for (int j = 0; j < nw; j++) {
         int k = j/(nw/8);
-        int ii = i + pad + k*(nh+pad);
+        int ii = i + foot + k*(nh+pad);
         int jj = j + pad - k*(nw/8);
         if (edges[j][i]) {
           image[ii][jj] = COLOR_BLACK;
@@ -183,7 +228,7 @@ int image_write(const char * restrict path, struct Image *img) {
   } else {
     for (int i = 0; i < nh; i++) {
       for (int j = 0; j < nw; j++) {
-        int ii = i + pad;
+        int ii = i + foot;
         int jj = j + pad;
         if (img_d[j][i] < 0.0) {
           image[ii][jj] = COLOR_SKY;
@@ -197,6 +242,41 @@ int image_write(const char * restrict path, struct Image *img) {
       } // j end
     } // i end
   }
+
+
+  /* ============ */
+  /*   ADD TEXT   */
+  /* ============ */
+  char str[128];
+
+  /* sizes */
+  int clarge = head/(2*CHAR_H);
+  int cmed = head/(4*CHAR_H);
+  int csmall = head/(8*CHAR_H);
+
+  /* top left */
+  int i0 = h-pad-1;
+  int j0 = pad+1;
+
+  /* name */
+  // TODO: find with gazetteer
+  strcpy(str, "Unknown: ");
+  j0 = add_text(str, i0, j0, clarge, image);
+
+  /* grid reference */
+  int err = ne_to_osng(p->y0, p->x0, str, 8, 1);
+  if (err) {
+    strcpy(str, "unknown gridref");
+  }
+  j0 = add_text(str, i0, j0, clarge, image);
+  j0 = add_text(" ", i0, j0, clarge, image);
+
+  /* other details */
+  sprintf(str, "terrain height: %.0lf m", p->z0);
+  add_text(str, i0, j0, cmed, image);
+  sprintf(str, "    eye height: %.0lf m", img->z);
+  add_text(str, i0-(CHAR_H+1)*cmed, j0, cmed, image);
+
 
 
   /* ================= */

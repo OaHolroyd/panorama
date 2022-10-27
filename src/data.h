@@ -11,6 +11,26 @@ typedef enum data_source {
   SWISSALTI3D, // swissALTI3D
 } data_source;
 
+/* container for panorama data */
+struct Panorama {
+  /* viewpoint */
+  double x0, y0; // easting and northing
+  double z0; // relative height above surface
+  double d0; // minimum ray collision distance
+
+  /* panorama */
+  int wlim[2], hlim[2]; // panorama image limits (in degrees)
+  int res; // resolution (pixels per degree)
+  int split;
+
+  /* data */
+  data_source source; // data source (with associated projection/datum)
+  int blockmax; // number of blocks to cover
+  double dmax; // maximum ray distance
+  int nlevels; // number of levels
+  int *levels; // level structure
+};
+
 
 /* ========================================================================== */
 /*   FUNCTION DECLARATIONS                                                    */
@@ -64,6 +84,11 @@ int validate_levels(int ny, int nx, int nlevels, int *levels);
       2 if invalid leading character code
       3 if invalid grid reference */
 int osng_to_ne(char *gridref, double *y, double *x);
+
+/* converts northing and easting (y, x) to a len figure gridref. The gridref
+   pointer should have space for a string of at least length len+2 (or len+4
+   if the spaced option is set). Returns non-zero error code on failure. */
+int ne_to_osng(double y, double x, char *gridref, int len, int spaced);
 
 
 #endif

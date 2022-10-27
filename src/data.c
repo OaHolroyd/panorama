@@ -276,10 +276,10 @@ int osng_to_ne(char *gridref, double *y, double *x) {
   } // i end
 
   /* contributions from letter code */
-  double dE1[26] = {-2, -1, 0, 1, 2, -2, -1, 0, -9, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2};
-  double dN1[26] = {3, 3, 3, 3, 3, 2, 2, 2, -9, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1};
-  double dE2[26] = {0, 1, 2, 3, 4, 0, 1, 2, -9, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4};
-  double dN2[26] = {4, 4, 4, 4, 4, 3, 3, 3, -9, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0};
+  const double dE1[26] = {-2, -1, 0, 1, 2, -2, -1, 0, -9, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2};
+  const double dN1[26] = {3, 3, 3, 3, 3, 2, 2, 2, -9, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1};
+  const double dE2[26] = {0, 1, 2, 3, 4, 0, 1, 2, -9, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4};
+  const double dN2[26] = {4, 4, 4, 4, 4, 3, 3, 3, -9, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0};
   *y = 500000.0*dN1[G1] + 100000.0*dN2[G2];
   *x = 500000.0*dE1[G1] + 100000.0*dE2[G2];
 
@@ -292,6 +292,69 @@ int osng_to_ne(char *gridref, double *y, double *x) {
     *x += (gridref[2+i]-'0') * p10;
     *y += (gridref[2+p+i]-'0') * p10;
   } // i end
+
+  return 0;
+}
+
+
+/* converts northing and easting (y, x) to a len figure gridref. The gridref
+   pointer should have space for a string of at least length len+2 (or len+4
+   if the spaced option is set). Returns non-zero error code on failure. */
+int ne_to_osng(double y, double x, char *gridref, int len, int spaced) {
+  /* check coords are valid */
+  if (y < 0 || x < 0) {
+    return 1;
+  }
+
+  /* must be a 6, 8, or 10 figure grid ref */
+  if (len != 6 && len != 8 && len != 10) {
+    return 2;
+  }
+
+  /* decompose into grid square code and grid reference */
+  int G1y = (int)(y/500000.0);
+  int G1x = (int)(x/500000.0);
+  int G2y = (int)((y-500000*G1y)/100000.0);
+  int G2x = (int)((x-500000*G1x)/100000.0);
+  double G3y = y-500000*G1y-100000*G2y;
+  double G3x = x-500000*G1x-100000*G2x;
+
+  /* round to precision required by len */
+  len = len/2;
+  for (int i = 0; i < (5-len); i++) {
+    G3y /= 10;
+    G3x /= 10;
+  } // i end
+  G3y = floor(G3y);
+  G3x = floor(G3x);
+
+  /* find the letters */
+  unsigned char G1 = 'I', G2 = 'I';
+  const int dE1[26] = {-2, -1, 0, 1, 2, -2, -1, 0, -9, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2};
+  const int dN1[26] = {3, 3, 3, 3, 3, 2, 2, 2, -9, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1};
+  const int dE2[26] = {0, 1, 2, 3, 4, 0, 1, 2, -9, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4};
+  const int dN2[26] = {4, 4, 4, 4, 4, 3, 3, 3, -9, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0};
+  for (unsigned char i = 0; i < 26; i++) {
+    if (dE1[i] == G1x && dN1[i] == G1y) {
+      G1 = 'A' + i;
+    }
+
+    if (dE2[i] == G2x && dN2[i] == G2y) {
+      G2 = 'A' + i;
+    }
+  } // i end
+
+  /* ensure letters are valid */
+  if (G1 == 'I' || G2 == 'I') {
+    return 3;
+  }
+
+  /* combine to gridref */
+  if (spaced) {
+    sprintf(gridref, "%c%c %.0lf %.0lf", G1, G2, G3x, G3y);
+  } else {
+    sprintf(gridref, "%c%c%.0lf%.0lf", G1, G2, G3x, G3y);
+  }
 
   return 0;
 }

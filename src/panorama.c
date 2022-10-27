@@ -34,26 +34,6 @@
 #define DROP 6.544431587294458e-08 // height drop (metre/metre^2)
 
 
-/* container for panorama data */
-struct Panorama {
-  /* viewpoint */
-  double x0, y0; // easting and northing
-  double z0; // relative height above surface
-  double d0; // minimum ray collision distance
-
-  /* panorama */
-  int wlim[2], hlim[2]; // panorama image limits (in degrees)
-  int res; // resolution (pixels per degree)
-  int split;
-
-  /* data */
-  data_source source; // data source (with associated projection/datum)
-  int blockmax; // number of blocks to cover
-  double dmax; // maximum ray distance
-  int nlevels; // number of levels
-  int *levels; // level structure
-};
-
 /* block exit side */
 enum Exit_side {
   EXIT_LEFT,
@@ -165,7 +145,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
           "  -z <height>    Place the viewpoint at a height of <height> metres above the\n"
           "                 ground. (Defaults to 50)\n"
           "  -r <res>       Output an image with a resolution of <res> pixels per degree.\n"
-          "                 (Defaults to 32)\n"
+          "                 (Defaults to 96)\n"
           "  -c <cutoff>    Neglect terrain  under <cutoff> metres from the viewpoint.\n"
           "                 (Defaults to 200)\n"
           "  -d <dmax>      Scales the colors between 0 and <dmax> kms from the viewpoint.\n"
@@ -309,7 +289,6 @@ int main(int argc, char * const *argv) {
   int wlim[2] = {p.wlim[0], p.wlim[1]};
   int hlim[2] = {p.hlim[0], p.hlim[1]};
   int res = p.res;
-  int split = p.split;
   data_source source = p.source;
   int blockmax = p.blockmax;
   double dmax = p.dmax;
@@ -442,6 +421,7 @@ int main(int argc, char * const *argv) {
   /* absolute viewpoint height */
   int i0 = (int)((y0 - Y[0][0])/ch + 0.5);
   int j0 = (int)((x0 - X[0][0])/cw + 0.5);
+  double zrel = z0;
   z0 += Zb[i0][j0];
 
   /* loop over the data blocks in order of distance from the origin block */
@@ -931,17 +911,15 @@ int main(int argc, char * const *argv) {
   struct Image img;
   img.nw = nw;
   img.nh = nh;
-  img.wlim = wlim;
-  img.hlim = hlim;
   img.img_d = img_d;
   img.img_h = img_h;
   img.img_n = img_n;
-  img.dmax = dmax;
-  img.split = split;
+  img.z = zrel;
+  p.z0 = z0 - zrel;
 
   /* write to file */
   t0 = clock();
-  image_write("out/img.png", &img);
+  image_write("out/img.png", &img, &p);
   tpng = clock() - t0;
 
 
