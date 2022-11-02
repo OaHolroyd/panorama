@@ -265,7 +265,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   double derr = gazetteer_nearest(p->y0, p->x0, name);
   free_gazetteer();
 
-  if (derr > 10000.0) {
+  if (derr > 200.0) {
     /* if the error is too large, mark as unknown */
     strcpy(name, "Unknown location");
   }
