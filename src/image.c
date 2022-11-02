@@ -7,6 +7,7 @@
 // #include <zlib.h>
 
 #include "data.h"
+#include "gazetteer.h"
 #include "colors.h"
 #include "font.h"
 #include "utils.h"
@@ -247,20 +248,30 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   /* ============ */
   /*   ADD TEXT   */
   /* ============ */
+  char name[64];
   char str[128];
 
   /* sizes */
-  int clarge = head/(2*CHAR_H);
-  int cmed = head/(4*CHAR_H);
-  int csmall = head/(8*CHAR_H);
+  int clarge = head/(1.2*CHAR_H);
+  int cmed = head/(2.4*CHAR_H);
+  int csmall = head/(4.8*CHAR_H);
 
   /* top left */
   int i0 = h-pad-1;
-  int j0 = pad+1;
+  int j0 = pad;
 
   /* name */
-  // TODO: find with gazetteer
-  strcpy(str, "Unknown: ");
+  init_gazetteer(p->source);
+  double derr = gazetteer_nearest(p->y0, p->x0, name);
+  free_gazetteer();
+
+  if (derr > 10000.0) {
+    /* if the error is too large, mark as unknown */
+    strcpy(name, "Unknown location");
+  }
+  add_text("view ", i0, j0, cmed, image);
+  j0 = add_text("from ", i0-(CHAR_H+1)*cmed, j0, cmed, image);
+  sprintf(str, "%s, ", name);
   j0 = add_text(str, i0, j0, clarge, image);
 
   /* grid reference */
@@ -272,11 +283,28 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   j0 = add_text(" ", i0, j0, clarge, image);
 
   /* other details */
-  sprintf(str, "terrain height: %.0lf m", p->z0);
+  sprintf(str, "  altitude: %.0lf m", p->z0);
   add_text(str, i0, j0, cmed, image);
-  sprintf(str, "    eye height: %.0lf m", img->z);
+  sprintf(str, "eye height: %.0lf m", img->z);
   add_text(str, i0-(CHAR_H+1)*cmed, j0, cmed, image);
 
+  /* bottom left */
+  i0 = foot-pad;
+  j0 = pad;
+
+  /* attributions */
+  switch (p->source) {
+    case OST50:
+      sprintf(str, "generated from OS Terrain 50 data (Crown copyright)");
+      break;
+    case SWISSALTI3D:
+      ERROR("SWISSALTI3D not supported");
+      break;
+    default :
+      ERROR("data source not recognised");
+      break;
+  }
+  add_text(str, i0, j0, csmall, image);
 
 
   /* ================= */
