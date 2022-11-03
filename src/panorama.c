@@ -54,7 +54,7 @@ void setup_default(struct Panorama *p) {
   p->z0 = 50.0;
   p->d0 = 200.0;
 
-  p->wlim[0] = 0; p->wlim[1] = 360;
+  p->wlim[0] = -22.5; p->wlim[1] = 360-22.5;
   p->hlim[0] = -5; p->hlim[1] = 1;
   p->res = 96;
   p->split = 1;
@@ -591,7 +591,7 @@ int main(int argc, char * const *argv) {
         double z = z00 + t*(dz + t*DROP);
 
         /* check if that will collide with the current cell */
-        if (t > d0 && Z[level][i/l][j/l] > z) {
+        if (t+d00 > d0 && Z[level][i/l][j/l] > z) {
           if (level == 0) { // collision
             /* set image and record final position for next ray */
             Jprev = J;
