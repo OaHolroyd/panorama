@@ -20,13 +20,20 @@
 /*   AUXILIARY FUNCTION DEFINITIONS                                           */
 /* ========================================================================== */
 /* adds the characters in the string str to the image, scaled by size. (i0, j0)
-   denotes the upper left corner of the string. Returns the x coordinate of the
-   next blank space. */
-int add_text(const char *str, int i0, int j0, int size, png_byte **image) {
+   denotes the upper left corner or the upper central point of the string,
+   depending if centred is true. Uses fcol (>=0) as the foreground color and
+   bcol as the background color (or blank if bcol = 0). Returns the
+   x coordinate of the next blank space. */
+int add_text(const char *str, int i0, int j0, int size, png_byte **image, int centred, int fcol, int bcol) {
   int len = (int)strlen(str);
   const unsigned char *c;
 
+  /* start x coordinate */
+  if (centred) {
+    j0 -= (len*size*CHAR_W)/2;
+  }
   int j1 = j0;
+
   for (int k = 0; k < len; k++) {
     int i1 = i0;
     c = CHAR_8BIT(str[k]);
@@ -35,12 +42,14 @@ int add_text(const char *str, int i0, int j0, int size, png_byte **image) {
     for (int i = CHAR_H-1; i >= 0; i--) {
       j1 = j0 + k*CHAR_W*size;
       for (int j = CHAR_W-1; j >= 0; j--) {
-        png_byte set = (c[i] & 1 << j) ? COLOR_BLACK : COLOR_WHITE;
+        png_byte set = (c[i] & 1 << j) ? fcol : bcol;
 
         /* scale pixels by size */
         for (int l0 = 0; l0 < size; l0++) {
           for (int l1 = 0; l1 < size; l1++) {
-            image[i1+l0][j1+l1] = set;
+            if (set != COLOR_NULL) {
+              image[i1+l0][j1+l1] = set;
+            }
           } // l1 end
         } // l0 end
         j1 += size;
@@ -207,106 +216,24 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   } // i end
 
   /* write distance data */
-  if (split) {
-    for (int i = 0; i < nh; i++) {
-      for (int j = 0; j < nw; j++) {
-        int k = j/(nw/8);
-        int ii = i + foot + (7-k)*(nh+pad);
-        int jj = j + pad - k*(nw/8);
-        if (edges[j][i]) {
-          image[ii][jj] = COLOR_BLACK;
-        } else if (img_d[j][i] < 0.0) {
-          image[ii][jj] = COLOR_SKY;
-        } else if (img_h[j][i] < MIN_H) {
-          image[ii][jj] = COLOR_WATER;
-        } else {
-          double d = img_d[j][i]/dmax;
-          if (d > 1.0) { d = 1.0; }
-          image[ii][jj] = COLORMAP(d);
-        }
-      } // j end
-    } // i end
-  } else {
-    for (int i = 0; i < nh; i++) {
-      for (int j = 0; j < nw; j++) {
-        int ii = i + foot;
-        int jj = j + pad;
-        if (img_d[j][i] < 0.0) {
-          image[ii][jj] = COLOR_SKY;
-        } else if (img_h[j][i] < 0.0) {
-          image[ii][jj] = COLOR_WATER;
-        } else {
-          double d = img_d[j][i]/dmax;
-          if (d > 1.0) { d = 1.0; }
-          image[ii][jj] = COLORMAP(d);
-        }
-      } // j end
-    } // i end
-  }
-
-
-  /* ================ */
-  /*   IMAGE LABELS   */
-  /* ================ */
-  /* zones */
-  int radius = nh/12;
-  if (split) {
-    for (int k = 0; k < 8; k++) {
-      int i0 = foot + (7-k)*(nh+pad) + pad + radius;
-      int j0 = 2*pad + radius;
-      double w0 = M_PI*(0.5 - (wlim[0]+k*(nw/(8*p->res)))/180.0);
-      double w1 = M_PI*(0.5 - (wlim[0]+(k+1)*(nw/(8*p->res)))/180.0);
-
-      /* draw circle */
-      for (int i = -radius; i < radius; i++) {
-        for (int j = -radius; j < radius; j++) {
-          int d = i*i + j*j;
-          if (d < radius*radius) {
-            image[i0 + i][j0 + j] = COLOR_WHITE;
-
-            /* draw zone */
-            double a = atan2(i, j);
-            if (a > w1 && a <= w0) {
-              image[i0 + i][j0 + j] = COLOR_RED;
-              continue;
-            }
-            a -= 2.0*M_PI; // account for equivalent angles
-            if (a > w1 && a <= w0) {
-              image[i0 + i][j0 + j] = COLOR_RED;
-              continue;
-            }
-          }
-        } // j end
-      } // i end
-    } // k end
-  } else {
-    int i0 = foot + pad + radius;
-    int j0 = 2*pad + radius;
-    double w0 = M_PI*(0.5 - wlim[0]/180.0);
-    double w1 = M_PI*(0.5 - wlim[1]/180.0);
-
-    /* draw circle */
-    for (int i = -radius; i < radius; i++) {
-      for (int j = -radius; j < radius; j++) {
-        int d = i*i + j*j;
-        if (d < radius*radius) {
-          image[i0 + i][j0 + j] = COLOR_WHITE;
-
-          /* draw zone */
-          double a = atan2(i, j);
-          if (a > w1 && a <= w0) {
-            image[i0 + i][j0 + j] = COLOR_RED;
-            continue;
-          }
-          a -= 2.0*M_PI; // account for equivalent angles
-          if (a > w1 && a <= w0) {
-            image[i0 + i][j0 + j] = COLOR_RED;
-            continue;
-          }
-        }
-      } // j end
-    } // i end
-  }
+  for (int i = 0; i < nh; i++) {
+    for (int j = 0; j < nw; j++) {
+      int k = j/(nw/8);
+      int ii = i + foot + split*((7-k)*(nh+pad));
+      int jj = j + pad - split*(k*(nw/8));
+      if (edges[j][i]) {
+        image[ii][jj] = COLOR_BLACK;
+      } else if (img_d[j][i] < 0.0) {
+        image[ii][jj] = COLOR_SKY;
+      } else if (img_h[j][i] < MIN_H) {
+        image[ii][jj] = COLOR_WATER;
+      } else {
+        double d = img_d[j][i]/dmax;
+        if (d > 1.0) { d = 1.0; }
+        image[ii][jj] = COLORMAP(d);
+      }
+    } // j end
+  } // i end
 
 
   /* ============ */
@@ -333,24 +260,24 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
     /* if the error is too large, mark as unknown */
     strcpy(name, "Unknown location");
   }
-  add_text("view ", i0, j0, cmed, image);
-  j0 = add_text("from ", i0-(CHAR_H+1)*cmed, j0, cmed, image);
+  add_text("view ", i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  j0 = add_text("from ", i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
   sprintf(str, "%s, ", name);
-  j0 = add_text(str, i0, j0, clarge, image);
+  j0 = add_text(str, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* grid reference */
   int err = ne_to_osng(p->y0, p->x0, str, 8, 1);
   if (err) {
     strcpy(str, "unknown gridref");
   }
-  j0 = add_text(str, i0, j0, clarge, image);
-  j0 = add_text(" ", i0, j0, clarge, image);
+  j0 = add_text(str, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
+  j0 = add_text(" ", i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* other details */
   sprintf(str, "  altitude: %.0lf m", p->z0);
-  add_text(str, i0, j0, cmed, image);
+  add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
   sprintf(str, "eye height: %.0lf m", img->z);
-  add_text(str, i0-(CHAR_H+1)*cmed, j0, cmed, image);
+  add_text(str, i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* bottom left */
   i0 = foot-pad;
@@ -368,7 +295,102 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       ERROR("data source not recognised");
       break;
   }
-  add_text(str, i0, j0, csmall, image);
+  add_text(str, i0, j0, csmall, image, 0, COLOR_BLACK, COLOR_NULL);
+
+
+  /* ================ */
+  /*   IMAGE LABELS   */
+  /* ================ */
+  /* zones */
+  int radius = nh/12;
+  if (split) {
+    for (int k = 0; k < 8; k++) {
+      i0 = foot + (7-k)*(nh+pad) + pad + radius;
+      j0 = 2*pad + radius;
+      double w0 = M_PI*(0.5 - (wlim[0]+k*(nw/(8*p->res)))/180.0);
+      double w1 = M_PI*(0.5 - (wlim[0]+(k+1)*(nw/(8*p->res)))/180.0);
+
+      /* draw circle */
+      for (int i = -radius; i < radius; i++) {
+        for (int j = -radius; j < radius; j++) {
+          int d = i*i + j*j;
+          if (d < radius*radius) {
+            image[i0 + i][j0 + j] = COLOR_WHITE;
+
+            /* draw zone */
+            double a = atan2(i, j);
+            if (a > w1 && a <= w0) {
+              image[i0 + i][j0 + j] = COLOR_RED;
+              continue;
+            }
+            a -= 2.0*M_PI; // account for equivalent angles
+            if (a > w1 && a <= w0) {
+              image[i0 + i][j0 + j] = COLOR_RED;
+              continue;
+            }
+          }
+        } // j end
+      } // i end
+    } // k end
+  } else {
+    i0 = foot + pad + radius;
+    j0 = 2*pad + radius;
+    double w0 = M_PI*(0.5 - wlim[0]/180.0);
+    double w1 = M_PI*(0.5 - wlim[1]/180.0);
+
+    /* draw circle */
+    for (int i = -radius; i < radius; i++) {
+      for (int j = -radius; j < radius; j++) {
+        int d = i*i + j*j;
+        if (d < radius*radius) {
+          image[i0 + i][j0 + j] = COLOR_WHITE;
+
+          /* draw zone */
+          double a = atan2(i, j);
+          if (a > w1 && a <= w0) {
+            image[i0 + i][j0 + j] = COLOR_RED;
+            continue;
+          }
+          a -= 2.0*M_PI; // account for equivalent angles
+          if (a > w1 && a <= w0) {
+            image[i0 + i][j0 + j] = COLOR_RED;
+            continue;
+          }
+        }
+      } // j end
+    } // i end
+  }
+
+  /* cardinal points and bearings */
+  for (int j = 0; j < nw; j++) {
+    int k = j/(nw/8);
+    int ii = nh-2 + foot + split*((7-k)*(nh+pad));
+    int jj = j + pad - split*(k*(nw/8));
+
+    /* label 8 main compass directions and then every dd degrees */
+    const double dd = 10.0;
+    double d = wlim[0]+(double)j/p->res;
+    if (fabs(d-0.0) < 0.5/p->res) {
+      add_text("NORTH", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(d-180.0) < 0.5/p->res) {
+      add_text("SOUTH", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(d-90.0) < 0.5/p->res) {
+      add_text("EAST", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(d-270.0) < 0.5/p->res) {
+      add_text("WEST", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(d-45.0) < 0.5/p->res) {
+      add_text("NE", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(d-135.0) < 0.5/p->res) {
+      add_text("SE", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(d-225.0) < 0.5/p->res) {
+      add_text("SW", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(d-315.0) < 0.5/p->res) {
+      add_text("NW", ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    } else if (fabs(fmodf(d, dd)) < 0.5/p->res) {
+      sprintf(str, "%03.0lf", fmodf(dd*rint(d/dd)+360.0, 360.0));
+      add_text(str, ii, jj, csmall, image, 1, COLOR_RED, COLOR_WHITE);
+    }
+  } // j end
 
 
   /* ================= */
