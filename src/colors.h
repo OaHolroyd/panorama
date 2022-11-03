@@ -12,15 +12,17 @@
 #define COLORMAP(x) (NUM_INDIVIDUAL + ((png_byte)(x*((double)NUM_COLORMAP-1.0))))
 
 /* individual color indices */
-#define COLOR_BLACK 0
-#define COLOR_WHITE 1
-#define COLOR_GREY 2
-#define COLOR_WATER 3
-#define COLOR_SKY 4
-#define COLOR_RED 5
+#define COLOR_NULL 0
+#define COLOR_BLACK 1
+#define COLOR_WHITE 2
+#define COLOR_GREY 3
+#define COLOR_WATER 4
+#define COLOR_SKY 5
+#define COLOR_RED 6
 
 /* individual colors */
 #define INDIVIDUAL_COLORS \
+  {  0,   0,   0}, /* "null" */ \
   {  0,   0,   0}, /* black */ \
   {255, 255, 255}, /* white */ \
   {128, 128, 128}, /* grey */ \
