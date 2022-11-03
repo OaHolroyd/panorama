@@ -211,7 +211,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
     for (int i = 0; i < nh; i++) {
       for (int j = 0; j < nw; j++) {
         int k = j/(nw/8);
-        int ii = i + foot + k*(nh+pad);
+        int ii = i + foot + (7-k)*(nh+pad);
         int jj = j + pad - k*(nw/8);
         if (edges[j][i]) {
           image[ii][jj] = COLOR_BLACK;
@@ -239,6 +239,70 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
           double d = img_d[j][i]/dmax;
           if (d > 1.0) { d = 1.0; }
           image[ii][jj] = COLORMAP(d);
+        }
+      } // j end
+    } // i end
+  }
+
+
+  /* ================ */
+  /*   IMAGE LABELS   */
+  /* ================ */
+  /* zones */
+  int radius = nh/12;
+  if (split) {
+    for (int k = 0; k < 8; k++) {
+      int i0 = foot + (7-k)*(nh+pad) + pad + radius;
+      int j0 = 2*pad + radius;
+      double w0 = M_PI*(0.5 - (wlim[0]+k*(nw/(8*p->res)))/180.0);
+      double w1 = M_PI*(0.5 - (wlim[0]+(k+1)*(nw/(8*p->res)))/180.0);
+
+      /* draw circle */
+      for (int i = -radius; i < radius; i++) {
+        for (int j = -radius; j < radius; j++) {
+          int d = i*i + j*j;
+          if (d < radius*radius) {
+            image[i0 + i][j0 + j] = COLOR_WHITE;
+
+            /* draw zone */
+            double a = atan2(i, j);
+            if (a > w1 && a <= w0) {
+              image[i0 + i][j0 + j] = COLOR_RED;
+              continue;
+            }
+            a -= 2.0*M_PI; // account for equivalent angles
+            if (a > w1 && a <= w0) {
+              image[i0 + i][j0 + j] = COLOR_RED;
+              continue;
+            }
+          }
+        } // j end
+      } // i end
+    } // k end
+  } else {
+    int i0 = foot + pad + radius;
+    int j0 = 2*pad + radius;
+    double w0 = M_PI*(0.5 - wlim[0]/180.0);
+    double w1 = M_PI*(0.5 - wlim[1]/180.0);
+
+    /* draw circle */
+    for (int i = -radius; i < radius; i++) {
+      for (int j = -radius; j < radius; j++) {
+        int d = i*i + j*j;
+        if (d < radius*radius) {
+          image[i0 + i][j0 + j] = COLOR_WHITE;
+
+          /* draw zone */
+          double a = atan2(i, j);
+          if (a > w1 && a <= w0) {
+            image[i0 + i][j0 + j] = COLOR_RED;
+            continue;
+          }
+          a -= 2.0*M_PI; // account for equivalent angles
+          if (a > w1 && a <= w0) {
+            image[i0 + i][j0 + j] = COLOR_RED;
+            continue;
+          }
         }
       } // j end
     } // i end
