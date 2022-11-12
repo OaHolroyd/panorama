@@ -1,6 +1,6 @@
 # Project-specific
 panorama
-data/**
+data/*/**
 out/**
 
 # Junk
