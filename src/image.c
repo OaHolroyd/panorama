@@ -297,8 +297,10 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   // TODO: should this use png_malloc?
   png_byte **image = malloc_2d(h, w, sizeof(png_byte));
 
-  /* find edges */
+  /* find edges -- 0 for no edge, 1 for major, 2 for minor */
   int **edges = malloc_2d(nw, nh, sizeof(int));
+  const double alpha = 2.5;
+  const double beta = 2.0;
   for (int j = 0; j < nw; j++) {
     for (int i = 1; i < nh; i++) {
       if (img_h[j][i] < MIN_H && img_h[j][i-1] < MIN_H) {
@@ -313,6 +315,13 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       } else if (img_h[j][i] > MIN_H && img_h[j][i-1] < MIN_H) {
         /* turn from water to land */
         edges[j][i] = 1;
+      } else if (img_d[j][i] < 0.0) {
+        /* hit the sky */
+        edges[j][i] = 0;
+        break;
+      } else if (floor(pow(img_d[j][i]/alpha, 1.0/beta)) - floor(pow(img_d[j][i-1]/alpha, 1.0/beta)) > 0.1) {
+        /* minor edge */
+        edges[j][i] = 2;
       } else {
         edges[j][i] = 0;
       }
@@ -332,8 +341,10 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       int k = (j*8)/nw;
       int ii = i + foot + split*((7-k)*(nh+pad));
       int jj = j + pad - split*(k*(nw/8));
-      if (edges[j][i]) {
+      if (edges[j][i] == 1) {
         image[ii][jj] = COLOR_BLACK;
+      } else if (edges[j][i] == 2) {
+        image[ii][jj] = COLOR_GREY;
       } else if (img_d[j][i] < 0.0) {
         image[ii][jj] = COLOR_SKY;
       } else if (img_h[j][i] < MIN_H) {
