@@ -57,7 +57,9 @@ void setup_default(struct Panorama *p) {
   p->wlim[0] = -22.5; p->wlim[1] = 360-22.5;
   p->hlim[0] = -5; p->hlim[1] = 1;
   p->res = 96;
+
   p->split = 1;
+  p->labels = 0;
 
   p->source = OST50;
   p->blockmax = 500;
@@ -74,8 +76,12 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
   setup_default(p);
 
   int c, err;
-  while ((c = getopt(argc, argv, "hsr:v:d:c:b:z:")) != -1) {
+  while ((c = getopt(argc, argv, "lhsr:v:d:c:b:z:")) != -1) {
     switch (c) {
+      case 'l':
+        /* add text to the image */
+        p->labels = 1;
+        break;
       case 's':
         /* strip (ie not split) image */
         p->split = 0;
@@ -152,6 +158,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
           "                 (Defaults to 90)\n"
           "  -b <blockmax>  Limits the raytracing to <blockmax> data blocks. (Defaults to\n"
           "                 500)\n"
+          "  -l             Include labels on selected summits.\n"
           "  -s             Output the image as a single strip rather than divided into 8\n"
           "                 sections.\n");
         return 1;
@@ -914,6 +921,8 @@ int main(int argc, char * const *argv) {
   img.img_d = img_d;
   img.img_h = img_h;
   img.img_n = img_n;
+  img.img_u = img_u;
+  img.img_v = img_v;
   img.z = zrel;
   p.z0 = z0 - zrel;
 

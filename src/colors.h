@@ -19,6 +19,8 @@
 #define COLOR_WATER 4
 #define COLOR_SKY 5
 #define COLOR_RED 6
+#define COLOR_TEXT 7
+#define COLOR_BACK 8
 
 /* individual colors */
 #define INDIVIDUAL_COLORS \
@@ -28,7 +30,9 @@
   {128, 128, 128}, /* grey */ \
   { 51, 153, 255}, /* water */ \
   {175, 225, 255}, /* sky */ \
-  {255,   0,   0}  /* red */
+  {255,   0,   0}, /* red */ \
+  {  0,   0,   0}, /* label text */ \
+  {255, 255, 255}  /* label background */
 
 /* colormap colors */
 #define COLORMAP_COLORS \

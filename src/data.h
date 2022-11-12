@@ -21,7 +21,10 @@ struct Panorama {
   /* panorama */
   int wlim[2], hlim[2]; // panorama image limits (in degrees)
   int res; // resolution (pixels per degree)
+
+  /* output flags */
   int split;
+  int labels;
 
   /* data */
   data_source source; // data source (with associated projection/datum)

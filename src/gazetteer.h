@@ -1,7 +1,20 @@
 #ifndef GAZETEER_H
 #define GAZETEER_H
 
+#include <stdlib.h>
+
 #include "data.h"
+
+
+/* ========================================================================== */
+/*   GAZETTEER VARIABLES                                                      */
+/* ========================================================================== */
+extern int gaz_n; // number of entries
+extern char **gaz_names; // names
+extern int32_t *gaz_y; // y coord
+extern int32_t *gaz_x; // x coord
+
+#define GAZ_NAME_LEN 35
 
 
 /* ========================================================================== */
