@@ -351,9 +351,9 @@ int ne_to_osng(double y, double x, char *gridref, int len, int spaced) {
 
   /* combine to gridref */
   if (spaced) {
-    sprintf(gridref, "%c%c %.0lf %.0lf", G1, G2, G3x, G3y);
+    sprintf(gridref, "%c%c %0*.0lf %0*.0lf", G1, G2, len, G3x, len, G3y);
   } else {
-    sprintf(gridref, "%c%c%.0lf%.0lf", G1, G2, G3x, G3y);
+    sprintf(gridref, "%c%c%0*.0lf%0*.0lf", G1, G2, len, G3x, len, G3y);
   }
 
   return 0;
