@@ -76,7 +76,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
   setup_default(p);
 
   int c, err;
-  while ((c = getopt(argc, argv, "lhsr:v:d:c:b:z:")) != -1) {
+  while ((c = getopt(argc, argv, "lhsr:v:d:c:b:z:S:")) != -1) {
     switch (c) {
       case 'l':
         /* add text to the image */
@@ -90,15 +90,36 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         /* resolution */
         err = sscanf(optarg, "%d", &p->res);
         if (err != 1) {
-          fprintf(stderr, "failed to read resolution argument '%s'", optarg);
+          fprintf(stderr, "failed to read resolution argument '%s'\n", optarg);
+          return 1;
+        }
+        break;
+      case 'S':
+        /* data source */
+        if (!strncmp(optarg, "ost50", 5)) {
+          p->source = OST50;
+        } else if (!strncmp(optarg, "swt02", 5)) {
+          p->source = SWT02;
+        } else {
+          fprintf(stderr, "failed to read source argument '%s'\n", optarg);
           return 1;
         }
         break;
       case 'v':
         /* viewpoint */
-        err = osng_to_ne(optarg, &p->y0, &p->x0);
+        switch (p->source) {
+          case OST50:
+            err = osng_to_ne(optarg, &p->y0, &p->x0);
+            break;
+          case SWT02:
+            err = swgr_to_ne(optarg, &p->y0, &p->x0);
+            break;
+          default :
+            fprintf(stderr, "bad data source");
+          return 1;
+        }
         if (err) {
-          fprintf(stderr, "failed to read viewpoint argument '%s'", optarg);
+          fprintf(stderr, "failed to read viewpoint argument '%s'\n", optarg);
           return 1;
         }
         break;
@@ -109,7 +130,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
           if (!strncmp(optarg, "auto", 4)) {
             p->dmax = -1.0;
           } else {
-            fprintf(stderr, "failed to read dmax argument '%s'", optarg);
+            fprintf(stderr, "failed to read dmax argument '%s'\n", optarg);
             return 1;
           }
         }
@@ -119,7 +140,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         /* minimum cutoff */
         err = sscanf(optarg, "%lf", &p->d0);
         if (err != 1) {
-          fprintf(stderr, "failed to read cutoff argument '%s'", optarg);
+          fprintf(stderr, "failed to read cutoff argument '%s'\n", optarg);
           return 1;
         }
         break;
@@ -127,7 +148,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         /* blockmax */
         err = sscanf(optarg, "%d", &p->blockmax);
         if (err != 1) {
-          fprintf(stderr, "failed to read blockmax argument '%s'", optarg);
+          fprintf(stderr, "failed to read blockmax argument '%s'\n", optarg);
           return 1;
         }
         break;
@@ -135,7 +156,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         /* viewpoint height */
         err = sscanf(optarg, "%lf", &p->z0);
         if (err != 1) {
-          fprintf(stderr, "failed to read height argument '%s'", optarg);
+          fprintf(stderr, "failed to read height argument '%s'\n", optarg);
           return 1;
         }
         break;
@@ -145,9 +166,12 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
           "Usage: panorama [options]\n"
           "Options:\n"
           "  -h             Display this information.\n"
-          "  -v <gridref>   Specify an 6, 8, or 10 figure OS grid reference for the\n"
-          "                 viewpoint location. Must include the grid square identifier\n"
-          "                 code and have spaces removed. (Defaults to NN16677128)\n"
+          "  -S <source>    Specify the source of the elevation data. Available options\n"
+          "                 are: ost50, swt02. (Defaults to ost50)\n"
+          "  -v <gridref>   Specify a grid reference for the viewpoint location. Must\n"
+          "                 match the specified data source and have spaces removed.\n"
+          "                 (Defaults to NN16677128/E2623451N1100503 for ost50/swt02\n"
+          "                 respectively)\n"
           "  -z <height>    Place the viewpoint at a height of <height> metres above the\n"
           "                 ground. (Defaults to 50)\n"
           "  -r <res>       Output an image with a resolution of <res> pixels per degree.\n"
@@ -385,7 +409,7 @@ int main(int argc, char * const *argv) {
   int *Bx, *By;
   err = get_data_extent(source, &nbx, &nby, &Bx, &By);
   if (err) {
-    fprintf(stderr, "ERROR: bad data source\n");
+    fprintf(stderr, "ERROR: failed to get data extent\n");
     exit_code = EXIT_FAILURE;
     goto cleanup4;
   }

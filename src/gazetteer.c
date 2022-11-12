@@ -30,9 +30,13 @@ void init_gazetteer(data_source source) {
     case OST50:
       sprintf(file, "./data/gazetteers/dobih.gaz");
       break;
-    case SWISSALTI3D:
-      ERROR("SWISSALTI3D not supported");
-      break;
+    case SWT02:
+      fprintf(stderr, "WARNING: SWT02 has no gazetteer\n");
+      gaz_n = 0;
+      gaz_names = NULL;
+      gaz_x = NULL;
+      gaz_y = NULL;
+      return;
     default :
       ERROR("data source not recognised");
       break;
@@ -83,6 +87,11 @@ double gazetteer_nearest(int py, int px, char *name) {
       dmin = d;
     }
   } // i end
+
+  /* no gazetteer */
+  if (imin < 0) {
+    return DBL_MAX;
+  }
 
   strcpy(name, gaz_names[imin]);
 

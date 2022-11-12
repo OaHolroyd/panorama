@@ -398,7 +398,18 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   j0 = add_text(str, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* grid reference */
-  int err = ne_to_osng(p->y0, p->x0, str, 8, 1);
+  int err;
+  switch (p->source) {
+    case OST50:
+      err = ne_to_osng(p->y0, p->x0, str, 8, 1);
+      break;
+    case SWT02:
+      err = ne_to_swgr(p->y0, p->x0, str, 1);
+      break;
+    default :
+      ERROR("data source not recognised");
+      break;
+  }
   if (err) {
     strcpy(str, "unknown gridref");
   }
@@ -418,10 +429,10 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   /* attributions */
   switch (p->source) {
     case OST50:
-      sprintf(str, "generated from OS Terrain 50 data (Crown copyright)");
+      sprintf(str, "generated from Ordnance Survey Terrain 50 data (Crown copyright)");
       break;
-    case SWISSALTI3D:
-      ERROR("SWISSALTI3D not supported");
+    case SWT02:
+      sprintf(str, "generated from Federal Office of Topography swisstopo swissALTI3D data (copyright swisstopo)");
       break;
     default :
       ERROR("data source not recognised");

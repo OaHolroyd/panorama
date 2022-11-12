@@ -20,7 +20,7 @@ int get_block_dims(data_source source, int *ny, int *nx) {
       *ny = 200;
       *nx = 200;
       break;
-    case SWISSALTI3D:
+    case SWT02:
       *ny = 500;
       *nx = 500;
       break;
@@ -48,18 +48,17 @@ int get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By) 
         (*By)[i] = 0 + 10*i;
       } // i end
       break;
-    case SWISSALTI3D:
-      return 1;
-      *nbx = 51;
+    case SWT02:
+      *nbx = 348;
       *Bx = malloc(*nbx*sizeof(int));
       for (int i = 0; i < *nbx; i++) {
-        (*Bx)[i] = 0 + 10*i;
+        (*Bx)[i] = 2485+i;
       } // i end
 
-      *nby = 123;
+      *nby = 233;
       *By = malloc(*nby*sizeof(int));
       for (int i = 0; i < *nby; i++) {
-        (*By)[i] = 0 + 10*i;
+        (*By)[i] = 1064+i;
       } // i end
       break;
     default :
@@ -76,8 +75,7 @@ int block_index(data_source source, double y0, int *I0, double x0, int *J0) {
       *I0 = 10*(((int)y0)/10000);
       *J0 = 10*(((int)x0)/10000);
       break;
-    case SWISSALTI3D:
-      return 1;
+    case SWT02:
       *I0 = ((int)y0)/1000;
       *J0 = ((int)x0)/1000;
       break;
@@ -112,9 +110,8 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
       cw = 50;
       ch = 50;
       break;
-    case SWISSALTI3D:
-      return 1;
-      sprintf(file, "./data/swissalti3d/SWISSALTI3D-500-500-%04d-%04d.gzd", I0, J0);
+    case SWT02:
+      sprintf(file, "./data/swt02/SWT02-500-500-%04d-%04d.gzd", I0, J0);
       ny = 500;
       nx = 500;
       x0 = 1000*J0;
@@ -296,7 +293,6 @@ int osng_to_ne(char *gridref, double *y, double *x) {
   return 0;
 }
 
-
 /* converts northing and easting (y, x) to a len figure gridref. The gridref
    pointer should have space for a string of at least length len+2 (or len+4
    if the spaced option is set). Returns non-zero error code on failure. */
@@ -354,6 +350,52 @@ int ne_to_osng(double y, double x, char *gridref, int len, int spaced) {
     sprintf(gridref, "%c%c %0*.0lf %0*.0lf", G1, G2, len, G3x, len, G3y);
   } else {
     sprintf(gridref, "%c%c%0*.0lf%0*.0lf", G1, G2, len, G3x, len, G3y);
+  }
+
+  return 0;
+}
+
+/* converts an SwissTopo coordinate string gridref (which has the format E%dN%d)
+   to a Northing y and Easting x. Returns an error code:
+      0 on success
+      1 if invalid length
+      2 if invalid leading character code */
+int swgr_to_ne(char *gridref, double *y, double *x) {
+  /* get string length (capped at 16) */
+  int len;
+  for (len = 0; len < 17; len++) {
+    if (gridref[len] == '\0') {
+      break;
+    }
+  } // i end
+
+  /* must be a 12, or 14 figure grid ref */
+  int err;
+  if (len == 14) {
+    err = sscanf(gridref, "E%06lfN%06lf", x, y);
+    *x *= 10;
+    *y *= 10;
+  } else if (len == 16) {
+    err = sscanf(gridref, "E%07lfN%07lf", x, y);
+  } else {
+    return 1;
+  }
+
+  if (err != 2) {
+    return 2;
+  }
+
+  return 0;
+}
+
+/* converts northing and easting (y, x) to a len figure gridref. The gridref
+   pointer should have space for a string of at least length len+2 (or len+4
+   if the spaced option is set). Returns non-zero error code on failure. */
+int ne_to_swgr(double y, double x, char *gridref, int spaced) {
+  if (spaced) {
+    sprintf(gridref, "E%07.0lf N%07.0lf", x, y);
+  } else {
+    sprintf(gridref, "E%07.0lfN%07.0lf", x, y);
   }
 
   return 0;

@@ -8,7 +8,7 @@
 /* where the base data comes from */
 typedef enum data_source {
   OST50, // OS Terrain 50
-  SWISSALTI3D, // swissALTI3D
+  SWT02, // swissALTI3D
 } data_source;
 
 /* container for panorama data */
@@ -93,5 +93,16 @@ int osng_to_ne(char *gridref, double *y, double *x);
    if the spaced option is set). Returns non-zero error code on failure. */
 int ne_to_osng(double y, double x, char *gridref, int len, int spaced);
 
+/* converts an SwissTopo coordinate string gridref (which has the format E%dN%d)
+   to a Northing y and Easting x. Returns an error code:
+      0 on success
+      1 if invalid length
+      2 if invalid leading character code */
+int swgr_to_ne(char *gridref, double *y, double *x);
+
+/* converts northing and easting (y, x) to a len figure gridref. The gridref
+   pointer should have space for a string of at least length len+2 (or len+4
+   if the spaced option is set). Returns non-zero error code on failure. */
+int ne_to_swgr(double y, double x, char *gridref, int spaced);
 
 #endif

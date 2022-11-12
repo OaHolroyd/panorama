@@ -58,6 +58,6 @@ void* malloc_2d(size_t ni, size_t nj, size_t size) {
 
 /* Frees memory associated with a 2D array */
 void internal_free_2d(void** arr) {
-  free(*arr);
+  if (arr) { free(*arr); }
   free(arr);
 }
