@@ -186,8 +186,8 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   /* extract data from container */
   int nw = img->nw;
   int nh = img->nh;
-  int *wlim = p->wlim;
-  int *hlim = p->hlim;
+  double *wlim = p->wlim;
+  double *hlim = p->hlim;
   double **img_d = img->img_d;
   double **img_h = img->img_h;
   double **img_u = img->img_u;
@@ -237,9 +237,9 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   // png_set_compression_level(png, Z_BEST_COMPRESSION);
 
   /* compute size of output image */
-  const int pad = nh/20; // padding between split rows
-  const int head = nh/4; // space for header
-  const int foot = nh/4; // space for footer
+  const int pad = nw/625; // padding between split rows
+  const int head = nw/125; // space for header
+  const int foot = nw/250; // space for footer
   int w, h;
   if (split) {
     w = nw/8 + 2*pad;
@@ -375,10 +375,14 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   char str[128];
 
   /* sizes */
-  int clarge = head/(1.2*CHAR_H);
-  int cmed = head/(2.4*CHAR_H);
-  int csmall = head/(4.8*CHAR_H);
+  int clarge = head/(2.0*CHAR_H);
+  int cmed = head/(4.0*CHAR_H);
+  int csmall = head/(6.0*CHAR_H);
   int ctiny = head/(8.0*CHAR_H);
+  clarge = (clarge == 0) ? 1 : clarge;
+  cmed = (cmed == 0) ? 1 : cmed;
+  csmall = (csmall == 0) ? 1 : csmall;
+  ctiny = (ctiny == 0) ? 1 : ctiny;
 
   /* top left */
   int i0 = h-pad-1;
@@ -471,6 +475,11 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
               image[i0 + i][j0 + j] = COLOR_RED;
               continue;
             }
+            a += 4.0*M_PI; // account for equivalent angles
+            if (a > w1 && a <= w0) {
+              image[i0 + i][j0 + j] = COLOR_RED;
+              continue;
+            }
           }
         } // j end
       } // i end
@@ -499,6 +508,11 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
             image[i0 + i][j0 + j] = COLOR_RED;
             continue;
           }
+          a += 4.0*M_PI; // account for equivalent angles
+          if (a > w1 && a <= w0) {
+            image[i0 + i][j0 + j] = COLOR_RED;
+            continue;
+          }
         }
       } // j end
     } // i end
@@ -512,7 +526,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
 
     /* label 8 main compass directions and then every dd degrees */
     const double dd = 10.0;
-    double d = wlim[0]+(double)j/p->res;
+    double d = fmod(wlim[0]+(double)j/p->res + 1440.0, 360.0);
     if (fabs(d-0.0) < 0.5/p->res) {
       add_text("NORTH", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-180.0) < 0.5/p->res) {

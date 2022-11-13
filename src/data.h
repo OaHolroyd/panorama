@@ -19,7 +19,7 @@ struct Panorama {
   double d0; // minimum ray collision distance
 
   /* panorama */
-  int wlim[2], hlim[2]; // panorama image limits (in degrees)
+  double wlim[2], hlim[2]; // panorama image limits (in degrees)
   int res; // resolution (pixels per degree)
 
   /* output flags */

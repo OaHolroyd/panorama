@@ -54,7 +54,7 @@ void setup_default(struct Panorama *p) {
   p->z0 = 50.0;
   p->d0 = 200.0;
 
-  p->wlim[0] = -22.5; p->wlim[1] = 360-22.5;
+  p->wlim[0] = -22.5; p->wlim[1] = 360.0-22.5;
   p->hlim[0] = -5; p->hlim[1] = 1;
   p->res = 96;
 
@@ -76,9 +76,10 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
   setup_default(p);
 
   int c, err;
-  while ((c = getopt(argc, argv, "lhsr:v:d:c:b:z:S:")) != -1) {
+  double w0 = 337.5, w = 360.0;
+  while ((c = getopt(argc, argv, "thsr:v:d:c:b:z:S:l:u:o:w:")) != -1) {
     switch (c) {
-      case 'l':
+      case 't':
         /* add text to the image */
         p->labels = 1;
         break;
@@ -152,6 +153,39 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
           return 1;
         }
         break;
+      case 'u':
+        /* upper edge */
+        err = sscanf(optarg, "%lf", &p->hlim[1]);
+        if (err != 1) {
+          fprintf(stderr, "failed to read upper argument '%s'\n", optarg);
+          return 1;
+        }
+        break;
+      case 'l':
+        /* lower edge */
+        err = sscanf(optarg, "%lf", &p->hlim[0]);
+        p->hlim[0] *= -1;
+        if (err != 1) {
+          fprintf(stderr, "failed to read lower argument '%s'\n", optarg);
+          return 1;
+        }
+        break;
+      case 'o':
+        /* origin */
+        err = sscanf(optarg, "%lf", &w0);
+        if (err != 1) {
+          fprintf(stderr, "failed to read origin argument '%s'\n", optarg);
+          return 1;
+        }
+        break;
+      case 'w':
+        /* width */
+        err = sscanf(optarg, "%lf", &w);
+        if (err != 1) {
+          fprintf(stderr, "failed to read width argument '%s'\n", optarg);
+          return 1;
+        }
+        break;
       case 'z':
         /* viewpoint height */
         err = sscanf(optarg, "%lf", &p->z0);
@@ -180,14 +214,34 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
           "                 (Defaults to 200)\n"
           "  -d <dmax>      Scales the colors between 0 and <dmax> kms from the viewpoint.\n"
           "                 (Defaults to 90)\n"
-          "  -b <blockmax>  Limits the raytracing to <blockmax> data blocks. (Defaults to\n"
+          "  -b <blockmax>  Limit the raytracing to <blockmax> data blocks. (Defaults to\n"
           "                 500)\n"
-          "  -l             Include labels on selected summits.\n"
+          "  -u <upper>     Set the upper edge of the image to <upper> degrees above the\n"
+          "                 horizon. Must be greater than 0. (Defaults to 1)\n"
+          "  -l <lower>     Set the upper edge of the image to <upper> degrees below the\n"
+          "                 horizon. Must be greater than 0. (Defaults to 5)\n"
+          "  -o <origin>    Set the leftmost edge to <origin> degrees. Must be between 0\n"
+          "                 and 359. (Defaults to 337.5)\n"
+          "  -w <width>     Set the width of the panorama to <width> degrees. Must be\n"
+          "                 between 1 and 360. (Defaults to 360)\n"
+          "  -t             Include labels on selected summits.\n"
           "  -s             Output the image as a single strip rather than divided into 8\n"
           "                 sections.\n");
         return 1;
     }
+
+    /* set variables in the correct order */
+    p->wlim[0] = w0-360.0;
+    p->wlim[1] = p->wlim[0]+w;
   }
+  return 0;
+}
+
+/* ensures that the panorama data is valid, returning non-zero error. */
+int validate_inputs(struct Panorama *p) {
+  /* width must be an integer number of degrees */
+  p->wlim[1] = p->wlim[0]+rint(p->wlim[1]-p->wlim[0]);
+
   return 0;
 }
 
@@ -312,13 +366,20 @@ int main(int argc, char * const *argv) {
     goto cleanup0;
   }
 
+  err = validate_inputs(&p);
+  if (err) {
+    fprintf(stderr, "ERROR: inputs not valid\n");
+    exit_code = EXIT_FAILURE;
+    goto cleanup0;
+  }
+
   /* extract from struct */
   double x0 = p.x0;
   double y0 = p.y0;
   double z0 = p.z0;
   double d0 = p.d0;
-  int wlim[2] = {p.wlim[0], p.wlim[1]};
-  int hlim[2] = {p.hlim[0], p.hlim[1]};
+  double wlim[2] = {p.wlim[0], p.wlim[1]};
+  double hlim[2] = {p.hlim[0], p.hlim[1]};
   int res = p.res;
   data_source source = p.source;
   int blockmax = p.blockmax;
@@ -332,8 +393,8 @@ int main(int argc, char * const *argv) {
   /* ====================================================================== */
   /* dimensions */
   double dpx = 1.0/((double)res);
-  int nw = (wlim[1]-wlim[0])*res;
-  int nh = (hlim[1]-hlim[0])*res + 1;
+  int nw = (int)((wlim[1]-wlim[0])*res);
+  int nh = (int)((hlim[1]-hlim[0])*res) + 1;
 
   // note that the image is stored rotated so that we can iterate over the
   // columns for speed
@@ -936,6 +997,7 @@ int main(int argc, char * const *argv) {
         dmax = img_d[0][IJ];
       }
     } // IJ end
+    p.dmax = dmax;
   }
 
   /* pack data into struct */
