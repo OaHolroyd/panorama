@@ -134,6 +134,8 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
 
   int c, err;
   double w0 = 337.5, w = 360.0; // TODO: should be read from defaults
+  char viewpoint[32];
+  int viewset = 0;
   char filename[256];
   int fromfile = 0;
   int tofile = 0;
@@ -170,21 +172,8 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
         break;
       case 'v':
         /* viewpoint */
-        switch (p->source) {
-          case OST50:
-            err = osng_to_ne(optarg, &p0.y0, &p0.x0);
-            break;
-          case SWT02:
-            err = swgr_to_ne(optarg, &p0.y0, &p0.x0);
-            break;
-          default :
-            fprintf(stderr, "bad data source");
-          return 1;
-        }
-        if (err) {
-          fprintf(stderr, "failed to read viewpoint argument '%s'\n", optarg);
-          return 1;
-        }
+        strcpy(viewpoint, optarg);
+        viewset = 1;
         break;
       case 'd':
         /* dmax */
@@ -353,7 +342,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
   }
 
   /* update variables that have been set on the command line */
-  if (p0.source < 0) {
+  if (p0.source >= 0) {
     p->source = p0.source;
     /* also update default location */
     switch (p->source) {
@@ -369,11 +358,22 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
         ERROR("bad data source");
     }
   }
-  if (p0.x0 < DBL_MAX) {
-    p->x0 = p0.x0;
-  }
-  if (p0.y0 < DBL_MAX) {
-    p->y0 = p0.y0;
+  if (viewset) {
+    switch (p->source) {
+      case OST50:
+        err = osng_to_ne(viewpoint, &p0.y0, &p0.x0);
+        break;
+      case SWT02:
+        err = swgr_to_ne(viewpoint, &p0.y0, &p0.x0);
+        break;
+      default :
+        fprintf(stderr, "bad data source");
+        return 1;
+    }
+    if (err) {
+      fprintf(stderr, "failed to read viewpoint argument '%s'\n", optarg);
+      return 1;
+    }
   }
   if (p0.z0 < DBL_MAX) {
     p->z0 = p0.z0;
@@ -539,7 +539,7 @@ int main(int argc, char * const *argv) {
     fprintf(stderr, "ERROR: failed to read options\n");
     exit_code = EXIT_FAILURE;
     goto cleanup0;
-  } else {
+  } else if (err == 2) {
     exit_code = EXIT_SUCCESS;
     goto cleanup0;
   }
