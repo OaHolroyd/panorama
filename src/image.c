@@ -26,7 +26,7 @@
    bcol as the background color (or blank if bcol = 0). Returns the
    x coordinate of the next blank space. */
 // TODO: add const back by including a len argument
-int add_text(char *str, int i0, int j0, int size, png_byte **image, int centred, int fcol, int bcol) {
+int add_text(char *str, int i0, int j0, int size, png_byte **image, int centred, png_byte fcol, png_byte bcol) {
   int len = (int)strlen(str);
   const unsigned char *c;
 
@@ -238,8 +238,23 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
 
   /* compute size of output image */
   const int pad = nw/625; // padding between split rows
-  const int head = nw/125; // space for header
-  const int foot = nw/250; // space for footer
+  int head = nw/125; // space for header
+  int foot = nw/250; // space for footer
+
+  /* text sizes */
+  int clarge = (int)(head/(2.0*CHAR_H));
+  int cmed = (int)(head/(4.0*CHAR_H));
+  int csmall = (int)(head/(6.0*CHAR_H));
+  int ctiny = (int)(head/(8.0*CHAR_H));
+  clarge = (clarge == 0) ? 1 : clarge;
+  cmed = (cmed == 0) ? 1 : cmed;
+  csmall = (csmall == 0) ? 1 : csmall;
+  ctiny = (ctiny == 0) ? 1 : ctiny;
+
+  /* ensure header and footer are large enough to contain text */
+  head = (head < clarge*CHAR_H+pad) ? clarge*CHAR_H+pad : head;
+  foot = (foot < clarge*CHAR_H+pad) ? clarge*CHAR_H+pad : foot;
+
   int w, h;
   if (split) {
     w = nw/8 + 2*pad;
@@ -374,16 +389,6 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   char name[64];
   char str[128];
 
-  /* sizes */
-  int clarge = head/(2.0*CHAR_H);
-  int cmed = head/(4.0*CHAR_H);
-  int csmall = head/(6.0*CHAR_H);
-  int ctiny = head/(8.0*CHAR_H);
-  clarge = (clarge == 0) ? 1 : clarge;
-  cmed = (cmed == 0) ? 1 : cmed;
-  csmall = (csmall == 0) ? 1 : csmall;
-  ctiny = (ctiny == 0) ? 1 : ctiny;
-
   /* top left */
   int i0 = h-pad-1;
   int j0 = pad;
@@ -396,8 +401,12 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
     /* if the error is too large, mark as unknown */
     strcpy(name, "Unknown location");
   }
-  add_text("view ", i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
-  j0 = add_text("from ", i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  if (head-pad >= 2*cmed*CHAR_H) {
+    add_text("view ", i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    j0 = add_text("from ", i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  } else {
+    j0 = add_text("view from ", i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  }
   sprintf(str, "%s, ", name);
   j0 = add_text(str, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
@@ -421,10 +430,17 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   j0 = add_text(" ", i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* other details */
-  sprintf(str, "  altitude: %.0lf m", p->z0);
-  add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
-  sprintf(str, "eye height: %.0lf m", img->z);
-  add_text(str, i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  if (head-pad >= 2*cmed*CHAR_H) {
+    sprintf(str, "  altitude: %.0lf m", p->z0);
+    add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    sprintf(str, "eye height: %.0lf m", img->z);
+    add_text(str, i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  } else {
+    sprintf(str, "  altitude: %.0lf m, ", p->z0);
+    j0 = add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    sprintf(str, "eye height: %.0lf m", img->z);
+    add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  }
 
   /* bottom left */
   i0 = foot-pad;
@@ -442,6 +458,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       ERROR("data source not recognised");
       break;
   }
+  split_string(str, w/(CHAR_W*csmall));
   add_text(str, i0, j0, csmall, image, 0, COLOR_BLACK, COLOR_NULL);
 
 

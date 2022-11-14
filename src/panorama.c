@@ -125,7 +125,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
   p0.res = -1;
   p0.split = -1;
   p0.labels = -1;
-  p0.source = -1;
+  p0.source = DATA_NULL;
   p0.blockmax = -1;
   p0.dmax = DBL_MAX;
 
@@ -342,7 +342,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
   }
 
   /* update variables that have been set on the command line */
-  if (p0.source >= 0) {
+  if (p0.source != DATA_NULL) {
     p->source = p0.source;
     /* also update default location */
     switch (p->source) {
@@ -361,10 +361,10 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
   if (viewset) {
     switch (p->source) {
       case OST50:
-        err = osng_to_ne(viewpoint, &p0.y0, &p0.x0);
+        err = osng_to_ne(viewpoint, &p->y0, &p->x0);
         break;
       case SWT02:
-        err = swgr_to_ne(viewpoint, &p0.y0, &p0.x0);
+        err = swgr_to_ne(viewpoint, &p->y0, &p->x0);
         break;
       default :
         fprintf(stderr, "bad data source");

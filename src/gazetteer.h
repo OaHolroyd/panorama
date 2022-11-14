@@ -29,6 +29,6 @@ void free_gazetteer(void);
 /* finds the closest entry in the gazetteer to a point (py, px), filling its
    name into name. Returns the distance to to the entry. Name should have space
    for up to 35 chars. */
-double gazetteer_nearest(int py, int px, char *name);
+double gazetteer_nearest(double py, double px, char *name);
 
 #endif
