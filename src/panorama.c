@@ -71,25 +71,87 @@ void setup_default(struct Panorama *p) {
   p->levels[2] = 2;
 }
 
-/* reads inputs from the command line */
-int read_inputs(struct Panorama *p, int argc, char * const *argv) {
+/* generate an example input file at filename containing the given data p.
+   returns a non-zero exit code on failure. */
+int generate_input_file(struct Panorama *p, const char *filename) {
+  FILE *fp = fopen(filename, "w");
+  if (!fp) { return 1; }
+
+  char gridref[32];
+  switch (p->source) {
+    case OST50:
+      ne_to_osng(p->y0, p->x0, gridref, 10, 0);
+      fprintf(fp, "-S %s\n", "ost50");
+      fprintf(fp, "-v %s\n", gridref);
+      break;
+    case SWT02:
+      ne_to_swgr(p->y0, p->x0, gridref, 0);
+      fprintf(fp, "-S %s\n", "swt02");
+      fprintf(fp, "-v %s\n", gridref);
+      break;
+    default :
+      ERROR("bad data source");
+  }
+  fprintf(fp, "-z %lf\n", p->z0);
+  fprintf(fp, "-r %d\n", p->res);
+  fprintf(fp, "-c %lf\n", p->d0);
+  fprintf(fp, "-d %lf\n", p->dmax);
+  fprintf(fp, "-b %d\n", p->blockmax);
+  fprintf(fp, "-u %lf\n", p->hlim[1]);
+  fprintf(fp, "-l %lf\n", -p->hlim[0]);
+  fprintf(fp, "-o %lf\n", p->wlim[0]);
+  fprintf(fp, "-w %lf\n", p->wlim[1]-p->wlim[0]);
+  fprintf(fp, "-t\n");
+  fprintf(fp, "-s\n");
+
+  fclose(fp);
+  return 0;
+}
+
+/* reads inputs from the command line into the struct p. Alows reading inputs
+   from a file only if readfile is non-zero. Returns an exit code
+     0 - success
+     1 - option read failure
+     2 - success but exit anyway */
+int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) {
+  /* inputs (set to rubbish) */
+  struct Panorama p0;
+  p0.x0 = DBL_MAX;
+  p0.y0 = DBL_MAX;
+  p0.z0 = DBL_MAX;
+  p0.d0 = DBL_MAX;
+  p0.hlim[0] = DBL_MAX;
+  p0.hlim[1] = DBL_MAX;
+  p0.res = -1;
+  p0.split = -1;
+  p0.labels = -1;
+  p0.source = -1;
+  p0.blockmax = -1;
+  p0.dmax = DBL_MAX;
+
+  /* set to defaults */
   setup_default(p);
 
   int c, err;
-  double w0 = 337.5, w = 360.0;
-  while ((c = getopt(argc, argv, "thsr:v:d:c:b:z:S:l:u:o:w:")) != -1) {
+  double w0 = 337.5, w = 360.0; // TODO: should be read from defaults
+  char filename[256];
+  int fromfile = 0;
+  int tofile = 0;
+  const char *argstring = "thsr:v:d:c:b:z:S:l:u:o:w:f:F";
+  const int max_args = (int)strlen(argstring);
+  while ((c = getopt(argc, argv, argstring)) != -1) {
     switch (c) {
       case 't':
         /* add text to the image */
-        p->labels = 1;
+        p0.labels = 1;
         break;
       case 's':
         /* strip (ie not split) image */
-        p->split = 0;
+        p0.split = 0;
         break;
       case 'r':
         /* resolution */
-        err = sscanf(optarg, "%d", &p->res);
+        err = sscanf(optarg, "%d", &p0.res);
         if (err != 1) {
           fprintf(stderr, "failed to read resolution argument '%s'\n", optarg);
           return 1;
@@ -98,9 +160,9 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
       case 'S':
         /* data source */
         if (!strncmp(optarg, "ost50", 5)) {
-          p->source = OST50;
+          p0.source = OST50;
         } else if (!strncmp(optarg, "swt02", 5)) {
-          p->source = SWT02;
+          p0.source = SWT02;
         } else {
           fprintf(stderr, "failed to read source argument '%s'\n", optarg);
           return 1;
@@ -110,10 +172,10 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         /* viewpoint */
         switch (p->source) {
           case OST50:
-            err = osng_to_ne(optarg, &p->y0, &p->x0);
+            err = osng_to_ne(optarg, &p0.y0, &p0.x0);
             break;
           case SWT02:
-            err = swgr_to_ne(optarg, &p->y0, &p->x0);
+            err = swgr_to_ne(optarg, &p0.y0, &p0.x0);
             break;
           default :
             fprintf(stderr, "bad data source");
@@ -126,7 +188,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         break;
       case 'd':
         /* dmax */
-        err = sscanf(optarg, "%lf", &p->dmax);
+        err = sscanf(optarg, "%lf", &p0.dmax);
         if (err != 1) {
           if (!strncmp(optarg, "auto", 4)) {
             p->dmax = -1.0;
@@ -135,11 +197,11 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
             return 1;
           }
         }
-        p->dmax *= 1000.0;
+        p0.dmax *= 1000.0;
         break;
       case 'c':
         /* minimum cutoff */
-        err = sscanf(optarg, "%lf", &p->d0);
+        err = sscanf(optarg, "%lf", &p0.d0);
         if (err != 1) {
           fprintf(stderr, "failed to read cutoff argument '%s'\n", optarg);
           return 1;
@@ -147,7 +209,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         break;
       case 'b':
         /* blockmax */
-        err = sscanf(optarg, "%d", &p->blockmax);
+        err = sscanf(optarg, "%d", &p0.blockmax);
         if (err != 1) {
           fprintf(stderr, "failed to read blockmax argument '%s'\n", optarg);
           return 1;
@@ -155,7 +217,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         break;
       case 'u':
         /* upper edge */
-        err = sscanf(optarg, "%lf", &p->hlim[1]);
+        err = sscanf(optarg, "%lf", &p0.hlim[1]);
         if (err != 1) {
           fprintf(stderr, "failed to read upper argument '%s'\n", optarg);
           return 1;
@@ -163,8 +225,8 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         break;
       case 'l':
         /* lower edge */
-        err = sscanf(optarg, "%lf", &p->hlim[0]);
-        p->hlim[0] *= -1;
+        err = sscanf(optarg, "%lf", &p0.hlim[0]);
+        p0.hlim[0] *= -1;
         if (err != 1) {
           fprintf(stderr, "failed to read lower argument '%s'\n", optarg);
           return 1;
@@ -188,11 +250,20 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
         break;
       case 'z':
         /* viewpoint height */
-        err = sscanf(optarg, "%lf", &p->z0);
+        err = sscanf(optarg, "%lf", &p0.z0);
         if (err != 1) {
           fprintf(stderr, "failed to read height argument '%s'\n", optarg);
           return 1;
         }
+        break;
+      case 'f':
+        /* input file */
+        fromfile = 1;
+        strcpy(filename, optarg);
+        break;
+      case 'F':
+        /* output example input file */
+        tofile = 1;
         break;
       case 'h':
       default :
@@ -226,14 +297,118 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv) {
           "                 between 1 and 360. (Defaults to 360)\n"
           "  -t             Include labels on selected summits.\n"
           "  -s             Output the image as a single strip rather than divided into 8\n"
-          "                 sections.\n");
+          "                 sections.\n"
+          "  -f <file>      Pass inputs to panorama from the file <file>. Each input must\n"
+          "                 be on a separate line and be of the format\n"
+          "                     -<char> [argument]\n"
+          "                 matching the available options listed here. Any options\n"
+          "                 specified separately override those in the file.\n"
+          "  -F             Generate an input file with the inputs given then exit without\n"
+          "                 generating an image.\n");
         return 1;
     }
-
-    /* set variables in the correct order */
-    p->wlim[0] = w0-360.0;
-    p->wlim[1] = p->wlim[0]+w;
   }
+
+  p->wlim[0] = w0-360.0;
+  p->wlim[1] = p->wlim[0]+w;
+
+  /* set variables from file by calling recursively */
+  if (fromfile && readfile) {
+    int num_args = 1;
+    char *args[max_args];
+    args[0] = argv[0];
+
+    /* read file contents */
+    FILE *fp = fopen(filename, "r");
+    if (!fp) { return 1; }
+    fseek(fp, 0L, SEEK_END);
+    size_t size = ftell(fp);
+    fseek(fp, 0L, SEEK_SET);
+    char* contents = malloc(size);
+    if (!contents) { fclose(fp); return 1; }
+    fread(contents, 1, size, fp);
+
+    /* put into args */
+    size_t i = 0;
+    while (i < size) {
+      /* spaces/newlines become string ends */
+      if (contents[i] == ' ' || contents[i] == '\n') {
+        contents[i] = '\0';
+      } else if (i == 0) { // catch the first term
+        args[num_args] = &(contents[i]);
+        num_args++;
+      } else if (contents[i-1] == '\0') {
+        args[num_args] = &(contents[i]);
+        num_args++;
+      }
+
+      i++;
+    }
+
+    /* read args */
+    optind = 1;
+    read_inputs(p, num_args, args, 0);
+
+    fclose(fp);
+  }
+
+  /* update variables that have been set on the command line */
+  if (p0.source < 0) {
+    p->source = p0.source;
+    /* also update default location */
+    switch (p->source) {
+      case OST50:
+        p->x0 = 216670.0;
+        p->y0 = 771280.0;
+        break;
+      case SWT02:
+        p->x0 = 2623451.0;
+        p->y0 = 1100503.0;
+        break;
+      default :
+        ERROR("bad data source");
+    }
+  }
+  if (p0.x0 < DBL_MAX) {
+    p->x0 = p0.x0;
+  }
+  if (p0.y0 < DBL_MAX) {
+    p->y0 = p0.y0;
+  }
+  if (p0.z0 < DBL_MAX) {
+    p->z0 = p0.z0;
+  }
+  if (p0.d0 < DBL_MAX) {
+    p->d0 = p0.d0;
+  }
+  if (p0.hlim[0] < DBL_MAX) {
+    p->hlim[0] = p0.hlim[0];
+  }
+  if (p0.hlim[1] < DBL_MAX) {
+    p->hlim[1] = p0.hlim[1];
+  }
+  if (p0.res >= 0) {
+    p->res = p0.res;
+  }
+  if (p0.split >= 0) {
+    p->split = p0.split;
+  }
+  if (p0.labels >= 0) {
+    p->labels = p0.labels;
+  }
+  if (p0.blockmax >= 0) {
+    p->blockmax = p0.blockmax;
+  }
+  if (p0.dmax < DBL_MAX) {
+    p->dmax = p0.dmax;
+  }
+
+  /* generate input file if requested */
+  if (tofile) {
+    generate_input_file(p, "inputs.input");
+    return 2;
+  }
+
   return 0;
 }
 
@@ -359,10 +534,13 @@ int main(int argc, char * const *argv) {
 
   /* get inputs from command line */
   struct Panorama p; // wrapper for input data
-  int err = read_inputs(&p, argc, argv);
-  if (err) {
+  int err = read_inputs(&p, argc, argv, 1);
+  if (err == 1) {
     fprintf(stderr, "ERROR: failed to read options\n");
     exit_code = EXIT_FAILURE;
+    goto cleanup0;
+  } else {
+    exit_code = EXIT_SUCCESS;
     goto cleanup0;
   }
 

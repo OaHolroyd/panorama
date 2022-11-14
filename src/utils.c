@@ -11,7 +11,7 @@ void ERROR(const char *format, ...) {
   va_list args;
   va_start(args, format);
 
-  fprintf(stderr, "ERROR: ");
+  fprintf(stderr, "%s:%d: ERROR: ", __FILE__, __LINE__);
   vfprintf(stderr, format, args);
   fprintf(stderr, "\n");
 

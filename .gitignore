@@ -2,6 +2,7 @@
 panorama
 data/*/**
 out/**
+*.input
 
 # Junk
 .DS_Store
