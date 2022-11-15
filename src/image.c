@@ -16,10 +16,124 @@
 /* lower bound for feasible height (lowest point visible is -430m) */
 #define MIN_H (-500.0)
 
+struct img_writer {
+  /* file writer info */
+  png_structp png;
+  png_infop info;
+  FILE *fp;
+
+  /* image details */
+  int w, h; // width/height
+};
+
 
 /* ========================================================================== */
 /*   AUXILIARY FUNCTION DEFINITIONS                                           */
 /* ========================================================================== */
+/* sets up the image writer (wrapper for libpng boilerplate). Returns nonzero
+   exit code on failure. */
+int img_writer_setup(struct img_writer *w, const char * restrict path) {
+  w->png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+  if (!w->png) {
+    return 1;
+  }
+  w->info = png_create_info_struct(w->png);
+  if (!w->info) {
+    png_destroy_write_struct(&w->png, NULL);
+    return 1;
+  }
+
+  /* open the file */
+  w->fp = fopen(path, "wb");
+  if (!w->png) {
+    png_destroy_write_struct(&w->png, &w->info);
+    return 2;
+  }
+
+  /* set failure point */
+  if (setjmp(png_jmpbuf(w->png))) {
+    png_destroy_write_struct(&w->png, &w->info);
+    fclose(w->fp);
+    return 3;
+  }
+
+  /* set output */
+  png_init_io(w->png, w->fp);
+
+  /* set filtering options */
+  // TODO: see if setting filters is useful
+  // png_set_filter(0, /* filters */);
+
+  /* set the zlib compression level */
+  // TODO: see if setting compression level is useful
+  // png_set_compression_level(png, Z_BEST_COMPRESSION);
+
+  /* fill the image header chunk */
+  png_set_IHDR(
+    w->png, w->info,
+    w->w, w->h, // image dimensions
+    8, // color bit-depth
+    PNG_COLOR_TYPE_PALETTE, // index into a defined color palette
+    PNG_INTERLACE_NONE, // disable interlacing
+    PNG_COMPRESSION_TYPE_DEFAULT, // fixed
+    PNG_FILTER_TYPE_DEFAULT // fixed
+  );
+
+  // TODO: fill tIME
+
+  /* fill text chunk */
+  // const int num_text = 1;
+  // png_text text[num_text];
+  // char key0[] = "Title";
+  // char text0[] = "Panorama";
+  // text[0].key = key0;
+  // text[0].text = text0;
+  // text[0].compression = PNG_TEXT_COMPRESSION_NONE;
+  // text[0].itxt_length = 0;
+  // text[0].lang = NULL;
+  // text[0].lang_key = NULL;
+  // png_set_text(w->png, w->info, text, num_text);
+
+  // TODO: set gAMA: png_set_gAMA(png_ptr, info_ptr, gamma);
+
+  /* set the color palette (max 256 colors) */
+  if (NUM_COLORS > 256) {
+    png_destroy_write_struct(&w->png, &w->info);
+    fclose(w->fp);
+    return 4;
+  }
+  png_set_PLTE(w->png, w->info, palette, NUM_COLORS);
+
+  /* write chunks */
+  png_write_info(w->png, w->info);
+
+  return 0;
+}
+
+/* writes the image in image (which must have the dimensions specified in w)
+   to the file. */
+void img_writer_image(struct img_writer *w, png_byte **image) {
+  /* set up rows of pixels */
+  // TODO: should this use png_malloc?
+  png_bytep *rows = malloc(w->h*sizeof(png_bytep));
+  for (int i = 0; i < w->h; i++) {
+    rows[i] = image[w->h-i-1];
+  } // i end
+
+  /* write the image data */
+  png_write_image(w->png, rows);
+
+  free(rows);
+}
+
+/* finished the image writing process */
+void img_writer_end(struct img_writer *w) {
+  /* finish writing */
+  png_write_end(w->png, w->info);
+  png_destroy_write_struct(&w->png, &w->info);
+  fclose(w->fp);
+}
+
 /* adds the characters in the string str to the image, scaled by size. (i0, j0)
    denotes the upper left corner or the upper central point of the string,
    depending if centred is true. Uses fcol (>=0) as the foreground color and
@@ -184,58 +298,22 @@ void split_string(char *str, int tol) {
      3 - subsequent write failure
      4 - color palette too large
   */
-int image_write(const char * restrict path, struct Image *img, struct Panorama *p) {
+int panorama_write(const char * restrict path, struct Image *img, struct Panorama *p) {
   /* extract data from container */
   int nw = img->nw;
   int nh = img->nh;
   double *wlim = p->wlim;
-  double *hlim = p->hlim;
   double **img_d = img->img_d;
   double **img_h = img->img_h;
   double **img_u = img->img_u;
   double **img_v = img->img_v;
-  int **img_n = img->img_n;
   int split = p->split;
 
 
   /* ====================== */
   /*   SET UP PNG WRITING   */
   /* ====================== */
-  /* allocate space for the image and the write info */
-  png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-  if (!png) {
-    return 1;
-  }
-  png_infop info = png_create_info_struct(png);
-  if (!info) {
-    png_destroy_write_struct(&png, NULL);
-    return 1;
-  }
-
-  /* open the file */
-  FILE *fp = fopen(path, "wb");
-  if (!png) {
-    png_destroy_write_struct(&png, &info);
-    return 2;
-  }
-
-  /* set failure point */
-  if (setjmp(png_jmpbuf(png))) {
-    png_destroy_write_struct(&png, &info);
-    fclose(fp);
-    return 3;
-  }
-
-  /* set output */
-  png_init_io(png, fp);
-
-  /* set filtering options */
-  // TODO: see if setting filters is useful
-  // png_set_filter(0, /* filters */);
-
-  /* set the zlib compression level */
-  // TODO: see if setting compression level is useful
-  // png_set_compression_level(png, Z_BEST_COMPRESSION);
+  struct img_writer writer;
 
   /* compute size of output image */
   const int pad = nw/625; // padding between split rows
@@ -256,54 +334,18 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   head = (head < clarge*CHAR_H+pad) ? clarge*CHAR_H+pad : head;
   foot = (foot < clarge*CHAR_H+pad) ? clarge*CHAR_H+pad : foot;
 
-  int w, h;
   if (split) {
-    w = nw/8 + 2*pad;
-    h = nh*8 + head + foot + 7*pad;
+    writer.w = nw/8 + 2*pad;
+    writer.h = nh*8 + head + foot + 7*pad;
   } else {
-    w = nw + 2*pad;
-    h = nh + head + foot;
+    writer.w = nw + 2*pad;
+    writer.h = nh + head + foot;
   }
 
-  /* fill the image header chunk */
-  png_set_IHDR(
-    png, info,
-    w, h, // image dimensions
-    8, // color bit-depth
-    PNG_COLOR_TYPE_PALETTE, // index into a defined color palette
-    PNG_INTERLACE_NONE, // disable interlacing
-    PNG_COMPRESSION_TYPE_DEFAULT, // fixed
-    PNG_FILTER_TYPE_DEFAULT // fixed
-  );
-
-  // TODO: fill tIME
-
-  /* fill text chunk */
-  const int num_text = 1;
-  png_text text[num_text];
-  char key0[] = "Title";
-  char text0[] = "Panorama";
-  text[0].key = key0;
-  text[0].text = text0;
-  text[0].compression = PNG_TEXT_COMPRESSION_NONE;
-  text[0].itxt_length = 0;
-  text[0].lang = NULL;
-  text[0].lang_key = NULL;
-  png_set_text(png, info, text, num_text);
-
-
-  // TODO: set gAMA: png_set_gAMA(png_ptr, info_ptr, gamma);
-
-  /* set the color palette (max 256 colors) */
-  if (NUM_COLORS > 256) {
-    png_destroy_write_struct(&png, &info);
-    fclose(fp);
-    return 4;
+  int err = img_writer_setup(&writer, path);
+  if (err) {
+    return err;
   }
-  png_set_PLTE(png, info, palette, NUM_COLORS);
-
-  /* write chunks */
-  png_write_info(png, info);
 
 
   /* ========================= */
@@ -311,7 +353,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   /* ========================= */
   /* image (represented as 8-bit indices into the palette) */
   // TODO: should this use png_malloc?
-  png_byte **image = malloc_2d(h, w, sizeof(png_byte));
+  png_byte **image = malloc_2d(writer.h, writer.w, sizeof(png_byte));
 
   /* find edges -- 0 for no edge, 1 for major, 2 for minor */
   int **edges = malloc_2d(nw, nh, sizeof(int));
@@ -345,8 +387,8 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   } // j end
 
   /* white background */
-  for (int i = 0; i < h; i++) {
-    for (int j = 0; j < w; j++) {
+  for (int i = 0; i < writer.h; i++) {
+    for (int j = 0; j < writer.w; j++) {
       image[i][j] = COLOR_WHITE;
     } // j end
   } // i end
@@ -391,7 +433,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   char str[128];
 
   /* top left */
-  int i0 = h-pad-1;
+  int i0 = writer.h-pad-1;
   int j0 = pad;
 
   /* name */
@@ -412,7 +454,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   j0 = add_text(str, -1, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* grid reference */
-  int err = 0;
+  err = 0;
   switch (p->source) {
     case OST50:
       err = ne_to_osng(p->y0, p->x0, str, 8, 1);
@@ -459,7 +501,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       ERROR("data source not recognised");
       break;
   }
-  split_string(str, w/(CHAR_W*csmall));
+  split_string(str, writer.w/(CHAR_W*csmall));
   add_text(str, -1, i0, j0, csmall, image, 0, COLOR_BLACK, COLOR_NULL);
 
 
@@ -665,7 +707,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
         int jj = jmin + pad - split*(k*(nw/8));
         sprintf(str, "%s %.0lf", gaz_names[l], img_d[jmin][imin]/1000.0);
         split_string(str, 10);
-        if (ii < h-head) {
+        if (ii < writer.h-head) {
           /* try placing the label as close to the point as possible by going
              round in a spiral */
           int direction = 0; // 0 for u/l, 1 for d/r
@@ -700,7 +742,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
             } else {
               for (int i = 0; i < j; i++) {
                 ii += 1;
-                if (ii >= h) {
+                if (ii >= writer.h) {
                   continue;
                 }
                 if (check_text(str, -1, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
@@ -713,7 +755,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
               }
               for (int i = 0; i < 2*j-1; i++) {
                 jj += 1;
-                if (jj >= w) {
+                if (jj >= writer.w) {
                   continue;
                 }
                 if (check_text(str, -1, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
@@ -729,7 +771,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
             direction = !direction;
             j++;
           }
-          if (ii >= 0 && ii < h-1 && jj >= 0 && jj < w-1) {
+          if (ii >= 0 && ii < writer.h-1 && jj >= 0 && jj < writer.w-1) {
             add_text(str, -1, ii+1, jj, ctiny, image, 1, COLOR_TEXT, COLOR_NULL);
           }
         }
@@ -741,26 +783,12 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   /* ================= */
   /*   WRITE TO FILE   */
   /* ================= */
-  /* set up rows of pixels */
-  // TODO: should this use png_malloc?
-  png_bytep *rows = malloc(h*sizeof(png_bytep));
-  for (int i = 0; i < h; i++) {
-    rows[i] = image[h-i-1];
-  } // i end
-
-  /* write the image data */
-  png_write_image(png, rows);
-
-  /* finish writing */
-  png_write_end(png, info);
-
+  img_writer_image(&writer, image);
+  img_writer_end(&writer);
 
   /* clean up */
   free_gazetteer();
   free_2d(edges);
   free_2d(image);
-  free(rows);
-  png_destroy_write_struct(&png, &info);
-  fclose(fp);
   return 0;
 }

@@ -25,7 +25,7 @@ struct Image {
 /*   FUNCTION DECLARATIONS                                                    */
 /* ========================================================================== */
 /* takes the image data and writes it to the specified stream */
-int image_write(const char * restrict path, struct Image *img, struct Panorama *p);
+int panorama_write(const char * restrict path, struct Image *img, struct Panorama *p);
 
 
 #endif

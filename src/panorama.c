@@ -1191,7 +1191,7 @@ int main(int argc, char * const *argv) {
 
   /* write to file */
   t0 = clock();
-  image_write("out/img.png", &img, &p);
+  panorama_write("out/panorama.png", &img, &p);
   tpng = clock() - t0;
 
 
