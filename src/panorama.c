@@ -367,8 +367,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
         err = swgr_to_ne(viewpoint, &p->y0, &p->x0);
         break;
       default :
-        fprintf(stderr, "bad data source");
-        return 1;
+        ERROR("bad data source");
     }
     if (err) {
       fprintf(stderr, "failed to read viewpoint argument '%s'\n", optarg);

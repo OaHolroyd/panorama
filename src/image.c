@@ -24,19 +24,20 @@
    denotes the upper left corner or the upper central point of the string,
    depending if centred is true. Uses fcol (>=0) as the foreground color and
    bcol as the background color (or blank if bcol = 0). Returns the
-   x coordinate of the next blank space. */
-// TODO: add const back by including a len argument
-int add_text(char *str, int i0, int j0, int size, png_byte **image, int centred, png_byte fcol, png_byte bcol) {
-  int len = (int)strlen(str);
+   x coordinate of the next blank space. The length of the string is given by
+   len. If it is negative this is computed with strlen. */
+int add_text(const char *str, int len, int i0, int j0, int size, png_byte **image, int centred, png_byte fcol, png_byte bcol) {
   const unsigned char *c;
+
+  if (len < 0) {
+    len = (int)strlen(str);
+  }
 
   /* check for newlines */
   for (int i = 0; i < len; i++) {
     if (str[i] == '\n') {
-      str[i] = '\0';
-      int j1 = add_text(str, i0, j0, size, image, centred, fcol, bcol);
-      int j2 = add_text(&(str[i+1]), i0-size*CHAR_H, j0, size, image, centred, fcol, bcol);
-      str[i] = '\n';
+      int j1 = add_text(str, i, i0, j0, size, image, centred, fcol, bcol);
+      int j2 = add_text(&(str[i+1]), -1, i0-size*CHAR_H, j0, size, image, centred, fcol, bcol);
       return (j1 > j2) ? j1 : j2;
     }
   } // i end
@@ -77,19 +78,20 @@ int add_text(char *str, int i0, int j0, int size, png_byte **image, int centred,
 /* checks if str, scaled by size, will overlap an existing string. (i0, j0)
    denotes the upper left corner or the upper central point of the string,
    depending if centred is true. Uses fcol (>=0) as the foreground color and
-   bcol as the background color (or blank if bcol = 0). Returns 1 if the space
-   is free, 0 otherwise. */
+   bcol as the background color (or blank if bcol = 0). The length of the string
+   is given by len. If it is negative this is computed with strlen.Returns 1 if
+   the space is free, 0 otherwise. */
 // TODO: add const back by including a len argument
-int check_text(char *str, int i0, int j0, int size, png_byte **image, int centred, int fcol, int bcol) {
-  int len = (int)strlen(str);
+int check_text(const char *str, int len, int i0, int j0, int size, png_byte **image, int centred, int fcol, int bcol) {
+  if (len < 0) {
+    len = (int)strlen(str);
+  }
 
   /* check for newlines */
   for (int i = 0; i < len; i++) {
     if (str[i] == '\n') {
-      str[i] = '\0';
-      int j1 = check_text(str, i0, j0, size, image, centred, fcol, bcol);
-      int j2 = check_text(&(str[i+1]), i0-size*CHAR_H, j0, size, image, centred, fcol, bcol);
-      str[i] = '\n';
+      int j1 = check_text(str, i, i0, j0, size, image, centred, fcol, bcol);
+      int j2 = check_text(&(str[i+1]), -1, i0-size*CHAR_H, j0, size, image, centred, fcol, bcol);
       return (j1 && j2);
     }
   } // i end
@@ -193,7 +195,6 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   double **img_u = img->img_u;
   double **img_v = img->img_v;
   int **img_n = img->img_n;
-  double dmax = p->dmax;
   int split = p->split;
 
 
@@ -365,7 +366,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       } else if (img_h[j][i] < MIN_H) {
         image[ii][jj] = COLOR_WATER;
       } else {
-        double d = img_d[j][i]/dmax;
+        double d = img_d[j][i]/p->dmax;
         if (d > 1.0) { d = 1.0; }
         image[ii][jj] = COLORMAP(d);
       }
@@ -373,7 +374,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   } // i end
 
   /* recompute dmax to true max */
-  dmax = 0.0;
+  double dmax = 0.0;
   for (int j = 0; j < nw; j++) {
     for (int i = 0; i < nh; i++) {
       if (img_d[j][i] > dmax) {
@@ -402,16 +403,16 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
     strcpy(name, "Unknown location");
   }
   if (head-pad >= 2*cmed*CHAR_H) {
-    add_text("view ", i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
-    j0 = add_text("from ", i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    add_text("view ", -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    j0 = add_text("from ", -1, i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
   } else {
-    j0 = add_text("view from ", i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    j0 = add_text("view from ", -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
   }
   sprintf(str, "%s, ", name);
-  j0 = add_text(str, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
+  j0 = add_text(str, -1, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* grid reference */
-  int err;
+  int err = 0;
   switch (p->source) {
     case OST50:
       err = ne_to_osng(p->y0, p->x0, str, 8, 1);
@@ -426,20 +427,20 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
   if (err) {
     strcpy(str, "unknown gridref");
   }
-  j0 = add_text(str, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
-  j0 = add_text(" ", i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
+  j0 = add_text(str, -1, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
+  j0 = add_text(" ", -1, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
 
   /* other details */
   if (head-pad >= 2*cmed*CHAR_H) {
     sprintf(str, "  altitude: %.0lf m", p->z0);
-    add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    add_text(str, -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
     sprintf(str, "eye height: %.0lf m", img->z);
-    add_text(str, i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    add_text(str, -1, i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
   } else {
     sprintf(str, "  altitude: %.0lf m, ", p->z0);
-    j0 = add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    j0 = add_text(str, -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
     sprintf(str, "eye height: %.0lf m", img->z);
-    add_text(str, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    add_text(str, -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
   }
 
   /* bottom left */
@@ -459,7 +460,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       break;
   }
   split_string(str, w/(CHAR_W*csmall));
-  add_text(str, i0, j0, csmall, image, 0, COLOR_BLACK, COLOR_NULL);
+  add_text(str, -1, i0, j0, csmall, image, 0, COLOR_BLACK, COLOR_NULL);
 
 
   /* ================ */
@@ -545,24 +546,24 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
     const double dd = 10.0;
     double d = fmod(wlim[0]+(double)j/p->res + 1440.0, 360.0);
     if (fabs(d-0.0) < 0.5/p->res) {
-      add_text("NORTH", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("NORTH", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-180.0) < 0.5/p->res) {
-      add_text("SOUTH", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("SOUTH", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-90.0) < 0.5/p->res) {
-      add_text("EAST", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("EAST", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-270.0) < 0.5/p->res) {
-      add_text("WEST", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("WEST", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-45.0) < 0.5/p->res) {
-      add_text("NE", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("NE", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-135.0) < 0.5/p->res) {
-      add_text("SE", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("SE", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-225.0) < 0.5/p->res) {
-      add_text("SW", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("SW", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(d-315.0) < 0.5/p->res) {
-      add_text("NW", ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text("NW", -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     } else if (fabs(fmod(d, dd)) < 0.5/p->res) {
       sprintf(str, "%03.0lf", fmod(dd*rint(d/dd)+360.0, 360.0));
-      add_text(str, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
+      add_text(str, -1, ii, jj, csmall, image, 1, COLOR_RED, COLOR_BACK);
     }
   } // j end
 
@@ -588,7 +589,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
       } else if (a > wlim[1]) {
         a -= 360.0;
       }
-      int ja = (a - wlim[0]) * p->res;
+      int ja = (int)((a - wlim[0]) * p->res);
       int ja0 = ja - p->res;
       int ja1 = ja + p->res;
       if (ja0 < 0) {
@@ -678,7 +679,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
                 if (ii < 0) {
                   continue;
                 }
-                if (check_text(str, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
+                if (check_text(str, -1, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
                   stop = 1;
                   break;
                 }
@@ -691,7 +692,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
                 if (jj < 0) {
                   continue;
                 }
-                if (check_text(str, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
+                if (check_text(str, -1, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
                   stop = 1;
                   break;
                 }
@@ -702,7 +703,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
                 if (ii >= h) {
                   continue;
                 }
-                if (check_text(str, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
+                if (check_text(str, -1, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
                   stop = 1;
                   break;
                 }
@@ -715,7 +716,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
                 if (jj >= w) {
                   continue;
                 }
-                if (check_text(str, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
+                if (check_text(str, -1, ii, jj, ctiny, image, 1, COLOR_TEXT, COLOR_BACK)) {
                   stop = 1;
                   break;
                 }
@@ -729,7 +730,7 @@ int image_write(const char * restrict path, struct Image *img, struct Panorama *
             j++;
           }
           if (ii >= 0 && ii < h-1 && jj >= 0 && jj < w-1) {
-            add_text(str, ii+1, jj, ctiny, image, 1, COLOR_TEXT, COLOR_NULL);
+            add_text(str, -1, ii+1, jj, ctiny, image, 1, COLOR_TEXT, COLOR_NULL);
           }
         }
       }
