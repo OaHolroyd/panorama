@@ -103,6 +103,7 @@ int generate_input_file(struct Panorama *p, const char *filename) {
   fprintf(fp, "-w %lf\n", p->wlim[1]-p->wlim[0]);
   fprintf(fp, "-t\n");
   fprintf(fp, "-s\n");
+  fprintf(fp, "-L\n");
 
   fclose(fp);
   return 0;
@@ -113,7 +114,7 @@ int generate_input_file(struct Panorama *p, const char *filename) {
      0 - success
      1 - option read failure
      2 - success but exit anyway */
-int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) {
+int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, int *loc) {
   /* inputs (set to rubbish) */
   struct Panorama p0;
   p0.x0 = DBL_MAX;
@@ -139,7 +140,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
   char filename[256];
   int fromfile = 0;
   int tofile = 0;
-  const char *argstring = "thsr:v:d:c:b:z:S:l:u:o:w:f:F";
+  const char *argstring = "thsr:v:d:c:b:z:S:l:u:o:w:f:FL";
   const int max_args = (int)strlen(argstring);
   while ((c = getopt(argc, argv, argstring)) != -1) {
     switch (c) {
@@ -254,6 +255,10 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
         /* output example input file */
         tofile = 1;
         break;
+      case 'L':
+        /* output location detail */
+        *loc = 1;
+        break;
       case 'h':
       default :
         fprintf(stderr,
@@ -287,6 +292,8 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
           "  -t             Include labels on selected summits.\n"
           "  -s             Output the image as a single strip rather than divided into 8\n"
           "                 sections.\n"
+          "  -L             Generate an additional image detailing the location of the\n"
+          "                 viewpoint. Useful for debugging.\n"
           "  -f <file>      Pass inputs to panorama from the file <file>. Each input must\n"
           "                 be on a separate line and be of the format\n"
           "                     -<char> [argument]\n"
@@ -336,7 +343,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile) 
 
     /* read args */
     optind = 1;
-    read_inputs(p, num_args, args, 0);
+    read_inputs(p, num_args, args, 0, loc);
 
     fclose(fp);
   }
@@ -533,7 +540,8 @@ int main(int argc, char * const *argv) {
 
   /* get inputs from command line */
   struct Panorama p; // wrapper for input data
-  int err = read_inputs(&p, argc, argv, 1);
+  int loc; // whether to produce location info
+  int err = read_inputs(&p, argc, argv, 1, &loc);
   if (err == 1) {
     fprintf(stderr, "ERROR: failed to read options\n");
     exit_code = EXIT_FAILURE;
@@ -656,6 +664,47 @@ int main(int argc, char * const *argv) {
   int *iblocks = malloc(nblocks*sizeof(int)); // position of block in order
   order_blocks(blocks, iblocks, nby, nbx, I0, J0, By, Bx);
 
+  /* origin block indices */
+  int IJb0 = blocks[0]; // single index
+  int Ib0 = IJb0/nbx; // row index
+  int Jb0 = IJb0-Ib0*nbx; // column index
+
+  /* location map (if required) */
+  double **Xloc = NULL;
+  double **Yloc = NULL;
+  double **Zloc = NULL;
+  int loc_I = 0;
+  int loc_J = 0;
+  int loc_nblocks = 1;
+  int *loc_blocks = NULL;
+  if (loc) {
+    /* how many blocks are required for sufficient detail */
+    const double loc_size = 5000.0;
+    while (loc_nblocks*cw*nx < loc_size || loc_nblocks*ch*ny < loc_size) {
+      loc_nblocks += 2;
+      loc_I += 1;
+      loc_J += 1;
+    }
+
+    /* decide which blocks to store */
+    loc_blocks = malloc(loc_nblocks*loc_nblocks*sizeof(int));
+    int ib = 0, jb = 0;
+    while (ib < loc_nblocks*loc_nblocks) {
+      int IJb = blocks[jb]; // single index
+      int Ib = IJb/nbx; // row index
+      int Jb = IJb-Ib*nbx; // column index
+      if (abs(Ib-Ib0) <= loc_nblocks/2 && abs(Jb-Jb0) <= loc_nblocks/2) {
+        loc_blocks[ib] = blocks[jb];
+        ib++;
+      }
+      jb++;
+    }
+
+    Xloc = malloc_2d(loc_nblocks*ny, loc_nblocks*nx, sizeof(double));
+    Yloc = malloc_2d(loc_nblocks*ny, loc_nblocks*nx, sizeof(double));
+    Zloc = malloc_2d(loc_nblocks*ny, loc_nblocks*nx, sizeof(double));
+  }
+
 
   /* ====================================================================== */
   /*   Ray Initialisation                                                   */
@@ -690,8 +739,9 @@ int main(int argc, char * const *argv) {
   /* absolute viewpoint height */
   int i0 = (int)((y0 - Y[0][0])/ch + 0.5);
   int j0 = (int)((x0 - X[0][0])/cw + 0.5);
-  double zrel = z0;
+  double zrel = z0; // store relative height
   z0 += Zb[i0][j0];
+  int loc_i = 0; // keep track of stored blocks
 
   /* loop over the data blocks in order of distance from the origin block */
   for (int block = 0; block < blockmax; block++) {
@@ -712,6 +762,22 @@ int main(int argc, char * const *argv) {
     t0 = clock();
     fill_multigrid(ny, nx, nlevels, levels, Z);
     tgrid += clock() - t0;
+
+    /* store block for location image if required */
+    if (loc && loc_i < loc_nblocks*loc_nblocks) {
+      if (IJb == loc_blocks[loc_i]) {
+        int ii = (loc_I+(Ib-Ib0))*ny;
+        int jj = (loc_J+(Jb-Jb0))*nx;
+        for (int i = 0; i < ny; i++) {
+          for (int j = 0; j < nx; j++) {
+            Xloc[ii+i][jj+j] = X[i][j];
+            Yloc[ii+i][jj+j] = Y[i][j];
+            Zloc[ii+i][jj+j] = Z[0][i][j];
+          } // j end
+        } // i end
+        loc_i++;
+      }
+    }
 
     /* ================================== */
     /*  Propagate rays through the block  */
@@ -1178,7 +1244,7 @@ int main(int argc, char * const *argv) {
   }
 
   /* pack data into struct */
-  struct Image img;
+  struct Img_pan img;
   img.nw = nw;
   img.nh = nh;
   img.img_d = img_d;
@@ -1191,8 +1257,25 @@ int main(int argc, char * const *argv) {
 
   /* write to file */
   t0 = clock();
-  panorama_write("out/panorama.png", &img, &p);
+  err = panorama_write("out/panorama.png", &img, &p);
   tpng = clock() - t0;
+  if (err) {
+    fprintf(stderr, "ERROR: failed to write image\n");
+    exit_code = EXIT_FAILURE;
+  }
+
+  /* location write */
+  if (loc) {
+    struct Img_loc img_loc;
+    img_loc.nh = loc_nblocks*ny;
+    img_loc.nw = loc_nblocks*nx;
+    img_loc.X = Xloc;
+    img_loc.Y = Yloc;
+    img_loc.Z = Zloc;
+    img_loc.i0 = ny*loc_I+i0;
+    img_loc.j0 = nx*loc_J+j0;
+    location_write("out/location.png", &img_loc, &p);
+  }
 
 
   /* ====================================================================== */
@@ -1226,6 +1309,10 @@ int main(int argc, char * const *argv) {
   cleanup5:
   free(blocks);
   free(iblocks);
+  free_2d(Xloc);
+  free_2d(Yloc);
+  free_2d(Zloc);
+  free(loc_blocks);
   free_2d(rays);
 
   cleanup4:

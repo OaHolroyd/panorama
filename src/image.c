@@ -298,7 +298,7 @@ void split_string(char *str, int tol) {
      3 - subsequent write failure
      4 - color palette too large
   */
-int panorama_write(const char * restrict path, struct Image *img, struct Panorama *p) {
+int panorama_write(const char * restrict path, struct Img_pan *img, struct Panorama *p) {
   /* extract data from container */
   int nw = img->nw;
   int nh = img->nh;
@@ -789,6 +789,239 @@ int panorama_write(const char * restrict path, struct Image *img, struct Panoram
   /* clean up */
   free_gazetteer();
   free_2d(edges);
+  free_2d(image);
+  return 0;
+}
+
+/* takes the location data and writes it to the file whose name is the string
+   pointed to by path. Returns an error code:
+     0 - success
+     1 - failed to allocate png struct or info
+     2 - failed to open file
+     3 - subsequent write failure
+     4 - color palette too large
+  */
+int location_write(const char * restrict path, struct Img_loc *loc, struct Panorama *p) {
+  /* extract information */
+  int nh = loc->nh;
+  int nw = loc->nw;
+  double **X = loc->X;
+  double **Y = loc->Y;
+  double **Z = loc->Z;
+  int I0 = loc->i0;
+  int J0 = loc->j0;
+  double dy = Y[1][1] - Y[0][0];
+  double dx = X[1][1] - X[0][0];
+
+  const int max_zoom = 3;
+  char str[128];
+
+  /* ====================== */
+  /*   SET UP PNG WRITING   */
+  /* ====================== */
+  struct img_writer writer;
+
+  /* compute size of output image */
+  const int pad = nw/50; // padding between split rows
+  int head = nw/12; // space for header
+  int foot = nw/25; // space for footer
+
+  /* text sizes */
+  int clarge = (int)(head/(2.0*CHAR_H));
+  int cmed = (int)(head/(4.0*CHAR_H));
+  int csmall = (int)(head/(6.0*CHAR_H));
+  int ctiny = (int)(head/(8.0*CHAR_H));
+  clarge = (clarge == 0) ? 1 : clarge;
+  cmed = (cmed == 0) ? 1 : cmed;
+  csmall = (csmall == 0) ? 1 : csmall;
+  ctiny = (ctiny == 0) ? 1 : ctiny;
+
+  /* ensure header and footer are large enough to contain text */
+  head = (head < clarge*CHAR_H+pad) ? clarge*CHAR_H+pad : head;
+  foot = (foot < clarge*CHAR_H+pad) ? clarge*CHAR_H+pad : foot;
+
+  writer.w = max_zoom*nw + max_zoom*pad + pad;
+  writer.h = nh + head + foot;
+
+  int err = img_writer_setup(&writer, path);
+  if (err) {
+    return err;
+  }
+
+
+  /* ========================= */
+  /*   CONVERT DATA TO IMAGE   */
+  /* ========================= */
+  /* image (represented as 8-bit indices into the palette) */
+  // TODO: should this use png_malloc?
+  png_byte **image = malloc_2d(writer.h, writer.w, sizeof(png_byte));
+
+  /* white background */
+  for (int i = 0; i < writer.h; i++) {
+    for (int j = 0; j < writer.w; j++) {
+      image[i][j] = COLOR_WHITE;
+    } // j end
+  } // i end
+
+
+  /* heightmap at increasing zoom */
+  int scale = 1;
+  for (int zoom = 0; zoom < max_zoom; zoom++) {
+    /* origin shift */
+    int di = I0-nh/(2*scale);
+    int dj = J0-nw/(2*scale);
+    if (di > nh-nh/scale) { di = nh-nh/scale; }
+    if (di < 0) { di = 0; }
+    if (dj > nw-nw/scale) { dj = nw-nw/scale; }
+    if (dj < 0) { dj = 0; }
+
+    /* find min and max values */
+    double zmin = DBL_MAX;
+    double zmax = -DBL_MAX;
+    for (int i = 0; i < nh/scale; i++) {
+      for (int j = 0; j < nw/scale; j++) {
+        double z = Z[di+i][dj+j];
+        if (z > zmax) {
+          zmax = z;
+        }
+        if (z < zmin) {
+          zmin = z;
+        }
+      } // j end
+    } // i end
+    double zrange = zmax-zmin;
+
+    /* height data */
+    for (int i = 0; i < nh/scale; i++) {
+      for (int j = 0; j < nw/scale; j++) {
+        int ii = scale*i + foot;
+        int jj = scale*j + pad + zoom*(nw+pad);
+
+        double z = (Z[di+i][dj+j]-zmin)/zrange;
+        if (z > 1.0) { z = 1.0; }
+
+        for (int k = 0; k < scale; k++) {
+          for (int l = 0; l < scale; l++) {
+            image[ii+k][jj+l] = COLORMAP(z);
+          } // l end
+        } // k end
+      } // j end
+    } // i end
+
+    /* gridlines */
+    for (int i = 0; i < nh/scale; i++) {
+      for (int j = 0; j < nw/scale; j++) {
+        int ii = scale*i + foot;
+        int jj = scale*j + pad + zoom*(nw+pad);
+
+        /* gridlines */
+        if (fmod(Y[di+i][dj+j],1000.0) <= dy/2) {
+          for (int k = 0; k < scale; k++) {
+            image[ii][jj+k] = COLOR_GREY;
+          } // k end
+
+          if (j == 0) {
+            sprintf(str, "%.0lf", Y[di+i][dj+j]/1000.0);
+            int w = (int)(ctiny*CHAR_W*strlen(str));
+            int h = ctiny*CHAR_H;
+            add_text(str, -1, ii+h/2, pad+zoom*(nw+pad), ctiny, image, 0, COLOR_BLACK, COLOR_BACK);
+            add_text(str, -1, ii+h/2, pad+zoom*(nw+pad)+nw-w, ctiny, image, 0, COLOR_BLACK, COLOR_BACK);
+          }
+        }
+        if (fmod(X[di+i][dj+j],1000.0) <= dx/2) {
+          for (int k = 0; k < scale; k++) {
+            image[ii+k][jj] = COLOR_GREY;
+          } // k end
+
+          if (i == 0) {
+            sprintf(str, "%.0lf", X[di+i][dj+j]/1000.0);
+            int w = (int)(ctiny*CHAR_W*strlen(str));
+            int h = ctiny*CHAR_H;
+            add_text(str, -1, foot+h, jj-w/2, ctiny, image, 0, COLOR_BLACK, COLOR_BACK);
+            add_text(str, -1, foot+nh, jj-w/2, ctiny, image, 0, COLOR_BLACK, COLOR_BACK);
+          }
+        }
+      } // j end
+    } // i end
+
+    /* viewpoint location */
+    int ii = scale*(I0-di)+(scale/2)+foot;
+    int jj = scale*(J0-dj)+(scale/2)+pad+zoom*(nw+pad);
+    for (int k = 0; k <= scale; k++) {
+      image[ii+k][jj] = COLOR_BLACK;
+      image[ii-k][jj] = COLOR_BLACK;
+      image[ii][jj+k] = COLOR_BLACK;
+      image[ii][jj-k] = COLOR_BLACK;
+    } // k end
+
+    int w = ctiny*CHAR_W;
+    int h = ctiny*CHAR_H;
+    add_text("X", -1, ii+h/2, jj-w/2, ctiny, image, 0, COLOR_BLACK, COLOR_NULL);
+
+    scale *= 2;
+  } // zoom end
+
+
+  /* ============ */
+  /*   ADD TEXT   */
+  /* ============ */
+  char name[64];
+
+  /* top left */
+  int i0 = writer.h-pad-1;
+  int j0 = pad;
+
+  /* name */
+  init_gazetteer(p->source);
+  double derr = gazetteer_nearest(p->y0, p->x0, name);
+
+  if (derr > 200.0) {
+    /* if the error is too large, mark as unknown */
+    strcpy(name, "Unknown location");
+    derr = NAN;
+  }
+  sprintf(str, "%s, ", name);
+  j0 = add_text(str, -1, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
+
+  /* grid reference */
+  err = 0;
+  switch (p->source) {
+    case OST50:
+      err = ne_to_osng(p->y0, p->x0, str, 8, 1);
+      break;
+    case SWT02:
+      err = ne_to_swgr(p->y0, p->x0, str, 1);
+      break;
+    default :
+      ERROR("data source not recognised");
+      break;
+  }
+  if (err) {
+    strcpy(str, "unknown gridref");
+  }
+  j0 = add_text(str, -1, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
+  j0 = add_text(" ", -1, i0, j0, clarge, image, 0, COLOR_BLACK, COLOR_NULL);
+
+  /* other details */
+  if (head-pad >= 2*cmed*CHAR_H) {
+    sprintf(str, "  altitude: %.0lf m", Z[I0][J0]);
+    add_text(str, -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    sprintf(str, "summit distance: %.0lf m", derr);
+    add_text(str, -1, i0-(CHAR_H+1)*cmed, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  } else {
+    sprintf(str, "  altitude: %.0lf m, ", Z[I0][J0]);
+    j0 = add_text(str, -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+    sprintf(str, "summit distance: %.0lf m", derr);
+    add_text(str, -1, i0, j0, cmed, image, 0, COLOR_BLACK, COLOR_NULL);
+  }
+
+
+  /* ================= */
+  /*   WRITE TO FILE   */
+  /* ================= */
+  img_writer_image(&writer, image);
+  img_writer_end(&writer);
+
   free_2d(image);
   return 0;
 }
