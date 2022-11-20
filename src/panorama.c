@@ -89,6 +89,11 @@ int generate_input_file(struct Panorama *p, const char *filename) {
       fprintf(fp, "-S %s\n", "swt02");
       fprintf(fp, "-v %s\n", gridref);
       break;
+    case NZT08:
+      ne_to_swgr(p->y0, p->x0, gridref, 0);
+      fprintf(fp, "-S %s\n", "nzt08");
+      fprintf(fp, "-v %s\n", gridref);
+      break;
     default :
       ERROR("bad data source");
   }
@@ -166,6 +171,8 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
           p0.source = OST50;
         } else if (!strncmp(optarg, "swt02", 5)) {
           p0.source = SWT02;
+        } else if (!strncmp(optarg, "nzt08", 5)) {
+          p0.source = NZT08;
         } else {
           fprintf(stderr, "failed to read source argument '%s'\n", optarg);
           return 1;
@@ -361,6 +368,11 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
         p->x0 = 2623451.0;
         p->y0 = 1100503.0;
         break;
+      case NZT08:
+        // TODO find a good location
+        p->x0 = 1369350.0;
+        p->y0 = 5151150.0;
+        break;
       default :
         ERROR("bad data source");
     }
@@ -373,8 +385,12 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
       case SWT02:
         err = swgr_to_ne(viewpoint, &p->y0, &p->x0);
         break;
+      case NZT08:
+        err = swgr_to_ne(viewpoint, &p->y0, &p->x0);
+        break;
       default :
         ERROR("bad data source");
+        err = 1;
     }
     if (err) {
       fprintf(stderr, "failed to read viewpoint argument '%s'\n", optarg);

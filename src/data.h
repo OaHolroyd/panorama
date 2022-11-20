@@ -9,7 +9,8 @@
 typedef enum data_source {
   DATA_NULL, // OS Terrain 50
   OST50, // OS Terrain 50
-  SWT02, // swissALTI3D
+  SWT02, // SwissTopo swissALTI3D 2m
+  NZT08, // LINZ 8m DTM
 } data_source;
 
 /* container for panorama data */

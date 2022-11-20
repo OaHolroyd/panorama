@@ -462,6 +462,10 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
     case SWT02:
       err = ne_to_swgr(p->y0, p->x0, str, 1);
       break;
+    case NZT08:
+      // TODO: although this is correct it would be more normal to refer to the correct 1:50 map code
+      err = ne_to_swgr(p->y0, p->x0, str, 1);
+      break;
     default :
       ERROR("data source not recognised");
       break;
@@ -496,6 +500,9 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
       break;
     case SWT02:
       sprintf(str, "generated from Federal Office of Topography swisstopo swissALTI3D data (copyright swisstopo)");
+      break;
+    case NZT08:
+      sprintf(str, "generated from Land Information New Zealand 8m DEM (CC BY 4.0)");
       break;
     default :
       ERROR("data source not recognised");
@@ -990,6 +997,10 @@ int location_write(const char * restrict path, struct Img_loc *loc, struct Panor
       err = ne_to_osng(p->y0, p->x0, str, 8, 1);
       break;
     case SWT02:
+      err = ne_to_swgr(p->y0, p->x0, str, 1);
+      break;
+    case NZT08:
+      // TODO: although this is correct it would be more normal to refer to the correct 1:50 map code
       err = ne_to_swgr(p->y0, p->x0, str, 1);
       break;
     default :

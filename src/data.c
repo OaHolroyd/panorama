@@ -24,6 +24,10 @@ int get_block_dims(data_source source, int *ny, int *nx) {
       *ny = 500;
       *nx = 500;
       break;
+    case NZT08:
+      *ny = 1250;
+      *nx = 1250;
+      break;
     default :
       return 1;
   }
@@ -61,6 +65,19 @@ int get_data_extent(data_source source, int *nbx, int *nby, int **Bx, int **By) 
         (*By)[i] = 1064+i;
       } // i end
       break;
+    case NZT08:
+      *nbx = 105;
+      *Bx = malloc(*nbx*sizeof(int));
+      for (int i = 0; i < *nbx; i++) {
+        (*Bx)[i] = 1048+10*i;
+      } // i end
+
+      *nby = 149;
+      *By = malloc(*nby*sizeof(int));
+      for (int i = 0; i < *nby; i++) {
+        (*By)[i] = 4718+10*i;
+      } // i end
+      break;
     default :
       return 1;
   }
@@ -78,6 +95,10 @@ int block_index(data_source source, double y0, int *I0, double x0, int *J0) {
     case SWT02:
       *I0 = ((int)y0)/1000;
       *J0 = ((int)x0)/1000;
+      break;
+    case NZT08:
+      *I0 = 10*((((int)y0)/1000 - 8)/10)+8;
+      *J0 = 10*((((int)x0)/1000 - 8)/10)+8;
       break;
     default :
       return 1;
@@ -98,6 +119,7 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
   char file[256]; // filepath
 
   /* get filename, lower left coords, and grid spacing */
+  // TODO: all of this can be read from the filename
   int ny, nx;
   double x0, y0, cw, ch;
   switch (source) {
@@ -118,6 +140,15 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
       y0 = 1000*I0;
       cw = 2;
       ch = 2;
+      break;
+    case NZT08:
+      sprintf(file, "./data/nzt08/NZT08-1250-1250-%04d-%04d.gzd", I0, J0);
+      ny = 1250;
+      nx = 1250;
+      x0 = 1000*J0;
+      y0 = 1000*I0;
+      cw = 8;
+      ch = 8;
       break;
     default :
       return 1;

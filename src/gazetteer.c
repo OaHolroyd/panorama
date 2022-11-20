@@ -30,16 +30,13 @@ void init_gazetteer(data_source source) {
     case OST50:
       sprintf(file, "./data/gazetteers/dobih.gaz");
       break;
-    case SWT02:
-      fprintf(stderr, "WARNING: SWT02 has no gazetteer\n");
+    default :
+      fprintf(stderr, "WARNING: gazetteer not supported\n");
       gaz_n = 0;
       gaz_names = NULL;
       gaz_x = NULL;
       gaz_y = NULL;
       return;
-    default :
-      ERROR("data source not recognised");
-      break;
   }
 
   /* use the fact that the names are 35 char strings and the x and y coords are
