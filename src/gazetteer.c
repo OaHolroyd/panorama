@@ -30,6 +30,9 @@ void init_gazetteer(data_source source) {
     case OST50:
       sprintf(file, "./data/gazetteers/dobih.gaz");
       break;
+    case NZT08:
+      sprintf(file, "./data/gazetteers/nzgb.gaz");
+      break;
     default :
       fprintf(stderr, "WARNING: gazetteer not supported\n");
       gaz_n = 0;
@@ -42,6 +45,15 @@ void init_gazetteer(data_source source) {
   /* use the fact that the names are 35 char strings and the x and y coords are
      int16s to convert the length of the file to the number of entries */
   FILE *fp = fopen(file, "rb");
+  if (!fp) {
+    /* on error just use a zero-length gazetteer */
+    fprintf(stderr, "WARNING: gazetteer not supported\n");
+    gaz_n = 0;
+    gaz_names = NULL;
+    gaz_x = NULL;
+    gaz_y = NULL;
+    return;
+  }
   fseek(fp, 0L, SEEK_END);
   long int fsize = ftell(fp);
   rewind(fp);
