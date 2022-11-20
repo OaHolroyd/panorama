@@ -156,8 +156,8 @@ def process_nzt08():
     dx = 8
     out_size = np.array([10000, 10000], dtype=int)
     out_n = out_size//dx
-    out_xy0 = np.array([1048000, 4718000], dtype=int)
-    out_xy1 = np.array([2098000, 6208000], dtype=int)
+    out_x = np.array([1048000, 2098000], dtype=int)
+    out_y = np.array([4718000, 6208000], dtype=int)
 
     # loop over all output cells
     y = np.array(out_y[0], out_y[0]+out_size[1])
