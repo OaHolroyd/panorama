@@ -371,9 +371,9 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
         p->y0 = 1100503.0;
         break;
       case NZT08:
-        // Mount Cook
+        // Aoraki/Mount Cook
         p->x0 = 1369350.0;
-        p->y0 = 5169150.0; // TODO this is 18000 off
+        p->y0 = 5169150.0;
         break;
       default :
         ERROR("bad data source");
