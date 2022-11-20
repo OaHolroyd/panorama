@@ -145,26 +145,28 @@ def process_nzt08():
     Path(OUTPUT_DATA_ROOT).mkdir(parents=True, exist_ok=True)
 
     # unzip the main archive
-    with ZipFile(f"{ORIGINAL_DATA_ROOT}.zip", 'r') as z:
-        try:
-            z.extractall(path=ORIGINAL_DATA_ROOT)
-        except FileNotFoundError:
-            print(f"ERROR: '{ORIGINAL_DATA_ROOT}.zip' not found")
-            return
+    # with ZipFile(f"{ORIGINAL_DATA_ROOT}.zip", 'r') as z:
+    #     try:
+    #         z.extractall(path=ORIGINAL_DATA_ROOT)
+    #     except FileNotFoundError:
+    #         print(f"ERROR: '{ORIGINAL_DATA_ROOT}.zip' not found")
+    #         return
 
     # output size and extent
     dx = 8
     out_size = np.array([10000, 10000], dtype=int)
     out_n = out_size//dx
-    out_x = np.array([1048000, 2098000], dtype=int)
-    out_y = np.array([4718000, 6208000], dtype=int)
+    # out_x = np.array([1048000, 2098000], dtype=int)
+    # out_y = np.array([4718000, 6208000], dtype=int)
+    out_x = np.array([1238000, 1278000], dtype=int)
+    out_y = np.array([4978000, 5018000], dtype=int)
 
     # loop over all output cells
-    y = np.array(out_y[0], out_y[0]+out_size[1])
+    y = np.array([out_y[0], out_y[0]+out_size[1]])
     count = 0
     max_count = ((out_x[1]-out_x[0])//out_size[0])*((out_y[1]-out_y[0])//out_size[1])
     while y[0] < out_y[1]:
-        x = np.array(out_x[0], out_x[0]+out_size[0])
+        x = np.array([out_x[0], out_x[0]+out_size[0]])
         while x[0] < out_x[1]:
             count += 1
             print(f"{count} of {max_count}")
@@ -185,37 +187,38 @@ def process_nzt08():
                         file = f"{ORIGINAL_DATA_ROOT}/{chr(ord('A')+i)}{chr(ord('A')+j)}.kea"
                         if Path(file).is_file():
                             files.append([i, j, file])
-            if len(files) == 0:
-                continue
+            if len(files) > 0:
+                # load and output the data
+                data = np.zeros([8192*(Y[0]-Y[1]+1), 8192*(X[1]-X[0]+1)])
+                for row in files:
+                    f = h5py.File(row[2], 'r')
+                    in_data = np.array(f['BAND1']['DATA'])
+                    in_data[in_data < -500.0] = 0.0  # replace nodata values
+                    data[(row[0]-Y[1])*8192:(row[0]-Y[1]+1)*8192,
+                         (row[1]-X[0])*8192:(row[1]-X[0]+1)*8192] = in_data
 
-            # load and output the data
-            data = np.zeros([8192*(Y[0]-Y[1]+1), 8192*(X[1]-X[0]+1)])
-            for row in files:
-                f = h5py.File(row[2], 'r')
-                in_data = np.array(f['BAND1']['DATA'])
-                in_data[in_data < -500.0] = 0.0  # replace nodata values
-                data[(row[0]-Y[1])*8192:(row[0]-Y[1]+1)*8192,
-                     (row[1]-X[0])*8192:(row[1]-X[0]+1)*8192] = in_data
+                # crop
+                data = np.flipud(data)
+                J = (x[0] - (1048576+X[0]*65536))//8
+                I = (y[0] - (6207960-(Y[0]+1)*65536))//8
+                data = data[I:I+out_n[1], J:J+out_n[0]]
 
-            # crop
-            data = np.flipud(data)
-            J = (x[0] - 1048576+X[0]*65536)//8
-            I = (y[0] - 6207960-(Y[0]+1)*65536)//8
-            data = data[I:I+out_n[1], J:J+out_n[0]]
+                # shift y back
+                y += 18000
 
-            # shift y back
-            y -= 18000
-
-            # output
-            gzdfile = f"{OUTPUT_DATA_ROOT}/{gzd_name('NZT', dx, out_n[1], out_n[0], y[0]//1000, x[0]//1000)}"
-            data.tofile(gzdfile)
+                # output
+                gzdfile = f"{OUTPUT_DATA_ROOT}/{gzd_name('NZT', dx, out_n[1], out_n[0], y[0]//1000, x[0]//1000)}"
+                data.tofile(gzdfile)
+            else:
+                # shift y back
+                y += 18000
 
             x += out_size[0]
         y += out_size[1]
 
     # clean up
-    rm_tree(Path(f"{ORIGINAL_DATA_ROOT}"))
-    Path(f"{ORIGINAL_DATA_ROOT}.zip").unlink()
+    # rm_tree(Path(f"{ORIGINAL_DATA_ROOT}"))
+    # Path(f"{ORIGINAL_DATA_ROOT}.zip").unlink()
 
 
 if __name__ == "__main__":

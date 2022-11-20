@@ -361,17 +361,19 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
     /* also update default location */
     switch (p->source) {
       case OST50:
+        // Ben Nevis
         p->x0 = 216670.0;
         p->y0 = 771280.0;
         break;
       case SWT02:
+        // Mettlehorn
         p->x0 = 2623451.0;
         p->y0 = 1100503.0;
         break;
       case NZT08:
-        // TODO find a good location
+        // Mount Cook
         p->x0 = 1369350.0;
-        p->y0 = 5151150.0;
+        p->y0 = 5169150.0; // TODO this is 18000 off
         break;
       default :
         ERROR("bad data source");

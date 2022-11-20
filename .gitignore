@@ -3,6 +3,9 @@ panorama
 data/*/**
 out/**
 *.input
+*.zip
+*.gzd
+*.gaz
 
 # Junk
 .DS_Store
