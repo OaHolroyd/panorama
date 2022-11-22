@@ -626,16 +626,13 @@ int main(int argc, char * const *argv) {
   /* ====================================================================== */
   /* dimensions */
   int ny, nx;
-  err = get_block_dims(source, &ny, &nx);
+  double cw, ch;
+  err = get_block_dims(source, &ny, &nx, &ch, &cw);
   if (err) {
     fprintf(stderr, "ERROR: failed to recognise data source\n");
     exit_code = EXIT_FAILURE;
     goto cleanup1;
   }
-
-  double *X = malloc(nx*sizeof(double)); // eastings grid
-  double *Y = malloc(ny*sizeof(double)); // northings grid
-  double **Zb = malloc_2d(ny, nx, sizeof(double)); // height grid
 
   /* read origin block */
   int I0, J0;
@@ -643,25 +640,24 @@ int main(int argc, char * const *argv) {
   if (err) {
     fprintf(stderr, "ERROR: block index for [%lf, %lf] not found\n", x0, y0);
     exit_code = EXIT_FAILURE;
-    goto cleanup2;
+    goto cleanup1;
   }
-  err = get_block(I0, J0, source, X, Y, Zb);
+
+  double X0, Y0;
+  double **Zb = malloc_2d(ny, nx, sizeof(double)); // height grid
+  err = get_block(I0, J0, source, &X0, &Y0, Zb);
   if (err) {
     fprintf(stderr, "ERROR: failed to read block [%d, %d] (returned %d)\n", I0, J0, err);
     exit_code = EXIT_FAILURE;
     goto cleanup2;
   }
 
-  /* grid spacing */
-  const double cw = X[1] - X[0];
-  const double ch = Y[1] - Y[0];
-
   /* check levels are valid */
   err = validate_levels(ny, nx, nlevels, levels);
   if (err) {
     fprintf(stderr, "ERROR: level structure invalid\n");
     exit_code = EXIT_FAILURE;
-    goto cleanup3;
+    goto cleanup2;
   }
 
   /* set up multigrid */
@@ -675,7 +671,7 @@ int main(int argc, char * const *argv) {
   if (err) {
     fprintf(stderr, "ERROR: failed to get data extent\n");
     exit_code = EXIT_FAILURE;
-    goto cleanup4;
+    goto cleanup3;
   }
   int nblocks = nbx*nby;
   int *blocks = malloc(nblocks*sizeof(int)); // block order
@@ -732,7 +728,7 @@ int main(int argc, char * const *argv) {
   if (!rays) {
     fprintf(stderr, "ERROR: failed to allocate ray memory\n");
     exit_code = EXIT_FAILURE;
-    goto cleanup5;
+    goto cleanup4;
   }
 
   /* the number of rays in the kth block is stored in rays[k][nrays] */
@@ -755,8 +751,8 @@ int main(int argc, char * const *argv) {
   /*   Ray Tracing                                                          */
   /* ====================================================================== */
   /* absolute viewpoint height */
-  int i0 = (int)((y0 - Y[0])/ch + 0.5);
-  int j0 = (int)((x0 - X[0])/cw + 0.5);
+  int i0 = (int)((y0 - Y0)/ch + 0.5);
+  int j0 = (int)((x0 - X0)/cw + 0.5);
   double zrel = z0; // store relative height
   z0 += Zb[i0][j0];
   int loc_i = 0; // keep track of stored blocks
@@ -770,7 +766,7 @@ int main(int argc, char * const *argv) {
     int IJb = blocks[block]; // single index
     int Ib = IJb/nbx; // row index
     int Jb = IJb-Ib*nbx; // column index
-    err = get_block(By[Ib], Bx[Jb], source, X, Y, Zb);
+    err = get_block(By[Ib], Bx[Jb], source, &X0, &Y0, Zb);
     if (err != 0) {
       /* skip data blocks that don't exist */
       continue;
@@ -788,8 +784,8 @@ int main(int argc, char * const *argv) {
         int jj = (loc_J+(Jb-Jb0))*nx;
         for (int i = 0; i < ny; i++) {
           for (int j = 0; j < nx; j++) {
-            Xloc[jj+j] = X[j];
-            Yloc[ii+i] = Y[i];
+            Xloc[jj+j] = X0+j*cw;
+            Yloc[ii+i] = Y0+i*ch;
             Zloc[ii+i][jj+j] = Z[0][i][j];
           } // j end
         } // i end
@@ -856,29 +852,29 @@ int main(int argc, char * const *argv) {
           double y1, x1, dy1, dx1;
           switch (rays_entry[IJ]) {
             case EXIT_BOTTOM: // enter top
-              x1 = X[0] - 0.5*cw;
-              y1 = Y[0] + ch*(ny-0.5);
+              x1 = X0 - 0.5*cw;
+              y1 = Y0 + ch*(ny-0.5);
               dx1 = 1.0;
               dy1 = 0.0;
               dprev = 0;
               break;
             case EXIT_TOP: // enter bottom
-              x1 = X[0] - 0.5*cw;
-              y1 = Y[0] - 0.5*ch;
+              x1 = X0 - 0.5*cw;
+              y1 = Y0 - 0.5*ch;
               dx1 = 1.0;
               dy1 = 0.0;
               dprev = 0;
               break;
             case EXIT_LEFT: // enter right
-              x1 = X[0] + cw*(nx-0.5);
-              y1 = Y[0] - 0.5*ch;
+              x1 = X0 + cw*(nx-0.5);
+              y1 = Y0 - 0.5*ch;
               dx1 = 0.0;
               dy1 = 1.0;
               dprev = 1;
               break;
             case EXIT_RIGHT: // enter left
-              x1 = X[0] - 0.5*cw;
-              y1 = Y[0] - 0.5*ch;
+              x1 = X0 - 0.5*cw;
+              y1 = Y0 - 0.5*ch;
               dx1 = 0.0;
               dy1 = 1.0;
               dprev = 1;
@@ -886,7 +882,7 @@ int main(int argc, char * const *argv) {
             default:
               fprintf(stderr, "ERROR: exit side not valid\n");
               exit_code = EXIT_FAILURE;
-              goto cleanup6;
+              goto cleanup5;
           }
           if (stepy != 0) { // if stepy == 0 then v == 0 and u/v is not defined
             t1 = (x0-x1 + (u/v)*(y1-y0)) / (dx1 - (u/v)*dy1);
@@ -897,8 +893,8 @@ int main(int argc, char * const *argv) {
         }
 
         /* start index */
-        i00 = (int)((y00 - Y[0])/ch + 0.5);
-        j00 = (int)((x00 - X[0])/cw + 0.5);
+        i00 = (int)((y00 - Y0)/ch + 0.5);
+        j00 = (int)((x00 - X0)/cw + 0.5);
         i = i00; j = j00;
 
         /* handle corner cases */
@@ -915,8 +911,8 @@ int main(int argc, char * const *argv) {
         }
 
         /* advance to first edge */
-        ty = ((double)stepy*(Y[i]-y00)/ch + 0.5)*dty;
-        tx = ((double)stepx*(X[j]-x00)/cw + 0.5)*dtx;
+        ty = ((double)stepy*((Y0-y00)/ch + i) + 0.5)*dty;
+        tx = ((double)stepx*((X0-x00)/cw + j) + 0.5)*dtx;
       }
 
       /* start height */
@@ -1085,7 +1081,7 @@ int main(int argc, char * const *argv) {
               i = l1*(i/l1) + (stepy!=1)*(l1-1);
 
               /* find correct j index */
-              j = (int)(((x00+ty*u) - X[0])/cw + 0.5);
+              j = (int)((ty*u+x00-X0)/cw + 0.5);
 
               /* handle corner cases */
               // TODO: handle corner cases better
@@ -1101,7 +1097,7 @@ int main(int argc, char * const *argv) {
               }
 
               /* rewind tx (used to use rint) */
-              tx -= ((tx-(X[j]-x00+stepx*0.5*l*cw)/u)/(l*dtx))*l*dtx;
+              tx -= ((tx-(X0-x00+(j+stepx*0.5*l)*cw)/u)/(l*dtx))*l*dtx;
 
               /* move back forwards again (at the lower level) */
               ty += l*dty;
@@ -1113,7 +1109,7 @@ int main(int argc, char * const *argv) {
               j = l1*(j/l1) + (stepx!=1)*(l1-1);
 
               /* find correct i index */
-              i = (int)(((y00+tx*v) - Y[0])/ch + 0.5);
+              i = (int)((tx*v+y00-Y0)/ch + 0.5);
 
               /* handle corner cases */
               // TODO: handle corner cases better
@@ -1129,14 +1125,14 @@ int main(int argc, char * const *argv) {
               }
 
               /* rewind ty (used to use rint) */
-              ty -= ((ty-(Y[i]-y00+stepy*0.5*l*ch)/v)/(l*dty))*l*dty;
+              ty -= ((ty-(Y0-y00+(i+stepy*0.5*l)*ch)/v)/(l*dty))*l*dty;
 
               /* move back forwards again (at the lower level) */
               tx += l*dtx;
             } else {
               fprintf(stderr, "ERROR: (unreachable) go down level at start\n");
               exit_code = EXIT_FAILURE;
-              goto cleanup6;
+              goto cleanup5;
             }
             continue;
           }
@@ -1320,10 +1316,10 @@ int main(int argc, char * const *argv) {
   /* ====================================================================== */
   /*   Clean Up                                                             */
   /* ====================================================================== */
-  cleanup6:
+  cleanup5:
   free(rays_entry);
 
-  cleanup5:
+  cleanup4:
   free(blocks);
   free(iblocks);
   free(Xloc);
@@ -1332,16 +1328,12 @@ int main(int argc, char * const *argv) {
   free(loc_blocks);
   free_2d(rays);
 
-  cleanup4:
+  cleanup3:
   free(Bx);
   free(By);
-
-  cleanup3:
   free_multigrid(nlevels, Z);
 
   cleanup2:
-  free(X);
-  free(Y);
   free_2d(Zb);
 
   cleanup1:

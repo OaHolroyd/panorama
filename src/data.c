@@ -14,19 +14,25 @@
 /* ========================================================================== */
 /* sets ny and nx to the number of columns and rows in a block from the given
    data source. Returns non-zero error code on failure. */
-int get_block_dims(data_source source, int *ny, int *nx) {
+int get_block_dims(data_source source, int *ny, int *nx, double *ch, double *cw) {
   switch (source) {
     case OST50:
       *ny = 200;
       *nx = 200;
+      *cw = 50.0;
+      *ch = 50.0;
       break;
     case SWT02:
       *ny = 500;
       *nx = 500;
+      *cw = 2.0;
+      *ch = 2.0;
       break;
     case NZT08:
       *ny = 1250;
       *nx = 1250;
+      *cw = 8.0;
+      *ch = 8.0;
       break;
     default :
       return 1;
@@ -106,7 +112,7 @@ int block_index(data_source source, double y0, int *I0, double x0, int *J0) {
   return 0;
 }
 
-/* fills X, Y, and Z with the eastings, northings, and heights from the data
+/* fills Z with heights from the data and sets (X0, Y0) to the lower left corner
    block (I0, J0) from the given data source. If the file containing the data
    is not found, it defaults to returning a height of zero for the entire block.
    Returns an integer error code:
@@ -115,40 +121,33 @@ int block_index(data_source source, double y0, int *I0, double x0, int *J0) {
       1 unsupported data source
    The data must be saved in row-major format from the lower-left corner to the
    upper-right corner */
-int get_block(int I0, int J0, data_source source, double *X, double *Y, double **Z) {
+int get_block(int I0, int J0, data_source source, double *X0, double *Y0, double **Z) {
   char file[256]; // filepath
 
   /* get filename, lower left coords, and grid spacing */
   // TODO: all of this can be read from the filename
   int ny, nx;
-  double x0, y0, cw, ch;
   switch (source) {
     case OST50:
       sprintf(file, "./data/ost50/OST50-200-200-%04d-%04d.gzd", I0, J0);
       ny = 200;
       nx = 200;
-      x0 = 1000*J0;
-      y0 = 1000*I0;
-      cw = 50;
-      ch = 50;
+      *X0 = 1000.0*J0+25;
+      *Y0 = 1000.0*I0+25;
       break;
     case SWT02:
       sprintf(file, "./data/swt02/SWT02-500-500-%04d-%04d.gzd", I0, J0);
       ny = 500;
       nx = 500;
-      x0 = 1000*J0;
-      y0 = 1000*I0;
-      cw = 2;
-      ch = 2;
+      *X0 = 1000.0*J0+1.0;
+      *Y0 = 1000.0*I0+1.0;
       break;
     case NZT08:
       sprintf(file, "./data/nzt08/NZT08-1250-1250-%04d-%04d.gzd", I0, J0);
       ny = 1250;
       nx = 1250;
-      x0 = 1000*J0;
-      y0 = 1000*I0;
-      cw = 8;
-      ch = 8;
+      *X0 = 1000.0*J0+4.0;
+      *Y0 = 1000.0*I0+4.0;
       break;
     default :
       return 1;
@@ -159,14 +158,10 @@ int get_block(int I0, int J0, data_source source, double *X, double *Y, double *
   if (!fp) {
     /* fill X, Y, and Z values */
     for (int i = 0; i < ny; i++) {
-      Y[i] = y0 + (i+0.5)*ch;
       for (int j = 0; j < nx; j++) {
         Z[i][j] = 0.0;
       } // j end
     } // i end
-    for (int j = 0; j < nx; j++) {
-      X[j] = x0 + (j+0.5)*cw;
-    } // j end
     return 0;
   }
   size_t err = fread(*Z, sizeof(double), ny*nx, fp);
@@ -176,14 +171,6 @@ int get_block(int I0, int J0, data_source source, double *X, double *Y, double *
   if (err != (size_t)ny*nx) {
     return -1;
   }
-
-  /* fill X and Y values */
-  for (int i = 0; i < ny; i++) {
-    Y[i] = y0 + (i+0.5)*ch;
-  } // i end
-  for (int j = 0; j < nx; j++) {
-    X[j] = x0 + (j+0.5)*cw;
-  } // j end
 
   return 0;
 }
