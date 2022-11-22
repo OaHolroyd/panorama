@@ -14,9 +14,8 @@ struct Img_pan {
   int nw, nh; // dimensions
   double **img_d; // distances
   double **img_h; // heights
-  double **img_u; // x step
-  double **img_v; // y step
-  int **img_n; // step counts
+  double *img_u; // x step
+  double *img_v; // y step
   double z; // relative height
 };
 

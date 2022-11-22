@@ -305,8 +305,8 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
   double *wlim = p->wlim;
   double **img_d = img->img_d;
   double **img_h = img->img_h;
-  double **img_u = img->img_u;
-  double **img_v = img->img_v;
+  double *img_u = img->img_u;
+  double *img_v = img->img_v;
   int split = p->split;
 
 
@@ -662,8 +662,8 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
             break;
           }
 
-          dy = p->y0 + img_d[j][i]*img_v[j][i] - y;
-          dx = p->x0 + img_d[j][i]*img_u[j][i] - x;
+          dy = p->y0 + img_d[j][i]*img_v[j] - y;
+          dx = p->x0 + img_d[j][i]*img_u[j] - x;
           d = dx*dx + dy*dy;
 
           if (d < dtol*dtol) {

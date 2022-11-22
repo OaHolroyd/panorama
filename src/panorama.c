@@ -603,22 +603,22 @@ int main(int argc, char * const *argv) {
   // columns for speed
   double **img_d = malloc_2d(nw, nh, sizeof(double)); // distance
   double **img_h = malloc_2d(nw, nh, sizeof(double)); // height (and water cover)
-  int **img_n = malloc_2d(nw, nh, sizeof(int)); // number of steps to collision
-  double **img_u = malloc_2d(nw, nh, sizeof(double)); // step x-direction
-  double **img_v = malloc_2d(nw, nh, sizeof(double)); // step y-direction
-  double **img_dz = malloc_2d(nw, nh, sizeof(double)); // step z-direction
+  double *img_u = malloc(nw*sizeof(double)); // step x-direction
+  double *img_v = malloc(nw*sizeof(double)); // step y-direction
+  double *img_dz = malloc(nh*sizeof(double)); // step z-direction
   for (int j = 0; j < nw; j++) {
+    double theta = M_PI*(0.5 - (wlim[0]+j*dpx)/180.0);
+    img_u[j] = cos(theta);
+    img_v[j] = sin(theta);
+
     for (int i = 0; i < nh; i++) {
       img_d[j][i] = -DBL_MAX;
       img_h[j][i] = -DBL_MAX;
-      img_n[j][i] = 0;
-
-      double theta = M_PI*(0.5 - (wlim[0]+j*dpx)/180.0);
-      img_u[j][i] = cos(theta);
-      img_v[j][i] = sin(theta);
-      img_dz[j][i] = tan((hlim[0]+i*dpx)*M_PI/180.0);
     } // i end
   } // j end
+  for (int i = 0; i < nh; i++) {
+    img_dz[i] = tan((hlim[0]+i*dpx)*M_PI/180.0);
+  } // i end
 
 
   /* ====================================================================== */
@@ -816,15 +816,16 @@ int main(int argc, char * const *argv) {
       /* index */
       int IJ = rays[block][k];
       int J = IJ/nh; // column index (recalling that img is column-major)
+      int I = IJ - J*nh; // row index
 
       /* variables */
-      double u = img_u[0][IJ]; // ray direction vector
-      double v = img_v[0][IJ];
+      double u = img_u[J]; // ray direction vector
+      double v = img_v[J];
       int stepy = (v>0.0) - (v<0.0); // step directions
       int stepx = (u>0.0) - (u<0.0);
       double dty = fabs(ch/v); // dt to cross one cell
       double dtx = fabs(cw/u);
-      double dz = img_dz[0][IJ];
+      double dz = img_dz[I];
 
       /* =============================== */
       /* start position, index, and edge */
@@ -939,7 +940,6 @@ int main(int argc, char * const *argv) {
       while (1) {
         /* start with cell (i, j) just crossed, having travelled t metres along
            the ray from (y00, x00), now at height z */
-        img_n[0][IJ] += 1;
         double t = (ty < tx) ? ty : tx;
         double z = z00 + t*(dz + t*DROP);
 
@@ -1267,7 +1267,6 @@ int main(int argc, char * const *argv) {
   img.nh = nh;
   img.img_d = img_d;
   img.img_h = img_h;
-  img.img_n = img_n;
   img.img_u = img_u;
   img.img_v = img_v;
   img.z = zrel;
@@ -1348,10 +1347,9 @@ int main(int argc, char * const *argv) {
   cleanup1:
   free_2d(img_d);
   free_2d(img_h);
-  free_2d(img_n);
-  free_2d(img_u);
-  free_2d(img_v);
-  free_2d(img_dz);
+  free(img_u);
+  free(img_v);
+  free(img_dz);
 
   cleanup0:
   free(p.levels);
