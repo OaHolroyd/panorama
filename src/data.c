@@ -115,7 +115,7 @@ int block_index(data_source source, double y0, int *I0, double x0, int *J0) {
       1 unsupported data source
    The data must be saved in row-major format from the lower-left corner to the
    upper-right corner */
-int get_block(int I0, int J0, data_source source, double **X, double **Y, double **Z) {
+int get_block(int I0, int J0, data_source source, double *X, double *Y, double **Z) {
   char file[256]; // filepath
 
   /* get filename, lower left coords, and grid spacing */
@@ -159,12 +159,14 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
   if (!fp) {
     /* fill X, Y, and Z values */
     for (int i = 0; i < ny; i++) {
+      Y[i] = y0 + (i+0.5)*ch;
       for (int j = 0; j < nx; j++) {
-        Y[i][j] = y0 + (i+0.5)*ch;
-        X[i][j] = x0 + (j+0.5)*cw;
         Z[i][j] = 0.0;
       } // j end
     } // i end
+    for (int j = 0; j < nx; j++) {
+      X[j] = x0 + (j+0.5)*cw;
+    } // j end
     return 0;
   }
   size_t err = fread(*Z, sizeof(double), ny*nx, fp);
@@ -177,11 +179,11 @@ int get_block(int I0, int J0, data_source source, double **X, double **Y, double
 
   /* fill X and Y values */
   for (int i = 0; i < ny; i++) {
-    for (int j = 0; j < nx; j++) {
-      Y[i][j] = y0 + (i+0.5)*ch;
-      X[i][j] = x0 + (j+0.5)*cw;
-    } // j end
+    Y[i] = y0 + (i+0.5)*ch;
   } // i end
+  for (int j = 0; j < nx; j++) {
+    X[j] = x0 + (j+0.5)*cw;
+  } // j end
 
   return 0;
 }

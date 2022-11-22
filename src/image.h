@@ -22,8 +22,8 @@ struct Img_pan {
 /* container for image data */
 struct Img_loc {
   int nw, nh; // dimensions
-  double **X; // eastings
-  double **Y; // nothings
+  double *X; // eastings
+  double *Y; // nothings
   double **Z; // heights
   int i0, j0; // viewpoint location
 };

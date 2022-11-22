@@ -812,13 +812,13 @@ int location_write(const char * restrict path, struct Img_loc *loc, struct Panor
   /* extract information */
   int nh = loc->nh;
   int nw = loc->nw;
-  double **X = loc->X;
-  double **Y = loc->Y;
+  double *X = loc->X;
+  double *Y = loc->Y;
   double **Z = loc->Z;
   int I0 = loc->i0;
   int J0 = loc->j0;
-  double dy = Y[1][1] - Y[0][0];
-  double dx = X[1][1] - X[0][0];
+  double dy = Y[1] - Y[0];
+  double dx = X[1] - X[0];
 
   const int max_zoom = 3;
   char str[128];
@@ -922,26 +922,26 @@ int location_write(const char * restrict path, struct Img_loc *loc, struct Panor
         int jj = scale*j + pad + zoom*(nw+pad);
 
         /* gridlines */
-        if (fmod(Y[di+i][dj+j],1000.0) <= dy/2) {
+        if (fmod(Y[di+i],1000.0) <= dy/2) {
           for (int k = 0; k < scale; k++) {
             image[ii][jj+k] = COLOR_GREY;
           } // k end
 
           if (j == 0) {
-            sprintf(str, "%.0lf", Y[di+i][dj+j]/1000.0);
+            sprintf(str, "%.0lf", Y[di+i]/1000.0);
             int w = (int)(ctiny*CHAR_W*strlen(str));
             int h = ctiny*CHAR_H;
             add_text(str, -1, ii+h/2, pad+zoom*(nw+pad), ctiny, image, 0, COLOR_BLACK, COLOR_BACK);
             add_text(str, -1, ii+h/2, pad+zoom*(nw+pad)+nw-w, ctiny, image, 0, COLOR_BLACK, COLOR_BACK);
           }
         }
-        if (fmod(X[di+i][dj+j],1000.0) <= dx/2) {
+        if (fmod(X[dj+j],1000.0) <= dx/2) {
           for (int k = 0; k < scale; k++) {
             image[ii+k][jj] = COLOR_GREY;
           } // k end
 
           if (i == 0) {
-            sprintf(str, "%.0lf", X[di+i][dj+j]/1000.0);
+            sprintf(str, "%.0lf", X[dj+j]/1000.0);
             int w = (int)(ctiny*CHAR_W*strlen(str));
             int h = ctiny*CHAR_H;
             add_text(str, -1, foot+h, jj-w/2, ctiny, image, 0, COLOR_BLACK, COLOR_BACK);

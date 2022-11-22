@@ -633,8 +633,8 @@ int main(int argc, char * const *argv) {
     goto cleanup1;
   }
 
-  double **X = malloc_2d(ny, nx, sizeof(double)); // eastings grid
-  double **Y = malloc_2d(ny, nx, sizeof(double)); // northings grid
+  double *X = malloc(nx*sizeof(double)); // eastings grid
+  double *Y = malloc(ny*sizeof(double)); // northings grid
   double **Zb = malloc_2d(ny, nx, sizeof(double)); // height grid
 
   /* read origin block */
@@ -653,8 +653,8 @@ int main(int argc, char * const *argv) {
   }
 
   /* grid spacing */
-  double cw = X[0][1] - X[0][0];
-  double ch = Y[1][0] - Y[0][0];
+  const double cw = X[1] - X[0];
+  const double ch = Y[1] - Y[0];
 
   /* check levels are valid */
   err = validate_levels(ny, nx, nlevels, levels);
@@ -688,8 +688,8 @@ int main(int argc, char * const *argv) {
   int Jb0 = IJb0-Ib0*nbx; // column index
 
   /* location map (if required) */
-  double **Xloc = NULL;
-  double **Yloc = NULL;
+  double *Xloc = NULL;
+  double *Yloc = NULL;
   double **Zloc = NULL;
   int loc_I = 0;
   int loc_J = 0;
@@ -718,8 +718,8 @@ int main(int argc, char * const *argv) {
       jb++;
     }
 
-    Xloc = malloc_2d(loc_nblocks*ny, loc_nblocks*nx, sizeof(double));
-    Yloc = malloc_2d(loc_nblocks*ny, loc_nblocks*nx, sizeof(double));
+    Xloc = malloc(loc_nblocks*nx*sizeof(double));
+    Yloc = malloc(loc_nblocks*ny*sizeof(double));
     Zloc = malloc_2d(loc_nblocks*ny, loc_nblocks*nx, sizeof(double));
   }
 
@@ -755,8 +755,8 @@ int main(int argc, char * const *argv) {
   /*   Ray Tracing                                                          */
   /* ====================================================================== */
   /* absolute viewpoint height */
-  int i0 = (int)((y0 - Y[0][0])/ch + 0.5);
-  int j0 = (int)((x0 - X[0][0])/cw + 0.5);
+  int i0 = (int)((y0 - Y[0])/ch + 0.5);
+  int j0 = (int)((x0 - X[0])/cw + 0.5);
   double zrel = z0; // store relative height
   z0 += Zb[i0][j0];
   int loc_i = 0; // keep track of stored blocks
@@ -788,8 +788,8 @@ int main(int argc, char * const *argv) {
         int jj = (loc_J+(Jb-Jb0))*nx;
         for (int i = 0; i < ny; i++) {
           for (int j = 0; j < nx; j++) {
-            Xloc[ii+i][jj+j] = X[i][j];
-            Yloc[ii+i][jj+j] = Y[i][j];
+            Xloc[jj+j] = X[j];
+            Yloc[ii+i] = Y[i];
             Zloc[ii+i][jj+j] = Z[0][i][j];
           } // j end
         } // i end
@@ -856,29 +856,29 @@ int main(int argc, char * const *argv) {
           double y1, x1, dy1, dx1;
           switch (rays_entry[IJ]) {
             case EXIT_BOTTOM: // enter top
-              x1 = X[0][0] - 0.5*cw;
-              y1 = Y[0][0] + ch*(ny-0.5);
+              x1 = X[0] - 0.5*cw;
+              y1 = Y[0] + ch*(ny-0.5);
               dx1 = 1.0;
               dy1 = 0.0;
               dprev = 0;
               break;
             case EXIT_TOP: // enter bottom
-              x1 = X[0][0] - 0.5*cw;
-              y1 = Y[0][0] - 0.5*ch;
+              x1 = X[0] - 0.5*cw;
+              y1 = Y[0] - 0.5*ch;
               dx1 = 1.0;
               dy1 = 0.0;
               dprev = 0;
               break;
             case EXIT_LEFT: // enter right
-              x1 = X[0][0] + cw*(nx-0.5);
-              y1 = Y[0][0] - 0.5*ch;
+              x1 = X[0] + cw*(nx-0.5);
+              y1 = Y[0] - 0.5*ch;
               dx1 = 0.0;
               dy1 = 1.0;
               dprev = 1;
               break;
             case EXIT_RIGHT: // enter left
-              x1 = X[0][0] - 0.5*cw;
-              y1 = Y[0][0] - 0.5*ch;
+              x1 = X[0] - 0.5*cw;
+              y1 = Y[0] - 0.5*ch;
               dx1 = 0.0;
               dy1 = 1.0;
               dprev = 1;
@@ -897,8 +897,8 @@ int main(int argc, char * const *argv) {
         }
 
         /* start index */
-        i00 = (int)((y00 - Y[0][0])/ch + 0.5);
-        j00 = (int)((x00 - X[0][0])/cw + 0.5);
+        i00 = (int)((y00 - Y[0])/ch + 0.5);
+        j00 = (int)((x00 - X[0])/cw + 0.5);
         i = i00; j = j00;
 
         /* handle corner cases */
@@ -915,8 +915,8 @@ int main(int argc, char * const *argv) {
         }
 
         /* advance to first edge */
-        ty = ((double)stepy*(Y[i][j]-y00)/ch + 0.5)*dty;
-        tx = ((double)stepx*(X[i][j]-x00)/cw + 0.5)*dtx;
+        ty = ((double)stepy*(Y[i]-y00)/ch + 0.5)*dty;
+        tx = ((double)stepx*(X[j]-x00)/cw + 0.5)*dtx;
       }
 
       /* start height */
@@ -1085,7 +1085,7 @@ int main(int argc, char * const *argv) {
               i = l1*(i/l1) + (stepy!=1)*(l1-1);
 
               /* find correct j index */
-              j = (int)(((x00+ty*u) - X[0][0])/cw + 0.5);
+              j = (int)(((x00+ty*u) - X[0])/cw + 0.5);
 
               /* handle corner cases */
               // TODO: handle corner cases better
@@ -1101,7 +1101,7 @@ int main(int argc, char * const *argv) {
               }
 
               /* rewind tx (used to use rint) */
-              tx -= ((tx-(X[i][j]-x00+stepx*0.5*l*cw)/u)/(l*dtx))*l*dtx;
+              tx -= ((tx-(X[j]-x00+stepx*0.5*l*cw)/u)/(l*dtx))*l*dtx;
 
               /* move back forwards again (at the lower level) */
               ty += l*dty;
@@ -1113,7 +1113,7 @@ int main(int argc, char * const *argv) {
               j = l1*(j/l1) + (stepx!=1)*(l1-1);
 
               /* find correct i index */
-              i = (int)(((y00+tx*v) - Y[0][0])/ch + 0.5);
+              i = (int)(((y00+tx*v) - Y[0])/ch + 0.5);
 
               /* handle corner cases */
               // TODO: handle corner cases better
@@ -1129,7 +1129,7 @@ int main(int argc, char * const *argv) {
               }
 
               /* rewind ty (used to use rint) */
-              ty -= ((ty-(Y[i][j]-y00+stepy*0.5*l*ch)/v)/(l*dty))*l*dty;
+              ty -= ((ty-(Y[i]-y00+stepy*0.5*l*ch)/v)/(l*dty))*l*dty;
 
               /* move back forwards again (at the lower level) */
               tx += l*dtx;
@@ -1326,8 +1326,8 @@ int main(int argc, char * const *argv) {
   cleanup5:
   free(blocks);
   free(iblocks);
-  free_2d(Xloc);
-  free_2d(Yloc);
+  free(Xloc);
+  free(Yloc);
   free_2d(Zloc);
   free(loc_blocks);
   free_2d(rays);
@@ -1340,8 +1340,8 @@ int main(int argc, char * const *argv) {
   free_multigrid(nlevels, Z);
 
   cleanup2:
-  free_2d(X);
-  free_2d(Y);
+  free(X);
+  free(Y);
   free_2d(Zb);
 
   cleanup1:

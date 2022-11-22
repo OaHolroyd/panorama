@@ -61,7 +61,7 @@ int block_index(data_source source, double y0, int *I0, double x0, int *J0);
      -1 failed to read correct number of entries
    The data must be saved in row-major format from the lower-left corner to the
    upper-right corner */
-int get_block(int I0, int J0, data_source source, double **X, double **Y, double **Z);
+int get_block(int I0, int J0, data_source source, double *X, double *Y, double **Z);
 
 /* given an ny-by-nx base grid Zb, allocates storage for the multigrid
    specified by levels and contstructs the grid ***Z. Note that the top level of
