@@ -537,11 +537,11 @@ void order_blocks(int *blocks, int *iblocks, int nby, int nbx, int I0, int J0, i
 }
 
 /* awful wrapper for the ray-tracing code - to be removed! */
-static inline void trace_ray(const double y00, const double x00, const double z00, const double d00, const int stepy, const int stepx, const int *levels, const int nlevels,
-                             double *pty, double *ptx, const double dz, const double d0, double ** const *Z, int *pi, int *pj, int *Jprev, const int IJ, const int J,
-                             double **img_d, double **img_h, const int ny, const int nx, int *pdprev, const double dty, const double dtx, const int Ib, const int Jb,
-                             const double u, const double v, const double Y0, const double X0, const double ch, const double cw, enum Exit_side *rays_entry, const int nby, const int nbx,
-                             int *pblock1, const int *iblocks, const int blockmax, const int nrays, int * const *rays) {
+static inline int trace_ray(const double y00, const double x00, const double z00, const double d00, const int stepy, const int stepx, const int *levels, const int nlevels,
+                            double *pty, double *ptx, const double dz, const double d0, double ** const *Z, int *pi, int *pj, const int I, const int J,
+                            double **img_d, double **img_h, const int ny, const int nx, int *pdprev, const double dty, const double dtx, const int Ib, const int Jb,
+                            const double u, const double v, const double Y0, const double X0, const double ch, const double cw, enum Exit_side *rays_entry, const int nby, const int nbx,
+                            int *pblock1, const int *iblocks, const int blockmax, const int nw, int **ray_cols, int *ray_col0s) {
   /* extract input values */
   double ty = *pty;
   double tx = *ptx;
@@ -549,6 +549,8 @@ static inline void trace_ray(const double y00, const double x00, const double z0
   int j = *pj;
   int dprev = *pdprev;
   int block1 = *pblock1;
+
+  int block_exit = 0;
 
   /* ================== */
   /* set starting level */
@@ -572,9 +574,8 @@ static inline void trace_ray(const double y00, const double x00, const double z0
     if (t+d00 > d0 && Z[level][i/l][j/l] > z) {
       if (level == 0) { // collision
         /* set image and record final position for next ray */
-        *Jprev = J;
-        img_d[0][IJ] = t + d00;
-        img_h[0][IJ] = Z[0][i][j];
+        img_d[J][I] = t + d00;
+        img_h[J][I] = Z[0][i][j];
 
         /* check for water */
         double zc = Z[0][i][j];
@@ -692,7 +693,7 @@ static inline void trace_ray(const double y00, const double x00, const double z0
           }
         }
 
-        img_h[0][IJ] = -DBL_MAX; // leave as -DBL_MAX if it's water
+        img_h[J][I] = -DBL_MAX; // leave as -DBL_MAX if it's water
 
         break;
       } else { // potential collision at lower level
@@ -777,24 +778,25 @@ static inline void trace_ray(const double y00, const double x00, const double z0
 
     /* check if we've left the block */
     if (i < 0 || i >= ny || j < 0 || j >= nx) {
+      block_exit = 1;
+
       /* track next entry side and find next block */
       int Ib1 = Ib; int Jb1 = Jb;
       if (i < 0) {
         Ib1 -= 1;
-        rays_entry[IJ] = EXIT_BOTTOM;
+        rays_entry[J] = EXIT_BOTTOM;
       } else if (i >= ny) {
         Ib1 += 1;
-        rays_entry[IJ] = EXIT_TOP;
+        rays_entry[J] = EXIT_TOP;
       } else if (j < 0) {
         Jb1 -= 1;
-        rays_entry[IJ] = EXIT_LEFT;
+        rays_entry[J] = EXIT_LEFT;
       } else {
         Jb1 += 1;
-        rays_entry[IJ] = EXIT_RIGHT;
+        rays_entry[J] = EXIT_RIGHT;
       }
 
       /* record information for next ray */
-      *Jprev = J;
       i = -1; j = -1; // -1: exited block (to prevent unnecessary restart)
 
       /* check if we have also left available data */
@@ -811,8 +813,9 @@ static inline void trace_ray(const double y00, const double x00, const double z0
         i = -2; j = -2; // -2: exited data (to prevent unnecessary restart)
         break;
       }
-      rays[block1][rays[block1][nrays]] = IJ;
-      rays[block1][nrays] += 1;
+      ray_cols[block1][ray_cols[block1][nw]] = J; // add column to next block
+      ray_cols[block1][nw] += 1; //
+      ray_col0s[J] = I; // set the first
       break;
     }
 
@@ -872,6 +875,7 @@ static inline void trace_ray(const double y00, const double x00, const double z0
   *pj = j;
   *pdprev = dprev;
   *pblock1 = block1;
+  return block_exit;
 }
 
 /* ========================================================================== */
@@ -1061,26 +1065,32 @@ int main(int argc, char * const *argv) {
   /*   Ray Initialisation                                                   */
   /* ====================================================================== */
   int nrays = nw*nh;
-  int **rays = malloc_2d(blockmax, nrays+1, sizeof(int));
-  if (!rays) {
+  int **ray_cols = malloc_2d(blockmax, nw+1, sizeof(int)); // columns in each block
+  int *ray_col0s = malloc(nw*sizeof(int)); // start index in each column
+  if (!ray_cols || !ray_col0s) {
     fprintf(stderr, "ERROR: failed to allocate ray memory\n");
     exit_code = EXIT_FAILURE;
     goto cleanup4;
   }
 
-  /* the number of rays in the kth block is stored in rays[k][nrays] */
+  /* the number of columns in the kth block is stored in ray_cols[k][nw] */
   for (int k = 0; k < blockmax; k++) {
-    rays[k][nrays] = 0;
+    ray_cols[k][nw] = 0;
   } // k end
 
   /* all of the rays begin in the 0th block */
-  rays[0][nrays] = nrays;
-  for (int i = 0; i < nrays; i++) {
-    rays[0][i] = i;
+  ray_cols[0][nw] = nw;
+  for (int i = 0; i < nw; i++) {
+    ray_cols[0][i] = i;
+  } // i end
+
+  /* all of the columns start on the lowest row */
+  for (int i = 0; i < nw; i++) {
+    ray_col0s[i] = 0;
   } // i end
 
   /* ray block entry side (0, 1, 2, 3 - top, bottom, right, left) */
-  enum Exit_side *rays_entry = malloc(nrays*sizeof(enum Exit_side));
+  enum Exit_side *rays_entry = malloc(nw*sizeof(enum Exit_side));
   tsetup = clock() - tstart;
 
 
@@ -1141,15 +1151,13 @@ int main(int argc, char * const *argv) {
     double ty, tx; // vertical and horizontal distance
 
     t0 = clock();
-    int Jprev = -1; // previous column
-    for (int k = 0; k < rays[block][nrays]; k++) {
+    /* loop over all of the columns in the current block */
+    for (int k = 0; k < ray_cols[block][nw]; k++) {
       /* ============== */
       /* create the ray */
       /* ============== */
       /* index */
-      int IJ = rays[block][k];
-      int J = IJ/nh; // column index (recalling that img is column-major)
-      int I = IJ - J*nh; // row index
+      int J = ray_cols[block][k]; // column index
 
       /* variables */
       double u = img_u[J]; // ray direction vector
@@ -1158,111 +1166,113 @@ int main(int argc, char * const *argv) {
       int stepx = (u>0.0) - (u<0.0);
       double dty = fabs(ch/v); // dt to cross one cell
       double dtx = fabs(cw/u);
-      double dz = img_dz[I];
 
-      /* =============================== */
-      /* start position, index, and edge */
-      /* =============================== */
-      /* if we're in the same column as the previous ray we can just continue
-         from where it finished (provided we go up the columns of the image) */
-      if (J == Jprev) {
-        /* check if the previous ray left the block */
-        if (i == -1) {
-          /* left block, entered new one */
-          rays_entry[IJ] = rays_entry[IJ-1];
-          rays[block1][rays[block1][nrays]] = IJ;
-          rays[block1][nrays] += 1;
-          continue;
-        } else if (i == -2) {
-          /* left available data */
-          continue;
-        }
-      } else {
-        /* compute ray start position from scratch */
-        double t1;
-        if (block == 0) {
-          /* just start from the viewpoint */
-          y00 = y0; x00 = x0;
-          t1 = 0.0;
+      int first = 1;
+      int block_exit = 0;
+      for (int I = ray_col0s[J]; I < nh; I++) {
+        double dz = img_dz[I]; // ray height step
+
+        /* =============================== */
+        /* start position, index, and edge */
+        /* =============================== */
+        /* if we're in the same column as the previous ray we can just continue
+           from where it finished (provided we go up the columns of the image) */
+        if (!first) {
+          /* check if the previous ray left the block */
+          if (block_exit) {
+            /* left block, entered new one */
+            break;
+          }
         } else {
-          /* compute ray entry point be edge intersection */
-          double y1, x1, dy1, dx1;
-          switch (rays_entry[IJ]) {
-            case EXIT_BOTTOM: // enter top
-              x1 = X0 - 0.5*cw;
-              y1 = Y0 + ch*(ny-0.5);
-              dx1 = 1.0;
-              dy1 = 0.0;
-              dprev = 0;
-              break;
-            case EXIT_TOP: // enter bottom
-              x1 = X0 - 0.5*cw;
-              y1 = Y0 - 0.5*ch;
-              dx1 = 1.0;
-              dy1 = 0.0;
-              dprev = 0;
-              break;
-            case EXIT_LEFT: // enter right
-              x1 = X0 + cw*(nx-0.5);
-              y1 = Y0 - 0.5*ch;
-              dx1 = 0.0;
-              dy1 = 1.0;
-              dprev = 1;
-              break;
-            case EXIT_RIGHT: // enter left
-              x1 = X0 - 0.5*cw;
-              y1 = Y0 - 0.5*ch;
-              dx1 = 0.0;
-              dy1 = 1.0;
-              dprev = 1;
-              break;
-            default:
-              fprintf(stderr, "ERROR: exit side not valid\n");
-              exit_code = EXIT_FAILURE;
-              goto cleanup5;
-          }
-          if (stepy != 0) { // if stepy == 0 then v == 0 and u/v is not defined
-            t1 = (x0-x1 + (u/v)*(y1-y0)) / (dx1 - (u/v)*dy1);
+          first = 0;
+          /* compute ray start position from scratch */
+          double t1;
+          if (block == 0) {
+            /* just start from the viewpoint */
+            y00 = y0; x00 = x0;
+            t1 = 0.0;
           } else {
-            t1 = (y0-y1) / dy1;
+            /* compute ray entry point be edge intersection */
+            double y1, x1, dy1, dx1;
+            switch (rays_entry[J]) {
+              case EXIT_BOTTOM: // enter top
+                x1 = X0 - 0.5*cw;
+                y1 = Y0 + ch*(ny-0.5);
+                dx1 = 1.0;
+                dy1 = 0.0;
+                dprev = 0;
+                break;
+              case EXIT_TOP: // enter bottom
+                x1 = X0 - 0.5*cw;
+                y1 = Y0 - 0.5*ch;
+                dx1 = 1.0;
+                dy1 = 0.0;
+                dprev = 0;
+                break;
+              case EXIT_LEFT: // enter right
+                x1 = X0 + cw*(nx-0.5);
+                y1 = Y0 - 0.5*ch;
+                dx1 = 0.0;
+                dy1 = 1.0;
+                dprev = 1;
+                break;
+              case EXIT_RIGHT: // enter left
+                x1 = X0 - 0.5*cw;
+                y1 = Y0 - 0.5*ch;
+                dx1 = 0.0;
+                dy1 = 1.0;
+                dprev = 1;
+                break;
+              default:
+                fprintf(stderr, "ERROR: exit side not valid\n");
+                exit_code = EXIT_FAILURE;
+                goto cleanup5;
+            }
+            if (stepy != 0) { // if stepy == 0 then v == 0 and u/v is not defined
+              t1 = (x0-x1 + (u/v)*(y1-y0)) / (dx1 - (u/v)*dy1);
+            } else {
+              t1 = (y0-y1) / dy1;
+            }
+            y00 = y1 + t1*dy1; x00 = x1 + t1*dx1;
           }
-          y00 = y1 + t1*dy1; x00 = x1 + t1*dx1;
+
+          /* start index */
+          i00 = (int)((y00 - Y0)/ch + 0.5);
+          j00 = (int)((x00 - X0)/cw + 0.5);
+          i = i00; j = j00;
+
+          /* handle corner cases */
+          // TODO: handle corner cases better
+          if (i < 0) {
+            i = 0;
+          } else if (i >= ny) {
+            i = ny-1;
+          }
+          if (j < 0) {
+            j = 0;
+          } else if (j >= nx) {
+            j = nx-1;
+          }
+
+          /* advance to first edge */
+          ty = ((double)stepy*((Y0-y00)/ch + i) + 0.5)*dty;
+          tx = ((double)stepx*((X0-x00)/cw + j) + 0.5)*dtx;
         }
 
-        /* start index */
-        i00 = (int)((y00 - Y0)/ch + 0.5);
-        j00 = (int)((x00 - X0)/cw + 0.5);
-        i = i00; j = j00;
+        /* start height */
+        double dy00 = y00-y0;
+        double dx00 = x00-x0;
+        double d00 = sqrt(dy00*dy00+dx00*dx00); // distance to start
+        z00 = z0 + d00*dz + d00*d00*DROP;
 
-        /* handle corner cases */
-        // TODO: handle corner cases better
-        if (i < 0) {
-          i = 0;
-        } else if (i >= ny) {
-          i = ny-1;
-        }
-        if (j < 0) {
-          j = 0;
-        } else if (j >= nx) {
-          j = nx-1;
-        }
-
-        /* advance to first edge */
-        ty = ((double)stepy*((Y0-y00)/ch + i) + 0.5)*dty;
-        tx = ((double)stepx*((X0-x00)/cw + j) + 0.5)*dtx;
-      }
-
-      /* start height */
-      double dy00 = y00-y0;
-      double dx00 = x00-x0;
-      double d00 = sqrt(dy00*dy00+dx00*dx00); // distance to start
-      z00 = z0 + d00*dz + d00*d00*DROP;
-
-      trace_ray(y00, x00, z00, d00, stepy, stepx, levels, nlevels,
-               &ty, &tx, dz, d0, Z, &i, &j, &Jprev, IJ, J,
-               img_d, img_h, ny, nx, &dprev, dty, dtx, Ib, Jb,
-               u, v, Y0, X0, ch, cw, rays_entry, nby, nbx,
-               &block1, iblocks, blockmax, nrays, rays);
+        /* perform the ray tracing */
+        // TODO: remove ray_cols and ray_col0s
+        block_exit = trace_ray(y00, x00, z00, d00, stepy, stepx, levels, nlevels,
+                  &ty, &tx, dz, d0, Z, &i, &j, I, J,
+                  img_d, img_h, ny, nx, &dprev, dty, dtx, Ib, Jb,
+                  u, v, Y0, X0, ch, cw, rays_entry, nby, nbx,
+                  &block1, iblocks, blockmax, nw, ray_cols, ray_col0s);
+      } // I end
     } // k end (loop over all rays in block)
     tray += clock() - t0;
   } // block end (loop over all data blocks)
@@ -1351,7 +1361,8 @@ int main(int argc, char * const *argv) {
   free(Yloc);
   free_2d(Zloc);
   free(loc_blocks);
-  free_2d(rays);
+  free(ray_col0s);
+  free_2d(ray_cols);
 
   cleanup3:
   free(Bx);
