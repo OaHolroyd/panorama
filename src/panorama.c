@@ -537,6 +537,127 @@ void order_blocks(int *blocks, int *iblocks, int nby, int nbx, int I0, int J0, i
   } // end while
 }
 
+/* checks the neighbours of point (i,j) in the ny by nx grid Z, returning 1 if
+   its neighbours have equal height and 0 otherwise. */
+static inline int water_check(const int i, const int j, double ** const *Z, const int ny, const int nx) {
+  double zc = Z[0][i][j];
+  const double wtol = 0.0;
+  if (i <= 1) {
+    if (fabs(Z[0][i+1][j]-zc) > wtol) {
+      return 0;
+    }
+    if (fabs(Z[0][i+2][j]-zc) > wtol) {
+      return 0;
+    }
+    if (j <= 1) {
+      if (fabs(Z[0][i][j+1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j+2]-zc) > wtol) {
+        return 0;
+      }
+    } else if (j >= nx-2) {
+      if (fabs(Z[0][i][j-1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-2]-zc) > wtol) {
+        return 0;
+      }
+    } else {
+      if (fabs(Z[0][i][j+1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j+2]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-2]-zc) > wtol) {
+        return 0;
+      }
+    }
+  } else if (i >= ny-2) {
+    if (fabs(Z[0][i-1][j]-zc) > wtol) {
+      return 0;
+    }
+    if (fabs(Z[0][i-2][j]-zc) > wtol) {
+      return 0;
+    }
+    if (j <= 1) {
+      if (fabs(Z[0][i][j+1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j+2]-zc) > wtol) {
+        return 0;
+      }
+    } else if (j >= nx-2) {
+      if (fabs(Z[0][i][j-1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-2]-zc) > wtol) {
+        return 0;
+      }
+    } else {
+      if (fabs(Z[0][i][j+1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j+2]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-2]-zc) > wtol) {
+        return 0;
+      }
+    }
+  } else {
+    if (fabs(Z[0][i+1][j]-zc) > wtol) {
+      return 0;
+    }
+    if (fabs(Z[0][i+2][j]-zc) > wtol) {
+      return 0;
+    }
+    if (fabs(Z[0][i-1][j]-zc) > wtol) {
+      return 0;
+    }
+    if (fabs(Z[0][i-2][j]-zc) > wtol) {
+      return 0;
+    }
+    if (j <= 1) {
+      if (fabs(Z[0][i][j+1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j+2]-zc) > wtol) {
+        return 0;
+      }
+    } else if (j >= nx-2) {
+      if (fabs(Z[0][i][j-1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-2]-zc) > wtol) {
+        return 0;
+      }
+    } else {
+      if (fabs(Z[0][i][j+1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-1]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j+2]-zc) > wtol) {
+        return 0;
+      }
+      if (fabs(Z[0][i][j-2]-zc) > wtol) {
+        return 0;
+      }
+    }
+  }
+
+  return 1;
+}
+
 /* awful wrapper for the ray-tracing code - to be removed! */
 static inline int trace_ray(const double y00, const double x00, const double z00, const double d00, const int stepy, const int stepx, const int *levels, const int nlevels,
                             double *pty, double *ptx, const double dz, const double d0, double ** const *Z, int *pi, int *pj, const int I, const int J,
@@ -577,122 +698,9 @@ static inline int trace_ray(const double y00, const double x00, const double z00
         img_h[J][I] = Z[0][i][j];
 
         /* check for water */
-        double zc = Z[0][i][j];
-        const double watertol = 0.0;
-        if (i <= 1) {
-          if (fabs(Z[0][i+1][j]-zc) > watertol) {
-            break;
-          }
-          if (fabs(Z[0][i+2][j]-zc) > watertol) {
-            break;
-          }
-          if (j <= 1) {
-            if (fabs(Z[0][i][j+1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j+2]-zc) > watertol) {
-              break;
-            }
-          } else if (j >= nx-2) {
-            if (fabs(Z[0][i][j-1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-2]-zc) > watertol) {
-              break;
-            }
-          } else {
-            if (fabs(Z[0][i][j+1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j+2]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-2]-zc) > watertol) {
-              break;
-            }
-          }
-        } else if (i >= ny-2) {
-          if (fabs(Z[0][i-1][j]-zc) > watertol) {
-            break;
-          }
-          if (fabs(Z[0][i-2][j]-zc) > watertol) {
-            break;
-          }
-          if (j <= 1) {
-            if (fabs(Z[0][i][j+1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j+2]-zc) > watertol) {
-              break;
-            }
-          } else if (j >= nx-2) {
-            if (fabs(Z[0][i][j-1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-2]-zc) > watertol) {
-              break;
-            }
-          } else {
-            if (fabs(Z[0][i][j+1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j+2]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-2]-zc) > watertol) {
-              break;
-            }
-          }
-        } else {
-          if (fabs(Z[0][i+1][j]-zc) > watertol) {
-            break;
-          }
-          if (fabs(Z[0][i+2][j]-zc) > watertol) {
-            break;
-          }
-          if (fabs(Z[0][i-1][j]-zc) > watertol) {
-            break;
-          }
-          if (fabs(Z[0][i-2][j]-zc) > watertol) {
-            break;
-          }
-          if (j <= 1) {
-            if (fabs(Z[0][i][j+1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j+2]-zc) > watertol) {
-              break;
-            }
-          } else if (j >= nx-2) {
-            if (fabs(Z[0][i][j-1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-2]-zc) > watertol) {
-              break;
-            }
-          } else {
-            if (fabs(Z[0][i][j+1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-1]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j+2]-zc) > watertol) {
-              break;
-            }
-            if (fabs(Z[0][i][j-2]-zc) > watertol) {
-              break;
-            }
-          }
+        if (water_check(i, j, Z, ny, nx)) {
+          img_h[J][I] = -DBL_MAX; // leave as -DBL_MAX if it's water
         }
-
-        img_h[J][I] = -DBL_MAX; // leave as -DBL_MAX if it's water
 
         break;
       } else { // potential collision at lower level
