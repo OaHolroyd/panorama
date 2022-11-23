@@ -36,6 +36,7 @@
 
 /* block exit side */
 enum Exit_side {
+  EXIT_NONE,
   EXIT_LEFT,
   EXIT_RIGHT,
   EXIT_TOP,
@@ -539,18 +540,16 @@ void order_blocks(int *blocks, int *iblocks, int nby, int nbx, int I0, int J0, i
 /* awful wrapper for the ray-tracing code - to be removed! */
 static inline int trace_ray(const double y00, const double x00, const double z00, const double d00, const int stepy, const int stepx, const int *levels, const int nlevels,
                             double *pty, double *ptx, const double dz, const double d0, double ** const *Z, int *pi, int *pj, const int I, const int J,
-                            double **img_d, double **img_h, const int ny, const int nx, int *pdprev, const double dty, const double dtx, const int Ib, const int Jb,
-                            const double u, const double v, const double Y0, const double X0, const double ch, const double cw, enum Exit_side *rays_entry, const int nby, const int nbx,
-                            int *pblock1, const int *iblocks, const int blockmax, const int nw, int **ray_cols, int *ray_col0s) {
+                            double **img_d, double **img_h, const int ny, const int nx, int *pdprev, const double dty, const double dtx,
+                            const double u, const double v, const double Y0, const double X0, const double ch, const double cw) {
   /* extract input values */
   double ty = *pty;
   double tx = *ptx;
   int i = *pi;
   int j = *pj;
   int dprev = *pdprev;
-  int block1 = *pblock1;
 
-  int block_exit = 0;
+  int block_exit = EXIT_NONE;
 
   /* ================== */
   /* set starting level */
@@ -777,45 +776,17 @@ static inline int trace_ray(const double y00, const double x00, const double z00
     }
 
     /* check if we've left the block */
-    if (i < 0 || i >= ny || j < 0 || j >= nx) {
-      block_exit = 1;
-
-      /* track next entry side and find next block */
-      int Ib1 = Ib; int Jb1 = Jb;
-      if (i < 0) {
-        Ib1 -= 1;
-        rays_entry[J] = EXIT_BOTTOM;
-      } else if (i >= ny) {
-        Ib1 += 1;
-        rays_entry[J] = EXIT_TOP;
-      } else if (j < 0) {
-        Jb1 -= 1;
-        rays_entry[J] = EXIT_LEFT;
-      } else {
-        Jb1 += 1;
-        rays_entry[J] = EXIT_RIGHT;
-      }
-
-      /* record information for next ray */
-      i = -1; j = -1; // -1: exited block (to prevent unnecessary restart)
-
-      /* check if we have also left available data */
-      if (Ib1 < 0 || Ib1 >= nby || Jb1 < 0 || Jb1 >= nbx) {
-        i = -2; j = -2; // -2: exited data (to prevent unnecessary restart)
-        break;
-      }
-
-      /* place ray in new block */
-      block1 = Ib1*nbx + Jb1; // absolute index of next block
-      block1 = iblocks[block1]; // order index of next block
-      if (block1 >= blockmax) {
-        /* don't move ray */
-        i = -2; j = -2; // -2: exited data (to prevent unnecessary restart)
-        break;
-      }
-      ray_cols[block1][ray_cols[block1][nw]] = J; // add column to next block
-      ray_cols[block1][nw] += 1; //
-      ray_col0s[J] = I; // set the first
+    if (i < 0) {
+      block_exit = EXIT_BOTTOM;
+      break;
+    } else if (i >= ny) {
+      block_exit = EXIT_TOP;
+      break;
+    } else if (j < 0) {
+      block_exit = EXIT_LEFT;
+      break;
+    } else if (j >= nx) {
+      block_exit = EXIT_RIGHT;
       break;
     }
 
@@ -874,7 +845,6 @@ static inline int trace_ray(const double y00, const double x00, const double z00
   *pi = i;
   *pj = j;
   *pdprev = dprev;
-  *pblock1 = block1;
   return block_exit;
 }
 
@@ -1255,10 +1225,39 @@ int main(int argc, char * const *argv) {
         // TODO: remove ray_cols and ray_col0s
         int exit = trace_ray(y00, x00, z00, d00, stepy, stepx, levels, nlevels,
                   &ty, &tx, dz, d0, Z, &i, &j, I, J,
-                  img_d, img_h, ny, nx, &dprev, dty, dtx, Ib, Jb,
-                  u, v, Y0, X0, ch, cw, rays_entry, nby, nbx,
-                  &block1, iblocks, blockmax, nw, ray_cols, ray_col0s);
-        if (exit) {
+                  img_d, img_h, ny, nx, &dprev, dty, dtx,
+                  u, v, Y0, X0, ch, cw);
+
+        /* check if we've left the block */
+        if (exit != EXIT_NONE) {
+          /* track next entry side and find next block */
+          int Ib1 = Ib; int Jb1 = Jb;
+          if (i < 0) {
+            Ib1 -= 1;
+          } else if (i >= ny) {
+            Ib1 += 1;
+          } else if (j < 0) {
+            Jb1 -= 1;
+          } else {
+            Jb1 += 1;
+          }
+          rays_entry[J] = exit;
+
+          /* check if we have also left available data */
+          if (Ib1 < 0 || Ib1 >= nby || Jb1 < 0 || Jb1 >= nbx) {
+            break;
+          }
+
+          /* place ray in new block */
+          block1 = Ib1*nbx + Jb1; // absolute index of next block
+          block1 = iblocks[block1]; // order index of next block
+          if (block1 >= blockmax) {
+            /* don't move ray */
+            break;
+          }
+          ray_cols[block1][ray_cols[block1][nw]] = J; // add column to next block
+          ray_cols[block1][nw] += 1; //
+          ray_col0s[J] = I; // set the first
           break;
         }
       } // I end
