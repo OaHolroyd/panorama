@@ -1167,111 +1167,100 @@ int main(int argc, char * const *argv) {
       double dty = fabs(ch/v); // dt to cross one cell
       double dtx = fabs(cw/u);
 
-      int first = 1;
-      int block_exit = 0;
-      for (int I = ray_col0s[J]; I < nh; I++) {
-        double dz = img_dz[I]; // ray height step
-
-        /* =============================== */
-        /* start position, index, and edge */
-        /* =============================== */
-        /* if we're in the same column as the previous ray we can just continue
-           from where it finished (provided we go up the columns of the image) */
-        if (!first) {
-          /* check if the previous ray left the block */
-          if (block_exit) {
-            /* left block, entered new one */
+      /* =============================== */
+      /* start position, index, and edge */
+      /* =============================== */
+      /* compute ray start position from scratch */
+      double t1;
+      if (block == 0) {
+        /* just start from the viewpoint */
+        y00 = y0; x00 = x0;
+        t1 = 0.0;
+      } else {
+        /* compute ray entry point be edge intersection */
+        double y1, x1, dy1, dx1;
+        switch (rays_entry[J]) {
+          case EXIT_BOTTOM: // enter top
+            x1 = X0 - 0.5*cw;
+            y1 = Y0 + ch*(ny-0.5);
+            dx1 = 1.0;
+            dy1 = 0.0;
+            dprev = 0;
             break;
-          }
-        } else {
-          first = 0;
-          /* compute ray start position from scratch */
-          double t1;
-          if (block == 0) {
-            /* just start from the viewpoint */
-            y00 = y0; x00 = x0;
-            t1 = 0.0;
-          } else {
-            /* compute ray entry point be edge intersection */
-            double y1, x1, dy1, dx1;
-            switch (rays_entry[J]) {
-              case EXIT_BOTTOM: // enter top
-                x1 = X0 - 0.5*cw;
-                y1 = Y0 + ch*(ny-0.5);
-                dx1 = 1.0;
-                dy1 = 0.0;
-                dprev = 0;
-                break;
-              case EXIT_TOP: // enter bottom
-                x1 = X0 - 0.5*cw;
-                y1 = Y0 - 0.5*ch;
-                dx1 = 1.0;
-                dy1 = 0.0;
-                dprev = 0;
-                break;
-              case EXIT_LEFT: // enter right
-                x1 = X0 + cw*(nx-0.5);
-                y1 = Y0 - 0.5*ch;
-                dx1 = 0.0;
-                dy1 = 1.0;
-                dprev = 1;
-                break;
-              case EXIT_RIGHT: // enter left
-                x1 = X0 - 0.5*cw;
-                y1 = Y0 - 0.5*ch;
-                dx1 = 0.0;
-                dy1 = 1.0;
-                dprev = 1;
-                break;
-              default:
-                fprintf(stderr, "ERROR: exit side not valid\n");
-                exit_code = EXIT_FAILURE;
-                goto cleanup5;
-            }
-            if (stepy != 0) { // if stepy == 0 then v == 0 and u/v is not defined
-              t1 = (x0-x1 + (u/v)*(y1-y0)) / (dx1 - (u/v)*dy1);
-            } else {
-              t1 = (y0-y1) / dy1;
-            }
-            y00 = y1 + t1*dy1; x00 = x1 + t1*dx1;
-          }
-
-          /* start index */
-          i00 = (int)((y00 - Y0)/ch + 0.5);
-          j00 = (int)((x00 - X0)/cw + 0.5);
-          i = i00; j = j00;
-
-          /* handle corner cases */
-          // TODO: handle corner cases better
-          if (i < 0) {
-            i = 0;
-          } else if (i >= ny) {
-            i = ny-1;
-          }
-          if (j < 0) {
-            j = 0;
-          } else if (j >= nx) {
-            j = nx-1;
-          }
-
-          /* advance to first edge */
-          ty = ((double)stepy*((Y0-y00)/ch + i) + 0.5)*dty;
-          tx = ((double)stepx*((X0-x00)/cw + j) + 0.5)*dtx;
+          case EXIT_TOP: // enter bottom
+            x1 = X0 - 0.5*cw;
+            y1 = Y0 - 0.5*ch;
+            dx1 = 1.0;
+            dy1 = 0.0;
+            dprev = 0;
+            break;
+          case EXIT_LEFT: // enter right
+            x1 = X0 + cw*(nx-0.5);
+            y1 = Y0 - 0.5*ch;
+            dx1 = 0.0;
+            dy1 = 1.0;
+            dprev = 1;
+            break;
+          case EXIT_RIGHT: // enter left
+            x1 = X0 - 0.5*cw;
+            y1 = Y0 - 0.5*ch;
+            dx1 = 0.0;
+            dy1 = 1.0;
+            dprev = 1;
+            break;
+          default:
+            fprintf(stderr, "ERROR: exit side not valid\n");
+            exit_code = EXIT_FAILURE;
+            goto cleanup5;
         }
+        if (stepy != 0) { // if stepy == 0 then v == 0 and u/v is not defined
+          t1 = (x0-x1 + (u/v)*(y1-y0)) / (dx1 - (u/v)*dy1);
+        } else {
+          t1 = (y0-y1) / dy1;
+        }
+        y00 = y1 + t1*dy1; x00 = x1 + t1*dx1;
+      }
 
+      /* start index */
+      i00 = (int)((y00 - Y0)/ch + 0.5);
+      j00 = (int)((x00 - X0)/cw + 0.5);
+      i = i00; j = j00;
+
+      /* handle corner cases */
+      // TODO: handle corner cases better
+      if (i < 0) {
+        i = 0;
+      } else if (i >= ny) {
+        i = ny-1;
+      }
+      if (j < 0) {
+        j = 0;
+      } else if (j >= nx) {
+        j = nx-1;
+      }
+
+      /* advance to first edge */
+      ty = ((double)stepy*((Y0-y00)/ch + i) + 0.5)*dty;
+      tx = ((double)stepx*((X0-x00)/cw + j) + 0.5)*dtx;
+
+      for (int I = ray_col0s[J]; I < nh; I++) {
         /* start height */
         double dy00 = y00-y0;
         double dx00 = x00-x0;
         double d00 = sqrt(dy00*dy00+dx00*dx00); // distance to start
+        double dz = img_dz[I]; // ray height step
         z00 = z0 + d00*dz + d00*d00*DROP;
 
         /* perform the ray tracing */
         // TODO: remove ray_cols and ray_col0s
-        block_exit = trace_ray(y00, x00, z00, d00, stepy, stepx, levels, nlevels,
+        int exit = trace_ray(y00, x00, z00, d00, stepy, stepx, levels, nlevels,
                   &ty, &tx, dz, d0, Z, &i, &j, I, J,
                   img_d, img_h, ny, nx, &dprev, dty, dtx, Ib, Jb,
                   u, v, Y0, X0, ch, cw, rays_entry, nby, nbx,
                   &block1, iblocks, blockmax, nw, ray_cols, ray_col0s);
+        if (exit) {
+          break;
+        }
       } // I end
     } // k end (loop over all rays in block)
     tray += clock() - t0;
