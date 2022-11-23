@@ -659,17 +659,17 @@ static inline int water_check(const int i, const int j, double ** const *Z, cons
 }
 
 /* awful wrapper for the ray-tracing code - to be removed! */
-static inline int trace_ray(const double y00, const double x00, const double z00, const double d00, const int stepy, const int stepx, const int *levels, const int nlevels,
-                            double *pty, double *ptx, const double dz, const double d0, double ** const *Z, int *pi, int *pj, const int I, const int J,
-                            double **img_d, double **img_h, const int ny, const int nx, int *pdprev, const double dty, const double dtx,
-                            const double u, const double v, const double Y0, const double X0, const double ch, const double cw) {
+static inline int trace_ray(const double dY00, const double dX00, const double z00, const double d00, const int stepy, const int stepx, const int *levels, const int nlevels,
+                            double *pty, double *ptx, const double dz, const double d0, double ** const *Z, int *pi, int *pj,
+                            double *img_dJI, double *img_hJI, const int ny, const int nx, const double dty, const double dtx,
+                            const double u, const double v, const double ch, const double cw) {
   /* extract input values */
   double ty = *pty;
   double tx = *ptx;
   int i = *pi;
   int j = *pj;
-  int dprev = *pdprev;
 
+  int dprev = -1; // previous step (0 for vertical, 1 for horizontal)
   int block_exit = EXIT_NONE;
 
   /* ================== */
@@ -694,12 +694,13 @@ static inline int trace_ray(const double y00, const double x00, const double z00
     if (t+d00 > d0 && Z[level][i/l][j/l] > z) {
       if (level == 0) { // collision
         /* set image and record final position for next ray */
-        img_d[J][I] = t + d00;
-        img_h[J][I] = Z[0][i][j];
+        *img_dJI = t + d00;
 
         /* check for water */
         if (water_check(i, j, Z, ny, nx)) {
-          img_h[J][I] = -DBL_MAX; // leave as -DBL_MAX if it's water
+          *img_hJI = -DBL_MAX; // leave as -DBL_MAX if it's water
+        } else {
+          *img_hJI = Z[0][i][j];
         }
 
         break;
@@ -719,7 +720,7 @@ static inline int trace_ray(const double y00, const double x00, const double z00
           i = l1*(i/l1) + (stepy!=1)*(l1-1);
 
           /* find correct j index */
-          j = (int)((ty*u+x00-X0)/cw + 0.5);
+          j = (int)((ty*u+dX00)/cw + 0.5);
 
           /* handle corner cases */
           // TODO: handle corner cases better
@@ -734,8 +735,8 @@ static inline int trace_ray(const double y00, const double x00, const double z00
             j = nx-1;
           }
 
-          /* rewind tx (used to use rint) */
-          tx -= ((tx-(X0-x00+(j+stepx*0.5*l)*cw)/u)/(l*dtx))*l*dtx;
+          /* rewind tx */
+          tx = ((j+stepx*0.5*l)*cw-dX00)/u;
 
           /* move back forwards again (at the lower level) */
           ty += l*dty;
@@ -747,7 +748,7 @@ static inline int trace_ray(const double y00, const double x00, const double z00
           j = l1*(j/l1) + (stepx!=1)*(l1-1);
 
           /* find correct i index */
-          i = (int)((tx*v+y00-Y0)/ch + 0.5);
+          i = (int)((tx*v+dY00)/ch + 0.5);
 
           /* handle corner cases */
           // TODO: handle corner cases better
@@ -763,7 +764,12 @@ static inline int trace_ray(const double y00, const double x00, const double z00
           }
 
           /* rewind ty (used to use rint) */
-          ty -= ((ty-(Y0-y00+(i+stepy*0.5*l)*ch)/v)/(l*dty))*l*dty;
+          // TODO: this can't be as simple as the tx version because sometimes
+          // v == 0.0 (since sin(0.0) returns 0.0 exactly). When this happens
+          // tx can be set to -inf (rather than inf) and the move direction is
+          // incorrect
+          ty -= ((ty-((i+stepy*0.5*l)*ch-dY00)/v)/(l*dty))*l*dty;
+          // ty = ((i+stepy*0.5*l)*ch-dY00)/v;
 
           /* move back forwards again (at the lower level) */
           tx += l*dtx;
@@ -852,7 +858,6 @@ static inline int trace_ray(const double y00, const double x00, const double z00
   *ptx = tx;
   *pi = i;
   *pj = j;
-  *pdprev = dprev;
   return block_exit;
 }
 
@@ -1125,7 +1130,6 @@ int main(int argc, char * const *argv) {
     int i = -4, j = -4; // current index
     double y00, x00, z00; // start position
     int block1; // next block
-    int dprev = -1; // previous step (0 for vertical, 1 for horizontal)
     double ty, tx; // vertical and horizontal distance
 
     t0 = clock();
@@ -1163,28 +1167,24 @@ int main(int argc, char * const *argv) {
             y1 = Y0 + ch*(ny-0.5);
             dx1 = 1.0;
             dy1 = 0.0;
-            dprev = 0;
             break;
           case EXIT_TOP: // enter bottom
             x1 = X0 - 0.5*cw;
             y1 = Y0 - 0.5*ch;
             dx1 = 1.0;
             dy1 = 0.0;
-            dprev = 0;
             break;
           case EXIT_LEFT: // enter right
             x1 = X0 + cw*(nx-0.5);
             y1 = Y0 - 0.5*ch;
             dx1 = 0.0;
             dy1 = 1.0;
-            dprev = 1;
             break;
           case EXIT_RIGHT: // enter left
             x1 = X0 - 0.5*cw;
             y1 = Y0 - 0.5*ch;
             dx1 = 0.0;
             dy1 = 1.0;
-            dprev = 1;
             break;
           default:
             fprintf(stderr, "ERROR: exit side not valid\n");
@@ -1230,11 +1230,10 @@ int main(int argc, char * const *argv) {
         z00 = z0 + d00*dz + d00*d00*DROP;
 
         /* perform the ray tracing */
-        // TODO: remove ray_cols and ray_col0s
-        int exit = trace_ray(y00, x00, z00, d00, stepy, stepx, levels, nlevels,
-                  &ty, &tx, dz, d0, Z, &i, &j, I, J,
-                  img_d, img_h, ny, nx, &dprev, dty, dtx,
-                  u, v, Y0, X0, ch, cw);
+        int exit = trace_ray(y00-Y0, x00-X0, z00, d00, stepy, stepx, levels, nlevels,
+                  &ty, &tx, dz, d0, Z, &i, &j,
+                  &(img_d[J][I]), &(img_h[J][I]), ny, nx, dty, dtx,
+                  u, v, ch, cw);
 
         /* check if we've left the block */
         if (exit != EXIT_NONE) {
