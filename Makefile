@@ -14,7 +14,8 @@ WARNINGS=-Wall -Wextra -pedantic -Wno-unused-parameter -Wshadow \
          -Wunused-but-set-parameter -Wwrite-strings
 DEBUG=-O0 -g3 -DDEBUG -fbounds-check \
       -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
-CFLAGS=-Ofast $(WARNINGS)
+CFLAGS=-Ofast -flto
+LDFLAGS=$(CFLAGS)
 LDLIBS=-lpng
 
 # executable
@@ -37,12 +38,12 @@ DEPS=$(patsubst %.o,%.d,$(OBJ)) # dependency files
 # link objects into single binary
 $(EXE): directories $(OBJ)
 	@printf "`tput bold``tput setaf 2`Linking`tput sgr0`\n"
-	$(LD) $(CFLAGS) $(LDFLAGS) -o $(EXE) $(OBJ) $(LDLIBS)
+	$(LD) $(LDFLAGS) -o $(EXE) $(OBJ) $(LDLIBS)
 
-# compile/assemble object files
+# compile object files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c Makefile
 	@printf "`tput bold``tput setaf 6`Compiling %s`tput sgr0`\n" $@
-	$(CC) $(CFLAGS) $(LDFLAGS) -MMD -MP -c -o $@ $< $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARNINGS) -MMD -MP -c -o $@ $<
 
 # include dependency information
 -include $(DEPS)
@@ -53,7 +54,8 @@ all: clean $(EXE)
 
 # forces a debug build
 .PHONY: debug
-debug: CFLAGS=$(DEBUG) $(WARNINGS)
+debug: CFLAGS=$(DEBUG)
+debug: LDFLAGS=$(DEBUG)
 debug: all
 
 # create required directories
@@ -62,7 +64,7 @@ directories:
 	@printf "`tput bold``tput setaf 3`Creating directories`tput sgr0`\n"
 	mkdir -p $(OBJ_DIR) $(OUT_DIR)
 
-# purge build files and executable
+# remove build files and executable
 .PHONY: clean
 clean:
 	@printf "`tput bold``tput setaf 1`Cleaning`tput sgr0`\n"
