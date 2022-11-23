@@ -14,6 +14,7 @@ WARNINGS=-Wall -Wextra -pedantic -Wno-unused-parameter -Wshadow \
          -Wunused-but-set-parameter -Wwrite-strings
 DEBUG=-O0 -g3 -DDEBUG -fbounds-check \
       -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
+PROFILE=-O0 -g3
 CFLAGS=-Ofast -flto
 LDFLAGS=$(CFLAGS)
 LDLIBS=-lpng
@@ -57,6 +58,12 @@ all: clean $(EXE)
 debug: CFLAGS=$(DEBUG)
 debug: LDFLAGS=$(DEBUG)
 debug: all
+
+# forces a profile build
+.PHONY: profile
+profile: CFLAGS=$(PROFILE)
+profile: LDFLAGS=$(PROFILE)
+profile: all
 
 # create required directories
 .PHONY: directories
