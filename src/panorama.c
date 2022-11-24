@@ -672,6 +672,9 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
   int dprev = -1; // previous step (0 for vertical, 1 for horizontal)
   int block_exit = EXIT_NONE;
 
+  const double vinv = 1.0/v;
+  const double uinv = 1.0/u;
+
   /* ================== */
   /* set starting level */
   /* ================== */
@@ -697,9 +700,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
         *img_dJI = t + d00;
 
         /* check for water */
-        if (water_check(i, j, Z, ny, nx)) {
-          *img_hJI = -DBL_MAX; // leave as -DBL_MAX if it's water
-        } else {
+        if (!water_check(i, j, Z, ny, nx)) {
           *img_hJI = Z[0][i][j];
         }
 
@@ -717,7 +718,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           ty -= l1*dty;
 
           /* find correct i index */
-          i = l1*(i/l1) + (stepy!=1)*(l1-1);
+          i = i - (i%l1) + (stepy!=1)*(l1-1);
 
           /* find correct j index */
           j = (int)((ty*u+dX00)/cw + 0.5);
@@ -736,7 +737,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           }
 
           /* rewind tx */
-          tx = ((j+stepx*0.5*l)*cw-dX00)/u;
+          tx = ((j+stepx*0.5*l)*cw-dX00)*uinv;
 
           /* move back forwards again (at the lower level) */
           ty += l*dty;
@@ -745,7 +746,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           tx -= l1*dtx;
 
           /* find correct j index */
-          j = l1*(j/l1) + (stepx!=1)*(l1-1);
+          j = j - (j%l1) + (stepx!=1)*(l1-1);
 
           /* find correct i index */
           i = (int)((tx*v+dY00)/ch + 0.5);
@@ -768,7 +769,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           // v == 0.0 (since sin(0.0) returns 0.0 exactly). When this happens
           // tx can be set to -inf (rather than inf) and the move direction is
           // incorrect
-          ty -= ((ty-((i+stepy*0.5*l)*ch-dY00)/v)/(l*dty))*l*dty;
+          ty -= ((ty-((i+stepy*0.5*l)*ch-dY00)*vinv)/(l*dty))*l*dty;
           // ty = ((i+stepy*0.5*l)*ch-dY00)/v;
 
           /* move back forwards again (at the lower level) */
@@ -817,10 +818,11 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           ty += (l1-l)*dty;
 
           /* adjust tx to align with larger grid */
+          int jj = (j % l1);
           if (stepx == 1) {
-            tx += ((l1-l) - l*((j % l1)/l)) * dtx;
+            tx += ((l1-l) - jj + (jj % l)  ) * dtx;
           } else if (stepx == -1) { // TODO: could this just be an 'else' ?
-            tx += l*((j % l1)/l) * dtx;
+            tx += (jj - (jj % l)) * dtx;
           }
 
           /* go up a level */
@@ -836,10 +838,11 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           tx += (l1-l)*dtx;
 
           /* adjust ty to align with larger grid */
+          int ii = (i % l1);
           if (stepy == 1) {
-            ty += ((l1-l) - l*((i % l1)/l)) * dty;
+            ty += ((l1-l) - ii + (ii % l)) * dty;
           } else if (stepy == -1) { // TODO: could this just be an 'else' ?
-            ty += l*((i % l1)/l) * dty;
+            ty += (ii - (ii % l)) * dty;
           }
 
           /* go up a level */
