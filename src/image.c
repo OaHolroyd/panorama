@@ -196,7 +196,7 @@ int add_text(const char *str, int len, int i0, int j0, int size, png_byte **imag
    is given by len. If it is negative this is computed with strlen.Returns 1 if
    the space is free, 0 otherwise. */
 // TODO: add const back by including a len argument
-int check_text(const char *str, int len, int i0, int j0, int size, png_byte **image, int centred, int fcol, int bcol) {
+int check_text(const char *str, int len, int i0, int j0, int size, png_byte **image, int centred, png_byte fcol, png_byte bcol) {
   if (len < 0) {
     len = (int)strlen(str);
   }
@@ -286,6 +286,104 @@ void split_string(char *str, int tol) {
   }
 }
 
+/* find the edges in the distance field */
+static inline void find_edges(const int nh, const int nw, int **edges,
+                              double * const *img_d, double * const *img_h) {
+  const double alpha = 1.0/2.5;
+  for (int j = 0; j < nw; j++) {
+    for (int i = 1; i < nh; i++) {
+      if (img_d[j][i] < 0.0) {
+        /* hit the sky */
+        edges[j][(i+1 == nh) ? i : nh] = 0;
+        edges[j][i] = 1;
+        break;
+      } else if (img_h[j][i] < MIN_H) {
+        /* in water */
+        if (img_h[j][i-1] < MIN_H) {
+          /* water has no edges */
+          edges[j][i] = 0;
+        } else {
+          /* turn from land to water */
+          edges[j][i] = 1;
+        }
+      } else if (fabs(1.0 - img_d[j][i-1]/img_d[j][i]) > 0.05) {
+        /* big distance jump */
+        edges[j][i] = 1;
+      } else if (img_h[j][i-1] < MIN_H) {
+        /* turn from water to land */
+        edges[j][i] = 1;
+      } else if (floor(sqrt(img_d[j][i]*alpha)) - floor(sqrt(img_d[j][i-1]*alpha)) > 0.1) {
+        /* minor edge */
+        edges[j][i] = 2;
+      } else {
+        edges[j][i] = 0;
+      }
+    } // i end
+  } // j end
+}
+
+/* set the background to col */
+static inline void set_background(const int h, const int w, const png_byte col, png_byte **image) {
+  for (int i = 0; i < h; i++) {
+    for (int j = 0; j < w; j++) {
+      image[i][j] = col;
+    } // j end
+  } // i end
+}
+
+/* set the image pixels to match the distances */
+static inline void write_distances(const int nh, const int nw, png_byte **image,
+                                   int * const *edges, double * const *img_d,
+                                   double * const *img_h, const int foot,
+                                   const int pad, const int split, const double dmax) {
+  if (split) {
+    const int dk = nw/8;
+    for (int k = 0; k < 8; k++) {
+      const int j0 = k*dk;
+      const int j1 = j0+dk;
+      for (int j = j0; j < j1; j++) {
+        int jj = j + pad - split*(k*(nw/8));
+        for (int i = 0; i < nh; i++) {
+          int ii = i + foot + split*((7-k)*(nh+pad));
+          if (edges[j][i] == 1) {
+            image[ii][jj] = COLOR_BLACK;
+          } else if (edges[j][i] == 2) {
+            image[ii][jj] = COLOR_GREY;
+          } else if (img_d[j][i] < 0.0) {
+            image[ii][jj] = COLOR_SKY;
+          } else if (img_h[j][i] < MIN_H) {
+            image[ii][jj] = COLOR_WATER;
+          } else {
+            double d = img_d[j][i]/dmax;
+            if (d > 1.0) { d = 1.0; }
+            image[ii][jj] = COLORMAP(d);
+          }
+        } // i end
+      } // j end
+    } // k end
+  } else {
+    for (int j = 0; j < nw; j++) {
+      int jj = j + pad;
+      for (int i = 0; i < nh; i++) {
+        int ii = i + foot;
+        if (edges[j][i] == 1) {
+          image[ii][jj] = COLOR_BLACK;
+        } else if (edges[j][i] == 2) {
+          image[ii][jj] = COLOR_GREY;
+        } else if (img_d[j][i] < 0.0) {
+          image[ii][jj] = COLOR_SKY;
+        } else if (img_h[j][i] < MIN_H) {
+          image[ii][jj] = COLOR_WATER;
+        } else {
+          double d = img_d[j][i]/dmax;
+          if (d > 1.0) { d = 1.0; }
+          image[ii][jj] = COLORMAP(d);
+        }
+      } // i end
+    } // j end
+  }
+}
+
 
 /* ========================================================================== */
 /*   FUNCTION DEFINITIONS                                                     */
@@ -357,63 +455,13 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
 
   /* find edges -- 0 for no edge, 1 for major, 2 for minor */
   int **edges = malloc_2d(nw, nh, sizeof(int));
-  const double alpha = 2.5;
-  const double beta = 2.0;
-  for (int j = 0; j < nw; j++) {
-    for (int i = 1; i < nh; i++) {
-      if (img_h[j][i] < MIN_H && img_h[j][i-1] < MIN_H) {
-        /* water has no edges */
-        edges[j][i] = 0;
-      } else if (fabs(1.0 - img_d[j][i-1]/img_d[j][i]) > 0.05) {
-        /* big distance jump */
-        edges[j][i] = 1;
-      } else if (img_h[j][i] < MIN_H && img_h[j][i-1] > MIN_H) {
-        /* turn from land to water */
-        edges[j][i] = 1;
-      } else if (img_h[j][i] > MIN_H && img_h[j][i-1] < MIN_H) {
-        /* turn from water to land */
-        edges[j][i] = 1;
-      } else if (img_d[j][i] < 0.0) {
-        /* hit the sky */
-        edges[j][i] = 0;
-        break;
-      } else if (floor(pow(img_d[j][i]/alpha, 1.0/beta)) - floor(pow(img_d[j][i-1]/alpha, 1.0/beta)) > 0.1) {
-        /* minor edge */
-        edges[j][i] = 2;
-      } else {
-        edges[j][i] = 0;
-      }
-    } // i end
-  } // j end
+  find_edges(nh, nw, edges, img_d, img_h);
 
   /* white background */
-  for (int i = 0; i < writer.h; i++) {
-    for (int j = 0; j < writer.w; j++) {
-      image[i][j] = COLOR_WHITE;
-    } // j end
-  } // i end
+  set_background(writer.h, writer.w, COLOR_WHITE, image);
 
   /* write distance data */
-  for (int i = 0; i < nh; i++) {
-    for (int j = 0; j < nw; j++) {
-      int k = (j*8)/nw;
-      int ii = i + foot + split*((7-k)*(nh+pad));
-      int jj = j + pad - split*(k*(nw/8));
-      if (edges[j][i] == 1) {
-        image[ii][jj] = COLOR_BLACK;
-      } else if (edges[j][i] == 2) {
-        image[ii][jj] = COLOR_GREY;
-      } else if (img_d[j][i] < 0.0) {
-        image[ii][jj] = COLOR_SKY;
-      } else if (img_h[j][i] < MIN_H) {
-        image[ii][jj] = COLOR_WATER;
-      } else {
-        double d = img_d[j][i]/p->dmax;
-        if (d > 1.0) { d = 1.0; }
-        image[ii][jj] = COLORMAP(d);
-      }
-    } // j end
-  } // i end
+  write_distances(nh, nw, image, edges, img_d, img_h, foot, pad, split, p->dmax);
 
   /* recompute dmax to true max */
   double dmax = 0.0;
@@ -655,7 +703,7 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
       int count = 0;
       double imean = 0.0;
       double jmean = 0.0;
-      const double dtol = 200;
+      const double dtol = 200.0;
       for (int j = ja0; j < ja1; j++) {
         for (int i = 0; i < nh; i++) {
           if (img_d[j][i] < 0.0) {
@@ -724,7 +772,7 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
 
             if (direction) {
               for (int i = 0; i < j; i++) {
-                ii -= 1;
+                ii -= ctiny*CHAR_W;
                 if (ii < 0) {
                   continue;
                 }
@@ -737,7 +785,7 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
                 break;
               }
               for (int i = 0; i < 2*j; i++) {
-                jj -= 1;
+                jj -= ctiny*CHAR_W;
                 if (jj < 0) {
                   continue;
                 }
@@ -748,7 +796,7 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
               } // i end
             } else {
               for (int i = 0; i < j; i++) {
-                ii += 1;
+                ii += ctiny*CHAR_W;
                 if (ii >= writer.h) {
                   continue;
                 }
@@ -761,7 +809,7 @@ int panorama_write(const char * restrict path, struct Img_pan *img, struct Panor
                 break;
               }
               for (int i = 0; i < 2*j-1; i++) {
-                jj += 1;
+                jj += ctiny*CHAR_W;
                 if (jj >= writer.w) {
                   continue;
                 }
@@ -899,8 +947,8 @@ int location_write(const char * restrict path, struct Img_loc *loc, struct Panor
     double zrange = zmax-zmin;
 
     /* height data */
-    for (int i = 0; i < nh/scale; i++) {
-      for (int j = 0; j < nw/scale; j++) {
+    for (int j = 0; j < nw/scale; j++) {
+      for (int i = 0; i < nh/scale; i++) {
         int ii = scale*i + foot;
         int jj = scale*j + pad + zoom*(nw+pad);
 
@@ -912,8 +960,8 @@ int location_write(const char * restrict path, struct Img_loc *loc, struct Panor
             image[ii+k][jj+l] = COLORMAP(z);
           } // l end
         } // k end
-      } // j end
-    } // i end
+      } // i end
+    } // j end
 
     /* gridlines */
     for (int i = 0; i < nh/scale; i++) {

@@ -14,8 +14,8 @@ WARNINGS=-Wall -Wextra -pedantic -Wno-unused-parameter -Wshadow \
          -Wunused-but-set-parameter -Wwrite-strings
 DEBUG=-O0 -g3 -DDEBUG -fbounds-check \
       -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
-PROFILE=-O0 -g3
-CFLAGS=-Ofast -flto
+PROFILE=-O0 -g3 -fno-math-errno -ffast-math
+CFLAGS=-Ofast -flto -fno-math-errno -ffast-math
 LDFLAGS=$(CFLAGS)
 LDLIBS=-lpng
 
