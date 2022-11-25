@@ -33,7 +33,6 @@ struct Panorama {
   int blockmax; // number of blocks to cover
   double dmax; // maximum ray distance
   int nlevels; // number of levels
-  int *levels; // level structure
 };
 
 
@@ -66,7 +65,7 @@ int get_block(int I0, int J0, data_source source, double *X0, double *Y0, double
 /* given an ny-by-nx base grid Zb, allocates storage for the multigrid
    specified by levels and contstructs the grid ***Z. Note that the top level of
    the grid uses the memory allocated to Zb */
-void create_multigrid(int ny, int nx, int nlevels, int *levels, double **Zb, double ****pZ);
+void create_multigrid(int ny, int nx, int nlevels, double **Zb, double ****pZ);
 
 /* frees all of the memory allocated by create_multigrid (no including the
    zeroth layer). */
@@ -74,12 +73,12 @@ void free_multigrid(int nlevels, double ***Z);
 
 /* fills the multigrid with coarsened values going up the levels (see mipmap).
    Note that this assumes that Z[0] = Zb */
-void fill_multigrid(int ny, int nx, int nlevels, int *levels, double ***Z);
+void fill_multigrid(int ny, int nx, int nlevels, double ***Z);
 
 /* checks if the level structure is compatable with the grid structure: at each
    refinement the coarsening factor (in levels) must divide the grid dimensions.
    Returns 1 if valid, 0 otherwise */
-int validate_levels(int ny, int nx, int nlevels, int *levels);
+int validate_levels(int ny, int nx, int nlevels);
 
 /* converts an OS National Grid coordinate string gridref (which must begin with
    a valid two-letter grid identifier, followed by a 6, 8, or 10 figure numeric

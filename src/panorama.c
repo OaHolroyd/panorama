@@ -66,10 +66,6 @@ void setup_default(struct Panorama *p) {
   p->blockmax = 500;
   p->dmax = 90000;
   p->nlevels = 3;
-  p->levels = malloc(p->nlevels*sizeof(int));
-  p->levels[0] = 1;
-  p->levels[1] = 5;
-  p->levels[2] = 2;
 }
 
 /* generate an example input file at filename containing the given data p.
@@ -107,6 +103,7 @@ int generate_input_file(struct Panorama *p, const char *filename) {
   fprintf(fp, "-l %lf\n", -p->hlim[0]);
   fprintf(fp, "-o %lf\n", p->wlim[0]);
   fprintf(fp, "-w %lf\n", p->wlim[1]-p->wlim[0]);
+  fprintf(fp, "-n %d\n", p->nlevels);
   fprintf(fp, "-t\n");
   fprintf(fp, "-s\n");
   fprintf(fp, "-L\n");
@@ -135,6 +132,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
   p0.source = DATA_NULL;
   p0.blockmax = -1;
   p0.dmax = DBL_MAX;
+  p0.nlevels = -1;
 
   /* set to defaults */
   setup_default(p);
@@ -146,7 +144,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
   char filename[256];
   int fromfile = 0;
   int tofile = 0;
-  const char *argstring = "thsr:v:d:c:b:z:S:l:u:o:w:f:FL";
+  const char *argstring = "thsr:v:d:c:b:z:S:l:u:o:w:f:FLn:";
   const int max_args = (int)strlen(argstring);
   while ((c = getopt(argc, argv, argstring)) != -1) {
     switch (c) {
@@ -163,6 +161,14 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
         err = sscanf(optarg, "%d", &p0.res);
         if (err != 1) {
           fprintf(stderr, "failed to read resolution argument '%s'\n", optarg);
+          return 1;
+        }
+        break;
+      case 'n':
+        /* resolution */
+        err = sscanf(optarg, "%d", &p0.nlevels);
+        if (err != 1) {
+          fprintf(stderr, "failed to read nlevel argument '%s'\n", optarg);
           return 1;
         }
         break;
@@ -297,6 +303,7 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
           "                 and 359. (Defaults to 337.5)\n"
           "  -w <width>     Set the width of the panorama to <width> degrees. Must be\n"
           "                 between 1 and 360. (Defaults to 360)\n"
+          "  -n <nlevels>   Use <nlevels> levels in the multigrid. (Defaults to 3).\n"
           "  -t             Include labels on selected summits.\n"
           "  -s             Output the image as a single strip rather than divided into 8\n"
           "                 sections.\n"
@@ -414,6 +421,9 @@ int read_inputs(struct Panorama *p, int argc, char * const *argv, int readfile, 
   }
   if (p0.res >= 0) {
     p->res = p0.res;
+  }
+  if (p0.nlevels >= 0) {
+    p->nlevels = p0.nlevels;
   }
   if (p0.split >= 0) {
     p->split = p0.split;
@@ -659,7 +669,7 @@ static inline int water_check(const int i, const int j, double ** const *Z, cons
 }
 
 /* awful wrapper for the ray-tracing code - to be removed! */
-static inline int trace_ray(const double dY00, const double dX00, const double z00, const double d00, const int stepy, const int stepx, const int *levels, const int nlevels,
+static inline int trace_ray(const double dY00, const double dX00, const double z00, const double d00, const int stepy, const int stepx, const int nlevels,
                             double *pty, double *ptx, const double dz, const double d0, double ** const *Z, int *pi, int *pj,
                             double *img_dJI, double *img_hJI, const int ny, const int nx, const double dty, const double dtx,
                             const double u, const double v, const double ch, const double cw) {
@@ -679,7 +689,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
   /* set starting level */
   /* ================== */
   int level = 0;
-  int l = levels[0];
+  int l = 1;
   int refined = 0;
   int modstepy = -1*(stepy==-1); // modulo at which to increase the level
   int modstepx = -1*(stepx==-1);
@@ -694,7 +704,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
     double z = z00 + t*(dz + t*DROP);
 
     /* check if that will collide with the current cell */
-    if (t+d00 > d0 && Z[level][i/l][j/l] > z) {
+    if (t+d00 > d0 && Z[level][i>>level][j>>level] > z) {
       if (level == 0) { // collision
         /* set image and record final position for next ray */
         *img_dJI = t + d00;
@@ -707,8 +717,9 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
         break;
       } else { // potential collision at lower level
         /* go down a level */
-        int l1 = l;
-        l /= levels[level];
+        const int l1 = l;
+        const int level1 = level;
+        l >>= 1;
         level -= 1;
         refined = 1;
 
@@ -718,7 +729,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           ty -= l1*dty;
 
           /* find correct i index */
-          i = i - (i%l1) + (stepy!=1)*(l1-1);
+          i = ((i>>level1)<<level1) + (stepy!=1)*(l1-1);
 
           /* find correct j index */
           j = (int)((ty*u+dX00)/cw + 0.5);
@@ -746,7 +757,7 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
           tx -= l1*dtx;
 
           /* find correct j index */
-          j = j - (j%l1) + (stepx!=1)*(l1-1);
+          j = ((j>>level1)<<level1) + (stepx!=1)*(l1-1);
 
           /* find correct i index */
           i = (int)((tx*v+dY00)/ch + 0.5);
@@ -783,11 +794,11 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
     if (ty < tx) {
       dprev = 0;
       ty += l*dty;
-      i += l*stepy;
+      i += stepy<<level;
     } else {
       dprev = 1;
       tx += l*dtx;
-      j += l*stepx;
+      j += stepx<<level;
     }
 
     /* check if we've left the block */
@@ -807,42 +818,40 @@ static inline int trace_ray(const double dY00, const double dX00, const double z
 
     /* go up a level if possible */
     if (level < nlevels-1) {
-      int l1 = l * levels[level+1]; // next level
+      int l1 = l << 1; // next level
       int modstepy1 = (modstepy < 0) ? modstepy+l1 : modstepy;
       int modstepx1 = (modstepx < 0) ? modstepx+l1 : modstepx;
       /* step up a level if we are about to cross a one-level-up boundary,
          unless we've recently refined */
-      if (i%l1 == modstepy1 && dprev == 0) {
+      if (dprev == 0 && (i&(l1-1)) == modstepy1) {
         if (refined == 0) {
           /* adjust ty to align with larger grid */
-          ty += (l1-l)*dty;
+          ty += l*dty;
 
           /* adjust tx to align with larger grid */
-          int jj = (j % l1);
           if (stepx == 1) {
-            tx += ((l1-l) - jj + (jj % l)  ) * dtx;
+            tx += (l - (j&l)) * dtx;
           } else if (stepx == -1) { // TODO: could this just be an 'else' ?
-            tx += (jj - (jj % l)) * dtx;
+            tx += (j&l) * dtx;
           }
 
           /* go up a level */
           level += 1;
-          l = l1;
+          l <<= 1;
         } else {
           /* reset refined to let us go up a level next time */
           refined = 0;
         }
-      } else if (j%l1 == modstepx1 && dprev == 1) {
+      } else if (dprev == 1 && (j&(l1-1)) == modstepx1) {
         if (refined == 0) {
           /* adjust tx to align with larger grid */
-          tx += (l1-l)*dtx;
+          tx += l*dtx;
 
           /* adjust ty to align with larger grid */
-          int ii = (i % l1);
           if (stepy == 1) {
-            ty += ((l1-l) - ii + (ii % l)) * dty;
+            ty += (l - (i&l)) * dty;
           } else if (stepy == -1) { // TODO: could this just be an 'else' ?
-            ty += (ii - (ii % l)) * dty;
+            ty += (i&l) * dty;
           }
 
           /* go up a level */
@@ -915,7 +924,6 @@ int main(int argc, char * const *argv) {
   int blockmax = p.blockmax;
   double dmax = p.dmax;
   int nlevels = p.nlevels;
-  int *levels = p.levels;
 
 
   /* ====================================================================== */
@@ -980,7 +988,7 @@ int main(int argc, char * const *argv) {
   }
 
   /* check levels are valid */
-  err = validate_levels(ny, nx, nlevels, levels);
+  err = validate_levels(ny, nx, nlevels);
   if (err) {
     fprintf(stderr, "ERROR: level structure invalid\n");
     exit_code = EXIT_FAILURE;
@@ -989,7 +997,7 @@ int main(int argc, char * const *argv) {
 
   /* set up multigrid */
   double ***Z;
-  create_multigrid(ny, nx, nlevels, levels, Zb, &Z);
+  create_multigrid(ny, nx, nlevels, Zb, &Z);
 
   /* order of block traversal */
   int nbx, nby;
@@ -1107,7 +1115,7 @@ int main(int argc, char * const *argv) {
     tread += clock() - t0;
 
     t0 = clock();
-    fill_multigrid(ny, nx, nlevels, levels, Z);
+    fill_multigrid(ny, nx, nlevels, Z);
     tgrid += clock() - t0;
 
     /* store block for location image if required */
@@ -1233,7 +1241,7 @@ int main(int argc, char * const *argv) {
         z00 = z0 + d00*dz + d00*d00*DROP;
 
         /* perform the ray tracing */
-        int exit = trace_ray(y00-Y0, x00-X0, z00, d00, stepy, stepx, levels, nlevels,
+        int exit = trace_ray(y00-Y0, x00-X0, z00, d00, stepy, stepx, nlevels,
                   &ty, &tx, dz, d0, Z, &i, &j,
                   &(img_d[J][I]), &(img_h[J][I]), ny, nx, dty, dtx,
                   u, v, ch, cw);
@@ -1378,7 +1386,6 @@ int main(int argc, char * const *argv) {
   free(img_dz);
 
   cleanup0:
-  free(p.levels);
 
   return exit_code;
 }

@@ -178,7 +178,7 @@ int get_block(int I0, int J0, data_source source, double *X0, double *Y0, double
 /* given an ny-by-nx base grid Zb, allocates storage for the multigrid
    specified by levels and contstructs the grid ***Z. Note that the top level of
    the grid uses the memory allocated to Zb */
-void create_multigrid(int ny, int nx, int nlevels, int *levels, double **Zb, double ****pZ) {
+void create_multigrid(int ny, int nx, int nlevels, double **Zb, double ****pZ) {
   *pZ = malloc(nlevels*sizeof(double**));
 
   /* just copy the pointer for the top level */
@@ -186,8 +186,8 @@ void create_multigrid(int ny, int nx, int nlevels, int *levels, double **Zb, dou
 
   /* allocate space for the remaining levels */
   for (int i = 1; i < nlevels; i++) {
-    ny /= levels[i];
-    nx /= levels[i];
+    ny >>= 1;
+    nx >>= 1;
     (*pZ)[i] = malloc_2d(ny, nx, sizeof(double));
   } // i end
 }
@@ -205,25 +205,24 @@ void free_multigrid(int nlevels, double ***Z) {
 
 /* fills the multigrid with coarsened values going up the levels (see mipmap).
    Note that this assumes that Z[0] = Zb */
-void fill_multigrid(int ny, int nx, int nlevels, int *levels, double ***Z) {
-  // TODO: this is very slow, try to go row-by-row (not blockwise) over the fine grid
-  int l, im0, jm0;
+void fill_multigrid(int ny, int nx, int nlevels, double ***Z) {
+  int im0, jm0;
   for (int k = 1; k < nlevels; k++) {
-    l = levels[k];
-    ny /= l;
-    nx /= l;
+    ny >>= 1;
+    nx >>= 1;
     for (int i = 0; i < ny; i++) {
-      im0 = l*i;
+      im0 = i << 1;
       for (int j = 0; j < nx; j++) {
-        jm0 = l*j;
+        jm0 = j << 1;
 
         /* find max in l-by-l grid in layer k-1 */
-        Z[k][i][j] = Z[k-1][im0][jm0];
-        for (int im = im0; im < im0+l; im++) {
-          for (int jm = jm0; jm < jm0+l; jm++) {
-            if (Z[k][i][j] < Z[k-1][im][jm]) { Z[k][i][j] = Z[k-1][im][jm]; }
-          } // jm end
-        } // im end
+        const double z00 = Z[k-1][im0][jm0];
+        const double z01 = Z[k-1][im0+1][jm0];
+        const double z10 = Z[k-1][im0][jm0+1];
+        const double z11 = Z[k-1][im0+1][jm0+1];
+        double z0  = (z00 > z01) ? z00 : z01;
+        double z1  = (z10 > z11) ? z10 : z11;
+        Z[k][i][j] = (z0 > z1) ? z0 : z1;
       } // j end
     } // i end
   } // k end
@@ -232,26 +231,17 @@ void fill_multigrid(int ny, int nx, int nlevels, int *levels, double ***Z) {
 /* checks if the level structure is compatable with the grid structure: at each
    refinement the coarsening factor (in levels) must divide the grid dimensions.
    Returns 0 if valid, 1 otherwise */
-int validate_levels(int ny, int nx, int nlevels, int *levels) {
+int validate_levels(int ny, int nx, int nlevels) {
   /* there must be at least one level */
   if (nlevels < 1) {
     return 1;
   }
 
-  /* the first level must be the raw data */
-  if (levels[0] != 1) {
-    return 1;
-  }
-
   /* check that the coarsening factors divide the grid */
-  int l = 1;
   for (int i = 1; i < nlevels; i++) {
-    l = levels[i];
-    if (l*(ny/l)-ny != 0 || l*(nx/l)-nx != 0) {
+    if ((ny>>i)<<i != ny || (nx>>i)<<i != nx) {
       return 1;
     }
-    ny /= l;
-    nx /= l;
   } // i end
 
   return 0;
