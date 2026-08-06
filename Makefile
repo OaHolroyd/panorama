@@ -1,78 +1,87 @@
-# ============================================================================ #
-#   VARIABLE DEFINITIONS                                                       #
-# ============================================================================ #
-# compiler/linker
-CC=gcc-12
-LD=$(CC)
+# The command-line executable produced by the default target.
+EXE := panorama
 
-# flags
-WARNINGS=-Wall -Wextra -pedantic -Wno-unused-parameter -Wshadow \
-         -Waggregate-return -Wbad-function-cast -Wcast-align -Wcast-qual \
-         -Wfloat-equal -Wformat=2 -Wlogical-op -Wmissing-include-dirs \
-         -Wnested-externs -Wpointer-arith -Wconversion -Wno-sign-conversion \
-         -Wredundant-decls -Wsequence-point -Wstrict-prototypes -Wswitch -Wundef \
-         -Wunused-but-set-parameter -Wwrite-strings
-DEBUG=-O0 -g3 -DDEBUG -fbounds-check \
-      -fsanitize=address -fsanitize=bounds -fsanitize=bounds-strict
-PROFILE=-O0 -g3 -fno-math-errno -ffast-math
-CFLAGS=-Ofast -flto -fno-math-errno -ffast-math
-LDFLAGS=$(CFLAGS)
-LDLIBS=-lpng
+# Keep source files flat for now; all generated files stay below obj/.
+SRC_DIR := src
+OBJ_ROOT := obj
 
-# executable
-EXE=panorama
+# Objective-C++ host compiler and the two Metal shader-toolchain stages.
+CXX := clang++
+METAL := xcrun --sdk macosx metal
+METALLIB := xcrun --sdk macosx metallib
 
-# directories
-SRC_DIR=./src
-OBJ_DIR=./obj
-OUT_DIR=./out
+# Host compiler options.  -MMD/-MP generate makefile dependency files next to
+# each object, and ARC is required by the Objective-C++ Metal host code.
+CPPFLAGS := -I$(SRC_DIR)
+WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion
+COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
+FRAMEWORKS := -framework Foundation -framework Metal
 
-# files
-SRC=$(wildcard $(SRC_DIR)/*.c)
-OBJ=$(addprefix $(OBJ_DIR)/, $(notdir $(SRC:.c=.o)))
-DEPS=$(patsubst %.o,%.d,$(OBJ)) # dependency files
+# Select with `make DEBUG=1`; release is the default.
+DEBUG ?= 0
+ifeq ($(DEBUG),1)
+  BUILD := debug
+  OPT_FLAGS := -O0 -g
+else
+  BUILD := release
+  OPT_FLAGS := -O3
+endif
 
+# Separate configurations so `make DEBUG=1` cannot reuse release objects.
+OBJ_DIR := $(OBJ_ROOT)/$(BUILD)
 
-# ============================================================================ #
-#   RULES                                                                      #
-# ============================================================================ #
-# link objects into single binary
-$(EXE): directories $(OBJ)
-	@printf "`tput bold``tput setaf 2`Linking`tput sgr0`\n"
-	$(LD) $(LDFLAGS) -o $(EXE) $(OBJ) $(LDLIBS)
+# Discover every host and shader source in src/.  Adding a .mm or .metal file
+# therefore needs no Makefile edit.  All shaders share one runtime library.
+HOST_SRC := $(wildcard $(SRC_DIR)/*.mm)
+HOST_OBJ := $(patsubst $(SRC_DIR)/%.mm,$(OBJ_DIR)/%.o,$(HOST_SRC))
+METAL_SRC := $(wildcard $(SRC_DIR)/*.metal)
+METAL_AIR := $(patsubst $(SRC_DIR)/%.metal,$(OBJ_DIR)/%.air,$(METAL_SRC))
+METAL_LIB := $(OBJ_DIR)/panorama.metallib
+# Tell the host where this configuration's generated metallib is located.
+CPPFLAGS += -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
+# Compiler-generated header dependencies for the Objective-C++ sources.
+DEPS := $(HOST_OBJ:.o=.d)
 
-# compile object files
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c Makefile
-	@printf "`tput bold``tput setaf 6`Compiling %s`tput sgr0`\n" $@
-	$(CC) $(CFLAGS) $(WARNINGS) -MMD -MP -c -o $@ $<
+.PHONY: all clean rebuild run FORCE
 
-# include dependency information
--include $(DEPS)
+all: $(EXE)
 
-# force rebuild of all files
-.PHONY: all
-all: clean $(EXE)
+# The executable name is shared by configurations, so relink it to the
+# configuration requested by this invocation even if the other build was newer.
+$(EXE): FORCE $(HOST_OBJ) $(METAL_LIB)
+	@printf 'Linking %s\n' '$@'
+	$(CXX) $(OPT_FLAGS) -o $@ $(HOST_OBJ) $(FRAMEWORKS)
 
-# forces a debug build
-.PHONY: debug
-debug: CFLAGS=$(DEBUG)
-debug: LDFLAGS=$(DEBUG)
-debug: all
+# Compile one Objective-C++ source file into its matching object file.
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.mm | $(OBJ_DIR)
+	@printf 'Compiling %s\n' '$@'
+	$(CXX) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
 
-# forces a profile build
-.PHONY: profile
-profile: CFLAGS=$(PROFILE)
-profile: LDFLAGS=$(PROFILE)
-profile: all
+# Metal source compiles to AIR (Apple Intermediate Representation) before the
+# metallib tool packages every AIR file into one library.
+$(OBJ_DIR)/%.air: $(SRC_DIR)/%.metal | $(OBJ_DIR)
+	@printf 'Compiling %s\n' '$@'
+	$(METAL) -c -o $@ $<
 
-# create required directories
-.PHONY: directories
-directories:
-	@printf "`tput bold``tput setaf 3`Creating directories`tput sgr0`\n"
-	mkdir -p $(OBJ_DIR) $(OUT_DIR)
+$(METAL_LIB): $(METAL_AIR)
+	@printf 'Creating %s\n' '$@'
+	$(METALLIB) -o $@ $<
 
-# remove build files and executable
-.PHONY: clean
+$(OBJ_DIR):
+	mkdir -p $@
+
+# Convenience target for the default input size used by the dummy kernel.
+run: $(EXE)
+	./$(EXE)
+
+rebuild: clean all
+
 clean:
-	@printf "`tput bold``tput setaf 1`Cleaning`tput sgr0`\n"
-	rm -rf $(OBJ_DIR)/* $(EXE)
+	rm -rf $(EXE) $(OBJ_ROOT)
+
+# A phony prerequisite makes the shared executable relink when switching
+# between debug and release object directories.
+FORCE:
+
+# Missing dependency files are harmless on the first build.
+-include $(DEPS)
