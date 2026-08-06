@@ -51,9 +51,9 @@ CPPFLAGS += -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
 DEPS := $(HOST_OBJ:.o=.d)
 
-.PHONY: all clean rebuild run compile_commands FORCE
+.PHONY: all clean rebuild compile_commands FORCE
 
-all: $(EXE) $(COMPILE_DB)
+all: $(EXE)
 
 # The executable name is shared by configurations, so relink it to the
 # configuration requested by this invocation even if the other build was newer.
@@ -79,27 +79,14 @@ $(METAL_LIB): $(METAL_AIR)
 $(OBJ_DIR):
 	mkdir -p $@
 
-# Generate the compilation database consumed by clangd/objc-clangd.  This is
-# deliberately a separate target from linking: it describes each source-file
-# compilation, including the GDAL header directory, rather than link commands.
-compile_commands: $(COMPILE_DB)
-
-$(COMPILE_DB): FORCE $(HOST_SRC) Makefile
-	@{ \
-		printf '[\n'; \
-		first=1; \
-		for source in $(HOST_SRC); do \
-			if [ $$first -eq 0 ]; then printf ',\n'; fi; \
-			printf '  {"directory":"%s","arguments":["%s","-Isrc",' '$(CURDIR)' '$(CXX)'; \
-			printf '"-isystem","%s","-std=c++20","-fobjc-arc",' '$(GDAL_INCLUDE_DIR)'; \
-			printf '"-x","objective-c++","-c","%s"],"file":"%s"}' "$$source" "$$source"; \
-			first=0; \
-		done; \
-		printf '\n]\n'; \
-	} > $@
-# Convenience target for the default input size used by the dummy kernel.
-run: $(EXE)
-	./$(EXE)
+# Generate the compilation database consumed by clangd/objc-clangd. Bear
+# records the compiler invocations that Make actually executes, so this does
+# not duplicate compiler flags or source discovery in a hand-written JSON
+# recipe. `-B` deliberately rebuilds the executable: there must be real
+# compiler processes for Bear to observe.
+compile_commands:
+	rm -f $(COMPILE_DB)
+	bear --output $(COMPILE_DB) -- $(MAKE) --no-print-directory -B $(EXE)
 
 rebuild: clean all
 
