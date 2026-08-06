@@ -3,11 +3,15 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include <cerrno>
+#include "loaded_tile.h"
+#include "png_writer.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
+#include <exception>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 namespace {
@@ -26,46 +30,47 @@ constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
 constexpr uint32_t kFieldWidth = 8;
 constexpr uint32_t kFieldHeight = 4;
 
-// Parse the optional number of kernel dispatches. The kernel receives scalar
-// dimensions as Metal `uint` values, which are unsigned 32-bit integers.
-bool parse_iterations(const char *text, uint32_t *iterations) {
-  char *end = nullptr;
-  errno = 0;
-  const unsigned long long parsed = std::strtoull(text, &end, 10);
-  if (errno != 0 || end == text || *end != '\0' || parsed == 0 ||
-      parsed > std::numeric_limits<uint32_t>::max()) {
-    return false;
-  }
-  *iterations = static_cast<uint32_t>(parsed);
-  return true;
-}
-
-// Convert a useful Objective-C error description into command-line output.
+/// Convert a useful Objective-C error description into command-line output.
 void print_error(NSString *context, NSError *error) {
   std::fprintf(stderr, "%s: %s\n", context.UTF8String,
                error.localizedDescription.UTF8String);
 }
 
+/// Return the conventional north-up image order for a south-to-north tile.
+[[nodiscard]] std::vector<float>
+north_up_image(const panorama::LoadedTile &tile) {
+  std::vector<float> image(tile.level_1_cells.size());
+  for (uint32_t source_y = 0; source_y < tile.size; ++source_y) {
+    const uint32_t image_y = tile.size - 1U - source_y;
+    for (uint32_t x = 0; x < tile.size; ++x) {
+      image[static_cast<size_t>(image_y) * tile.size + x] =
+          tile.level_1_cells[static_cast<size_t>(source_y) * tile.size + x];
+    }
+  }
+  return image;
+}
+
+/// Choose the default PNG path by replacing the input file's extension.
+[[nodiscard]] std::filesystem::path
+default_output_path(const std::filesystem::path &input_path) {
+  std::filesystem::path output_path = input_path;
+  output_path.replace_extension(".png");
+  return output_path;
+}
+
 } // namespace
 
-int main(int argc, const char *argv[]) {
+/// Run the initial Metal compute demonstration: repeatedly double an 8×4 field.
+///
+/// This remains separate from the GeoTIFF-to-PNG program so later GPU tests can
+/// call it directly while the command-line interface develops independently.
+int run_metal_example(uint32_t iterations) {
   // Metal objects use Objective-C reference counting. This pool releases
   // temporary Foundation objects before the command-line program exits.
   @autoreleasepool {
-    // With no argument, dispatch the multiplication kernel three times.
-    uint32_t iterations = 3;
-    if (argc == 2 && !parse_iterations(argv[1], &iterations)) {
-      std::fprintf(stderr, "usage: %s [positive-iteration-count]\n", argv[0]);
-      return EXIT_FAILURE;
-    }
-    if (argc > 2) {
-      std::fprintf(stderr, "usage: %s [positive-iteration-count]\n", argv[0]);
-      return EXIT_FAILURE;
-    }
-
-    const size_t fieldSize = static_cast<size_t>(kFieldWidth) * kFieldHeight;
-    std::vector<float> values(fieldSize);
-    std::vector<float> expected(fieldSize);
+    const size_t field_size = static_cast<size_t>(kFieldWidth) * kFieldHeight;
+    std::vector<float> values(field_size);
+    std::vector<float> expected(field_size);
     for (uint32_t y = 0; y < kFieldHeight; ++y) {
       for (uint32_t x = 0; x < kFieldWidth; ++x) {
         const size_t index = static_cast<size_t>(y) * kFieldWidth + x;
@@ -91,9 +96,10 @@ int main(int argc, const char *argv[]) {
     // Load the precompiled shader library, then find the named kernel in it
     // and compile that function into a device-specific pipeline.
     NSError *error = nil;
-    NSURL *libraryUrl =
+    NSURL *library_url =
         [NSURL fileURLWithPath:[NSString stringWithUTF8String:kMetallibPath]];
-    id<MTLLibrary> library = [device newLibraryWithURL:libraryUrl error:&error];
+    id<MTLLibrary> library = [device newLibraryWithURL:library_url
+                                                 error:&error];
     if (library == nil) {
       print_error(@"Could not load the Metal library", error);
       return EXIT_FAILURE;
@@ -169,5 +175,34 @@ int main(int argc, const char *argv[]) {
       std::printf("\n");
     }
     return matches ? EXIT_SUCCESS : EXIT_FAILURE;
+  }
+}
+
+/// Load a level-1 GeoTIFF and write its elevation cells as a north-up PNG.
+int main(int argc, const char *argv[]) {
+  if (argc < 2 || argc > 3) {
+    std::fprintf(stderr, "usage: %s input.tif [output.png]\n", argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  const std::filesystem::path input_path(argv[1]);
+  const std::filesystem::path output_path =
+      argc == 3 ? std::filesystem::path(argv[2])
+                : default_output_path(input_path);
+  try {
+    // Treat the TIFF values as the tile's required level-1 cell data. Exact
+    // level-0 vertex collisions will be enabled later when their source data
+    // and command-line option are ready.
+    const panorama::LoadedTile tile =
+        panorama::LoadedTile::load_tif(input_path, false);
+    const std::vector<float> image = north_up_image(tile);
+    panorama::write_colormapped_png(output_path, image, tile.size, tile.size,
+                                    panorama::colormaps::viridis);
+    std::printf("Wrote %s (%u x %u level-1 cells).\n", output_path.c_str(),
+                tile.size, tile.size);
+    return EXIT_SUCCESS;
+  } catch (const std::exception &error) {
+    std::fprintf(stderr, "%s\n", error.what());
+    return EXIT_FAILURE;
   }
 }

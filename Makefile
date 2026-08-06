@@ -23,7 +23,8 @@ CPPFLAGS := -I$(SRC_DIR)
 CPPFLAGS += $(GDAL_CFLAGS)
 WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion
 COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
-FRAMEWORKS := -framework Foundation -framework Metal
+# ImageIO/CoreGraphics encode diagnostic and rendered images as PNG files.
+FRAMEWORKS := -framework Foundation -framework Metal -framework CoreGraphics -framework ImageIO
 LDLIBS := $(GDAL_LIBS)
 
 # Select with `make DEBUG=1`; release is the default.
