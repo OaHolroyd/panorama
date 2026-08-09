@@ -40,8 +40,8 @@ struct LoadedTile {
   /// When `supports_level_0_collisions` is true, interpret source values as
   /// vertices and build the required first maximum-mipmap level from them.
   /// Otherwise interpret source values as level-1 cells directly.
-  [[nodiscard]] static LoadedTile load_tif(const std::filesystem::path &path,
-                                           bool supports_level_0_collisions);
+  [[nodiscard]] static LoadedTile
+  load_tif(const std::filesystem::path &path, bool supports_level_0_collisions);
 };
 
 } // namespace panorama

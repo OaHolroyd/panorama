@@ -4,26 +4,40 @@
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
 
-// A `kernel` function is an entry point that the CPU can dispatch on the GPU.
-// The `[[buffer(n)]]` attributes are the ABI between this file and main.mm:
-//
-//   buffer(0): mutable, row-major float32 field
-//   buffer(1): field width, copied by the host
-//   buffer(2): field height, copied by the host
-//
-// `thread_position_in_grid` gives every invocation its 2D position. The host
-// dispatches one useful thread for each field element, then calls this same
-// kernel repeatedly to demonstrate successive compute passes.
-kernel void multiply_2d_by_two(device float *field [[buffer(0)]],
-                               constant uint &width [[buffer(1)]],
-                               constant uint &height [[buffer(2)]],
-                               uint2 position [[thread_position_in_grid]]) {
-  if (position.x >= width || position.y >= height) {
-    return;
-  }
+// The first terrain-tracing ABI. This scalar-only structure intentionally
+// mirrors RaytraceParameters in raytrace_setup.mm; all projected tile
+// coordinates have already been rebased around the observer before upload.
+struct RaytraceParameters {
+  float tile_x_min;
+  float tile_y_min;
+  float cell_size;
+  float observer_elevation;
+  uint num_cell;
+  uint num_azimuth;
+  uint num_polar;
+  float max_distance;
+};
 
-  // Metal buffers are one-dimensional. Flatten the 2D coordinate using the
-  // same row-major formula used by the host, then update this one element.
-  const uint index = position.y * width + position.x;
-  field[index] *= 2.0F;
+// Placeholder for the first independent-ray terrain kernel. The host already
+// uploads and binds all terrain, angular, parameter, and output buffers. The
+// next stage will dispatch one thread per (azimuth, polar) output and replace
+// this body with level-1 DDA traversal and midpoint collision handling.
+kernel void trace_single_tile(
+    device const float *level_1_cells [[buffer(0)]],
+    device const float2 *azimuth_directions [[buffer(1)]],
+    device const float *polar_slopes [[buffer(2)]],
+    constant RaytraceParameters &parameters [[buffer(3)]],
+    device float *distances [[buffer(4)]],
+    device float *elevations [[buffer(5)]],
+    uint2 ray_index [[thread_position_in_grid]]
+) {
+  // Keep every currently bound argument named in the stub. This both documents
+  // the host/device ABI and avoids accidentally changing it before traversal.
+  (void)level_1_cells;
+  (void)azimuth_directions;
+  (void)polar_slopes;
+  (void)parameters;
+  (void)distances;
+  (void)elevations;
+  (void)ray_index;
 }

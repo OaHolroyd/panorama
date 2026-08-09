@@ -15,8 +15,9 @@ constexpr uint32_t kWgs84Epsg = 4326;
 [[nodiscard]] OGRSpatialReference spatial_reference(uint32_t epsg_code) {
   OGRSpatialReference reference;
   if (reference.importFromEPSG(static_cast<int>(epsg_code)) != OGRERR_NONE) {
-    throw std::runtime_error("Could not initialise EPSG:" +
-                             std::to_string(epsg_code));
+    throw std::runtime_error(
+        "Could not initialise EPSG:" + std::to_string(epsg_code)
+    );
   }
 
   // GDAL 3 honours authority-defined axis order by default. This application
@@ -34,9 +35,9 @@ struct CoordinateTransformationDeleter {
 };
 
 /// Create an owning source-to-destination coordinate transformation.
-[[nodiscard]] std::unique_ptr<OGRCoordinateTransformation,
-                              CoordinateTransformationDeleter>
-make_transformation(uint32_t source_epsg, uint32_t destination_epsg) {
+[[nodiscard]] std::
+    unique_ptr<OGRCoordinateTransformation, CoordinateTransformationDeleter>
+    make_transformation(uint32_t source_epsg, uint32_t destination_epsg) {
   OGRSpatialReference source = spatial_reference(source_epsg);
   OGRSpatialReference destination = spatial_reference(destination_epsg);
   OGRCoordinateTransformation *raw =
@@ -44,10 +45,12 @@ make_transformation(uint32_t source_epsg, uint32_t destination_epsg) {
   if (raw == nullptr) {
     throw std::runtime_error(
         "Could not transform from EPSG:" + std::to_string(source_epsg) +
-        " to EPSG:" + std::to_string(destination_epsg));
+        " to EPSG:" + std::to_string(destination_epsg)
+    );
   }
-  return std::unique_ptr<OGRCoordinateTransformation,
-                         CoordinateTransformationDeleter>(raw);
+  return std::unique_ptr<
+      OGRCoordinateTransformation,
+      CoordinateTransformationDeleter>(raw);
 }
 
 } // namespace
@@ -65,8 +68,9 @@ Crs Crs::from_epsg(uint32_t epsg_code) {
   case static_cast<uint32_t>(CrsId::BritishNationalGrid):
     return Crs(CrsId::BritishNationalGrid);
   default:
-    throw std::invalid_argument("Unsupported terrain CRS EPSG:" +
-                                std::to_string(epsg_code));
+    throw std::invalid_argument(
+        "Unsupported terrain CRS EPSG:" + std::to_string(epsg_code)
+    );
   }
 }
 
@@ -93,8 +97,9 @@ Coord Crs::from_lat_lon(LatLon coordinate) const {
   double longitude = coordinate.lon;
   double latitude = coordinate.lat;
   if (!transformation->Transform(1, &longitude, &latitude)) {
-    throw std::runtime_error("Could not transform WGS 84 coordinate to " +
-                             std::string(name()));
+    throw std::runtime_error(
+        "Could not transform WGS 84 coordinate to " + std::string(name())
+    );
   }
   return {longitude, latitude};
 }
@@ -106,8 +111,9 @@ LatLon Crs::to_lat_lon(Coord coordinate) const {
   double easting = coordinate.x;
   double northing = coordinate.y;
   if (!transformation->Transform(1, &easting, &northing)) {
-    throw std::runtime_error("Could not transform " + std::string(name()) +
-                             " coordinate to WGS 84");
+    throw std::runtime_error(
+        "Could not transform " + std::string(name()) + " coordinate to WGS 84"
+    );
   }
   return {northing, easting};
 }

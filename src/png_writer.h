@@ -37,9 +37,12 @@ namespace colormaps {
 /// written as black so sparse diagnostic fields remain viewable. Throws
 /// std::invalid_argument for invalid dimensions or data and std::runtime_error
 /// when ImageIO cannot create the PNG.
-void write_colormapped_png(const std::filesystem::path &path,
-                           const std::vector<float> &values, uint32_t width,
-                           uint32_t height,
-                           Colormap colormap = colormaps::viridis);
+void write_colormapped_png(
+    const std::filesystem::path &path,
+    const std::vector<float> &values,
+    uint32_t width,
+    uint32_t height,
+    Colormap colormap = colormaps::viridis
+);
 
 } // namespace panorama

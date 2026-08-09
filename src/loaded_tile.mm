@@ -99,8 +99,11 @@ make_level_1_cells(const std::vector<float> &vertices, uint32_t size) {
       const size_t lower_left = static_cast<size_t>(y) * vertex_size + x;
       cells[static_cast<size_t>(y) * size + x] = std::max(
           std::max(vertices[lower_left], vertices[lower_left + 1U]),
-          std::max(vertices[lower_left + vertex_size],
-                   vertices[lower_left + vertex_size + 1U]));
+          std::max(
+              vertices[lower_left + vertex_size],
+              vertices[lower_left + vertex_size + 1U]
+          )
+      );
     }
   }
   return cells;
@@ -108,13 +111,16 @@ make_level_1_cells(const std::vector<float> &vertices, uint32_t size) {
 
 } // namespace
 
-LoadedTile LoadedTile::load_tif(const std::filesystem::path &path,
-                                bool level_0_collisions) {
+LoadedTile LoadedTile::load_tif(
+    const std::filesystem::path &path,
+    bool level_0_collisions
+) {
   // Keep the initial file-format contract narrow. Other loaders can later
   // prepare exactly the same LoadedTile representation from other sources.
   if (path.extension() != ".tif") {
-    throw std::invalid_argument("Only .tif terrain tiles are supported: " +
-                                path.string());
+    throw std::invalid_argument(
+        "Only .tif terrain tiles are supported: " + path.string()
+    );
   }
 
   // Register GDAL's built-in raster drivers before opening a dataset. GDALOpen
@@ -122,17 +128,20 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path,
   // unique_ptr to close the file on every success or exception path.
   GDALAllRegister();
   GDALDataset *raw_dataset = static_cast<GDALDataset *>(
-      GDALOpen(path.string().c_str(), GDALAccess::GA_ReadOnly));
+      GDALOpen(path.string().c_str(), GDALAccess::GA_ReadOnly)
+  );
   if (raw_dataset == nullptr) {
     throw std::runtime_error(
-        gdal_error("Could not open GeoTIFF " + path.string()));
+        gdal_error("Could not open GeoTIFF " + path.string())
+    );
   }
   std::unique_ptr<GDALDataset, DatasetCloser> dataset(raw_dataset);
 
   // Terrain is one scalar elevation field, not a multi-band image.
   if (dataset->GetRasterCount() != 1) {
     throw std::runtime_error(
-        "Terrain GeoTIFF must have exactly one raster band");
+        "Terrain GeoTIFF must have exactly one raster band"
+    );
   }
 
   const uint32_t width = checked_dimension(dataset->GetRasterXSize(), "width");
@@ -145,20 +154,20 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path,
   // raster has exactly one value per cell. `size` always means cell count.
   if (level_0_collisions && width < 2U) {
     throw std::runtime_error(
-        "Level-0 terrain GeoTIFF needs at least a 2 by 2 vertex grid");
+        "Level-0 terrain GeoTIFF needs at least a 2 by 2 vertex grid"
+    );
   }
   const uint32_t source_size = width;
-  const uint32_t size =
-      level_0_collisions ? source_size - 1U : source_size;
+  const uint32_t size = level_0_collisions ? source_size - 1U : source_size;
   // The implicit maximum mipmap repeatedly combines 2×2 cells. Requiring a
   // power-of-two cell count means every level remains square down to one cell.
   if (!is_power_of_two(size)) {
     throw std::runtime_error(
-        "Terrain GeoTIFF level-1 cell count must be a power of two");
+        "Terrain GeoTIFF level-1 cell count must be a power of two"
+    );
   }
   if (static_cast<size_t>(source_size) >
-      std::numeric_limits<size_t>::max() /
-          static_cast<size_t>(source_size)) {
+      std::numeric_limits<size_t>::max() / static_cast<size_t>(source_size)) {
     throw std::runtime_error("Terrain GeoTIFF is too large to load");
   }
 
@@ -174,7 +183,8 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path,
   if (transform[1] <= 0.0 || transform[5] >= 0.0 || transform[2] != 0.0 ||
       transform[4] != 0.0) {
     throw std::runtime_error(
-        "Terrain GeoTIFF must be north-up with square, unrotated pixels");
+        "Terrain GeoTIFF must be north-up with square, unrotated pixels"
+    );
   }
   const double delta = transform[1];
   if (delta != -transform[5]) {
@@ -188,10 +198,20 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path,
   // RasterIO converts the source's native sample format directly to float32.
   // This is the only terrain precision the eventual Metal tracer supports.
   std::vector<float> source_heights(sample_count);
-  if (band->RasterIO(GF_Read, 0, 0, static_cast<int>(source_size),
-                     static_cast<int>(source_size), source_heights.data(),
-                     static_cast<int>(source_size), static_cast<int>(source_size),
-                     GDT_Float32, 0, 0, nullptr) != CE_None) {
+  if (band->RasterIO(
+          GF_Read,
+          0,
+          0,
+          static_cast<int>(source_size),
+          static_cast<int>(source_size),
+          source_heights.data(),
+          static_cast<int>(source_size),
+          static_cast<int>(source_size),
+          GDT_Float32,
+          0,
+          0,
+          nullptr
+      ) != CE_None) {
     throw std::runtime_error(gdal_error("Could not read terrain heights"));
   }
 
@@ -212,7 +232,8 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path,
           (has_no_data != 0 && elevation == static_cast<float>(no_data))) {
         throw std::runtime_error(
             "Terrain GeoTIFF contains no-data or non-finite "
-            "elevations");
+            "elevations"
+        );
       }
       oriented_samples[static_cast<size_t>(trace_row) * source_size + x] =
           elevation;
@@ -246,7 +267,8 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path,
                    (static_cast<double>(source_size) - sample_offset) * delta;
   } else if (registration != RasterRegistration::PixelIsArea) {
     throw std::runtime_error(
-        "Level-1 terrain GeoTIFF must use PixelIsArea registration");
+        "Level-1 terrain GeoTIFF must use PixelIsArea registration"
+    );
   }
 
   return {level_0_collisions,

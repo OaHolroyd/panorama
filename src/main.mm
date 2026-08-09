@@ -3,15 +3,13 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include "loaded_tile.h"
-#include "png_writer.h"
+#include "raytrace_setup.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
-#include <filesystem>
-#include <string>
+#include <numbers>
 #include <vector>
 
 namespace {
@@ -32,30 +30,12 @@ constexpr uint32_t kFieldHeight = 4;
 
 /// Convert a useful Objective-C error description into command-line output.
 void print_error(NSString *context, NSError *error) {
-  std::fprintf(stderr, "%s: %s\n", context.UTF8String,
-               error.localizedDescription.UTF8String);
-}
-
-/// Return the conventional north-up image order for a south-to-north tile.
-[[nodiscard]] std::vector<float>
-north_up_image(const panorama::LoadedTile &tile) {
-  std::vector<float> image(tile.level_1_cells.size());
-  for (uint32_t source_y = 0; source_y < tile.size; ++source_y) {
-    const uint32_t image_y = tile.size - 1U - source_y;
-    for (uint32_t x = 0; x < tile.size; ++x) {
-      image[static_cast<size_t>(image_y) * tile.size + x] =
-          tile.level_1_cells[static_cast<size_t>(source_y) * tile.size + x];
-    }
-  }
-  return image;
-}
-
-/// Choose the default PNG path by replacing the input file's extension.
-[[nodiscard]] std::filesystem::path
-default_output_path(const std::filesystem::path &input_path) {
-  std::filesystem::path output_path = input_path;
-  output_path.replace_extension(".png");
-  return output_path;
+  std::fprintf(
+      stderr,
+      "%s: %s\n",
+      context.UTF8String,
+      error.localizedDescription.UTF8String
+  );
 }
 
 } // namespace
@@ -108,8 +88,11 @@ int run_metal_example(uint32_t iterations) {
     id<MTLFunction> function =
         [library newFunctionWithName:@"multiply_2d_by_two"];
     if (function == nil) {
-      std::fprintf(stderr, "Kernel multiply_2d_by_two is missing from %s.\n",
-                   kMetallibPath);
+      std::fprintf(
+          stderr,
+          "Kernel multiply_2d_by_two is missing from %s.\n",
+          kMetallibPath
+      );
       return EXIT_FAILURE;
     }
 
@@ -164,8 +147,12 @@ int run_metal_example(uint32_t iterations) {
     // The GPU has finished, so the shared field buffer can now be read.
     const auto *result = static_cast<const float *>(field.contents);
     bool matches = true;
-    std::printf("%u passes over a %u x %u field:\n", iterations, kFieldWidth,
-                kFieldHeight);
+    std::printf(
+        "%u passes over a %u x %u field:\n",
+        iterations,
+        kFieldWidth,
+        kFieldHeight
+    );
     for (uint32_t y = 0; y < kFieldHeight; ++y) {
       for (uint32_t x = 0; x < kFieldWidth; ++x) {
         const size_t index = static_cast<size_t>(y) * kFieldWidth + x;
@@ -178,28 +165,25 @@ int run_metal_example(uint32_t iterations) {
   }
 }
 
-/// Load a level-1 GeoTIFF and write its elevation cells as a north-up PNG.
-int main(int argc, const char *argv[]) {
-  if (argc < 2 || argc > 3) {
-    std::fprintf(stderr, "usage: %s input.tif [output.png]\n", argv[0]);
-    return EXIT_FAILURE;
-  }
-
-  const std::filesystem::path input_path(argv[1]);
-  const std::filesystem::path output_path =
-      argc == 3 ? std::filesystem::path(argv[2])
-                : default_output_path(input_path);
+/// Prepare one fixed Swiss level-1 tile for the initial GPU raytrace pass.
+int main() {
+  // Temporary fixed scene. The selected rechunked 1024×1024 Swiss LV95 tile
+  // is level-1 data, while this point lies at its centre. Keep global x/y as
+  // double until raytrace_setup.mm rebases them before float32 GPU upload.
+  const panorama::RaytraceConfig kConfiguration = {
+      "data/swissalti3d-10-level-1/"
+      "swissalti3d_level-1_p10_r-542_c1283.tif",
+      {2628608.0, 1108992.0, 3000.0},
+      1024,
+      256,
+      0.0,
+      2.0 * std::numbers::pi_v<double>,
+      -0.5,
+      0.5,
+      20'000.0F,
+  };
   try {
-    // Treat the TIFF values as the tile's required level-1 cell data. Exact
-    // level-0 vertex collisions will be enabled later when their source data
-    // and command-line option are ready.
-    const panorama::LoadedTile tile =
-        panorama::LoadedTile::load_tif(input_path, false);
-    const std::vector<float> image = north_up_image(tile);
-    panorama::write_colormapped_png(output_path, image, tile.size, tile.size,
-                                    panorama::colormaps::viridis);
-    std::printf("Wrote %s (%u x %u level-1 cells).\n", output_path.c_str(),
-                tile.size, tile.size);
+    panorama::prepare_single_tile_raytrace(kConfiguration);
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

@@ -35,7 +35,9 @@ struct ColorStop {
 /// Linearly interpolate an sRGB colour from a sorted set of colour stops.
 template <size_t Count>
 [[nodiscard]] Rgb interpolate_colormap(
-    const std::array<ColorStop, Count> &stops, float normalised_value) {
+    const std::array<ColorStop, Count> &stops,
+    float normalised_value
+) {
   const float value = clamp_unit(normalised_value);
   for (size_t index = 1; index < Count; ++index) {
     if (value <= stops[index].position) {
@@ -43,15 +45,21 @@ template <size_t Count>
       const ColorStop &upper = stops[index];
       const float fraction =
           (value - lower.position) / (upper.position - lower.position);
-      return {to_byte(static_cast<float>(lower.color.red) +
-                      fraction * (static_cast<float>(upper.color.red) -
-                                  static_cast<float>(lower.color.red))),
-              to_byte(static_cast<float>(lower.color.green) +
-                      fraction * (static_cast<float>(upper.color.green) -
-                                  static_cast<float>(lower.color.green))),
-              to_byte(static_cast<float>(lower.color.blue) +
-                      fraction * (static_cast<float>(upper.color.blue) -
-                                  static_cast<float>(lower.color.blue)))};
+      return {to_byte(
+                  static_cast<float>(lower.color.red) +
+                  fraction * (static_cast<float>(upper.color.red) -
+                              static_cast<float>(lower.color.red))
+              ),
+              to_byte(
+                  static_cast<float>(lower.color.green) +
+                  fraction * (static_cast<float>(upper.color.green) -
+                              static_cast<float>(lower.color.green))
+              ),
+              to_byte(
+                  static_cast<float>(lower.color.blue) +
+                  fraction * (static_cast<float>(upper.color.blue) -
+                              static_cast<float>(lower.color.blue))
+              )};
     }
   }
   return stops.back().color;
@@ -88,9 +96,12 @@ finite_range(const std::vector<float> &values) {
 }
 
 /// Encode an already-colormapped, tightly packed RGB buffer with ImageIO.
-void encode_png(const std::filesystem::path &path,
-                const std::vector<uint8_t> &rgb, uint32_t width,
-                uint32_t height) {
+void encode_png(
+    const std::filesystem::path &path,
+    const std::vector<uint8_t> &rgb,
+    uint32_t width,
+    uint32_t height
+) {
   @autoreleasepool {
     NSString *path_string =
         [NSString stringWithUTF8String:path.string().c_str()];
@@ -106,10 +117,24 @@ void encode_png(const std::filesystem::path &path,
         static_cast<CGBitmapInfo>(kCGBitmapByteOrderDefault) |
         static_cast<CGBitmapInfo>(kCGImageAlphaNone);
     CGImageRef image = CGImageCreate(
-        width, height, 8, 24, static_cast<size_t>(width) * 3U, color_space,
-        bitmap_info, provider, nullptr, false, kCGRenderingIntentDefault);
+        width,
+        height,
+        8,
+        24,
+        static_cast<size_t>(width) * 3U,
+        color_space,
+        bitmap_info,
+        provider,
+        nullptr,
+        false,
+        kCGRenderingIntentDefault
+    );
     CGImageDestinationRef destination = CGImageDestinationCreateWithURL(
-        (__bridge CFURLRef)url, CFSTR("public.png"), 1, nullptr);
+        (__bridge CFURLRef)url,
+        CFSTR("public.png"),
+        1,
+        nullptr
+    );
 
     if (provider == nullptr || color_space == nullptr || image == nullptr ||
         destination == nullptr) {
@@ -149,29 +174,34 @@ Rgb colormaps::grayscale(float normalised_value) {
 
 Rgb colormaps::viridis(float normalised_value) {
   constexpr std::array<ColorStop, 5> kStops = {{{0.0F, {68, 1, 84}},
-                                                  {0.25F, {59, 82, 139}},
-                                                  {0.5F, {33, 145, 140}},
-                                                  {0.75F, {94, 201, 98}},
-                                                  {1.0F, {253, 231, 37}}}};
+                                                {0.25F, {59, 82, 139}},
+                                                {0.5F, {33, 145, 140}},
+                                                {0.75F, {94, 201, 98}},
+                                                {1.0F, {253, 231, 37}}}};
   return interpolate_colormap(kStops, normalised_value);
 }
 
 Rgb colormaps::jet(float normalised_value) {
   constexpr std::array<ColorStop, 5> kStops = {{{0.0F, {0, 0, 128}},
-                                                  {0.25F, {0, 0, 255}},
-                                                  {0.5F, {0, 255, 255}},
-                                                  {0.75F, {255, 255, 0}},
-                                                  {1.0F, {128, 0, 0}}}};
+                                                {0.25F, {0, 0, 255}},
+                                                {0.5F, {0, 255, 255}},
+                                                {0.75F, {255, 255, 0}},
+                                                {1.0F, {128, 0, 0}}}};
   return interpolate_colormap(kStops, normalised_value);
 }
 
-void write_colormapped_png(const std::filesystem::path &path,
-                           const std::vector<float> &values, uint32_t width,
-                           uint32_t height, Colormap colormap) {
+void write_colormapped_png(
+    const std::filesystem::path &path,
+    const std::vector<float> &values,
+    uint32_t width,
+    uint32_t height,
+    Colormap colormap
+) {
   const size_t pixel_count = checked_pixel_count(width, height);
   if (values.size() != pixel_count) {
     throw std::invalid_argument(
-        "PNG input length does not match its declared dimensions");
+        "PNG input length does not match its declared dimensions"
+    );
   }
   if (colormap == nullptr) {
     throw std::invalid_argument("PNG colormap must not be null");
@@ -184,10 +214,10 @@ void write_colormapped_png(const std::filesystem::path &path,
     const float value = values[index];
     // Black makes absent rays or other non-finite diagnostic values obvious
     // without preventing the finite part of an image from being inspected.
-    const Rgb color = std::isfinite(value)
-                          ? colormap(range == 0.0F ? 0.5F
-                                                   : (value - minimum) / range)
-                          : Rgb{0, 0, 0};
+    const Rgb color =
+        std::isfinite(value)
+            ? colormap(range == 0.0F ? 0.5F : (value - minimum) / range)
+            : Rgb{0, 0, 0};
     rgb[index * 3U] = color.red;
     rgb[index * 3U + 1U] = color.green;
     rgb[index * 3U + 2U] = color.blue;
