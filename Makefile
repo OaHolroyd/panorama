@@ -1,5 +1,6 @@
 # The command-line executable produced by the default target.
 EXE := panorama
+COMPILE_DB := compile_commands.json
 
 # Keep source files flat for now; all generated files stay below obj/.
 SRC_DIR := src
@@ -9,13 +10,22 @@ OBJ_ROOT := obj
 CXX := clang++
 METAL := xcrun --sdk macosx metal
 METALLIB := xcrun --sdk macosx metallib
+GDAL_CONFIG := gdal-config
+# GDAL supplies GeoTIFF loading and EPSG/PROJ-backed coordinate transforms.
+# Mark its headers as system headers so third-party warnings do not obscure ours.
+GDAL_INCLUDE_DIR := $(patsubst -I%,%,$(shell $(GDAL_CONFIG) --cflags))
+GDAL_CFLAGS := -isystem $(GDAL_INCLUDE_DIR)
+GDAL_LIBS := $(shell $(GDAL_CONFIG) --libs)
 
 # Host compiler options.  -MMD/-MP generate makefile dependency files next to
 # each object, and ARC is required by the Objective-C++ Metal host code.
 CPPFLAGS := -I$(SRC_DIR)
+CPPFLAGS += $(GDAL_CFLAGS)
 WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion
 COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
-FRAMEWORKS := -framework Foundation -framework Metal
+# ImageIO/CoreGraphics encode diagnostic and rendered images as PNG files.
+FRAMEWORKS := -framework Foundation -framework Metal -framework CoreGraphics -framework ImageIO
+LDLIBS := $(GDAL_LIBS)
 
 # Select with `make DEBUG=1`; release is the default.
 DEBUG ?= 0
@@ -42,7 +52,7 @@ CPPFLAGS += -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
 DEPS := $(HOST_OBJ:.o=.d)
 
-.PHONY: all clean rebuild run FORCE
+.PHONY: all clean rebuild compile_commands FORCE
 
 all: $(EXE)
 
@@ -50,7 +60,7 @@ all: $(EXE)
 # configuration requested by this invocation even if the other build was newer.
 $(EXE): FORCE $(HOST_OBJ) $(METAL_LIB)
 	@printf 'Linking %s\n' '$@'
-	$(CXX) $(OPT_FLAGS) -o $@ $(HOST_OBJ) $(FRAMEWORKS)
+	$(CXX) $(OPT_FLAGS) -o $@ $(HOST_OBJ) $(FRAMEWORKS) $(LDLIBS)
 
 # Compile one Objective-C++ source file into its matching object file.
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.mm | $(OBJ_DIR)
@@ -70,14 +80,19 @@ $(METAL_LIB): $(METAL_AIR)
 $(OBJ_DIR):
 	mkdir -p $@
 
-# Convenience target for the default input size used by the dummy kernel.
-run: $(EXE)
-	./$(EXE)
+# Generate the compilation database consumed by clangd/objc-clangd. Bear
+# records the compiler invocations that Make actually executes, so this does
+# not duplicate compiler flags or source discovery in a hand-written JSON
+# recipe. `-B` deliberately rebuilds the executable: there must be real
+# compiler processes for Bear to observe.
+compile_commands:
+	rm -f $(COMPILE_DB)
+	bear --output $(COMPILE_DB) -- $(MAKE) --no-print-directory -B $(EXE)
 
 rebuild: clean all
 
 clean:
-	rm -rf $(EXE) $(OBJ_ROOT)
+	rm -rf $(EXE) $(OBJ_ROOT) $(COMPILE_DB)
 
 # A phony prerequisite makes the shared executable relink when switching
 # between debug and release object directories.

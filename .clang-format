@@ -1,0 +1,16 @@
+# This project uses clang-format through clangd in Zed. Keep function parameter
+# lists compact when they fit, but make wrapped lists easy to scan vertically.
+BasedOnStyle: LLVM
+
+IndentWidth: 2
+ContinuationIndentWidth: 4
+ColumnLimit: 100
+
+BinPackParameters: OnePerLine
+AllowAllParametersOfDeclarationOnNextLine: false
+BreakAfterOpenBracketFunction: true
+BreakBeforeCloseBracketFunction: true
+
+# Apply the same one-argument-per-line layout to wrapped function calls.
+BinPackArguments: false
+AllowAllArgumentsOnNextLine: false

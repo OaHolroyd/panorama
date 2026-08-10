@@ -1,6 +1,7 @@
 # Build products
 /panorama
 /obj/
+/compile_commands.json
 
 # Input data
 data/
@@ -12,6 +13,9 @@ data/
 *.mp4
 *.jpeg
 *.jpg
+
+# clangd caching
+.cache/
 
 # Scratch space
 panorama-python
