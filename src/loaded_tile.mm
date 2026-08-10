@@ -258,13 +258,11 @@ LoadedTile LoadedTile::load_tif(
   double lower_left_x = transform[0];
   double lower_left_y = transform[3] - static_cast<double>(size) * delta;
   if (level_0_collisions) {
-    // For level-0, the origin is the south-west vertex. PixelIsArea rasters
-    // locate values at cell centres, so their first vertex lies half a cell in.
-    const double sample_offset =
-        registration == RasterRegistration::PixelIsArea ? 0.5 : 0.0;
-    lower_left_x += sample_offset * delta;
-    lower_left_y = transform[3] -
-                   (static_cast<double>(source_size) - sample_offset) * delta;
+    // Prepared level-0 terrain records vertices at the affine grid positions,
+    // despite carrying the common GeoTIFF PixelIsArea metadata. Match the
+    // Python reference: transform[0] is the west vertex and the last source
+    // row is the south vertex.
+    lower_left_y = transform[3] - static_cast<double>(size) * delta;
   } else if (registration != RasterRegistration::PixelIsArea) {
     throw std::runtime_error(
         "Level-1 terrain GeoTIFF must use PixelIsArea registration"

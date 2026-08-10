@@ -14,14 +14,21 @@
 namespace {
 
 constexpr double kSwissCellSize = 2.0;
-constexpr uint32_t kRechunkLevel = 10;
-constexpr double kObserverEasting = 2628183.79;
-constexpr double kObserverNorthing = 1105668.21;
-constexpr double kObserverElevation = 2080.0;
+constexpr uint32_t kRechunkLevel = 13;
 
-/// Return the level-1 prepared Swiss tile containing an LV95 coordinate.
+// Weisshorn photo location
+// constexpr double kObserverEasting = 2628183.79;
+// constexpr double kObserverNorthing = 1105668.21;
+// constexpr double kObserverElevation = 2080.0;
+
+// Mettelhorn summit
+constexpr double kObserverEasting = 2623452.4;
+constexpr double kObserverNorthing = 1100502.2;
+constexpr double kObserverElevation = 3415.0;
+
+/// Return the level-0 prepared Swiss tile containing an LV95 coordinate.
 [[nodiscard]] std::filesystem::path
-find_level_1_tile(uint32_t power, double easting, double northing) {
+find_level_0_tile(uint32_t power, double easting, double northing) {
   const double tile_width = std::ldexp(kSwissCellSize, int(power));
   const double column_value = std::floor(easting / tile_width);
   const double row_value = std::floor(-northing / tile_width);
@@ -34,30 +41,30 @@ find_level_1_tile(uint32_t power, double easting, double northing) {
   const int64_t column = static_cast<int64_t>(column_value);
   const int64_t row = static_cast<int64_t>(row_value);
   const std::string level = std::to_string(power);
-  const std::string stem = "swissalti3d_level-1_p" + level + "_r" + std::to_string(row) + "_c" +
+  const std::string stem = "swissalti3d_level-0_p" + level + "_r" + std::to_string(row) + "_c" +
                            std::to_string(column) + ".tif";
-  return std::filesystem::path("data") / ("swissalti3d-" + level + "-level-1") / stem;
+  return std::filesystem::path("data") / ("swissalti3d-" + level + "-level-0") / stem;
 }
 
 } // namespace
 
-/// Trace the fixed level-1 Swiss tile containing the temporary observer.
+/// Trace the fixed level-0 Swiss tile containing the temporary observer.
 int main() {
   try {
     const std::filesystem::path tile_path =
-        find_level_1_tile(kRechunkLevel, kObserverEasting, kObserverNorthing);
+        find_level_0_tile(kRechunkLevel, kObserverEasting, kObserverNorthing);
     if (!std::filesystem::is_regular_file(tile_path)) {
       throw std::runtime_error(
-          "No level-1 prepared tile contains this origin: " + tile_path.string()
+          "No level-0 prepared tile contains this origin: " + tile_path.string()
       );
     }
     const panorama::RaytraceConfig config = {
         tile_path,
         {kObserverEasting, kObserverNorthing, kObserverElevation},
-        64,
-        32,
-        0.49 * std::numbers::pi_v<double>,
-        0.51 * std::numbers::pi_v<double>,
+        1024,
+        512,
+        0.0 * std::numbers::pi_v<double>,
+        2.0 * std::numbers::pi_v<double>,
         -0.5 * std::numbers::pi_v<double>,
         0.5 * std::numbers::pi_v<double>,
         20'000.0F,

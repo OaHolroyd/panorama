@@ -6,6 +6,7 @@
 #include "loaded_tile.h"
 #include "png_writer.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -155,8 +156,12 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
     throw std::invalid_argument("Raytrace tile path must not be empty");
   }
 
-  // This prototype traces the always-present level-1 maximum cells.
-  const LoadedTile tile = LoadedTile::load_tif(config.tile_path, false);
+  // Level-0 vertices provide exact bilinear intersections; the loader derives
+  // the accompanying level-1 maximum field used for cheap cell rejection.
+  const LoadedTile tile = LoadedTile::load_tif(config.tile_path, true);
+  if (tile.level_0_vertices == nullptr) {
+    throw std::logic_error("Level-0 raytrace tile has no vertex elevations");
+  }
 
   // Do the large-coordinate subtraction in float64 first. Only these local
   // values cross the host/device boundary, preserving float32 cell precision.
@@ -219,6 +224,16 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
         checked_buffer_length(tile.level_1_cells.size(), sizeof(float), "level-1 heights"),
         "level-1 heights"
     );
+    id<MTLBuffer> vertices = make_buffer(
+        device,
+        tile.level_0_vertices->data(),
+        checked_buffer_length(
+            tile.level_0_vertices->size(),
+            sizeof(float),
+            "level-0 vertex heights"
+        ),
+        "level-0 vertex heights"
+    );
     id<MTLBuffer> azimuths = make_buffer(
         device,
         directions.data(),
@@ -259,11 +274,12 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
 
     // Set the buffers
     [encoder setBuffer:heights offset:0 atIndex:0];
-    [encoder setBuffer:azimuths offset:0 atIndex:1];
-    [encoder setBuffer:slopes offset:0 atIndex:2];
-    [encoder setBytes:&parameters length:sizeof(parameters) atIndex:3];
-    [encoder setBuffer:distances offset:0 atIndex:4];
-    [encoder setBuffer:elevations offset:0 atIndex:5];
+    [encoder setBuffer:vertices offset:0 atIndex:1];
+    [encoder setBuffer:azimuths offset:0 atIndex:2];
+    [encoder setBuffer:slopes offset:0 atIndex:3];
+    [encoder setBytes:&parameters length:sizeof(parameters) atIndex:4];
+    [encoder setBuffer:distances offset:0 atIndex:5];
+    [encoder setBuffer:elevations offset:0 atIndex:6];
 
     // Each 16×16 group has 256 threads, safely below every Apple GPU's
     // supported per-threadgroup limit. The grid still contains exactly one
@@ -272,20 +288,27 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
         threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
 
     [encoder endEncoding];
+
+    // Start the GPU work
     [command commit];
 
-    // TODO: later host work can overlap this wait with GPU ray tracing.
+    // Finish the GPU work
     [command waitUntilCompleted];
     if (command.status == MTLCommandBufferStatusError) {
       print_error(@"The Metal raytrace command failed", command.error);
       throw std::runtime_error("The Metal raytrace command failed");
     }
+    const double gpu_milliseconds = 1'000.0 * (command.GPUEndTime - command.GPUStartTime);
+    std::printf("GPU raytrace: %.3f ms\n", gpu_milliseconds);
 
     // Shared storage is now coherent with the CPU, so ImageIO can read these
     // views directly. The buffers remain alive until the autorelease pool ends.
+    const auto image_start = std::chrono::steady_clock::now();
+    const std::span<const float> distance_values =
+        view_float_buffer(distances, num_ray, "distance output");
     write_colormapped_png(
         "distances.png",
-        view_float_buffer(distances, num_ray, "distance output"),
+        distance_values,
         config.num_azimuth,
         config.num_polar,
         colormaps::viridis
@@ -297,6 +320,9 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
         config.num_polar,
         colormaps::viridis
     );
+    const auto image_end = std::chrono::steady_clock::now();
+    const std::chrono::duration<double, std::milli> image_duration = image_end - image_start;
+    std::printf("PNG generation: %.3f ms\n", image_duration.count());
   }
 }
 
