@@ -25,11 +25,10 @@ struct RaytraceConfig {
   float max_distance;
 };
 
-/// Load one level-1 tile and encode all future ray-tracing kernel bindings.
+/// Load one level-1 tile and submit the first ray-tracing kernel dispatch.
 ///
-/// The function intentionally stops immediately before dispatching the Metal
-/// kernel. It validates the host/device payload and is the staging point for
-/// the first GPU traversal implementation.
-void prepare_single_tile_raytrace(const RaytraceConfig &config);
+/// The currently bound kernel is a traversal stub, but this function validates
+/// and submits the complete host/device payload used by later GPU traversal.
+void perform_single_tile_raytrace(const RaytraceConfig &config);
 
 } // namespace panorama

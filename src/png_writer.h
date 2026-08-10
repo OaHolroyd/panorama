@@ -2,7 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <vector>
+#include <span>
 
 namespace panorama {
 
@@ -39,7 +39,7 @@ namespace colormaps {
 /// when ImageIO cannot create the PNG.
 void write_colormapped_png(
     const std::filesystem::path &path,
-    const std::vector<float> &values,
+    std::span<const float> values,
     uint32_t width,
     uint32_t height,
     Colormap colormap = colormaps::viridis

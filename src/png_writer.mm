@@ -80,7 +80,7 @@ template <size_t Count>
 
 /// Find the finite value range used to normalise a diagnostic image.
 [[nodiscard]] std::pair<float, float>
-finite_range(const std::vector<float> &values) {
+finite_range(std::span<const float> values) {
   float minimum = std::numeric_limits<float>::infinity();
   float maximum = -std::numeric_limits<float>::infinity();
   for (float value : values) {
@@ -192,7 +192,7 @@ Rgb colormaps::jet(float normalised_value) {
 
 void write_colormapped_png(
     const std::filesystem::path &path,
-    const std::vector<float> &values,
+    std::span<const float> values,
     uint32_t width,
     uint32_t height,
     Colormap colormap
