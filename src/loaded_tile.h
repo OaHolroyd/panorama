@@ -34,7 +34,7 @@ struct LoadedTile {
 
   // Number of levels in the maximum mipmap, including level 1 and its final
   // 1×1 maximum level. Always greater than or equal to 1.
-  int32_t num_levels;
+  uint32_t num_levels;
 
   // Maximum mipmap stored as a contiguous block of memory. It is laid out
   // from finest to coarsest levels (that is, level 1, level 2, ...).

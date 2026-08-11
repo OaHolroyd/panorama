@@ -158,7 +158,7 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   }
   // Level 1 has `size` cells per side; repeatedly halving reaches a final
   // 1×1 maximum after log2(size) further levels.
-  const int32_t num_levels = static_cast<int32_t>(std::countr_zero(size)) + 1;
+  const uint32_t num_levels = static_cast<int32_t>(std::countr_zero(size)) + 1;
 
   // GDAL's affine transform maps a source pixel corner (column, row) to:
   // x = transform[0] + column * transform[1] + row * transform[2]
@@ -286,7 +286,7 @@ void LoadedTile::compute_mipmap() {
   uint32_t previous_side = size;
   size_t previous_offset = 0;
   size_t offset = finest_count;
-  for (int32_t level = 1; level < num_levels; ++level) {
+  for (uint32_t level = 1; level < num_levels; ++level) {
     const uint32_t side = previous_side / 2U;
     for (uint32_t i = 0; i < side; ++i) {
       for (uint32_t j = 0; j < side; ++j) {

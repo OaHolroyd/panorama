@@ -44,6 +44,7 @@ struct RaytraceParameters {
   float tile_y_min;
   float cell_size;
   float observer_elevation;
+  uint32_t num_levels;
   uint32_t num_cell;
   uint32_t num_azimuth;
   uint32_t num_polar;
@@ -51,7 +52,7 @@ struct RaytraceParameters {
 };
 
 static_assert(sizeof(HorizontalDirection) == 2U * sizeof(float));
-static_assert(sizeof(RaytraceParameters) == 8U * sizeof(uint32_t));
+static_assert(sizeof(RaytraceParameters) == 9U * sizeof(uint32_t));
 
 /// Print a Foundation error in the command-line form used by the host tools.
 void print_error(NSString *context, NSError *error) {
@@ -192,6 +193,7 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
       static_cast<float>(local_y_min),
       static_cast<float>(tile.delta),
       static_cast<float>(config.observer.elevation),
+      tile.num_levels,
       tile.size,
       config.num_azimuth,
       config.num_polar,

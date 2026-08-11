@@ -12,6 +12,7 @@ struct RaytraceParameters {
   float tile_y_min;
   float cell_size;
   float observer_elevation;
+  uint num_levels;
   uint num_cell;
   uint num_azimuth;
   uint num_polar;
@@ -165,12 +166,43 @@ inline Collision bilinear_collision(
   return conservative_boundary_hit();
 }
 
+/// Return whether the index is a at the boundary of a level+1 block (and would thus be permitted to
+/// go up a level)
+inline bool at_level_boundary(int index, int direction, uint level) {
+  const uint block_size = 1 << level; // the size of a block in the level above
+  const uint boundary_remainder =
+      direction > 0 ? block_size - 1 : 0; // remainder at a level boundary
+  return (direction != 0) && (index % block_size == boundary_remainder);
+}
+
+/// Return the offset required in the opposite component when going up from `level` to `level+1`
+inline float offset_jump(int index, int direction, uint level, uint scale, float dt) {
+  const int parity = (index >> (level - 1)) + (direction > 0);
+  return (parity % 2) * scale * dt;
+}
+
+/// Return the first flat-buffer element for a one-indexed mipmap level.
+inline uint mipmap_level_offset(uint cell_count, uint level) {
+  uint offset = 0;
+  uint side = cell_count;
+  for (uint current_level = 1; current_level < level; ++current_level) {
+    offset += side * side;
+    side /= 2U;
+  }
+  return offset;
+}
+
+/// Return the row-major side length of a one-indexed mipmap level.
+inline uint mipmap_level_side(uint cell_count, uint level) {
+  return cell_count >> (level - 1U);
+}
+
 /// Trace one independent polar ray through one level-0 terrain tile. Level-1
 /// cell maxima reject empty cells before the bounded bilinear solve reads the
 /// original vertex elevations.
 kernel void trace_single_tile(
-    device const float *level_1_cells [[buffer(0)]],
-    device const float *level_0_vertices [[buffer(1)]],
+    device const float *mipmap [[buffer(0)]],
+    device const float *vertices [[buffer(1)]],
     device const float2 *azimuth_directions [[buffer(2)]],
     device const float *polar_slopes [[buffer(3)]],
     constant RaytraceParameters &params [[buffer(4)]],
@@ -197,6 +229,16 @@ kernel void trace_single_tile(
   const float3 ray_direction = {direction.x, direction.y, dz};
   const int n = int(params.num_cell);
 
+  // Decide starting level: the origin tile always starts at level 1, all subsequent tiles start at
+  // the max level
+  // uint level = params.num_level; // for non-origin tiles
+  uint level = 1;
+  uint scale = 1 << (level - 1);
+  uint offset = 0;
+  // The exact near boundary of the active DDA segment. It remains separate
+  // from points nudged only to assign deterministic cell ownership.
+  float t_start = 0.0F;
+
   // The local observer is exactly at (0, 0), which may lie on one or both
   // shared cell boundaries. Nudge only the coordinate used for ownership so a
   // south/west ray starts in its forward cell; all DDA distances still use the
@@ -207,68 +249,140 @@ kernel void trace_single_tile(
   int i = clamp(int(floor((y_classify - params.tile_y_min) / delta)), 0, n - 1);
   int j = clamp(int(floor((x_classify - params.tile_x_min) / delta)), 0, n - 1);
 
+  // align to the correct level boundary
+  i = (i / scale) * scale;
+  j = (j / scale) * scale;
+
   // Cell-traversal distances: `tx` and `ty` are the distances to the next
   // vertical and horizontal cell boundary respectively.
-  float ty = stepy == 0 ? INFINITY : stepy * (params.tile_y_min / delta + i + (stepy > 0)) * dty;
-  float tx = stepx == 0 ? INFINITY : stepx * (params.tile_x_min / delta + j + (stepx > 0)) * dtx;
+  float ty =
+      stepy == 0 ? INFINITY : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+  float tx =
+      stepx == 0 ? INFINITY : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
   int previous_axis = -1;
   const uint vertex_count = params.num_cell + 1U;
 
-  // Ray tracing: level-1 maxima cheaply reject cells, then level-0 vertices
-  // provide the exact bilinear intersection within the DDA interval.
+  // Step the ray across the mipmap cell-by-cell until we go off the edge or find an internal
+  // collision
   while (i >= 0 && j >= 0 && i < n && j < n) {
     const float t_exit = min(tx, ty);
 
     // Find the minimum height that the ray has within the cell we've just crossed
-    float z_check = ray_origin.z + t_exit * dz;
+    float z = ray_origin.z + t_exit * dz;
     if (dz > 0.0F) {
       // Since an upward ray will be higher at the exit boundary, rewind to find the minimum height
       // as the ray crosses the cell.
-      z_check = previous_axis == -1
-                    ? ray_origin.z
-                    : ray_origin.z + (t_exit - (previous_axis == 0 ? dty : dtx)) * dz;
+      z = previous_axis == -1 ? ray_origin.z + t_start * dz
+                              : ray_origin.z + (t_exit - (previous_axis == 0 ? dty : dtx)) * dz;
     }
 
-    const uint cell_index = uint(i) * params.num_cell + uint(j);
-    if (z_check <= level_1_cells[cell_index]) {
-      // Collision check. Restrict the bilinear root search to this cell's
-      // actual DDA interval, including its near boundary.
-      float t_entry = 0.0F;
-      if (stepx != 0) {
-        t_entry = max(t_entry, tx - dtx);
+    bool refined = false;
+    const uint level_side = mipmap_level_side(params.num_cell, level);
+    const uint cell_index =
+        offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
+    if (z <= mipmap[cell_index]) {
+      if (level == 1) {
+        // Collision check. Restrict the bilinear root search to this cell's
+        // actual DDA interval, including its near boundary.
+        float t_entry = t_start;
+        if (stepx != 0) {
+          t_entry = max(t_entry, tx - dtx);
+        }
+        if (stepy != 0) {
+          t_entry = max(t_entry, ty - dty);
+        }
+        const Collision collision = bilinear_collision(
+            vertices,
+            vertex_count,
+            params.tile_x_min + float(j) * delta,
+            params.tile_y_min + float(i) * delta,
+            delta,
+            uint(i),
+            uint(j),
+            ray_origin,
+            ray_direction,
+            min(t_entry, t_exit),
+            t_exit
+        );
+        if (collision.hit) {
+          distances[output_index] = collision.distance;
+          elevations[output_index] = ray_origin.z + collision.distance * dz;
+          return;
+        }
+      } else {
+        // There might be a real collision inside this coarse cell. Descend to
+        // the child containing the ray at the coarse cell's true near edge.
+        float cell_entry = t_start;
+        if (stepx != 0) {
+          cell_entry = max(cell_entry, tx - scale * dtx);
+        }
+        if (stepy != 0) {
+          cell_entry = max(cell_entry, ty - scale * dty);
+        }
+
+        // Reclassify a point just inside the child. The nudge controls shared
+        // boundary ownership only; `cell_entry` remains the exact geometry.
+        float cell_x = ray_origin.x + cell_entry * direction.x;
+        float cell_y = ray_origin.y + cell_entry * direction.y;
+        const float cell_nudge = max(
+            1e-3F * delta,
+            8.0F * FLT_EPSILON * max(1.0F, max(fabs(cell_x), fabs(cell_y)))
+        );
+        if (stepx != 0) {
+          cell_x += copysign(cell_nudge, direction.x);
+        }
+        if (stepy != 0) {
+          cell_y += copysign(cell_nudge, direction.y);
+        }
+        i = clamp(int(floor((cell_y - params.tile_y_min) / delta)), 0, n - 1);
+        j = clamp(int(floor((cell_x - params.tile_x_min) / delta)), 0, n - 1);
+
+        // Fine indices remain in level-1 coordinates. Only the flat buffer
+        // offset and DDA scale change as we return to the child level.
+        t_start = cell_entry;
+        level -= 1U;
+        scale /= 2U;
+        offset = mipmap_level_offset(params.num_cell, level);
+        ty = stepy == 0 ? INFINITY
+                        : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+        tx = stepx == 0 ? INFINITY
+                        : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+        // The child begins a fresh DDA segment, so an upward ray's near-edge
+        // test must use `t_start` rather than a preceding X or Y step.
+        previous_axis = -1;
+        refined = true;
+        continue;
       }
-      if (stepy != 0) {
-        t_entry = max(t_entry, ty - dty);
-      }
-      const Collision collision = bilinear_collision(
-          level_0_vertices,
-          vertex_count,
-          params.tile_x_min + float(j) * delta,
-          params.tile_y_min + float(i) * delta,
-          delta,
-          uint(i),
-          uint(j),
-          ray_origin,
-          ray_direction,
-          min(t_entry, t_exit),
-          t_exit
-      );
-      if (collision.hit) {
-        distances[output_index] = collision.distance;
-        elevations[output_index] = ray_origin.z + collision.distance * dz;
-        return;
+    }
+
+    // go up to a coarser level whenever possible
+    if (!refined && level < params.num_levels) {
+      if (ty < tx) {
+        if (at_level_boundary(i, stepy, level)) {
+          tx += offset_jump(i, stepx, level, scale, dtx);
+          level += 1;
+          scale *= 2;
+          offset = mipmap_level_offset(params.num_cell, level);
+        }
+      } else {
+        if (at_level_boundary(j, stepx, level)) {
+          ty += offset_jump(j, stepy, level, scale, dty);
+          level += 1;
+          scale *= 2;
+          offset = mipmap_level_offset(params.num_cell, level);
+        }
       }
     }
 
     // Step forwards
     if (ty < tx) {
       previous_axis = 0;
-      ty += dty;
-      i += stepy;
+      ty += scale * dty;
+      i += scale * stepy;
     } else {
       previous_axis = 1;
-      tx += dtx;
-      j += stepx;
+      tx += scale * dtx;
+      j += scale * stepx;
     }
   }
 }
