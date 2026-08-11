@@ -158,10 +158,14 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
 
   // Level-0 vertices provide exact bilinear intersections; the loader derives
   // the accompanying level-1 maximum field used for cheap cell rejection.
-  const LoadedTile tile = LoadedTile::load_tif(config.tile_path, true);
-  if (tile.level_0_vertices == nullptr) {
+  LoadedTile tile = LoadedTile::load_tif(config.tile_path, true);
+  if (tile.vertices == nullptr) {
     throw std::logic_error("Level-0 raytrace tile has no vertex elevations");
   }
+  // Keep the complete flat maximum hierarchy resident alongside the exact
+  // vertices. The current kernel still reads level 1 only; later adaptive DDA
+  // traversal will index the appended coarser levels in this same buffer.
+  tile.compute_mipmap();
 
   // Do the large-coordinate subtraction in float64 first. Only these local
   // values cross the host/device boundary, preserving float32 cell precision.
@@ -220,18 +224,14 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
 
     id<MTLBuffer> heights = make_buffer(
         device,
-        tile.level_1_cells.data(),
-        checked_buffer_length(tile.level_1_cells.size(), sizeof(float), "level-1 heights"),
-        "level-1 heights"
+        tile.mipmap.data(),
+        checked_buffer_length(tile.mipmap.size(), sizeof(float), "maximum mipmap"),
+        "maximum mipmap"
     );
     id<MTLBuffer> vertices = make_buffer(
         device,
-        tile.level_0_vertices->data(),
-        checked_buffer_length(
-            tile.level_0_vertices->size(),
-            sizeof(float),
-            "level-0 vertex heights"
-        ),
+        tile.vertices->data(),
+        checked_buffer_length(tile.vertices->size(), sizeof(float), "level-0 vertex heights"),
         "level-0 vertex heights"
     );
     id<MTLBuffer> azimuths = make_buffer(
