@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <numbers>
@@ -57,6 +58,40 @@ static_assert(sizeof(RaytraceParameters) == 9U * sizeof(uint32_t));
 /// Print a Foundation error in the command-line form used by the host tools.
 void print_error(NSString *context, NSError *error) {
   std::fprintf(stderr, "%s: %s\n", context.UTF8String, error.localizedDescription.UTF8String);
+}
+
+/// Return whether Metal's capture layer was enabled before this process began.
+[[nodiscard]] bool capture_requested() {
+  const char *value = std::getenv("MTL_CAPTURE_ENABLED");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+/// Start a queue-scoped GPU trace when Metal's capture layer is enabled.
+[[nodiscard]] bool start_capture_if_requested(id<MTLCommandQueue> queue) {
+  if (!capture_requested()) {
+    return false;
+  }
+
+  NSString *path = [[NSFileManager.defaultManager currentDirectoryPath]
+      stringByAppendingPathComponent:@"panorama.gputrace"];
+  if ([NSFileManager.defaultManager fileExistsAtPath:path]) {
+    throw std::runtime_error(
+        "Refusing to overwrite panorama.gputrace; move or remove the existing capture first"
+    );
+  }
+
+  MTLCaptureDescriptor *descriptor = [[MTLCaptureDescriptor alloc] init];
+  descriptor.captureObject = queue;
+  descriptor.destination = MTLCaptureDestinationGPUTraceDocument;
+  descriptor.outputURL = [NSURL fileURLWithPath:path];
+  NSError *error = nil;
+  if (![[MTLCaptureManager sharedCaptureManager] startCaptureWithDescriptor:descriptor
+                                                                      error:&error]) {
+    print_error(@"Could not start the Metal GPU capture", error);
+    throw std::runtime_error("Could not start the Metal GPU capture");
+  }
+  std::printf("Capturing GPU work to %s\n", path.UTF8String);
+  return true;
 }
 
 /// Reject a count that cannot be represented by the Metal `uint` interface.
@@ -266,11 +301,22 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
 
     // Setup the queue/command/encoder
     id<MTLCommandQueue> queue = [device newCommandQueue];
+    if (queue == nil) {
+      throw std::runtime_error("Could not create a Metal raytrace command queue");
+    }
+    // A GPU trace begins at command-buffer creation, not merely encoding.
+    const bool capture_active = start_capture_if_requested(queue);
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    if (queue == nil || command == nil || encoder == nil) {
+    if (command == nil || encoder == nil) {
+      if (capture_active) {
+        [[MTLCaptureManager sharedCaptureManager] stopCapture];
+      }
       throw std::runtime_error("Could not create a Metal raytrace command");
     }
+    // Instruments displays these labels in its GPU command and encoder lists.
+    command.label = @"single-tile raytrace";
+    encoder.label = @"trace_single_tile";
     // Physical X is polar and physical Y is azimuth. A 32-wide X row places
     // adjacent SIMD lanes on one horizontal DDA path with different slopes.
     // The output buffer still uses its ordinary (polar, azimuth) layout.
@@ -292,6 +338,9 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
 
     // Finish the GPU work
     [command waitUntilCompleted];
+    if (capture_active) {
+      [[MTLCaptureManager sharedCaptureManager] stopCapture];
+    }
     if (command.status == MTLCommandBufferStatusError) {
       print_error(@"The Metal raytrace command failed", command.error);
       throw std::runtime_error("The Metal raytrace command failed");

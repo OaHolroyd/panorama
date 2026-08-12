@@ -276,7 +276,6 @@ kernel void trace_single_tile(
               : ray_origin.z + (t_exit - scale * (previous_axis == 0 ? dty : dtx)) * dz;
     }
 
-    bool refined = false;
     const uint level_side = mipmap_level_side(params.num_cell, level);
     const uint cell_index =
         offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
@@ -364,13 +363,12 @@ kernel void trace_single_tile(
         // The child begins a fresh DDA segment, so an upward ray's near-edge
         // test must use `t_start` rather than a preceding X or Y step.
         previous_axis = -1;
-        refined = true;
         continue;
       }
     }
 
     // go up to a coarser level whenever possible
-    if (!refined && level < params.num_levels) {
+    if (level < params.num_levels) {
       if (ty < tx) {
         if (at_level_boundary(i, stepy, level)) {
           // Crossing a Y boundary joins two vertically adjacent blocks. The
