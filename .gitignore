@@ -17,6 +17,10 @@ data/
 # clangd caching
 .cache/
 
+# debugging files
+*.trace
+*.gputrace
+
 # Scratch space
 panorama-python
 

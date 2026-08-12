@@ -13,9 +13,9 @@ namespace panorama {
 // of level-1 cells along one edge. All arrays are float32 and row-major; row
 // zero is the southern edge, so Y increases northward as required by tracing.
 struct LoadedTile {
-  // True when level_0_vertices owns exact `(size + 1)²` vertex elevations.
+  // True when `vertices` owns exact `(size + 1)²` vertex elevations.
   // Level-1-only tiles leave the pointer null and only support approximate
-  // collisions against level_1_cells.
+  // collisions against the first `mipmap` level.
   bool supports_level_0_collisions;
   Crs crs;
   float maximum_elevation;
@@ -30,18 +30,27 @@ struct LoadedTile {
 
   // Exact vertex terrain for bilinear level-0 collisions, or null when the
   // source tile supplies only level-1 cell values.
-  std::unique_ptr<std::vector<float>> level_0_vertices;
+  std::unique_ptr<std::vector<float>> vertices;
 
-  // The required N×N first maximum-mipmap level. For level-0 input it is the
-  // maximum of each 2×2 vertex patch; for level-1 input it is read directly.
-  std::vector<float> level_1_cells;
+  // Number of levels in the maximum mipmap, including level 1 and its final
+  // 1×1 maximum level. Always greater than or equal to 1.
+  uint32_t num_levels;
 
-  /// Load a single-band, north-up `.tif` into south-to-north tracer row order.
-  /// When `supports_level_0_collisions` is true, interpret source values as
-  /// vertices and build the required first maximum-mipmap level from them.
-  /// Otherwise interpret source values as level-1 cells directly.
+  // Maximum mipmap stored as a contiguous block of memory. It is laid out
+  // from finest to coarsest levels (that is, level 1, level 2, ...).
+  std::vector<float> mipmap;
+
+  // Load a single-band, north-up `.tif` into south-to-north tracer row order.
+  // When `supports_level_0_collisions` is true, interpret source values as
+  // vertices and build the required first maximum-mipmap level from them.
+  // Otherwise interpret source values as level-1 cells directly. This does not
+  // create any additional levels of the maximum-mipmap other than the required
+  // first one.
   [[nodiscard]] static LoadedTile
   load_tif(const std::filesystem::path &path, bool supports_level_0_collisions);
+
+  /// Fill the mipmap with every coarser maximum level, if not already present.
+  void compute_mipmap();
 };
 
 } // namespace panorama
