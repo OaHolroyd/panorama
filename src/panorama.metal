@@ -181,21 +181,8 @@ inline float offset_jump(int index, int direction, uint level, uint scale, float
   return (parity % 2) * scale * dt;
 }
 
-/// Return the first flat-buffer element for a one-indexed mipmap level.
-inline uint mipmap_level_offset(uint cell_count, uint level) {
-  uint offset = 0;
-  uint side = cell_count;
-  for (uint current_level = 1; current_level < level; ++current_level) {
-    offset += side * side;
-    side /= 2U;
-  }
-  return offset;
-}
-
 /// Return the row-major side length of a one-indexed mipmap level.
-inline uint mipmap_level_side(uint cell_count, uint level) {
-  return cell_count >> (level - 1U);
-}
+inline uint mipmap_level_side(uint cell_count, uint level) { return cell_count >> (level - 1U); }
 
 /// Move a periodic DDA boundary to the first occurrence strictly after the
 /// current segment entry. Refinement can begin part-way through a child cell,
@@ -282,9 +269,9 @@ kernel void trace_single_tile(
     if (dz > 0.0F) {
       // Since an upward ray will be higher at the exit boundary, rewind to find the minimum height
       // as the ray crosses the cell.
-      z = previous_axis == -1 ? ray_origin.z + t_start * dz
-                              : ray_origin.z +
-                                    (t_exit - scale * (previous_axis == 0 ? dty : dtx)) * dz;
+      z = previous_axis == -1
+              ? ray_origin.z + t_start * dz
+              : ray_origin.z + (t_exit - scale * (previous_axis == 0 ? dty : dtx)) * dz;
     }
 
     bool refined = false;
@@ -335,10 +322,8 @@ kernel void trace_single_tile(
         // boundary ownership only; `cell_entry` remains the exact geometry.
         float cell_x = ray_origin.x + cell_entry * direction.x;
         float cell_y = ray_origin.y + cell_entry * direction.y;
-        const float cell_nudge = max(
-            1e-3F * delta,
-            8.0F * FLT_EPSILON * max(1.0F, max(fabs(cell_x), fabs(cell_y)))
-        );
+        const float cell_nudge =
+            max(1e-3F * delta, 8.0F * FLT_EPSILON * max(1.0F, max(fabs(cell_x), fabs(cell_y))));
         if (stepx != 0) {
           cell_x += copysign(cell_nudge, direction.x);
         }
@@ -357,7 +342,10 @@ kernel void trace_single_tile(
         scale /= 2U;
         i = (i / int(scale)) * int(scale);
         j = (j / int(scale)) * int(scale);
-        offset = mipmap_level_offset(params.num_cell, level);
+        // The preceding level occupies `child_side` squared entries directly
+        // before this one, so move backward without rebuilding the offset.
+        const uint child_side = mipmap_level_side(params.num_cell, level);
+        offset -= child_side * child_side;
         ty = stepy == 0 ? INFINITY
                         : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
         tx = stepx == 0 ? INFINITY
@@ -386,18 +374,21 @@ kernel void trace_single_tile(
           // Crossing a Y boundary joins two vertically adjacent blocks. The
           // X timer must therefore be adjusted from the X cell's sibling.
           tx += offset_jump(j, stepx, level, scale, dtx);
+          // The current level immediately precedes the coarser level in the
+          // flat buffer, so advance by its square element count.
+          offset += level_side * level_side;
           level += 1;
           scale *= 2;
-          offset = mipmap_level_offset(params.num_cell, level);
         }
       } else {
         if (at_level_boundary(j, stepx, level)) {
           // Crossing an X boundary joins two horizontally adjacent blocks.
           // Adjust the Y timer from the Y cell's sibling before coarsening.
           ty += offset_jump(i, stepy, level, scale, dty);
+          // The level transition is identical regardless of the stepped axis.
+          offset += level_side * level_side;
           level += 1;
           scale *= 2;
-          offset = mipmap_level_offset(params.num_cell, level);
         }
       }
     }
