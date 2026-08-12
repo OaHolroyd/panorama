@@ -194,9 +194,8 @@ inline float next_boundary_after(float boundary, float entry_distance, float int
   return boundary;
 }
 
-/// Trace one independent polar ray through one level-0 terrain tile. Level-1
-/// cell maxima reject empty cells before the bounded bilinear solve reads the
-/// original vertex elevations.
+/// Trace one independent polar ray through one level-0 terrain tile. Uses a
+/// maximum-mipmap to step through cells faster.
 kernel void trace_single_tile(
     device const float *mipmap [[buffer(0)]],
     device const float *vertices [[buffer(1)]],
@@ -207,21 +206,24 @@ kernel void trace_single_tile(
     device float *elevations [[buffer(6)]],
     uint2 ray_index [[thread_position_in_grid]]
 ) {
-  // Bounds check and convert to flat indexing.
-  if (ray_index.x >= params.num_azimuth || ray_index.y >= params.num_polar) {
+  // Map neighboring threads to rays with the same azimuthal index and therefore the same grid
+  // traversal path.
+  const uint polar_index = ray_index.x;
+  const uint azimuth_index = ray_index.y;
+  if (polar_index >= params.num_polar || azimuth_index >= params.num_azimuth) {
     return;
   }
-  const uint output_index = ray_index.y * params.num_azimuth + ray_index.x;
+  const uint output_index = polar_index * params.num_azimuth + azimuth_index;
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
-  const float2 direction = azimuth_directions[ray_index.x];
+  const float2 direction = azimuth_directions[azimuth_index];
   const int stepx = int(direction.x > 0.0F) - int(direction.x < 0.0F);
   const int stepy = int(direction.y > 0.0F) - int(direction.y < 0.0F);
   const float delta = params.cell_size;
   const float dtx = stepx == 0 ? INFINITY : fabs(delta / direction.x);
   const float dty = stepy == 0 ? INFINITY : fabs(delta / direction.y);
-  const float dz = polar_slopes[ray_index.y];
+  const float dz = polar_slopes[polar_index];
   const float3 ray_origin = {0.0F, 0.0F, params.observer_elevation};
   const float3 ray_direction = {direction.x, direction.y, dz};
   const int n = int(params.num_cell);

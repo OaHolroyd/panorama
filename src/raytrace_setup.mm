@@ -271,8 +271,9 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
     if (queue == nil || command == nil || encoder == nil) {
       throw std::runtime_error("Could not create a Metal raytrace command");
     }
-    // Each 16×16 group has 256 threads, safely below every Apple GPU's
-    // per-threadgroup limit. The grid still has one thread per output ray.
+    // Physical X is polar and physical Y is azimuth. A 32-wide X row places
+    // adjacent SIMD lanes on one horizontal DDA path with different slopes.
+    // The output buffer still uses its ordinary (polar, azimuth) layout.
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:heights offset:0 atIndex:0];
     [encoder setBuffer:vertices offset:0 atIndex:1];
@@ -281,8 +282,8 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
     [encoder setBytes:&parameters length:sizeof(parameters) atIndex:4];
     [encoder setBuffer:distances offset:0 atIndex:5];
     [encoder setBuffer:elevations offset:0 atIndex:6];
-    [encoder dispatchThreads:MTLSizeMake(config.num_azimuth, config.num_polar, 1)
-        threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [encoder dispatchThreads:MTLSizeMake(config.num_polar, config.num_azimuth, 1)
+        threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
 
     [encoder endEncoding];
 
