@@ -197,6 +197,16 @@ inline uint mipmap_level_side(uint cell_count, uint level) {
   return cell_count >> (level - 1U);
 }
 
+/// Move a periodic DDA boundary to the first occurrence strictly after the
+/// current segment entry. Refinement can begin part-way through a child cell,
+/// so its nominal aligned boundary may already be behind `entry_distance`.
+inline float next_boundary_after(float boundary, float entry_distance, float interval) {
+  if (boundary <= entry_distance) {
+    boundary += (floor((entry_distance - boundary) / interval) + 1.0F) * interval;
+  }
+  return boundary;
+}
+
 /// Trace one independent polar ray through one level-0 terrain tile. Level-1
 /// cell maxima reject empty cells before the bounded bilinear solve reads the
 /// original vertex elevations.
@@ -273,7 +283,8 @@ kernel void trace_single_tile(
       // Since an upward ray will be higher at the exit boundary, rewind to find the minimum height
       // as the ray crosses the cell.
       z = previous_axis == -1 ? ray_origin.z + t_start * dz
-                              : ray_origin.z + (t_exit - (previous_axis == 0 ? dty : dtx)) * dz;
+                              : ray_origin.z +
+                                    (t_exit - scale * (previous_axis == 0 ? dty : dtx)) * dz;
     }
 
     bool refined = false;
@@ -337,16 +348,29 @@ kernel void trace_single_tile(
         i = clamp(int(floor((cell_y - params.tile_y_min) / delta)), 0, n - 1);
         j = clamp(int(floor((cell_x - params.tile_x_min) / delta)), 0, n - 1);
 
-        // Fine indices remain in level-1 coordinates. Only the flat buffer
-        // offset and DDA scale change as we return to the child level.
+        // Fine indices remain in level-1 coordinates. Returning to a child
+        // level requires their lower-left child-cell alignment before the
+        // DDA timers are rebuilt; retaining an arbitrary fine index would
+        // make a scale-sized timer skip an internal child boundary.
         t_start = cell_entry;
         level -= 1U;
         scale /= 2U;
+        i = (i / int(scale)) * int(scale);
+        j = (j / int(scale)) * int(scale);
         offset = mipmap_level_offset(params.num_cell, level);
         ty = stepy == 0 ? INFINITY
                         : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
         tx = stepx == 0 ? INFINITY
                         : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+        // An entry through only one edge of a coarse cell may leave the
+        // other axis part-way across the selected child. Advance its timer
+        // rather than allowing a stale aligned boundary to move backward.
+        if (stepy != 0) {
+          ty = next_boundary_after(ty, t_start, scale * dty);
+        }
+        if (stepx != 0) {
+          tx = next_boundary_after(tx, t_start, scale * dtx);
+        }
         // The child begins a fresh DDA segment, so an upward ray's near-edge
         // test must use `t_start` rather than a preceding X or Y step.
         previous_axis = -1;
@@ -359,14 +383,18 @@ kernel void trace_single_tile(
     if (!refined && level < params.num_levels) {
       if (ty < tx) {
         if (at_level_boundary(i, stepy, level)) {
-          tx += offset_jump(i, stepx, level, scale, dtx);
+          // Crossing a Y boundary joins two vertically adjacent blocks. The
+          // X timer must therefore be adjusted from the X cell's sibling.
+          tx += offset_jump(j, stepx, level, scale, dtx);
           level += 1;
           scale *= 2;
           offset = mipmap_level_offset(params.num_cell, level);
         }
       } else {
         if (at_level_boundary(j, stepx, level)) {
-          ty += offset_jump(j, stepy, level, scale, dty);
+          // Crossing an X boundary joins two horizontally adjacent blocks.
+          // Adjust the Y timer from the Y cell's sibling before coarsening.
+          ty += offset_jump(i, stepy, level, scale, dty);
           level += 1;
           scale *= 2;
           offset = mipmap_level_offset(params.num_cell, level);

@@ -260,7 +260,6 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
         checked_buffer_length(num_ray, sizeof(float), "elevation output"),
         "elevation output"
     );
-
     // Overwrite with zeros
     clear_buffer(distances, "distance output");
     clear_buffer(elevations, "elevation output");
@@ -272,9 +271,9 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
     if (queue == nil || command == nil || encoder == nil) {
       throw std::runtime_error("Could not create a Metal raytrace command");
     }
+    // Each 16×16 group has 256 threads, safely below every Apple GPU's
+    // per-threadgroup limit. The grid still has one thread per output ray.
     [encoder setComputePipelineState:pipeline];
-
-    // Set the buffers
     [encoder setBuffer:heights offset:0 atIndex:0];
     [encoder setBuffer:vertices offset:0 atIndex:1];
     [encoder setBuffer:azimuths offset:0 atIndex:2];
@@ -282,10 +281,6 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
     [encoder setBytes:&parameters length:sizeof(parameters) atIndex:4];
     [encoder setBuffer:distances offset:0 atIndex:5];
     [encoder setBuffer:elevations offset:0 atIndex:6];
-
-    // Each 16×16 group has 256 threads, safely below every Apple GPU's
-    // supported per-threadgroup limit. The grid still contains exactly one
-    // thread for each (azimuth, polar) output ray.
     [encoder dispatchThreads:MTLSizeMake(config.num_azimuth, config.num_polar, 1)
         threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
 
