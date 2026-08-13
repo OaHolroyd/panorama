@@ -25,6 +25,8 @@ struct RaytraceConfig {
   float max_distance;
   /// Maximum number of available tiles submitted to Metal; zero means no limit.
   uint32_t max_tile_count;
+  /// Total byte budget for the resident GPU terrain-tile cache.
+  uint64_t tile_cache_size_bytes;
 };
 
 /// Trace the fixed angular field through available level-0 terrain tiles.

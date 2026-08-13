@@ -29,6 +29,30 @@ struct TileRayInput {
   uint unused;
 };
 
+/// One immutable stage-2 tile-atlas slot mirrored by `ResidentTile` on the
+/// host.  Its terrain arrays are addressed by its index and the common per
+/// tile sample counts supplied to the frontier kernels.
+struct ResidentTile {
+  RaytraceParameters parameters;
+  uint generation;
+  uint unused_0;
+  uint unused_1;
+  uint unused_2;
+};
+
+/// One unresolved azimuth-column segment in the GPU-owned work frontier.
+/// This must remain identical to `TileWorkItem` in raytrace_setup.mm.
+struct TileWorkItem {
+  uint slot;
+  uint azimuth;
+  uint first_polar;
+  uint start_level;
+  float entry_distance;
+  uint unused_0;
+  uint unused_1;
+  uint unused_2;
+};
+
 /// Per-ray result values mirrored by RayStatus in raytrace_setup.mm.
 enum RayStatus : uint {
   RayStatusInactive = 0U,
@@ -214,18 +238,24 @@ inline float next_boundary_after(float boundary, float entry_distance, float int
 }
 
 /// Return the first tile boundary strictly after a segment's exact entry.
-inline float
-tile_exit_distance(constant RaytraceParameters &params, float2 direction, float entry_distance) {
+inline float tile_exit_distance(
+    float tile_x_min,
+    float tile_y_min,
+    float cell_size,
+    uint cell_count,
+    float2 direction,
+    float entry_distance
+) {
   float tile_exit = INFINITY;
-  const float x_max = params.tile_x_min + float(params.num_cell) * params.cell_size;
-  const float y_max = params.tile_y_min + float(params.num_cell) * params.cell_size;
+  const float x_max = tile_x_min + float(cell_count) * cell_size;
+  const float y_max = tile_y_min + float(cell_count) * cell_size;
   if (direction.x > 0.0F) {
     const float candidate = x_max / direction.x;
     if (candidate > entry_distance) {
       tile_exit = min(tile_exit, candidate);
     }
   } else if (direction.x < 0.0F) {
-    const float candidate = params.tile_x_min / direction.x;
+    const float candidate = tile_x_min / direction.x;
     if (candidate > entry_distance) {
       tile_exit = min(tile_exit, candidate);
     }
@@ -236,7 +266,7 @@ tile_exit_distance(constant RaytraceParameters &params, float2 direction, float 
       tile_exit = min(tile_exit, candidate);
     }
   } else if (direction.y < 0.0F) {
-    const float candidate = params.tile_y_min / direction.y;
+    const float candidate = tile_y_min / direction.y;
     if (candidate > entry_distance) {
       tile_exit = min(tile_exit, candidate);
     }
@@ -244,35 +274,48 @@ tile_exit_distance(constant RaytraceParameters &params, float2 direction, float 
   return tile_exit;
 }
 
-/// Trace one independent polar ray through one CPU-scheduled terrain segment.
-/// The maximum-mipmap rejects empty terrain cells before exact level-0 checks.
-kernel void trace_tile_segment(
-    device const float *mipmap [[buffer(0)]],
-    device const float *vertices [[buffer(1)]],
+/// Trace one independent polar ray through one GPU-frontier terrain segment.
+///
+/// Each work item is one azimuth column.  Its polar rays run in parallel and
+/// atomically record the first unresolved polar index when they leave the
+/// tile.  A later kernel turns that suffix into the next frontier item.
+kernel void trace_tile_frontier(
+    device const float *mipmap_atlas [[buffer(0)]],
+    device const float *vertex_atlas [[buffer(1)]],
     device const float2 *azimuth_directions [[buffer(2)]],
     device const float *polar_slopes [[buffer(3)]],
-    device const TileRayInput *tile_inputs [[buffer(4)]],
-    constant RaytraceParameters &params [[buffer(5)]],
-    device float *distances [[buffer(6)]],
-    device float *elevations [[buffer(7)]],
-    device uint *statuses [[buffer(8)]],
+    device const TileWorkItem *work_items [[buffer(4)]],
+    device const ResidentTile *tiles [[buffer(5)]],
+    constant uint &mipmap_value_count [[buffer(6)]],
+    device float *distances [[buffer(7)]],
+    device float *elevations [[buffer(8)]],
+    device atomic_uint *first_unresolved [[buffer(9)]],
     uint2 ray_index [[thread_position_in_grid]]
 ) {
-  // Map neighboring threads to rays with the same azimuthal index and therefore the same grid
-  // traversal path.
+  // Neighboring lanes differ in polar index and share the DDA path represented
+  // by one azimuth-column work item.
   const uint polar_index = ray_index.x;
-  const uint azimuth_index = ray_index.y;
-  if (polar_index >= params.num_polar || azimuth_index >= params.num_azimuth) {
+  const uint work_index = ray_index.y;
+  const TileWorkItem input = work_items[work_index];
+  const ResidentTile resident_tile = tiles[input.slot];
+  const RaytraceParameters params = resident_tile.parameters;
+  if (polar_index >= params.num_polar || input.azimuth >= params.num_azimuth) {
     return;
   }
+  const uint azimuth_index = input.azimuth;
   const uint output_index = polar_index * params.num_azimuth + azimuth_index;
 
   // Rays in a given column that have already intersected (and are therefore below the first index
   // that needs tracing because of the 2.5D nature of the heightfield).
-  const TileRayInput input = tile_inputs[azimuth_index];
   if (polar_index < input.first_polar) {
     return;
   }
+
+  // All resident slots share dimensions, so their fixed atlas strides can be
+  // derived from this tile's metadata.
+  const uint vertex_value_count = (params.num_cell + 1U) * (params.num_cell + 1U);
+  device const float *mipmap = mipmap_atlas + input.slot * mipmap_value_count;
+  device const float *vertices = vertex_atlas + input.slot * vertex_value_count;
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
@@ -336,7 +379,14 @@ kernel void trace_tile_segment(
 
   int previous_axis = -1; // remember which axis we last moved in
   const uint vertex_count = params.num_cell + 1U;
-  const float tile_exit = tile_exit_distance(params, direction, t_start);
+  const float tile_exit = tile_exit_distance(
+      params.tile_x_min,
+      params.tile_y_min,
+      params.cell_size,
+      params.num_cell,
+      direction,
+      t_start
+  );
   const float segment_limit = min(tile_exit, params.max_distance);
 
   // Step the ray across the mipmap cell-by-cell until we go off the edge or find an internal
@@ -392,7 +442,6 @@ kernel void trace_tile_segment(
         if (collision.hit) {
           distances[output_index] = collision.distance;
           elevations[output_index] = ray_origin.z + collision.distance * dz;
-          statuses[output_index] = RayStatusHit;
           return;
         }
       } else {
@@ -460,8 +509,11 @@ kernel void trace_tile_segment(
     // The ray reached either the far edge of this tile or the configured
     // global range. Report the distinction explicitly to the CPU scheduler.
     if (t_exit >= segment_limit) {
-      statuses[output_index] =
-          tile_exit <= params.max_distance ? RayStatusContinue : RayStatusMaxDistance;
+      if (tile_exit <= params.max_distance) {
+        atomic_fetch_min_explicit(
+            &first_unresolved[work_index], polar_index, memory_order_relaxed
+        );
+      }
       return;
     }
 
@@ -506,6 +558,94 @@ kernel void trace_tile_segment(
   }
   // The DDA normally returns through the segment-limit check above. Retain a
   // defensive continuation for an unexpected fine-cell exit discrepancy.
-  statuses[output_index] =
-      tile_exit <= params.max_distance ? RayStatusContinue : RayStatusMaxDistance;
+  if (tile_exit <= params.max_distance) {
+    atomic_fetch_min_explicit(&first_unresolved[work_index], polar_index, memory_order_relaxed);
+  }
+}
+
+/// Turn each column's atomic unresolved-polar result into its successor work
+/// item.  The all-resident first stage uses a short linear slot lookup; later
+/// cache work can replace that lookup with a compact grid index without
+/// changing the exact hand-off distance.
+kernel void emit_tile_frontier(
+    device const TileWorkItem *active_items [[buffer(0)]],
+    device const ResidentTile *tiles [[buffer(1)]],
+    device const float2 *azimuth_directions [[buffer(2)]],
+    device const atomic_uint *first_unresolved [[buffer(3)]],
+    constant uint &tile_count [[buffer(4)]],
+    constant uint &next_capacity [[buffer(5)]],
+    device TileWorkItem *next_items [[buffer(6)]],
+    device atomic_uint *next_count [[buffer(7)]],
+    uint work_index [[thread_position_in_grid]]
+) {
+  const TileWorkItem active = active_items[work_index];
+  const ResidentTile current_tile = tiles[active.slot];
+  const RaytraceParameters params = current_tile.parameters;
+  const uint first_polar = atomic_load_explicit(
+      &first_unresolved[work_index], memory_order_relaxed
+  );
+  if (first_polar >= params.num_polar) {
+    return;
+  }
+
+  const float2 direction = azimuth_directions[active.azimuth];
+  const float entry_distance = tile_exit_distance(
+      params.tile_x_min,
+      params.tile_y_min,
+      params.cell_size,
+      params.num_cell,
+      direction,
+      active.entry_distance
+  );
+  if (entry_distance >= params.max_distance) {
+    return;
+  }
+
+  // The outward nudge selects the neighbour at an edge/corner, while the
+  // original exit distance remains the geometric start of its segment.
+  float x = entry_distance * direction.x;
+  float y = entry_distance * direction.y;
+  const float nudge = max(
+      1e-3F * params.cell_size,
+      8.0F * FLT_EPSILON * max(1.0F, max(fabs(x), fabs(y)))
+  );
+  if (direction.x != 0.0F) {
+    x += copysign(nudge, direction.x);
+  }
+  if (direction.y != 0.0F) {
+    y += copysign(nudge, direction.y);
+  }
+
+  uint successor_slot = tile_count;
+  for (uint slot = 0U; slot < tile_count; ++slot) {
+    const RaytraceParameters candidate = tiles[slot].parameters;
+    const float x_max = candidate.tile_x_min + float(candidate.num_cell) * candidate.cell_size;
+    const float y_max = candidate.tile_y_min + float(candidate.num_cell) * candidate.cell_size;
+    if (x >= candidate.tile_x_min && x < x_max && y >= candidate.tile_y_min && y < y_max) {
+      successor_slot = slot;
+      break;
+    }
+  }
+  // No prepared/resident successor is open sky in this all-resident stage.
+  if (successor_slot == tile_count) {
+    return;
+  }
+
+  const uint output_index = atomic_fetch_add_explicit(next_count, 1U, memory_order_relaxed);
+  if (output_index >= next_capacity) {
+    // The host deliberately allocates enough space for every slot/azimuth
+    // combination; dropping an unexpected excess is safer than corrupting
+    // the adjacent buffer and is detected by the host count check.
+    return;
+  }
+  next_items[output_index] = {
+      successor_slot,
+      active.azimuth,
+      first_polar,
+      tiles[successor_slot].parameters.num_levels,
+      entry_distance,
+      0U,
+      0U,
+      0U,
+  };
 }

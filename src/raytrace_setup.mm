@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -71,6 +72,38 @@ struct TileRayInput {
 };
 
 static_assert(sizeof(TileRayInput) == 4U * sizeof(uint32_t));
+
+/// One immutable tile entry in the stage-2 resident atlas.
+///
+/// The slot's terrain samples live at `slot * per_tile_*_count` in the two
+/// atlas buffers.  This structure contains the per-tile geometry needed to
+/// interpret those samples and is mirrored by `ResidentTile` in Metal.
+struct ResidentTile {
+  RaytraceParameters parameters;
+  uint32_t generation;
+  uint32_t unused_0;
+  uint32_t unused_1;
+  uint32_t unused_2;
+};
+
+static_assert(sizeof(ResidentTile) == 13U * sizeof(uint32_t));
+
+/// One unresolved azimuth-column segment in the stage-2 GPU frontier.
+///
+/// It is mirrored by `TileWorkItem` in Metal.  `entry_distance` is exact;
+/// only the GPU's cell/tile classification positions are nudged.
+struct TileWorkItem {
+  uint32_t slot;
+  uint32_t azimuth;
+  uint32_t first_polar;
+  uint32_t start_level;
+  float entry_distance;
+  uint32_t unused_0;
+  uint32_t unused_1;
+  uint32_t unused_2;
+};
+
+static_assert(sizeof(TileWorkItem) == 8U * sizeof(uint32_t));
 
 /// Terminal result written by Metal for one independent polar ray.
 ///
@@ -199,6 +232,9 @@ void print_error(NSString *context, NSError *error) {
 void validate_configuration(const RaytraceConfig &config) {
   if (config.num_azimuth == 0U || config.num_polar == 0U) {
     throw std::invalid_argument("Ray counts must both be positive");
+  }
+  if (config.tile_cache_size_bytes == 0U) {
+    throw std::invalid_argument("Tile-cache byte budget must be positive");
   }
   if (!std::isfinite(config.observer.easting) || !std::isfinite(config.observer.northing) ||
       !std::isfinite(config.observer.elevation) || !std::isfinite(config.azimuth_start) ||
@@ -476,9 +512,76 @@ view_float_buffer(id<MTLBuffer> buffer, size_t num_value, const char *name) {
   return tile_exit;
 }
 
+/// Return the shortest horizontal distance from the observer to a tile square.
+[[nodiscard]] double tile_minimum_distance(
+    const TileGrid &grid,
+    TileKey key,
+    const ObserverLocation &observer
+) {
+  const double x_min = grid.origin_x + static_cast<double>(key.column) * grid.width;
+  const double y_max = grid.origin_y - static_cast<double>(key.row) * grid.width;
+  const double x_max = x_min + grid.width;
+  const double y_min = y_max - grid.width;
+  const double dx = observer.easting < x_min ? x_min - observer.easting
+                    : observer.easting > x_max ? observer.easting - x_max
+                                               : 0.0;
+  const double dy = observer.northing < y_min ? y_min - observer.northing
+                    : observer.northing > y_max ? observer.northing - y_max
+                                                : 0.0;
+  return std::hypot(dx, dy);
+}
+
+/// Return every prepared tile which can be reached before the trace range.
+///
+/// The initial stage-2 implementation deliberately preloads this conservative
+/// set.  A later asynchronous cache will replace directory scanning with tile
+/// requests and a bounded resident subset.
+[[nodiscard]] std::vector<std::pair<TileKey, std::filesystem::path>>
+find_resident_tiles(
+    const TileNameTemplate &name_template,
+    TileKey origin_key,
+    const TileGrid &grid,
+    const RaytraceConfig &config
+) {
+  std::vector<std::pair<TileKey, std::filesystem::path>> tiles;
+  for (const std::filesystem::directory_entry &entry :
+       std::filesystem::directory_iterator(name_template.directory)) {
+    if (!entry.is_regular_file() || entry.path().extension() != ".tif") {
+      continue;
+    }
+    TileKey key;
+    try {
+      key = parse_tile_name(entry.path()).first;
+    } catch (const std::invalid_argument &) {
+      // The prepared-tile directory can contain unrelated GeoTIFFs.
+      continue;
+    }
+    if (key == origin_key || tile_minimum_distance(grid, key, config.observer) <= config.max_distance) {
+      tiles.emplace_back(key, entry.path());
+    }
+  }
+  std::sort(tiles.begin(), tiles.end(), [origin_key](const auto &left, const auto &right) {
+    const uint64_t left_shell =
+        static_cast<uint64_t>(std::llabs(left.first.row - origin_key.row)) +
+        static_cast<uint64_t>(std::llabs(left.first.column - origin_key.column));
+    const uint64_t right_shell =
+        static_cast<uint64_t>(std::llabs(right.first.row - origin_key.row)) +
+        static_cast<uint64_t>(std::llabs(right.first.column - origin_key.column));
+    if (left_shell != right_shell) {
+      return left_shell < right_shell;
+    }
+    return left.first < right.first;
+  });
+  if (tiles.empty() || !(tiles.front().first == origin_key)) {
+    throw std::runtime_error("Could not find the observer tile in its prepared-tile directory");
+  }
+  return tiles;
+}
+
 } // namespace
 
-void perform_multi_tile_raytrace(const RaytraceConfig &config) {
+/// Run the retained synchronous scheduler used as the stage-1 reference.
+void perform_stage_1_multi_tile_raytrace(const RaytraceConfig &config) {
   validate_configuration(config);
   if (config.tile_path.empty()) {
     throw std::invalid_argument("Raytrace tile path must not be empty");
@@ -816,6 +919,148 @@ void perform_multi_tile_raytrace(const RaytraceConfig &config) {
     const std::chrono::duration<double, std::milli> image_duration =
         std::chrono::steady_clock::now() - image_start;
     std::printf("  PNG generation : %8.3f ms\n", image_duration.count());
+  }
+}
+
+/// Trace an all-resident, GPU-scheduled tile frontier.
+///
+/// This is stage 2's correctness implementation: it preloads the finite
+/// scene, then only the GPU creates continuation work items.  Cache misses,
+/// eviction, and asynchronous loading deliberately remain a later extension.
+void perform_multi_tile_raytrace(const RaytraceConfig &config) {
+  validate_configuration(config);
+  const auto started = std::chrono::steady_clock::now();
+  std::chrono::duration<double, std::milli> tile_prep = std::chrono::duration<double, std::milli>::zero();
+
+  const auto origin_started = std::chrono::steady_clock::now();
+  LoadedTile origin = LoadedTile::load_tif(config.tile_path, true);
+  origin.compute_mipmap();
+  tile_prep += std::chrono::steady_clock::now() - origin_started;
+  const auto [origin_key, names] = parse_tile_name(config.tile_path);
+  const TileGrid grid = make_tile_grid(origin, origin_key);
+  validate_tile_position(origin, origin_key, grid);
+  std::vector<std::pair<TileKey, std::filesystem::path>> paths =
+      find_resident_tiles(names, origin_key, grid, config);
+  if (config.max_tile_count != 0U && paths.size() > config.max_tile_count) {
+    paths.resize(config.max_tile_count);
+  }
+
+  const size_t mip_count = origin.mipmap.size();
+  const size_t vertex_count = origin.vertices->size();
+  const size_t tile_bytes = checked_buffer_length(mip_count + vertex_count, sizeof(float), "terrain tile");
+  const uint64_t slot_capacity = config.tile_cache_size_bytes / tile_bytes;
+  if (slot_capacity == 0U || paths.size() > slot_capacity) {
+    throw std::runtime_error("Tile-cache byte budget cannot hold the all-resident stage-2 scene");
+  }
+  const uint32_t tile_count = static_cast<uint32_t>(paths.size());
+  const size_t work_capacity = static_cast<size_t>(tile_count) * config.num_azimuth;
+  if (work_capacity > std::numeric_limits<uint32_t>::max()) {
+    throw std::overflow_error("GPU frontier has too many work items");
+  }
+
+  const std::vector<HorizontalDirection> directions = make_azimuth_directions(config);
+  const std::vector<float> slopes = make_polar_slopes(config);
+  const size_t ray_count = static_cast<size_t>(config.num_azimuth) * config.num_polar;
+
+  @autoreleasepool {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil) throw std::runtime_error("No Metal device is available");
+    NSError *error = nil;
+    NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:kMetallibPath]];
+    id<MTLLibrary> library = [device newLibraryWithURL:url error:&error];
+    if (library == nil) { print_error(@"Could not load the Metal library", error); throw std::runtime_error("Could not load Metal library"); }
+    id<MTLFunction> trace = [library newFunctionWithName:@"trace_tile_frontier"];
+    id<MTLFunction> emit = [library newFunctionWithName:@"emit_tile_frontier"];
+    if (trace == nil || emit == nil) throw std::runtime_error("Stage-2 Metal kernels are missing");
+    id<MTLComputePipelineState> trace_pipeline = [device newComputePipelineStateWithFunction:trace error:&error];
+    if (trace_pipeline == nil) { print_error(@"Could not create trace pipeline", error); throw std::runtime_error("Could not create trace pipeline"); }
+    id<MTLComputePipelineState> emit_pipeline = [device newComputePipelineStateWithFunction:emit error:&error];
+    if (emit_pipeline == nil) { print_error(@"Could not create continuation pipeline", error); throw std::runtime_error("Could not create continuation pipeline"); }
+
+    id<MTLBuffer> mip_atlas = make_buffer(device, nullptr, checked_buffer_length(tile_count * mip_count, sizeof(float), "mipmap atlas"), "mipmap atlas");
+    id<MTLBuffer> vertex_atlas = make_buffer(device, nullptr, checked_buffer_length(tile_count * vertex_count, sizeof(float), "vertex atlas"), "vertex atlas");
+    auto *mips = static_cast<float *>(mip_atlas.contents);
+    auto *vertices = static_cast<float *>(vertex_atlas.contents);
+    if (mips == nullptr || vertices == nullptr) throw std::runtime_error("Could not map terrain atlas");
+    std::vector<ResidentTile> metadata(tile_count);
+    for (uint32_t slot = 0U; slot < tile_count; ++slot) {
+      const auto &[key, path] = paths[slot];
+      const auto loaded = std::chrono::steady_clock::now();
+      std::unique_ptr<LoadedTile> loaded_neighbour;
+      const LoadedTile *neighbour = &origin;
+      if (slot != 0U) {
+        loaded_neighbour = std::make_unique<LoadedTile>(LoadedTile::load_tif(path, true));
+        loaded_neighbour->compute_mipmap();
+        neighbour = loaded_neighbour.get();
+      }
+      tile_prep += std::chrono::steady_clock::now() - loaded;
+      validate_tile_compatibility(*neighbour, origin);
+      validate_tile_position(*neighbour, key, grid);
+      if (neighbour->mipmap.size() != mip_count || neighbour->vertices->size() != vertex_count) {
+        throw std::runtime_error("Resident tile does not match the atlas dimensions");
+      }
+      std::memcpy(mips + static_cast<size_t>(slot) * mip_count, neighbour->mipmap.data(), mip_count * sizeof(float));
+      std::memcpy(vertices + static_cast<size_t>(slot) * vertex_count, neighbour->vertices->data(), vertex_count * sizeof(float));
+      metadata[slot] = {make_raytrace_parameters(*neighbour, config), 1U, 0U, 0U, 0U};
+    }
+    id<MTLBuffer> tile_buffer = make_buffer(device, metadata.data(), checked_buffer_length(tile_count, sizeof(ResidentTile), "tile metadata"), "tile metadata");
+    id<MTLBuffer> azimuth_buffer = make_buffer(device, directions.data(), checked_buffer_length(directions.size(), sizeof(HorizontalDirection), "azimuth directions"), "azimuth directions");
+    id<MTLBuffer> slope_buffer = make_buffer(device, slopes.data(), checked_buffer_length(slopes.size(), sizeof(float), "polar slopes"), "polar slopes");
+    id<MTLBuffer> distances = make_buffer(device, nullptr, checked_buffer_length(ray_count, sizeof(float), "distance output"), "distance output");
+    id<MTLBuffer> elevations = make_buffer(device, nullptr, checked_buffer_length(ray_count, sizeof(float), "elevation output"), "elevation output");
+    clear_buffer(distances, "distance output"); clear_buffer(elevations, "elevation output");
+    id<MTLBuffer> work_a = make_buffer(device, nullptr, checked_buffer_length(work_capacity, sizeof(TileWorkItem), "active frontier"), "active frontier");
+    id<MTLBuffer> work_b = make_buffer(device, nullptr, checked_buffer_length(work_capacity, sizeof(TileWorkItem), "next frontier"), "next frontier");
+    id<MTLBuffer> unresolved = make_buffer(device, nullptr, checked_buffer_length(work_capacity, sizeof(uint32_t), "unresolved polar indices"), "unresolved polar indices");
+    id<MTLBuffer> next_count = make_buffer(device, nullptr, sizeof(uint32_t), "next frontier count");
+    auto *initial = static_cast<TileWorkItem *>(work_a.contents);
+    for (uint32_t azimuth = 0U; azimuth < config.num_azimuth; ++azimuth) initial[azimuth] = {0U, azimuth, 0U, 1U, 0.0F, 0U, 0U, 0U};
+
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    if (queue == nil) throw std::runtime_error("Could not create Metal command queue");
+    const bool capture = start_capture_if_requested(queue);
+    double gpu_ms = 0.0;
+    uint32_t active_count = config.num_azimuth;
+    id<MTLBuffer> active = work_a, next = work_b;
+    try {
+      while (active_count != 0U) {
+        auto *first = static_cast<uint32_t *>(unresolved.contents);
+        auto *count = static_cast<uint32_t *>(next_count.contents);
+        if (first == nullptr || count == nullptr) throw std::runtime_error("Could not map GPU frontier counters");
+        std::fill_n(first, active_count, config.num_polar); *count = 0U;
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        command.label = @"stage-2 GPU tile frontier"; encoder.label = @"trace_tile_frontier";
+        [encoder setComputePipelineState:trace_pipeline];
+        [encoder setBuffer:mip_atlas offset:0 atIndex:0]; [encoder setBuffer:vertex_atlas offset:0 atIndex:1];
+        [encoder setBuffer:azimuth_buffer offset:0 atIndex:2]; [encoder setBuffer:slope_buffer offset:0 atIndex:3];
+        [encoder setBuffer:active offset:0 atIndex:4]; [encoder setBuffer:tile_buffer offset:0 atIndex:5];
+        const uint32_t mip_count_u32 = static_cast<uint32_t>(mip_count);
+        [encoder setBytes:&mip_count_u32 length:sizeof(mip_count_u32) atIndex:6];
+        [encoder setBuffer:distances offset:0 atIndex:7]; [encoder setBuffer:elevations offset:0 atIndex:8]; [encoder setBuffer:unresolved offset:0 atIndex:9];
+        [encoder dispatchThreads:MTLSizeMake(config.num_polar, active_count, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)]; [encoder endEncoding];
+        encoder = [command computeCommandEncoder]; encoder.label = @"emit_tile_frontier";
+        [encoder setComputePipelineState:emit_pipeline]; [encoder setBuffer:active offset:0 atIndex:0]; [encoder setBuffer:tile_buffer offset:0 atIndex:1];
+        [encoder setBuffer:azimuth_buffer offset:0 atIndex:2]; [encoder setBuffer:unresolved offset:0 atIndex:3];
+        [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:4]; const uint32_t capacity = static_cast<uint32_t>(work_capacity);
+        [encoder setBytes:&capacity length:sizeof(capacity) atIndex:5]; [encoder setBuffer:next offset:0 atIndex:6]; [encoder setBuffer:next_count offset:0 atIndex:7];
+        [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [encoder endEncoding];
+        [command commit]; [command waitUntilCompleted];
+        if (command.status == MTLCommandBufferStatusError) { print_error(@"Stage-2 Metal command failed", command.error); throw std::runtime_error("Stage-2 Metal command failed"); }
+        gpu_ms += 1'000.0 * (command.GPUEndTime - command.GPUStartTime);
+        if (*count > work_capacity) throw std::runtime_error("GPU frontier exceeded its work-item capacity");
+        active_count = *count; const id<MTLBuffer> temporary = active; active = next; next = temporary;
+      }
+    } catch (...) { if (capture) [[MTLCaptureManager sharedCaptureManager] stopCapture]; throw; }
+    if (capture) [[MTLCaptureManager sharedCaptureManager] stopCapture];
+    const std::chrono::duration<double, std::milli> elapsed = std::chrono::steady_clock::now() - started;
+    std::printf("Resident terrain tiles: %u (cache capacity %llu).\n", tile_count, static_cast<unsigned long long>(slot_capacity));
+    std::printf("  GPU raytrace   : %8.3f ms\n", gpu_ms); std::printf("  CPU tile prep  : %8.3f ms\n", tile_prep.count()); std::printf("  CPU + GPU total: %8.3f ms\n", elapsed.count());
+    const auto image_started = std::chrono::steady_clock::now();
+    write_colormapped_png("distances.png", view_float_buffer(distances, ray_count, "distance output"), config.num_azimuth, config.num_polar, colormaps::viridis);
+    write_colormapped_png("elevations.png", view_float_buffer(elevations, ray_count, "elevation output"), config.num_azimuth, config.num_polar, colormaps::viridis);
+    const std::chrono::duration<double, std::milli> image_elapsed = std::chrono::steady_clock::now() - image_started;
+    std::printf("  PNG generation : %8.3f ms\n", image_elapsed.count());
   }
 }
 

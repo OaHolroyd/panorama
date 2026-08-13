@@ -14,8 +14,11 @@
 namespace {
 
 constexpr double kSwissCellSize = 2.0;
-constexpr uint32_t kRechunkLevel = 13;
+constexpr uint32_t kRechunkLevel = 10;
 constexpr uint32_t kMaxTileCount = 0U; // zero -> unlimited
+// A memory budget, rather than a tile count: Stage 2 derives its slot count
+// from the current prepared vertex and maximum-mipmap payload sizes.
+constexpr uint64_t kTileCacheSizeBytes = 15ULL * 1024ULL * 1024ULL * 1024ULL;
 
 // Weisshorn photo location
 // constexpr double kObserverEasting = 2628183.79;
@@ -70,6 +73,7 @@ int main() {
         0.5 * std::numbers::pi_v<double>,
         20'000.0F,
         kMaxTileCount,
+        kTileCacheSizeBytes,
     };
     std::printf(
         "Tracing %s from LV95 (%.3f, %.3f, %.1f).\n",
