@@ -18,6 +18,7 @@
 namespace panorama {
 namespace {
 
+/// unique_ptr deleter that closes one GDAL dataset exactly once.
 struct DatasetCloser {
   /// Give GDALDataset unique_ptr ownership semantics and close the file once.
   void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
@@ -77,8 +78,7 @@ struct DatasetCloser {
   return Crs::from_epsg(static_cast<uint32_t>(epsg_code));
 }
 
-// GeoTIFF registration affects how the loader translates its affine transform
-// into LoadedTile's canonical origin, but has no meaning after that conversion.
+/// GeoTIFF registration used only while deriving LoadedTile's canonical origin.
 enum class RasterRegistration {
   PixelIsArea,
   PixelIsPoint,
@@ -210,18 +210,20 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
     for (uint32_t x = 0; x < source_size; ++x) {
       const size_t source_index = static_cast<size_t>(source_row) * source_size + x;
       const float elevation = source_heights[source_index];
-      // A hole in the elevation field cannot be treated as sea level: it would
-      // create false terrain hits. Reject no-data tiles until coverage handling
-      // is implemented at the multi-tile traversal layer.
-      if (!std::isfinite(elevation) ||
-          (has_no_data != 0 && elevation == static_cast<float>(no_data))) {
-        throw std::runtime_error(
-            "Terrain GeoTIFF contains no-data or non-finite "
-            "elevations"
-        );
+      // Rechunking represents partly unavailable source coverage with the
+      // GeoTIFF no-data value. Preserve valid terrain in the same chunk by
+      // converting that declared sentinel to the project's zero-elevation
+      // placeholder. A future coverage mask can distinguish this placeholder
+      // from real sea-level terrain.
+      const bool is_no_data =
+          has_no_data != 0 &&
+          (std::isnan(no_data) ? std::isnan(elevation) : elevation == static_cast<float>(no_data));
+      if (!is_no_data && !std::isfinite(elevation)) {
+        throw std::runtime_error("Terrain GeoTIFF contains a non-finite elevation");
       }
-      oriented_samples[static_cast<size_t>(trace_row) * source_size + x] = elevation;
-      maximum_elevation = std::max(maximum_elevation, elevation);
+      const float oriented_elevation = is_no_data ? 0.0F : elevation;
+      oriented_samples[static_cast<size_t>(trace_row) * source_size + x] = oriented_elevation;
+      maximum_elevation = std::max(maximum_elevation, oriented_elevation);
     }
   }
 

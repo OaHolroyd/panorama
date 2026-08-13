@@ -15,6 +15,7 @@ namespace {
 
 constexpr double kSwissCellSize = 2.0;
 constexpr uint32_t kRechunkLevel = 13;
+constexpr uint32_t kMaxTileCount = 0U; // zero -> unlimited
 
 // Weisshorn photo location
 // constexpr double kObserverEasting = 2628183.79;
@@ -48,7 +49,7 @@ find_level_0_tile(uint32_t power, double easting, double northing) {
 
 } // namespace
 
-/// Trace the fixed level-0 Swiss tile containing the temporary observer.
+/// Trace the fixed level-0 Swiss terrain field around the temporary observer.
 int main() {
   try {
     const std::filesystem::path tile_path =
@@ -68,6 +69,7 @@ int main() {
         -0.5 * std::numbers::pi_v<double>,
         0.5 * std::numbers::pi_v<double>,
         20'000.0F,
+        kMaxTileCount,
     };
     std::printf(
         "Tracing %s from LV95 (%.3f, %.3f, %.1f).\n",
@@ -76,7 +78,7 @@ int main() {
         kObserverNorthing,
         kObserverElevation
     );
-    panorama::perform_single_tile_raytrace(config);
+    panorama::perform_multi_tile_raytrace(config);
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

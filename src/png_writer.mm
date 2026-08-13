@@ -17,6 +17,7 @@
 namespace panorama {
 namespace {
 
+/// One normalised position and its sRGB colour in a piecewise-linear palette.
 struct ColorStop {
   float position;
   Rgb color;

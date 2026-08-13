@@ -6,6 +6,8 @@
 #include "loaded_tile.h"
 #include "png_writer.h"
 
+#include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -14,10 +16,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <numbers>
+#include <queue>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace panorama {
@@ -29,17 +34,16 @@ namespace {
 
 constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
 
-// This matches the Metal `float2` direction buffer element exactly: its
-// direction is horizontal and uses the compass convention x = sin(a),
-// y = cos(a). Keeping it as two scalars avoids platform-specific SIMD ABI.
+/// One horizontal compass direction with the same two-float layout as Metal's
+/// `float2`; x = sin(azimuth) and y = cos(azimuth).
 struct HorizontalDirection {
   float x;
   float y;
 };
 
-// This scalar-only layout is mirrored exactly by RaytraceParameters in
-// panorama.metal. The global tile origin has already been rebased before it
-// reaches these float32 fields.
+/// Scalar-only host/device ABI for one observer-relative terrain tile.
+///
+/// This is mirrored exactly by `RaytraceParameters` in panorama.metal.
 struct RaytraceParameters {
   float tile_x_min;
   float tile_y_min;
@@ -54,6 +58,103 @@ struct RaytraceParameters {
 
 static_assert(sizeof(HorizontalDirection) == 2U * sizeof(float));
 static_assert(sizeof(RaytraceParameters) == 9U * sizeof(uint32_t));
+
+/// Per-azimuth input state for one CPU-scheduled tile segment.
+///
+/// It mirrors `TileRayInput` in panorama.metal and is padded to 16 bytes so
+/// the host/device layout is unambiguous.
+struct TileRayInput {
+  uint32_t first_polar;
+  uint32_t start_level;
+  float entry_distance;
+  uint32_t unused;
+};
+
+static_assert(sizeof(TileRayInput) == 4U * sizeof(uint32_t));
+
+/// Terminal result written by Metal for one independent polar ray.
+///
+/// The CPU combines the monotonic hit/non-hit sequence into a continuation.
+enum class RayStatus : uint32_t {
+  Inactive = 0U,
+  Hit = 1U,
+  Continue = 2U,
+  MaxDistance = 3U,
+};
+
+/// Scheduler outcome for the unresolved suffix of one azimuth column.
+enum class TileContinuationStatus : uint32_t {
+  Resolved,
+  Continue,
+  MaxDistance,
+};
+
+/// Explicit CPU continuation state for one azimuth column after one tile.
+struct TileContinuation {
+  uint32_t first_unresolved_polar;
+  float entry_distance;
+  TileContinuationStatus status;
+};
+
+/// Key identifying one rechunked tile in the global row/column grid.
+struct TileKey {
+  int64_t row;
+  int64_t column;
+
+  /// Order keys by row and then column for associative containers.
+  [[nodiscard]] bool operator<(const TileKey &other) const {
+    if (row != other.row) {
+      return row < other.row;
+    }
+    return column < other.column;
+  }
+
+  /// Return whether two keys refer to the same rechunked tile.
+  [[nodiscard]] bool operator==(const TileKey &other) const {
+    return row == other.row && column == other.column;
+  }
+};
+
+/// Unresolved polar suffix entering one tile in an azimuth column.
+struct TileRayState {
+  uint32_t first_polar;
+  float entry_distance;
+};
+
+/// Priority-queue entry ordered by Manhattan shell, row, and column.
+struct TileQueueEntry {
+  uint64_t shell;
+  int64_t row;
+  int64_t column;
+};
+
+/// Reverse comparison that makes std::priority_queue return the nearest tile.
+struct TileQueueEntryGreater {
+  /// Return whether `left` has lower scheduling priority than `right`.
+  [[nodiscard]] bool operator()(const TileQueueEntry &left, const TileQueueEntry &right) const {
+    if (left.shell != right.shell) {
+      return left.shell > right.shell;
+    }
+    if (left.row != right.row) {
+      return left.row > right.row;
+    }
+    return left.column > right.column;
+  }
+};
+
+/// Reusable directory and filename fragments for prepared tile lookup.
+struct TileNameTemplate {
+  std::filesystem::path directory;
+  std::string prefix;
+  std::string suffix;
+};
+
+/// Global rechunk-grid origin and fixed physical width of each square tile.
+struct TileGrid {
+  double origin_x;
+  double origin_y;
+  double width;
+};
 
 /// Print a Foundation error in the command-line form used by the host tools.
 void print_error(NSString *context, NSError *error) {
@@ -106,6 +207,160 @@ void validate_configuration(const RaytraceConfig &config) {
       config.max_distance <= 0.0F) {
     throw std::invalid_argument("Raytrace configuration must be finite");
   }
+}
+
+/// Parse one signed tile-grid coordinate from a file-name component.
+[[nodiscard]] int64_t parse_tile_coordinate(std::string_view text, const char *name) {
+  int64_t value = 0;
+  const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+  if (error != std::errc() || end != text.data() + text.size()) {
+    throw std::invalid_argument(
+        std::string("Invalid ") + name + " tile coordinate: " + std::string(text)
+    );
+  }
+  return value;
+}
+
+/// Extract the row/column key and reusable name template from a prepared tile path.
+[[nodiscard]] std::pair<TileKey, TileNameTemplate>
+parse_tile_name(const std::filesystem::path &path) {
+  const std::string name = path.filename().string();
+  const size_t row_marker = name.rfind("_r");
+  const size_t column_marker = name.rfind("_c");
+  const size_t extension = name.rfind(".tif");
+  if (row_marker == std::string::npos || column_marker == std::string::npos ||
+      extension == std::string::npos || row_marker >= column_marker || column_marker >= extension) {
+    throw std::invalid_argument(
+        "Prepared tile name must end in _rROW_cCOLUMN.tif: " + path.string()
+    );
+  }
+  const TileKey key = {
+      parse_tile_coordinate(
+          std::string_view(name).substr(row_marker + 2U, column_marker - row_marker - 2U),
+          "row"
+      ),
+      parse_tile_coordinate(
+          std::string_view(name).substr(column_marker + 2U, extension - column_marker - 2U),
+          "column"
+      ),
+  };
+  return {key, {path.parent_path(), name.substr(0, row_marker), name.substr(extension)}};
+}
+
+/// Return the prepared GeoTIFF path corresponding to one global tile key.
+[[nodiscard]] std::filesystem::path tile_path(const TileNameTemplate &name_template, TileKey key) {
+  return name_template.directory / (name_template.prefix + "_r" + std::to_string(key.row) + "_c" +
+                                    std::to_string(key.column) + name_template.suffix);
+}
+
+/// Derive the global tile-grid origin from one loaded tile and its parsed key.
+[[nodiscard]] TileGrid make_tile_grid(const LoadedTile &tile, TileKey key) {
+  const double width = static_cast<double>(tile.size) * tile.delta;
+  if (!std::isfinite(width) || width <= 0.0) {
+    throw std::invalid_argument("Terrain tile has an invalid physical width");
+  }
+  // Rechunked rows count southward from their north-edge grid origin, whereas
+  // LoadedTile stores a south-west corner. A row therefore begins one width
+  // below origin_y - row * width.
+  return {
+      tile.lower_left_x - static_cast<double>(key.column) * width,
+      tile.lower_left_y + static_cast<double>(key.row + 1) * width,
+      width,
+  };
+}
+
+/// Return the global tile key that owns a point after its boundary nudge.
+[[nodiscard]] TileKey tile_key_at(const TileGrid &grid, double x, double y) {
+  const double column = std::floor((x - grid.origin_x) / grid.width);
+  const double row = std::floor((grid.origin_y - y) / grid.width);
+  if (column < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
+      column > static_cast<double>(std::numeric_limits<int64_t>::max()) ||
+      row < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
+      row > static_cast<double>(std::numeric_limits<int64_t>::max())) {
+    throw std::out_of_range("Ray exit is outside the supported tile grid");
+  }
+  return {static_cast<int64_t>(row), static_cast<int64_t>(column)};
+}
+
+/// Check that a neighbour has the same terrain layout as the origin tile.
+void validate_tile_compatibility(const LoadedTile &tile, const LoadedTile &origin) {
+  if (!tile.supports_level_0_collisions || tile.vertices == nullptr) {
+    throw std::logic_error("Level-0 multi-tile tracing received a tile without vertices");
+  }
+  if (tile.crs.id() != origin.crs.id() || tile.size != origin.size || tile.delta != origin.delta ||
+      tile.num_levels != origin.num_levels) {
+    throw std::runtime_error("Terrain tile is incompatible with the origin tile");
+  }
+}
+
+/// Check that a loaded tile's georeferencing agrees with its filename key.
+void validate_tile_position(const LoadedTile &tile, TileKey key, const TileGrid &grid) {
+  const double expected_x = grid.origin_x + static_cast<double>(key.column) * grid.width;
+  const double expected_y = grid.origin_y - static_cast<double>(key.row + 1) * grid.width;
+  const double tolerance = 1e-6 * std::max(1.0, grid.width);
+  if (std::abs(tile.lower_left_x - expected_x) > tolerance ||
+      std::abs(tile.lower_left_y - expected_y) > tolerance) {
+    throw std::runtime_error("Terrain tile georeferencing disagrees with its filename key");
+  }
+}
+
+/// Build the scalar Metal parameters for one observer-relative terrain tile.
+[[nodiscard]] RaytraceParameters
+make_raytrace_parameters(const LoadedTile &tile, const RaytraceConfig &config) {
+  const double local_x = tile.lower_left_x - config.observer.easting;
+  const double local_y = tile.lower_left_y - config.observer.northing;
+  if (local_x < static_cast<double>(std::numeric_limits<float>::lowest()) ||
+      local_x > static_cast<double>(std::numeric_limits<float>::max()) ||
+      local_y < static_cast<double>(std::numeric_limits<float>::lowest()) ||
+      local_y > static_cast<double>(std::numeric_limits<float>::max()) ||
+      tile.delta > static_cast<double>(std::numeric_limits<float>::max()) ||
+      config.observer.elevation < static_cast<double>(std::numeric_limits<float>::lowest()) ||
+      config.observer.elevation > static_cast<double>(std::numeric_limits<float>::max())) {
+    throw std::overflow_error("Raytrace geometry does not fit float32");
+  }
+  return {
+      static_cast<float>(local_x),
+      static_cast<float>(local_y),
+      static_cast<float>(tile.delta),
+      static_cast<float>(config.observer.elevation),
+      tile.num_levels,
+      tile.size,
+      config.num_azimuth,
+      config.num_polar,
+      config.max_distance,
+  };
+}
+
+/// Derive one explicit column continuation from the completed per-ray statuses.
+[[nodiscard]] TileContinuation collect_continuation(
+    std::span<const uint32_t> statuses,
+    uint32_t azimuth,
+    uint32_t num_azimuth,
+    uint32_t first_polar,
+    uint32_t num_polar,
+    float tile_exit
+) {
+  bool seen_non_hit = false;
+  for (uint32_t polar = first_polar; polar < num_polar; ++polar) {
+    const size_t output_index = static_cast<size_t>(polar) * num_azimuth + azimuth;
+    const RayStatus status = static_cast<RayStatus>(statuses[output_index]);
+    if (status == RayStatus::Hit) {
+      if (seen_non_hit) {
+        throw std::runtime_error("Tile rays violate the required hit-prefix ordering");
+      }
+      continue;
+    }
+    if (status == RayStatus::Continue) {
+      seen_non_hit = true;
+      return {polar, tile_exit, TileContinuationStatus::Continue};
+    }
+    if (status == RayStatus::MaxDistance) {
+      seen_non_hit = true;
+      return {polar, tile_exit, TileContinuationStatus::MaxDistance};
+    }
+    throw std::runtime_error("Tile kernel left an active ray without a status");
+  }
+  return {num_polar, tile_exit, TileContinuationStatus::Resolved};
 }
 
 /// Construct float32 compass directions from evenly spaced azimuth centres.
@@ -184,63 +439,89 @@ view_float_buffer(id<MTLBuffer> buffer, size_t num_value, const char *name) {
   return {contents, num_value};
 }
 
+/// Return the exact far boundary of one tile segment along a horizontal ray.
+[[nodiscard]] float tile_exit_distance(
+    const RaytraceParameters &parameters,
+    HorizontalDirection direction,
+    float entry_distance
+) {
+  float tile_exit = INFINITY;
+  const float x_max = parameters.tile_x_min + float(parameters.num_cell) * parameters.cell_size;
+  const float y_max = parameters.tile_y_min + float(parameters.num_cell) * parameters.cell_size;
+  if (direction.x > 0.0F) {
+    const float candidate = x_max / direction.x;
+    if (candidate > entry_distance) {
+      tile_exit = std::min(tile_exit, candidate);
+    }
+  } else if (direction.x < 0.0F) {
+    const float candidate = parameters.tile_x_min / direction.x;
+    if (candidate > entry_distance) {
+      tile_exit = std::min(tile_exit, candidate);
+    }
+  }
+  if (direction.y > 0.0F) {
+    const float candidate = y_max / direction.y;
+    if (candidate > entry_distance) {
+      tile_exit = std::min(tile_exit, candidate);
+    }
+  } else if (direction.y < 0.0F) {
+    const float candidate = parameters.tile_y_min / direction.y;
+    if (candidate > entry_distance) {
+      tile_exit = std::min(tile_exit, candidate);
+    }
+  }
+  if (!std::isfinite(tile_exit)) {
+    throw std::runtime_error("Ray cannot leave the current terrain tile");
+  }
+  return tile_exit;
+}
+
 } // namespace
 
-void perform_single_tile_raytrace(const RaytraceConfig &config) {
+void perform_multi_tile_raytrace(const RaytraceConfig &config) {
   validate_configuration(config);
   if (config.tile_path.empty()) {
     throw std::invalid_argument("Raytrace tile path must not be empty");
   }
+  // This wall-clock interval covers all stage-1 CPU and GPU tracing work, but
+  // deliberately excludes writing diagnostic PNGs below.
+  const auto raytrace_start = std::chrono::steady_clock::now();
+  std::chrono::duration<double, std::milli> cpu_tile_prep_duration =
+      std::chrono::duration<double, std::milli>::zero();
 
-  // Level-0 vertices provide exact bilinear intersections; the loader derives
-  // the accompanying level-1 maximum field used for cheap cell rejection.
-  LoadedTile tile = LoadedTile::load_tif(config.tile_path, true);
-  if (tile.vertices == nullptr) {
-    throw std::logic_error("Level-0 raytrace tile has no vertex elevations");
-  }
-  // Keep the complete flat maximum hierarchy resident alongside the exact
-  // vertices. The current kernel still reads level 1 only; later adaptive DDA
-  // traversal will index the appended coarser levels in this same buffer.
-  tile.compute_mipmap();
+  // The origin tile establishes the shared layout and the global filename
+  // grid. Neighbours are loaded only when an unresolved column reaches them.
+  const auto origin_load_start = std::chrono::steady_clock::now();
+  LoadedTile origin_tile = LoadedTile::load_tif(config.tile_path, true);
+  cpu_tile_prep_duration += std::chrono::steady_clock::now() - origin_load_start;
+  validate_tile_compatibility(origin_tile, origin_tile);
+  origin_tile.compute_mipmap();
+  const auto [origin_key, name_template] = parse_tile_name(config.tile_path);
+  const TileGrid grid = make_tile_grid(origin_tile, origin_key);
+  validate_tile_position(origin_tile, origin_key, grid);
 
-  // Do the large-coordinate subtraction in float64 first. Only these local
-  // values cross the host/device boundary, preserving float32 cell precision.
-  const double local_x_min = tile.lower_left_x - config.observer.easting;
-  const double local_y_min = tile.lower_left_y - config.observer.northing;
-  if (local_x_min < static_cast<double>(std::numeric_limits<float>::lowest()) ||
-      local_x_min > static_cast<double>(std::numeric_limits<float>::max()) ||
-      local_y_min < static_cast<double>(std::numeric_limits<float>::lowest()) ||
-      local_y_min > static_cast<double>(std::numeric_limits<float>::max()) ||
-      tile.delta > static_cast<double>(std::numeric_limits<float>::max()) ||
-      config.observer.elevation < static_cast<double>(std::numeric_limits<float>::lowest()) ||
-      config.observer.elevation > static_cast<double>(std::numeric_limits<float>::max())) {
-    throw std::overflow_error("Raytrace geometry does not fit float32");
-  }
-
-  // Set up the ray directions
   const std::vector<HorizontalDirection> directions = make_azimuth_directions(config);
   const std::vector<float> polar_slopes = make_polar_slopes(config);
   const size_t num_ray = static_cast<size_t>(config.num_azimuth) * config.num_polar;
+  const size_t input_bytes =
+      checked_buffer_length(config.num_azimuth, sizeof(TileRayInput), "tile ray input");
 
-  // Wrap to pass to Metal kernel
-  const RaytraceParameters parameters = {
-      static_cast<float>(local_x_min),
-      static_cast<float>(local_y_min),
-      static_cast<float>(tile.delta),
-      static_cast<float>(config.observer.elevation),
-      tile.num_levels,
-      tile.size,
-      config.num_azimuth,
-      config.num_polar,
-      config.max_distance,
-  };
+  // Every azimuth starts at the observer tile with its entire polar column
+  // unresolved. The priority key is Manhattan distance from that tile.
+  std::map<TileKey, std::map<uint32_t, TileRayState>> pending;
+  std::map<uint32_t, TileRayState> initial;
+  for (uint32_t azimuth = 0; azimuth < config.num_azimuth; ++azimuth) {
+    initial.emplace(azimuth, TileRayState{0U, 0.0F});
+  }
+  pending.emplace(origin_key, std::move(initial));
+  std::priority_queue<TileQueueEntry, std::vector<TileQueueEntry>, TileQueueEntryGreater> queue;
+  queue.push({0U, origin_key.row, origin_key.column});
 
   @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (device == nil) {
       throw std::runtime_error("No Metal device is available");
     }
-
     NSError *error = nil;
     NSURL *library_url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:kMetallibPath]];
     id<MTLLibrary> library = [device newLibraryWithURL:library_url error:&error];
@@ -248,29 +529,16 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
       print_error(@"Could not load the Metal library", error);
       throw std::runtime_error("Could not load the Metal library");
     }
-    id<MTLFunction> trace_single_tile_kernel = [library newFunctionWithName:@"trace_single_tile"];
-    if (trace_single_tile_kernel == nil) {
-      throw std::runtime_error("Kernel trace_single_tile is missing");
+    id<MTLFunction> kernel = [library newFunctionWithName:@"trace_tile_segment"];
+    if (kernel == nil) {
+      throw std::runtime_error("Kernel trace_tile_segment is missing");
     }
-    id<MTLComputePipelineState> pipeline =
-        [device newComputePipelineStateWithFunction:trace_single_tile_kernel error:&error];
+    id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:kernel
+                                                                                 error:&error];
     if (pipeline == nil) {
-      print_error(@"Could not create the raytrace pipeline", error);
-      throw std::runtime_error("Could not create the raytrace pipeline");
+      print_error(@"Could not create the multi-tile raytrace pipeline", error);
+      throw std::runtime_error("Could not create the multi-tile raytrace pipeline");
     }
-
-    id<MTLBuffer> heights = make_buffer(
-        device,
-        tile.mipmap.data(),
-        checked_buffer_length(tile.mipmap.size(), sizeof(float), "maximum mipmap"),
-        "maximum mipmap"
-    );
-    id<MTLBuffer> vertices = make_buffer(
-        device,
-        tile.vertices->data(),
-        checked_buffer_length(tile.vertices->size(), sizeof(float), "level-0 vertex heights"),
-        "level-0 vertex heights"
-    );
     id<MTLBuffer> azimuths = make_buffer(
         device,
         directions.data(),
@@ -295,67 +563,245 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
         checked_buffer_length(num_ray, sizeof(float), "elevation output"),
         "elevation output"
     );
-    // Overwrite with zeros
     clear_buffer(distances, "distance output");
     clear_buffer(elevations, "elevation output");
 
-    // Setup the queue/command/encoder
-    id<MTLCommandQueue> queue = [device newCommandQueue];
-    if (queue == nil) {
-      throw std::runtime_error("Could not create a Metal raytrace command queue");
+    id<MTLCommandQueue> command_queue = [device newCommandQueue];
+    if (command_queue == nil) {
+      throw std::runtime_error("Could not create a Metal multi-tile command queue");
     }
-    // A GPU trace begins at command-buffer creation, not merely encoding.
-    const bool capture_active = start_capture_if_requested(queue);
-    id<MTLCommandBuffer> command = [queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    if (command == nil || encoder == nil) {
+    const bool capture_active = start_capture_if_requested(command_queue);
+    uint32_t processed_tiles = 0U;
+    double total_gpu_milliseconds = 0.0;
+
+    try {
+      // Keep raytracing tile-by-tile until the queue has no tiles left
+      while (!queue.empty()) {
+        // Get the next tile from the queue
+        const TileQueueEntry queue_entry = queue.top();
+        queue.pop();
+        const TileKey key = {queue_entry.row, queue_entry.column};
+
+        // find out which unresolved rays pass through this tile and need to be
+        // assigned a thread in the next Metal kernel call
+        auto pending_iterator = pending.find(key);
+        if (pending_iterator == pending.end()) {
+          continue;
+        }
+        std::map<uint32_t, TileRayState> tile_work = std::move(pending_iterator->second);
+        pending.erase(pending_iterator);
+        // A zero limit means unlimited. Stop before loading or dispatching
+        // another tile, so a limit of one traces exactly the observer tile.
+        if (config.max_tile_count != 0U && processed_tiles >= config.max_tile_count) {
+          break;
+        }
+
+        // If the next tile is not the origin, load it from disk
+        std::unique_ptr<LoadedTile> neighbour;
+        const LoadedTile *tile = &origin_tile;
+        if (!(key == origin_key)) {
+          const std::filesystem::path path = tile_path(name_template, key);
+
+          if (!std::filesystem::is_regular_file(path)) {
+            // Prepared chunks are an availability boundary. Their absence is
+            // open coverage, so every incoming suffix terminates as sky.
+            // TODO: this is incorrect, sometimes missing tiles are Ocean
+            continue;
+          }
+
+          // load the tile and prepare the mipmap
+          std::printf(
+              "Loading tile r=%lld c=%lld: %s\n",
+              static_cast<long long>(key.row),
+              static_cast<long long>(key.column),
+              path.c_str()
+          );
+          const auto tile_prep_start = std::chrono::steady_clock::now();
+          neighbour = std::make_unique<LoadedTile>(LoadedTile::load_tif(path, true));
+          validate_tile_compatibility(*neighbour, origin_tile);
+          validate_tile_position(*neighbour, key, grid);
+          neighbour->compute_mipmap();
+          tile = neighbour.get();
+          cpu_tile_prep_duration += std::chrono::steady_clock::now() - tile_prep_start;
+        }
+        processed_tiles++;
+
+        // set up the raytracing parameters for this tile
+        const RaytraceParameters parameters = make_raytrace_parameters(*tile, config);
+
+        // set up the ray-columns for this tile
+        std::vector<TileRayInput> inputs(config.num_azimuth, {config.num_polar, 1U, 0.0F, 0U});
+        for (const auto &[azimuth, state] : tile_work) {
+          inputs[azimuth] = {
+              state.first_polar,
+              key == origin_key ? 1U : tile->num_levels,
+              state.entry_distance,
+              0U,
+          };
+        }
+
+        // set up tile-specific buffers for the Metal kernel
+        id<MTLBuffer> mipmap = make_buffer(
+            device,
+            tile->mipmap.data(),
+            checked_buffer_length(tile->mipmap.size(), sizeof(float), "maximum mipmap"),
+            "maximum mipmap"
+        );
+        id<MTLBuffer> vertices = make_buffer(
+            device,
+            tile->vertices->data(),
+            checked_buffer_length(tile->vertices->size(), sizeof(float), "level-0 vertex heights"),
+            "level-0 vertex heights"
+        );
+        id<MTLBuffer> input_buffer =
+            make_buffer(device, inputs.data(), input_bytes, "tile ray input");
+        id<MTLBuffer> statuses = make_buffer(
+            device,
+            nullptr,
+            checked_buffer_length(num_ray, sizeof(uint32_t), "ray status output"),
+            "ray status output"
+        );
+        clear_buffer(statuses, "ray status output");
+
+        // Set up the GPU command sequence
+        id<MTLCommandBuffer> command = [command_queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        if (command == nil || encoder == nil) {
+          throw std::runtime_error("Could not create a Metal multi-tile command");
+        }
+        command.label = @"stage-1 multi-tile raytrace";
+        encoder.label = @"trace_tile_segment";
+        [encoder setComputePipelineState:pipeline];
+        [encoder setBuffer:mipmap offset:0 atIndex:0];
+        [encoder setBuffer:vertices offset:0 atIndex:1];
+        [encoder setBuffer:azimuths offset:0 atIndex:2];
+        [encoder setBuffer:slopes offset:0 atIndex:3];
+        [encoder setBuffer:input_buffer offset:0 atIndex:4];
+        [encoder setBytes:&parameters length:sizeof(parameters) atIndex:5];
+        [encoder setBuffer:distances offset:0 atIndex:6];
+        [encoder setBuffer:elevations offset:0 atIndex:7];
+        [encoder setBuffer:statuses offset:0 atIndex:8];
+        [encoder dispatchThreads:MTLSizeMake(config.num_polar, config.num_azimuth, 1)
+            threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+        [encoder endEncoding];
+
+        // Start raytracing this tile
+        [command commit];
+        // NOTE: This explicit wait is the defining deliberate limitation of stage 1.
+        [command waitUntilCompleted];
+        if (command.status == MTLCommandBufferStatusError) {
+          print_error(@"The Metal multi-tile raytrace command failed", command.error);
+          throw std::runtime_error("The Metal multi-tile raytrace command failed");
+        }
+        // Each stage-1 tile uses its own command buffer. Sum their device
+        // execution intervals so the reported time excludes synchronous CPU
+        // tile loading, buffer allocation, and continuation scheduling.
+        total_gpu_milliseconds += 1'000.0 * (command.GPUEndTime - command.GPUStartTime);
+
+        // Unpack the statuses of all of the rays
+        const std::span<const uint32_t> status_values(
+            static_cast<const uint32_t *>(statuses.contents),
+            num_ray
+        );
+
+        // go through all of the ray-columns that entered the tile and decide what to
+        // do with them
+        for (const auto &[azimuth, state] : tile_work) {
+          const float tile_exit =
+              tile_exit_distance(parameters, directions[azimuth], state.entry_distance);
+
+          // Go through the exist statuses of all of the rays in a column and decide what that means
+          // about the continuation status of the column as a whole
+          const TileContinuation continuation = collect_continuation(
+              status_values,
+              azimuth,
+              config.num_azimuth,
+              state.first_polar,
+              config.num_polar,
+              tile_exit
+          );
+
+          // Stop columns which have completed or hit max distance
+          if (continuation.status != TileContinuationStatus::Continue ||
+              continuation.entry_distance >= config.max_distance) {
+            continue;
+          }
+
+          // Work out where the ray-column left the tile (and thus where it enters the new one)
+          float exit_x = continuation.entry_distance * directions[azimuth].x;
+          float exit_y = continuation.entry_distance * directions[azimuth].y;
+
+          // Find the tile that it will progress into
+          // Use the exact exit distance for geometry but a small forward nudge
+          // for tile ownership. This is the same separation as the Python
+          // reference and prevents return-to-the-tile rounding at a seam.
+          const float nudge = std::max(
+              1e-3F * parameters.cell_size,
+              8.0F * std::numeric_limits<float>::epsilon() *
+                  std::max(1.0F, std::max(std::abs(exit_x), std::abs(exit_y)))
+          );
+          if (directions[azimuth].x != 0.0F) {
+            exit_x += std::copysign(nudge, directions[azimuth].x);
+          }
+          if (directions[azimuth].y != 0.0F) {
+            exit_y += std::copysign(nudge, directions[azimuth].y);
+          }
+          const TileKey next_key = tile_key_at(
+              grid,
+              config.observer.easting + static_cast<double>(exit_x),
+              config.observer.northing + static_cast<double>(exit_y)
+          );
+
+          if (next_key == key) {
+            throw std::runtime_error("Ray did not advance to a neighbouring terrain tile");
+          }
+
+          // Add this ray-column to the pending-work map, creating one if this is the first azimuth
+          // to reach a given tile
+          auto [next_iterator, inserted] = pending.try_emplace(next_key);
+          const auto column_inserted =
+              next_iterator->second
+                  .emplace(
+                      azimuth,
+                      TileRayState{continuation.first_unresolved_polar, continuation.entry_distance}
+                  )
+                  .second; // we don't care about the returned iterator
+
+          if (!column_inserted) {
+            throw std::runtime_error("An azimuth column entered a tile more than once");
+          }
+
+          // Add the next tile to the queue if nothing is wrong and this azimuth was the first to
+          // request it (we must avoid repeat requests)
+          if (inserted) {
+            const uint64_t next_shell =
+                static_cast<uint64_t>(std::llabs(next_key.row - origin_key.row)) +
+                static_cast<uint64_t>(std::llabs(next_key.column - origin_key.column));
+            queue.push({next_shell, next_key.row, next_key.column});
+          }
+        }
+      }
+    } catch (...) {
       if (capture_active) {
         [[MTLCaptureManager sharedCaptureManager] stopCapture];
       }
-      throw std::runtime_error("Could not create a Metal raytrace command");
+      throw;
     }
-    // Instruments displays these labels in its GPU command and encoder lists.
-    command.label = @"single-tile raytrace";
-    encoder.label = @"trace_single_tile";
-    // Physical X is polar and physical Y is azimuth. A 32-wide X row places
-    // adjacent SIMD lanes on one horizontal DDA path with different slopes.
-    // The output buffer still uses its ordinary (polar, azimuth) layout.
-    [encoder setComputePipelineState:pipeline];
-    [encoder setBuffer:heights offset:0 atIndex:0];
-    [encoder setBuffer:vertices offset:0 atIndex:1];
-    [encoder setBuffer:azimuths offset:0 atIndex:2];
-    [encoder setBuffer:slopes offset:0 atIndex:3];
-    [encoder setBytes:&parameters length:sizeof(parameters) atIndex:4];
-    [encoder setBuffer:distances offset:0 atIndex:5];
-    [encoder setBuffer:elevations offset:0 atIndex:6];
-    [encoder dispatchThreads:MTLSizeMake(config.num_polar, config.num_azimuth, 1)
-        threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
-
-    [encoder endEncoding];
-
-    // Start the GPU work
-    [command commit];
-
-    // Finish the GPU work
-    [command waitUntilCompleted];
     if (capture_active) {
       [[MTLCaptureManager sharedCaptureManager] stopCapture];
     }
-    if (command.status == MTLCommandBufferStatusError) {
-      print_error(@"The Metal raytrace command failed", command.error);
-      throw std::runtime_error("The Metal raytrace command failed");
-    }
-    const double gpu_milliseconds = 1'000.0 * (command.GPUEndTime - command.GPUStartTime);
-    std::printf("GPU raytrace: %.3f ms\n", gpu_milliseconds);
+    std::printf("Processed %u terrain tiles.\n", processed_tiles);
+    std::printf("  GPU raytrace   : %8.3f ms\n", total_gpu_milliseconds);
+    std::printf("  CPU tile prep  : %8.3f ms\n", cpu_tile_prep_duration.count());
+    const std::chrono::duration<double, std::milli> raytrace_duration =
+        std::chrono::steady_clock::now() - raytrace_start;
+    std::printf("  CPU + GPU total: %8.3f ms\n", raytrace_duration.count());
 
-    // Shared storage is now coherent with the CPU, so ImageIO can read these
-    // views directly. The buffers remain alive until the autorelease pool ends.
+    // Write the data to the output files
     const auto image_start = std::chrono::steady_clock::now();
-    const std::span<const float> distance_values =
-        view_float_buffer(distances, num_ray, "distance output");
     write_colormapped_png(
         "distances.png",
-        distance_values,
+        view_float_buffer(distances, num_ray, "distance output"),
         config.num_azimuth,
         config.num_polar,
         colormaps::viridis
@@ -367,9 +813,9 @@ void perform_single_tile_raytrace(const RaytraceConfig &config) {
         config.num_polar,
         colormaps::viridis
     );
-    const auto image_end = std::chrono::steady_clock::now();
-    const std::chrono::duration<double, std::milli> image_duration = image_end - image_start;
-    std::printf("PNG generation: %.3f ms\n", image_duration.count());
+    const std::chrono::duration<double, std::milli> image_duration =
+        std::chrono::steady_clock::now() - image_start;
+    std::printf("  PNG generation : %8.3f ms\n", image_duration.count());
   }
 }
 

@@ -4,9 +4,9 @@
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
 
-// The terrain-tracing ABI. This scalar-only structure intentionally mirrors
-// RaytraceParameters in raytrace_setup.mm; all projected tile coordinates have
-// already been rebased around the observer before upload.
+/// Scalar-only terrain-tracing ABI mirrored by raytrace_setup.mm.
+///
+/// Projected coordinates have already been rebased around the observer.
 struct RaytraceParameters {
   float tile_x_min;
   float tile_y_min;
@@ -19,6 +19,25 @@ struct RaytraceParameters {
   float max_distance;
 };
 
+/// Per-azimuth state for one CPU-scheduled terrain-tile segment.
+///
+/// This must mirror `TileRayInput` in raytrace_setup.mm exactly.
+struct TileRayInput {
+  uint first_polar;
+  uint start_level;
+  float entry_distance;
+  uint unused;
+};
+
+/// Per-ray result values mirrored by RayStatus in raytrace_setup.mm.
+enum RayStatus : uint {
+  RayStatusInactive = 0U,
+  RayStatusHit = 1U,
+  RayStatusContinue = 2U,
+  RayStatusMaxDistance = 3U,
+};
+
+/// Result of an exact bilinear terrain-patch intersection test.
 struct Collision {
   bool hit;
   float distance;
@@ -194,16 +213,49 @@ inline float next_boundary_after(float boundary, float entry_distance, float int
   return boundary;
 }
 
-/// Trace one independent polar ray through one level-0 terrain tile. Uses a
-/// maximum-mipmap to step through cells faster.
-kernel void trace_single_tile(
+/// Return the first tile boundary strictly after a segment's exact entry.
+inline float
+tile_exit_distance(constant RaytraceParameters &params, float2 direction, float entry_distance) {
+  float tile_exit = INFINITY;
+  const float x_max = params.tile_x_min + float(params.num_cell) * params.cell_size;
+  const float y_max = params.tile_y_min + float(params.num_cell) * params.cell_size;
+  if (direction.x > 0.0F) {
+    const float candidate = x_max / direction.x;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  } else if (direction.x < 0.0F) {
+    const float candidate = params.tile_x_min / direction.x;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  }
+  if (direction.y > 0.0F) {
+    const float candidate = y_max / direction.y;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  } else if (direction.y < 0.0F) {
+    const float candidate = params.tile_y_min / direction.y;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  }
+  return tile_exit;
+}
+
+/// Trace one independent polar ray through one CPU-scheduled terrain segment.
+/// The maximum-mipmap rejects empty terrain cells before exact level-0 checks.
+kernel void trace_tile_segment(
     device const float *mipmap [[buffer(0)]],
     device const float *vertices [[buffer(1)]],
     device const float2 *azimuth_directions [[buffer(2)]],
     device const float *polar_slopes [[buffer(3)]],
-    constant RaytraceParameters &params [[buffer(4)]],
-    device float *distances [[buffer(5)]],
-    device float *elevations [[buffer(6)]],
+    device const TileRayInput *tile_inputs [[buffer(4)]],
+    constant RaytraceParameters &params [[buffer(5)]],
+    device float *distances [[buffer(6)]],
+    device float *elevations [[buffer(7)]],
+    device uint *statuses [[buffer(8)]],
     uint2 ray_index [[thread_position_in_grid]]
 ) {
   // Map neighboring threads to rays with the same azimuthal index and therefore the same grid
@@ -214,6 +266,13 @@ kernel void trace_single_tile(
     return;
   }
   const uint output_index = polar_index * params.num_azimuth + azimuth_index;
+
+  // Rays in a given column that have already intersected (and are therefore below the first index
+  // that needs tracing because of the 2.5D nature of the heightfield).
+  const TileRayInput input = tile_inputs[azimuth_index];
+  if (polar_index < input.first_polar) {
+    return;
+  }
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
@@ -228,23 +287,31 @@ kernel void trace_single_tile(
   const float3 ray_direction = {direction.x, direction.y, dz};
   const int n = int(params.num_cell);
 
-  // Decide starting level: the origin tile always starts at level 1, all subsequent tiles start at
-  // the max level
-  // uint level = params.num_level; // for non-origin tiles
-  uint level = 1;
+  // The observer tile begins at level 1. An incoming tile begins at its
+  // maximum level so the maximum pyramid can skip empty terrain immediately.
+  // TODO: check whether it would be better to start at the coarsest level no matter what since we
+  // are no longer using the CPU-based continuation trick
+  uint level = input.start_level;
   uint scale = 1 << (level - 1);
   uint offset = 0;
+  for (uint current_level = 1U; current_level < level; ++current_level) {
+    const uint side = mipmap_level_side(params.num_cell, current_level);
+    offset += side * side;
+  }
+
   // The exact near boundary of the active DDA segment. It remains separate
   // from points nudged only to assign deterministic cell ownership.
-  float t_start = 0.0F;
+  float t_start = input.entry_distance;
 
   // The local observer is exactly at (0, 0), which may lie on one or both
   // shared cell boundaries. Nudge only the coordinate used for ownership so a
   // south/west ray starts in its forward cell; all DDA distances still use the
   // exact observer position and therefore retain t = 0 as their geometry.
   const float boundary_nudge = 1e-3F * delta;
-  const float x_classify = stepx == 0 ? 0.0F : copysign(boundary_nudge, direction.x);
-  const float y_classify = stepy == 0 ? 0.0F : copysign(boundary_nudge, direction.y);
+  const float x_entry = t_start * direction.x;
+  const float y_entry = t_start * direction.y;
+  const float x_classify = stepx == 0 ? x_entry : x_entry + copysign(boundary_nudge, direction.x);
+  const float y_classify = stepy == 0 ? y_entry : y_entry + copysign(boundary_nudge, direction.y);
   int i = clamp(int(floor((y_classify - params.tile_y_min) / delta)), 0, n - 1);
   int j = clamp(int(floor((x_classify - params.tile_x_min) / delta)), 0, n - 1);
 
@@ -258,30 +325,46 @@ kernel void trace_single_tile(
       stepy == 0 ? INFINITY : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
   float tx =
       stepx == 0 ? INFINITY : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
-  int previous_axis = -1;
+  // A coarse incoming segment can begin inside the other axis's aligned
+  // block. Reposition both so neither moves behind the true hand-off.
+  if (stepy != 0) {
+    ty = next_boundary_after(ty, t_start, scale * dty);
+  }
+  if (stepx != 0) {
+    tx = next_boundary_after(tx, t_start, scale * dtx);
+  }
+
+  int previous_axis = -1; // remember which axis we last moved in
   const uint vertex_count = params.num_cell + 1U;
+  const float tile_exit = tile_exit_distance(params, direction, t_start);
+  const float segment_limit = min(tile_exit, params.max_distance);
 
   // Step the ray across the mipmap cell-by-cell until we go off the edge or find an internal
   // collision
   while (i >= 0 && j >= 0 && i < n && j < n) {
+    // shift t to the edge of the next cell/the edge of the tile/max distance, whichever is closest
     const float t_exit = min(tx, ty);
+    const float interval_end = min(t_exit, segment_limit);
 
     // Find the minimum height that the ray has within the cell we've just crossed
-    float z = ray_origin.z + t_exit * dz;
+    float z = ray_origin.z + interval_end * dz;
     if (dz > 0.0F) {
       // Since an upward ray will be higher at the exit boundary, rewind to find the minimum height
       // as the ray crosses the cell.
       z = previous_axis == -1
               ? ray_origin.z + t_start * dz
-              : ray_origin.z + (t_exit - scale * (previous_axis == 0 ? dty : dtx)) * dz;
+              : ray_origin.z + (interval_end - scale * (previous_axis == 0 ? dty : dtx)) * dz;
     }
 
+    // find the index of the relevant cell (correct level and location) inside the flattened mipmap
     const uint level_side = mipmap_level_side(params.num_cell, level);
     const uint cell_index =
         offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
+
+    // Collision check
     if (z <= mipmap[cell_index]) {
       if (level == 1) {
-        // Collision check. Restrict the bilinear root search to this cell's
+        // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
         float t_entry = t_start;
         if (stepx != 0) {
@@ -290,6 +373,7 @@ kernel void trace_single_tile(
         if (stepy != 0) {
           t_entry = max(t_entry, ty - dty);
         }
+
         const Collision collision = bilinear_collision(
             vertices,
             vertex_count,
@@ -300,12 +384,15 @@ kernel void trace_single_tile(
             uint(j),
             ray_origin,
             ray_direction,
-            min(t_entry, t_exit),
-            t_exit
+            min(t_entry, interval_end),
+            interval_end
         );
+
+        // Only exit it's a hit
         if (collision.hit) {
           distances[output_index] = collision.distance;
           elevations[output_index] = ray_origin.z + collision.distance * dz;
+          statuses[output_index] = RayStatusHit;
           return;
         }
       } else {
@@ -343,6 +430,7 @@ kernel void trace_single_tile(
         scale /= 2U;
         i = (i / int(scale)) * int(scale);
         j = (j / int(scale)) * int(scale);
+
         // The preceding level occupies `child_side` squared entries directly
         // before this one, so move backward without rebuilding the offset.
         const uint child_side = mipmap_level_side(params.num_cell, level);
@@ -351,6 +439,7 @@ kernel void trace_single_tile(
                         : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
         tx = stepx == 0 ? INFINITY
                         : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+
         // An entry through only one edge of a coarse cell may leave the
         // other axis part-way across the selected child. Advance its timer
         // rather than allowing a stale aligned boundary to move backward.
@@ -360,6 +449,7 @@ kernel void trace_single_tile(
         if (stepx != 0) {
           tx = next_boundary_after(tx, t_start, scale * dtx);
         }
+
         // The child begins a fresh DDA segment, so an upward ray's near-edge
         // test must use `t_start` rather than a preceding X or Y step.
         previous_axis = -1;
@@ -367,13 +457,22 @@ kernel void trace_single_tile(
       }
     }
 
-    // go up to a coarser level whenever possible
+    // The ray reached either the far edge of this tile or the configured
+    // global range. Report the distinction explicitly to the CPU scheduler.
+    if (t_exit >= segment_limit) {
+      statuses[output_index] =
+          tile_exit <= params.max_distance ? RayStatusContinue : RayStatusMaxDistance;
+      return;
+    }
+
+    // Go up to a coarser level whenever possible
     if (level < params.num_levels) {
       if (ty < tx) {
         if (at_level_boundary(i, stepy, level)) {
           // Crossing a Y boundary joins two vertically adjacent blocks. The
           // X timer must therefore be adjusted from the X cell's sibling.
           tx += offset_jump(j, stepx, level, scale, dtx);
+
           // The current level immediately precedes the coarser level in the
           // flat buffer, so advance by its square element count.
           offset += level_side * level_side;
@@ -385,6 +484,7 @@ kernel void trace_single_tile(
           // Crossing an X boundary joins two horizontally adjacent blocks.
           // Adjust the Y timer from the Y cell's sibling before coarsening.
           ty += offset_jump(i, stepy, level, scale, dty);
+
           // The level transition is identical regardless of the stepped axis.
           offset += level_side * level_side;
           level += 1;
@@ -404,4 +504,8 @@ kernel void trace_single_tile(
       j += scale * stepx;
     }
   }
+  // The DDA normally returns through the segment-limit check above. Retain a
+  // defensive continuation for an unexpected fine-cell exit discrepancy.
+  statuses[output_index] =
+      tile_exit <= params.max_distance ? RayStatusContinue : RayStatusMaxDistance;
 }

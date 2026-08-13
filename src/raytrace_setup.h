@@ -12,7 +12,7 @@ struct ObserverLocation {
   double elevation;
 };
 
-/// Host-only configuration for the first independent-ray, single-tile pass.
+/// Host-only configuration for fixed-observer, level-0 multi-tile tracing.
 struct RaytraceConfig {
   std::filesystem::path tile_path;
   ObserverLocation observer;
@@ -23,12 +23,16 @@ struct RaytraceConfig {
   double polar_start;
   double polar_end;
   float max_distance;
+  /// Maximum number of available tiles submitted to Metal; zero means no limit.
+  uint32_t max_tile_count;
 };
 
-/// Load one level-1 tile and submit the first ray-tracing kernel dispatch.
+/// Trace the fixed angular field through available level-0 terrain tiles.
 ///
-/// The currently bound kernel is a traversal stub, but this function validates
-/// and submits the complete host/device payload used by later GPU traversal.
-void perform_single_tile_raytrace(const RaytraceConfig &config);
+/// Stage 1 keeps the tile scheduler on the CPU and synchronises after each
+/// tile. It exists to validate shared-boundary hand-offs before later GPU
+/// wavefront scheduling and asynchronous tile caching are introduced. Set
+/// `RaytraceConfig::max_tile_count` to one to trace only the observer tile.
+void perform_multi_tile_raytrace(const RaytraceConfig &config);
 
 } // namespace panorama
