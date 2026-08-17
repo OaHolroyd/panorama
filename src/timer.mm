@@ -48,7 +48,7 @@ void Timer::stop(std::string_view name) {
   std::lock_guard<std::mutex> lock(mutex_);
   const std::thread::id calling_thread = std::this_thread::get_id();
   for (auto iterator = active_measurements_.rbegin(); iterator != active_measurements_.rend();
-       ++iterator) {
+       iterator++) {
     if (iterator->name != name || iterator->thread_id != calling_thread) {
       continue;
     }

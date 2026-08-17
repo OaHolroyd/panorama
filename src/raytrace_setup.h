@@ -14,14 +14,28 @@ struct ObserverLocation {
 
 /// Host-only configuration for fixed-observer, level-0 multi-tile tracing.
 struct RaytraceConfig {
-  std::filesystem::path tile_path;
+  // Directory containing prepared level-0 GeoTIFF terrain tiles.
+  std::filesystem::path tile_dir;
+
+  // The rechunk grid's north-west origin and fixed physical tile width in
+  // projected metres. Together these locate the observer's initial tile
+  // without requiring the caller to name an arbitrary source file.
+  double tile_grid_origin_x;
+  double tile_grid_origin_y;
+  double tile_width;
+
   ObserverLocation observer;
+  // Output resolution
   uint32_t num_azimuth;
   uint32_t num_polar;
+  // Azimuthal angle rage
   double azimuth_start;
   double azimuth_end;
+  // Polar angle range
   double polar_start;
   double polar_end;
+  /// Max distance to get new tiles (rays may go to the edge of a tile even if that means going
+  /// beyond this distance)
   float max_distance;
   /// Maximum number of available tiles submitted to Metal; zero means no limit.
   uint32_t max_tile_count;
@@ -32,11 +46,6 @@ struct RaytraceConfig {
 };
 
 /// Trace the fixed angular field through available level-0 terrain tiles.
-///
-/// Stage 1 keeps the tile scheduler on the CPU and synchronises after each
-/// tile. It exists to validate shared-boundary hand-offs before later GPU
-/// wavefront scheduling and asynchronous tile caching are introduced. Set
-/// `RaytraceConfig::max_tile_count` to one to trace only the observer tile.
-void perform_multi_tile_raytrace(const RaytraceConfig &config);
+void raytrace_tiled_heightmap(const RaytraceConfig &config);
 
 } // namespace panorama

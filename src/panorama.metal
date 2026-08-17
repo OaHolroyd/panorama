@@ -11,13 +11,12 @@ struct RaytraceParameters {
   float cell_size;
   float observer_elevation;
   uint num_levels;
-  uint num_cell;
   uint num_azimuth;
   uint num_polar;
   float max_distance;
 };
 
-/// One observer-relative origin for a stage-2 resident atlas slot, mirrored
+/// One observer-relative origin for a resident atlas slot, mirrored
 /// by `ResidentTile` on the host. All other parameters are dispatch-wide.
 struct ResidentTile {
   float tile_x_min;
@@ -81,7 +80,7 @@ inline uint lookup_resident_tile(
 ) {
   const uint mask = hash_capacity - 1U;
   uint index = tile_key_hash(row, column, mask);
-  for (uint probe = 0U; probe < hash_capacity; ++probe) {
+  for (uint probe = 0U; probe < hash_capacity; probe++) {
     const ResidentTileHashEntry entry = entries[index];
     if (entry.occupied == 0U) {
       return hash_capacity;
@@ -257,6 +256,12 @@ inline float offset_jump(int index, int direction, uint level, uint scale, float
   return (parity % 2) * scale * dt;
 }
 
+/// Return the level-1 cell count implied by a complete power-of-two mipmap.
+///
+/// Level 1 is the N×N field and every later level halves that side, so the
+/// final 1×1 level makes `num_levels` equal to log2(N) + 1.
+inline uint mipmap_finest_side(uint num_levels) { return 1U << (num_levels - 1U); }
+
 /// Return the row-major side length of a one-indexed mipmap level.
 inline uint mipmap_level_side(uint cell_count, uint level) { return cell_count >> (level - 1U); }
 
@@ -348,8 +353,9 @@ kernel void trace_tile_frontier(
   }
 
   // All resident slots share dimensions, so their fixed atlas strides can be
-  // derived from this tile's metadata.
-  const uint vertex_value_count = (params.num_cell + 1U) * (params.num_cell + 1U);
+  // derived from the common complete maximum-mipmap hierarchy.
+  const uint num_cell = mipmap_finest_side(params.num_levels);
+  const uint vertex_value_count = (num_cell + 1U) * (num_cell + 1U);
   device const float *mipmap = mipmap_atlas + input.slot * mipmap_value_count;
   device const float *vertices = vertex_atlas + input.slot * vertex_value_count;
 
@@ -364,7 +370,7 @@ kernel void trace_tile_frontier(
   const float dz = polar_slopes[polar_index];
   const float3 ray_origin = {0.0F, 0.0F, params.observer_elevation};
   const float3 ray_direction = {direction.x, direction.y, dz};
-  const int n = int(params.num_cell);
+  const int n = int(num_cell);
 
   // The observer tile begins at level 1. An incoming tile begins at its
   // maximum level so the maximum pyramid can skip empty terrain immediately.
@@ -372,11 +378,14 @@ kernel void trace_tile_frontier(
   // are no longer using the CPU-based continuation trick
   uint level = input.start_level;
   uint scale = 1 << (level - 1);
-  uint offset = 0;
-  for (uint current_level = 1U; current_level < level; ++current_level) {
-    const uint side = mipmap_level_side(params.num_cell, current_level);
-    offset += side * side;
-  }
+  // The preceding level areas are N², N²/4, ..., so their geometric-series
+  // sum is 4 * (N² - side²) / 3. Use 64-bit intermediates: each level's
+  // offset remains a uint under the host's atlas-size limits, but N² should
+  // not overflow while the formula is being evaluated.
+  const ulong full_area = ulong(num_cell) * ulong(num_cell);
+  const ulong current_side = ulong(mipmap_level_side(num_cell, level));
+  const ulong current_area = current_side * current_side;
+  uint offset = uint((4UL * (full_area - current_area)) / 3UL);
 
   // The exact near boundary of the active DDA segment. It remains separate
   // from points nudged only to assign deterministic cell ownership.
@@ -400,10 +409,8 @@ kernel void trace_tile_frontier(
 
   // Cell-traversal distances: `tx` and `ty` are the distances to the next
   // vertical and horizontal cell boundary respectively.
-  float ty =
-      stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
-  float tx =
-      stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+  float ty = stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+  float tx = stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
   // A coarse incoming segment can begin inside the other axis's aligned
   // block. Reposition both so neither moves behind the true hand-off.
   if (stepy != 0) {
@@ -414,15 +421,9 @@ kernel void trace_tile_frontier(
   }
 
   int previous_axis = -1; // remember which axis we last moved in
-  const uint vertex_count = params.num_cell + 1U;
-  const float tile_exit = tile_exit_distance(
-      tile_x_min,
-      tile_y_min,
-      params.cell_size,
-      params.num_cell,
-      direction,
-      t_start
-  );
+  const uint vertex_count = num_cell + 1U;
+  const float tile_exit =
+      tile_exit_distance(tile_x_min, tile_y_min, params.cell_size, num_cell, direction, t_start);
   const float segment_limit = min(tile_exit, params.max_distance);
 
   // Step the ray across the mipmap cell-by-cell until we go off the edge or find an internal
@@ -443,7 +444,7 @@ kernel void trace_tile_frontier(
     }
 
     // find the index of the relevant cell (correct level and location) inside the flattened mipmap
-    const uint level_side = mipmap_level_side(params.num_cell, level);
+    const uint level_side = mipmap_level_side(num_cell, level);
     const uint cell_index =
         offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
 
@@ -518,12 +519,10 @@ kernel void trace_tile_frontier(
 
         // The preceding level occupies `child_side` squared entries directly
         // before this one, so move backward without rebuilding the offset.
-        const uint child_side = mipmap_level_side(params.num_cell, level);
+        const uint child_side = mipmap_level_side(num_cell, level);
         offset -= child_side * child_side;
-        ty = stepy == 0 ? INFINITY
-                        : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
-        tx = stepx == 0 ? INFINITY
-                        : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+        ty = stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+        tx = stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
 
         // An entry through only one edge of a coarse cell may leave the
         // other axis part-way across the selected child. Advance its timer
@@ -546,9 +545,7 @@ kernel void trace_tile_frontier(
     // global range. Report the distinction explicitly to the CPU scheduler.
     if (t_exit >= segment_limit) {
       if (tile_exit <= params.max_distance) {
-        atomic_fetch_min_explicit(
-            &first_unresolved[work_index], polar_index, memory_order_relaxed
-        );
+        atomic_fetch_min_explicit(&first_unresolved[work_index], polar_index, memory_order_relaxed);
       }
       return;
     }
@@ -623,9 +620,8 @@ kernel void emit_tile_frontier(
   const RaytraceParameters params = shared_parameters;
   const float tile_x_min = current_tile.tile_x_min;
   const float tile_y_min = current_tile.tile_y_min;
-  const uint first_polar = atomic_load_explicit(
-      &first_unresolved[work_index], memory_order_relaxed
-  );
+  const uint first_polar =
+      atomic_load_explicit(&first_unresolved[work_index], memory_order_relaxed);
   if (first_polar >= params.num_polar) {
     return;
   }
@@ -635,7 +631,7 @@ kernel void emit_tile_frontier(
       tile_x_min,
       tile_y_min,
       params.cell_size,
-      params.num_cell,
+      mipmap_finest_side(params.num_levels),
       direction,
       active.entry_distance
   );
@@ -647,10 +643,8 @@ kernel void emit_tile_frontier(
   // original exit distance remains the geometric start of its segment.
   float x = entry_distance * direction.x;
   float y = entry_distance * direction.y;
-  const float nudge = max(
-      1e-3F * params.cell_size,
-      8.0F * FLT_EPSILON * max(1.0F, max(fabs(x), fabs(y)))
-  );
+  const float nudge =
+      max(1e-3F * params.cell_size, 8.0F * FLT_EPSILON * max(1.0F, max(fabs(x), fabs(y))));
   if (direction.x != 0.0F) {
     x += copysign(nudge, direction.x);
   }
@@ -660,28 +654,20 @@ kernel void emit_tile_frontier(
 
   // The nudge makes these comparisons deterministic at shared edges and
   // corners. A row increases southward while a column increases eastward.
-  const float tile_width = float(params.num_cell) * params.cell_size;
+  const float tile_width = float(mipmap_finest_side(params.num_levels)) * params.cell_size;
   const float tile_x_max = tile_x_min + tile_width;
   const float tile_y_max = tile_y_min + tile_width;
   const long row_offset = y < tile_y_min ? 1L : y >= tile_y_max ? -1L : 0L;
   const long column_offset = x < tile_x_min ? -1L : x >= tile_x_max ? 1L : 0L;
   const long successor_row = current_tile.row + row_offset;
   const long successor_column = current_tile.column + column_offset;
-  const uint successor_slot = lookup_resident_tile(
-      resident_hash,
-      hash_capacity,
-      successor_row,
-      successor_column
-  );
+  const uint successor_slot =
+      lookup_resident_tile(resident_hash, hash_capacity, successor_row, successor_column);
   // The source directory may contain this successor even though a background
   // worker has not loaded it into the atlas yet. Preserve its exact hand-off
   // for host-side retry rather than incorrectly treating it as open sky.
   if (successor_slot == hash_capacity) {
-    const uint deferred_index = atomic_fetch_add_explicit(
-        deferred_count,
-        1U,
-        memory_order_relaxed
-    );
+    const uint deferred_index = atomic_fetch_add_explicit(deferred_count, 1U, memory_order_relaxed);
     if (deferred_index < next_capacity) {
       deferred_items[deferred_index] = {active.azimuth, first_polar, entry_distance};
     }
@@ -690,9 +676,9 @@ kernel void emit_tile_frontier(
 
   const uint output_index = atomic_fetch_add_explicit(next_count, 1U, memory_order_relaxed);
   if (output_index >= next_capacity) {
-    // The host deliberately allocates enough space for every slot/azimuth
-    // combination; dropping an unexpected excess is safer than corrupting
-    // the adjacent buffer and is detected by the host count check.
+    // The host allocates one entry per azimuth because a column has only one
+    // unresolved suffix. Dropping an unexpected excess is safer than
+    // corrupting the adjacent buffer; the host detects the counter overflow.
     return;
   }
   next_items[output_index] = {

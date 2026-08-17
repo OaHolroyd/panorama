@@ -40,7 +40,7 @@ template <size_t Count>
     float normalised_value
 ) {
   const float value = clamp_unit(normalised_value);
-  for (size_t index = 1; index < Count; ++index) {
+  for (size_t index = 1; index < Count; index++) {
     if (value <= stops[index].position) {
       const ColorStop &lower = stops[index - 1];
       const ColorStop &upper = stops[index];
@@ -211,7 +211,7 @@ void write_colormapped_png(
   const auto [minimum, maximum] = finite_range(values);
   const float range = maximum - minimum;
   std::vector<uint8_t> rgb(pixel_count * 3U);
-  for (size_t index = 0; index < pixel_count; ++index) {
+  for (size_t index = 0; index < pixel_count; index++) {
     const float value = values[index];
     // Black makes absent rays or other non-finite diagnostic values obvious
     // without preventing the finite part of an image from being inspected.
