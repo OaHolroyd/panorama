@@ -27,6 +27,8 @@ struct RaytraceConfig {
   uint32_t max_tile_count;
   /// Total byte budget for the resident GPU terrain-tile cache.
   uint64_t tile_cache_size_bytes;
+  /// Maximum concurrent tile load/mipmap workers; zero selects all hardware threads.
+  uint32_t max_tile_preparation_workers;
 };
 
 /// Trace the fixed angular field through available level-0 terrain tiles.

@@ -22,6 +22,17 @@ struct RaytraceParameters {
 struct ResidentTile {
   float tile_x_min;
   float tile_y_min;
+  long row;
+  long column;
+};
+
+/// One open-addressed lookup entry mapping a global tile key to an atlas slot.
+/// This must remain identical to `ResidentTileHashEntry` in raytrace_setup.mm.
+struct ResidentTileHashEntry {
+  long row;
+  long column;
+  uint slot;
+  uint occupied;
 };
 
 /// One unresolved azimuth-column segment in the GPU-owned work frontier.
@@ -33,6 +44,55 @@ struct TileWorkItem {
   uint start_level;
   float entry_distance;
 };
+
+/// One continuation whose successor terrain tile is not resident yet.
+///
+/// The CPU resolves its tile key and retries it after the tile loader assigns
+/// that terrain to an atlas slot. This mirrors `DeferredTileWork` on the host.
+struct DeferredTileWork {
+  uint azimuth;
+  uint first_polar;
+  float entry_distance;
+};
+
+/// Mix one unsigned 64-bit value for the resident tile lookup table.
+inline ulong mix_tile_hash(ulong value) {
+  value ^= value >> 30UL;
+  value *= 0xbf58476d1ce4e5b9UL;
+  value ^= value >> 27UL;
+  value *= 0x94d049bb133111ebUL;
+  value ^= value >> 31UL;
+  return value;
+}
+
+/// Return the initial bucket for one global row/column tile key.
+inline uint tile_key_hash(long row, long column, uint mask) {
+  const ulong mixed_row = mix_tile_hash(ulong(row));
+  const ulong mixed_column = mix_tile_hash(ulong(column));
+  return uint(mix_tile_hash(mixed_row ^ (mixed_column + 0x9e3779b97f4a7c15UL))) & mask;
+}
+
+/// Return a resident atlas slot for a key, or `hash_capacity` when absent.
+inline uint lookup_resident_tile(
+    device const ResidentTileHashEntry *entries,
+    uint hash_capacity,
+    long row,
+    long column
+) {
+  const uint mask = hash_capacity - 1U;
+  uint index = tile_key_hash(row, column, mask);
+  for (uint probe = 0U; probe < hash_capacity; ++probe) {
+    const ResidentTileHashEntry entry = entries[index];
+    if (entry.occupied == 0U) {
+      return hash_capacity;
+    }
+    if (entry.row == row && entry.column == column) {
+      return entry.slot;
+    }
+    index = (index + 1U) & mask;
+  }
+  return hash_capacity;
+}
 
 /// Result of an exact bilinear terrain-patch intersection test.
 struct Collision {
@@ -540,19 +600,22 @@ kernel void trace_tile_frontier(
 }
 
 /// Turn each column's atomic unresolved-polar result into its successor work
-/// item.  The all-resident first stage uses a short linear slot lookup; later
-/// cache work can replace that lookup with a compact grid index without
-/// changing the exact hand-off distance.
+/// item. A hash table maps the outgoing global tile key to a resident slot;
+/// a nonresident successor is returned to the host without changing its exact
+/// hand-off distance.
 kernel void emit_tile_frontier(
     device const TileWorkItem *active_items [[buffer(0)]],
     device const ResidentTile *tiles [[buffer(1)]],
     device const float2 *azimuth_directions [[buffer(2)]],
     device const atomic_uint *first_unresolved [[buffer(3)]],
     constant RaytraceParameters &shared_parameters [[buffer(4)]],
-    constant uint &tile_count [[buffer(5)]],
-    constant uint &next_capacity [[buffer(6)]],
-    device TileWorkItem *next_items [[buffer(7)]],
-    device atomic_uint *next_count [[buffer(8)]],
+    device const ResidentTileHashEntry *resident_hash [[buffer(5)]],
+    constant uint &hash_capacity [[buffer(6)]],
+    constant uint &next_capacity [[buffer(7)]],
+    device TileWorkItem *next_items [[buffer(8)]],
+    device atomic_uint *next_count [[buffer(9)]],
+    device DeferredTileWork *deferred_items [[buffer(10)]],
+    device atomic_uint *deferred_count [[buffer(11)]],
     uint work_index [[thread_position_in_grid]]
 ) {
   const TileWorkItem active = active_items[work_index];
@@ -595,18 +658,33 @@ kernel void emit_tile_frontier(
     y += copysign(nudge, direction.y);
   }
 
-  uint successor_slot = tile_count;
-  for (uint slot = 0U; slot < tile_count; ++slot) {
-    const ResidentTile candidate = tiles[slot];
-    const float x_max = candidate.tile_x_min + float(params.num_cell) * params.cell_size;
-    const float y_max = candidate.tile_y_min + float(params.num_cell) * params.cell_size;
-    if (x >= candidate.tile_x_min && x < x_max && y >= candidate.tile_y_min && y < y_max) {
-      successor_slot = slot;
-      break;
+  // The nudge makes these comparisons deterministic at shared edges and
+  // corners. A row increases southward while a column increases eastward.
+  const float tile_width = float(params.num_cell) * params.cell_size;
+  const float tile_x_max = tile_x_min + tile_width;
+  const float tile_y_max = tile_y_min + tile_width;
+  const long row_offset = y < tile_y_min ? 1L : y >= tile_y_max ? -1L : 0L;
+  const long column_offset = x < tile_x_min ? -1L : x >= tile_x_max ? 1L : 0L;
+  const long successor_row = current_tile.row + row_offset;
+  const long successor_column = current_tile.column + column_offset;
+  const uint successor_slot = lookup_resident_tile(
+      resident_hash,
+      hash_capacity,
+      successor_row,
+      successor_column
+  );
+  // The source directory may contain this successor even though a background
+  // worker has not loaded it into the atlas yet. Preserve its exact hand-off
+  // for host-side retry rather than incorrectly treating it as open sky.
+  if (successor_slot == hash_capacity) {
+    const uint deferred_index = atomic_fetch_add_explicit(
+        deferred_count,
+        1U,
+        memory_order_relaxed
+    );
+    if (deferred_index < next_capacity) {
+      deferred_items[deferred_index] = {active.azimuth, first_polar, entry_distance};
     }
-  }
-  // No prepared/resident successor is open sky in this all-resident stage.
-  if (successor_slot == tile_count) {
     return;
   }
 
