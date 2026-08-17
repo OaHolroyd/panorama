@@ -4,7 +4,7 @@
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
 
-/// Scalar-only terrain-tracing ABI mirrored by raytrace_setup.mm.
+/// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///
 /// Projected coordinates have already been rebased around the observer.
 struct RaytraceParameters {
@@ -17,7 +17,7 @@ struct RaytraceParameters {
 };
 
 /// One observer-relative origin for a resident atlas slot, mirrored
-/// by `ResidentTile` on the host. All other parameters are dispatch-wide.
+/// by `ResidentTile` in resident_tile_cache.h. All other parameters are dispatch-wide.
 struct ResidentTile {
   float tile_x_min;
   float tile_y_min;
@@ -26,7 +26,7 @@ struct ResidentTile {
 };
 
 /// One open-addressed lookup entry mapping a global tile key to an atlas slot.
-/// This must remain identical to `ResidentTileHashEntry` in raytrace_setup.mm.
+/// This must remain identical to `ResidentTileHashEntry` in resident_tile_cache.h.
 struct ResidentTileHashEntry {
   long row;
   long column;
@@ -35,7 +35,7 @@ struct ResidentTileHashEntry {
 };
 
 /// One unresolved azimuth-column segment in the GPU-owned work frontier.
-/// This must remain identical to `TileWorkItem` in raytrace_setup.mm.
+/// This must remain identical to `TileWorkItem` in raytrace_gpu.h.
 struct TileWorkItem {
   uint slot;
   uint azimuth;
