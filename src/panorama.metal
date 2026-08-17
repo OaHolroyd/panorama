@@ -8,8 +8,6 @@ using namespace metal;
 ///
 /// Projected coordinates have already been rebased around the observer.
 struct RaytraceParameters {
-  float tile_x_min;
-  float tile_y_min;
   float cell_size;
   float observer_elevation;
   uint num_levels;
@@ -19,25 +17,11 @@ struct RaytraceParameters {
   float max_distance;
 };
 
-/// Per-azimuth state for one CPU-scheduled terrain-tile segment.
-///
-/// This must mirror `TileRayInput` in raytrace_setup.mm exactly.
-struct TileRayInput {
-  uint first_polar;
-  uint start_level;
-  float entry_distance;
-  uint unused;
-};
-
-/// One immutable stage-2 tile-atlas slot mirrored by `ResidentTile` on the
-/// host.  Its terrain arrays are addressed by its index and the common per
-/// tile sample counts supplied to the frontier kernels.
+/// One observer-relative origin for a stage-2 resident atlas slot, mirrored
+/// by `ResidentTile` on the host. All other parameters are dispatch-wide.
 struct ResidentTile {
-  RaytraceParameters parameters;
-  uint generation;
-  uint unused_0;
-  uint unused_1;
-  uint unused_2;
+  float tile_x_min;
+  float tile_y_min;
 };
 
 /// One unresolved azimuth-column segment in the GPU-owned work frontier.
@@ -48,17 +32,6 @@ struct TileWorkItem {
   uint first_polar;
   uint start_level;
   float entry_distance;
-  uint unused_0;
-  uint unused_1;
-  uint unused_2;
-};
-
-/// Per-ray result values mirrored by RayStatus in raytrace_setup.mm.
-enum RayStatus : uint {
-  RayStatusInactive = 0U,
-  RayStatusHit = 1U,
-  RayStatusContinue = 2U,
-  RayStatusMaxDistance = 3U,
 };
 
 /// Result of an exact bilinear terrain-patch intersection test.
@@ -286,10 +259,11 @@ kernel void trace_tile_frontier(
     device const float *polar_slopes [[buffer(3)]],
     device const TileWorkItem *work_items [[buffer(4)]],
     device const ResidentTile *tiles [[buffer(5)]],
-    constant uint &mipmap_value_count [[buffer(6)]],
-    device float *distances [[buffer(7)]],
-    device float *elevations [[buffer(8)]],
-    device atomic_uint *first_unresolved [[buffer(9)]],
+    constant RaytraceParameters &shared_parameters [[buffer(6)]],
+    constant uint &mipmap_value_count [[buffer(7)]],
+    device float *distances [[buffer(8)]],
+    device float *elevations [[buffer(9)]],
+    device atomic_uint *first_unresolved [[buffer(10)]],
     uint2 ray_index [[thread_position_in_grid]]
 ) {
   // Neighboring lanes differ in polar index and share the DDA path represented
@@ -298,7 +272,9 @@ kernel void trace_tile_frontier(
   const uint work_index = ray_index.y;
   const TileWorkItem input = work_items[work_index];
   const ResidentTile resident_tile = tiles[input.slot];
-  const RaytraceParameters params = resident_tile.parameters;
+  const RaytraceParameters params = shared_parameters;
+  const float tile_x_min = resident_tile.tile_x_min;
+  const float tile_y_min = resident_tile.tile_y_min;
   if (polar_index >= params.num_polar || input.azimuth >= params.num_azimuth) {
     return;
   }
@@ -355,8 +331,8 @@ kernel void trace_tile_frontier(
   const float y_entry = t_start * direction.y;
   const float x_classify = stepx == 0 ? x_entry : x_entry + copysign(boundary_nudge, direction.x);
   const float y_classify = stepy == 0 ? y_entry : y_entry + copysign(boundary_nudge, direction.y);
-  int i = clamp(int(floor((y_classify - params.tile_y_min) / delta)), 0, n - 1);
-  int j = clamp(int(floor((x_classify - params.tile_x_min) / delta)), 0, n - 1);
+  int i = clamp(int(floor((y_classify - tile_y_min) / delta)), 0, n - 1);
+  int j = clamp(int(floor((x_classify - tile_x_min) / delta)), 0, n - 1);
 
   // align to the correct level boundary
   i = (i / scale) * scale;
@@ -365,9 +341,9 @@ kernel void trace_tile_frontier(
   // Cell-traversal distances: `tx` and `ty` are the distances to the next
   // vertical and horizontal cell boundary respectively.
   float ty =
-      stepy == 0 ? INFINITY : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+      stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
   float tx =
-      stepx == 0 ? INFINITY : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+      stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
   // A coarse incoming segment can begin inside the other axis's aligned
   // block. Reposition both so neither moves behind the true hand-off.
   if (stepy != 0) {
@@ -380,8 +356,8 @@ kernel void trace_tile_frontier(
   int previous_axis = -1; // remember which axis we last moved in
   const uint vertex_count = params.num_cell + 1U;
   const float tile_exit = tile_exit_distance(
-      params.tile_x_min,
-      params.tile_y_min,
+      tile_x_min,
+      tile_y_min,
       params.cell_size,
       params.num_cell,
       direction,
@@ -427,8 +403,8 @@ kernel void trace_tile_frontier(
         const Collision collision = bilinear_collision(
             vertices,
             vertex_count,
-            params.tile_x_min + float(j) * delta,
-            params.tile_y_min + float(i) * delta,
+            tile_x_min + float(j) * delta,
+            tile_y_min + float(i) * delta,
             delta,
             uint(i),
             uint(j),
@@ -467,8 +443,8 @@ kernel void trace_tile_frontier(
         if (stepy != 0) {
           cell_y += copysign(cell_nudge, direction.y);
         }
-        i = clamp(int(floor((cell_y - params.tile_y_min) / delta)), 0, n - 1);
-        j = clamp(int(floor((cell_x - params.tile_x_min) / delta)), 0, n - 1);
+        i = clamp(int(floor((cell_y - tile_y_min) / delta)), 0, n - 1);
+        j = clamp(int(floor((cell_x - tile_x_min) / delta)), 0, n - 1);
 
         // Fine indices remain in level-1 coordinates. Returning to a child
         // level requires their lower-left child-cell alignment before the
@@ -485,9 +461,9 @@ kernel void trace_tile_frontier(
         const uint child_side = mipmap_level_side(params.num_cell, level);
         offset -= child_side * child_side;
         ty = stepy == 0 ? INFINITY
-                        : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+                        : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
         tx = stepx == 0 ? INFINITY
-                        : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+                        : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
 
         // An entry through only one edge of a coarse cell may leave the
         // other axis part-way across the selected child. Advance its timer
@@ -572,15 +548,18 @@ kernel void emit_tile_frontier(
     device const ResidentTile *tiles [[buffer(1)]],
     device const float2 *azimuth_directions [[buffer(2)]],
     device const atomic_uint *first_unresolved [[buffer(3)]],
-    constant uint &tile_count [[buffer(4)]],
-    constant uint &next_capacity [[buffer(5)]],
-    device TileWorkItem *next_items [[buffer(6)]],
-    device atomic_uint *next_count [[buffer(7)]],
+    constant RaytraceParameters &shared_parameters [[buffer(4)]],
+    constant uint &tile_count [[buffer(5)]],
+    constant uint &next_capacity [[buffer(6)]],
+    device TileWorkItem *next_items [[buffer(7)]],
+    device atomic_uint *next_count [[buffer(8)]],
     uint work_index [[thread_position_in_grid]]
 ) {
   const TileWorkItem active = active_items[work_index];
   const ResidentTile current_tile = tiles[active.slot];
-  const RaytraceParameters params = current_tile.parameters;
+  const RaytraceParameters params = shared_parameters;
+  const float tile_x_min = current_tile.tile_x_min;
+  const float tile_y_min = current_tile.tile_y_min;
   const uint first_polar = atomic_load_explicit(
       &first_unresolved[work_index], memory_order_relaxed
   );
@@ -590,8 +569,8 @@ kernel void emit_tile_frontier(
 
   const float2 direction = azimuth_directions[active.azimuth];
   const float entry_distance = tile_exit_distance(
-      params.tile_x_min,
-      params.tile_y_min,
+      tile_x_min,
+      tile_y_min,
       params.cell_size,
       params.num_cell,
       direction,
@@ -618,9 +597,9 @@ kernel void emit_tile_frontier(
 
   uint successor_slot = tile_count;
   for (uint slot = 0U; slot < tile_count; ++slot) {
-    const RaytraceParameters candidate = tiles[slot].parameters;
-    const float x_max = candidate.tile_x_min + float(candidate.num_cell) * candidate.cell_size;
-    const float y_max = candidate.tile_y_min + float(candidate.num_cell) * candidate.cell_size;
+    const ResidentTile candidate = tiles[slot];
+    const float x_max = candidate.tile_x_min + float(params.num_cell) * params.cell_size;
+    const float y_max = candidate.tile_y_min + float(params.num_cell) * params.cell_size;
     if (x >= candidate.tile_x_min && x < x_max && y >= candidate.tile_y_min && y < y_max) {
       successor_slot = slot;
       break;
@@ -642,10 +621,7 @@ kernel void emit_tile_frontier(
       successor_slot,
       active.azimuth,
       first_polar,
-      tiles[successor_slot].parameters.num_levels,
+      params.num_levels,
       entry_distance,
-      0U,
-      0U,
-      0U,
   };
 }
