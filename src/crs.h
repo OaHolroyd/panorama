@@ -4,29 +4,26 @@
 
 namespace panorama {
 
-// Geographic coordinates use WGS 84 degrees. Keeping the field names explicit
-// prevents accidentally supplying the common (longitude, latitude) order.
+/// Geographic WGS 84 coordinates in the explicit `(latitude, longitude)` order.
 struct LatLon {
   double lat;
   double lon;
 };
 
-// Projected coordinates are metres east and north in the CRS represented by a
-// Crs instance: x is easting and y is northing.
+/// Projected metre coordinates where x is easting and y is northing.
 struct Coord {
   double x;
   double y;
 };
 
-// The supported projected coordinate reference systems for terrain tiles.
+/// Projected coordinate reference systems supported by terrain tiles.
 enum class CrsId : uint32_t {
   SwissLv95 = 2056,
   FrenchLambert93 = 2154,
   BritishNationalGrid = 27700,
 };
 
-// A small, deliberately restricted CRS value type. Transformations are
-// performed through GDAL/PROJ, rather than approximate hand-written formulas.
+/// Restricted terrain CRS value type whose transforms are delegated to GDAL/PROJ.
 class Crs {
 public:
   /// Construct one of the explicitly supported projected coordinate systems.

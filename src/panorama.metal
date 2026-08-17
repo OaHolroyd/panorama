@@ -4,21 +4,96 @@
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
 
-// The terrain-tracing ABI. This scalar-only structure intentionally mirrors
-// RaytraceParameters in raytrace_setup.mm; all projected tile coordinates have
-// already been rebased around the observer before upload.
+/// Scalar-only terrain-tracing ABI mirrored by raytrace_setup.mm.
+///
+/// Projected coordinates have already been rebased around the observer.
 struct RaytraceParameters {
-  float tile_x_min;
-  float tile_y_min;
   float cell_size;
   float observer_elevation;
   uint num_levels;
-  uint num_cell;
   uint num_azimuth;
   uint num_polar;
   float max_distance;
 };
 
+/// One observer-relative origin for a resident atlas slot, mirrored
+/// by `ResidentTile` on the host. All other parameters are dispatch-wide.
+struct ResidentTile {
+  float tile_x_min;
+  float tile_y_min;
+  long row;
+  long column;
+};
+
+/// One open-addressed lookup entry mapping a global tile key to an atlas slot.
+/// This must remain identical to `ResidentTileHashEntry` in raytrace_setup.mm.
+struct ResidentTileHashEntry {
+  long row;
+  long column;
+  uint slot;
+  uint occupied;
+};
+
+/// One unresolved azimuth-column segment in the GPU-owned work frontier.
+/// This must remain identical to `TileWorkItem` in raytrace_setup.mm.
+struct TileWorkItem {
+  uint slot;
+  uint azimuth;
+  uint first_polar;
+  uint start_level;
+  float entry_distance;
+};
+
+/// One continuation whose successor terrain tile is not resident yet.
+///
+/// The CPU resolves its tile key and retries it after the tile loader assigns
+/// that terrain to an atlas slot. This mirrors `DeferredTileWork` on the host.
+struct DeferredTileWork {
+  uint azimuth;
+  uint first_polar;
+  float entry_distance;
+};
+
+/// Mix one unsigned 64-bit value for the resident tile lookup table.
+inline ulong mix_tile_hash(ulong value) {
+  value ^= value >> 30UL;
+  value *= 0xbf58476d1ce4e5b9UL;
+  value ^= value >> 27UL;
+  value *= 0x94d049bb133111ebUL;
+  value ^= value >> 31UL;
+  return value;
+}
+
+/// Return the initial bucket for one global row/column tile key.
+inline uint tile_key_hash(long row, long column, uint mask) {
+  const ulong mixed_row = mix_tile_hash(ulong(row));
+  const ulong mixed_column = mix_tile_hash(ulong(column));
+  return uint(mix_tile_hash(mixed_row ^ (mixed_column + 0x9e3779b97f4a7c15UL))) & mask;
+}
+
+/// Return a resident atlas slot for a key, or `hash_capacity` when absent.
+inline uint lookup_resident_tile(
+    device const ResidentTileHashEntry *entries,
+    uint hash_capacity,
+    long row,
+    long column
+) {
+  const uint mask = hash_capacity - 1U;
+  uint index = tile_key_hash(row, column, mask);
+  for (uint probe = 0U; probe < hash_capacity; probe++) {
+    const ResidentTileHashEntry entry = entries[index];
+    if (entry.occupied == 0U) {
+      return hash_capacity;
+    }
+    if (entry.row == row && entry.column == column) {
+      return entry.slot;
+    }
+    index = (index + 1U) & mask;
+  }
+  return hash_capacity;
+}
+
+/// Result of an exact bilinear terrain-patch intersection test.
 struct Collision {
   bool hit;
   float distance;
@@ -181,6 +256,12 @@ inline float offset_jump(int index, int direction, uint level, uint scale, float
   return (parity % 2) * scale * dt;
 }
 
+/// Return the level-1 cell count implied by a complete power-of-two mipmap.
+///
+/// Level 1 is the N×N field and every later level halves that side, so the
+/// final 1×1 level makes `num_levels` equal to log2(N) + 1.
+inline uint mipmap_finest_side(uint num_levels) { return 1U << (num_levels - 1U); }
+
 /// Return the row-major side length of a one-indexed mipmap level.
 inline uint mipmap_level_side(uint cell_count, uint level) { return cell_count >> (level - 1U); }
 
@@ -194,26 +275,89 @@ inline float next_boundary_after(float boundary, float entry_distance, float int
   return boundary;
 }
 
-/// Trace one independent polar ray through one level-0 terrain tile. Uses a
-/// maximum-mipmap to step through cells faster.
-kernel void trace_single_tile(
-    device const float *mipmap [[buffer(0)]],
-    device const float *vertices [[buffer(1)]],
+/// Return the first tile boundary strictly after a segment's exact entry.
+inline float tile_exit_distance(
+    float tile_x_min,
+    float tile_y_min,
+    float cell_size,
+    uint cell_count,
+    float2 direction,
+    float entry_distance
+) {
+  float tile_exit = INFINITY;
+  const float x_max = tile_x_min + float(cell_count) * cell_size;
+  const float y_max = tile_y_min + float(cell_count) * cell_size;
+  if (direction.x > 0.0F) {
+    const float candidate = x_max / direction.x;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  } else if (direction.x < 0.0F) {
+    const float candidate = tile_x_min / direction.x;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  }
+  if (direction.y > 0.0F) {
+    const float candidate = y_max / direction.y;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  } else if (direction.y < 0.0F) {
+    const float candidate = tile_y_min / direction.y;
+    if (candidate > entry_distance) {
+      tile_exit = min(tile_exit, candidate);
+    }
+  }
+  return tile_exit;
+}
+
+/// Trace one independent polar ray through one GPU-frontier terrain segment.
+///
+/// Each work item is one azimuth column.  Its polar rays run in parallel and
+/// atomically record the first unresolved polar index when they leave the
+/// tile.  A later kernel turns that suffix into the next frontier item.
+kernel void trace_tile_frontier(
+    device const float *mipmap_atlas [[buffer(0)]],
+    device const float *vertex_atlas [[buffer(1)]],
     device const float2 *azimuth_directions [[buffer(2)]],
     device const float *polar_slopes [[buffer(3)]],
-    constant RaytraceParameters &params [[buffer(4)]],
-    device float *distances [[buffer(5)]],
-    device float *elevations [[buffer(6)]],
+    device const TileWorkItem *work_items [[buffer(4)]],
+    device const ResidentTile *tiles [[buffer(5)]],
+    constant RaytraceParameters &shared_parameters [[buffer(6)]],
+    constant uint &mipmap_value_count [[buffer(7)]],
+    device float *distances [[buffer(8)]],
+    device float *elevations [[buffer(9)]],
+    device atomic_uint *first_unresolved [[buffer(10)]],
     uint2 ray_index [[thread_position_in_grid]]
 ) {
-  // Map neighboring threads to rays with the same azimuthal index and therefore the same grid
-  // traversal path.
+  // Neighboring lanes differ in polar index and share the DDA path represented
+  // by one azimuth-column work item.
   const uint polar_index = ray_index.x;
-  const uint azimuth_index = ray_index.y;
-  if (polar_index >= params.num_polar || azimuth_index >= params.num_azimuth) {
+  const uint work_index = ray_index.y;
+  const TileWorkItem input = work_items[work_index];
+  const ResidentTile resident_tile = tiles[input.slot];
+  const RaytraceParameters params = shared_parameters;
+  const float tile_x_min = resident_tile.tile_x_min;
+  const float tile_y_min = resident_tile.tile_y_min;
+  if (polar_index >= params.num_polar || input.azimuth >= params.num_azimuth) {
     return;
   }
+  const uint azimuth_index = input.azimuth;
   const uint output_index = polar_index * params.num_azimuth + azimuth_index;
+
+  // Rays in a given column that have already intersected (and are therefore below the first index
+  // that needs tracing because of the 2.5D nature of the heightfield).
+  if (polar_index < input.first_polar) {
+    return;
+  }
+
+  // All resident slots share dimensions, so their fixed atlas strides can be
+  // derived from the common complete maximum-mipmap hierarchy.
+  const uint num_cell = mipmap_finest_side(params.num_levels);
+  const uint vertex_value_count = (num_cell + 1U) * (num_cell + 1U);
+  device const float *mipmap = mipmap_atlas + input.slot * mipmap_value_count;
+  device const float *vertices = vertex_atlas + input.slot * vertex_value_count;
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
@@ -226,27 +370,38 @@ kernel void trace_single_tile(
   const float dz = polar_slopes[polar_index];
   const float3 ray_origin = {0.0F, 0.0F, params.observer_elevation};
   const float3 ray_direction = {direction.x, direction.y, dz};
-  const int n = int(params.num_cell);
+  const int n = int(num_cell);
 
-  // Decide starting level: the origin tile always starts at level 1, all subsequent tiles start at
-  // the max level
-  // uint level = params.num_level; // for non-origin tiles
-  uint level = 1;
+  // The observer tile begins at level 1. An incoming tile begins at its
+  // maximum level so the maximum pyramid can skip empty terrain immediately.
+  // TODO: check whether it would be better to start at the coarsest level no matter what since we
+  // are no longer using the CPU-based continuation trick
+  uint level = input.start_level;
   uint scale = 1 << (level - 1);
-  uint offset = 0;
+  // The preceding level areas are N², N²/4, ..., so their geometric-series
+  // sum is 4 * (N² - side²) / 3. Use 64-bit intermediates: each level's
+  // offset remains a uint under the host's atlas-size limits, but N² should
+  // not overflow while the formula is being evaluated.
+  const ulong full_area = ulong(num_cell) * ulong(num_cell);
+  const ulong current_side = ulong(mipmap_level_side(num_cell, level));
+  const ulong current_area = current_side * current_side;
+  uint offset = uint((4UL * (full_area - current_area)) / 3UL);
+
   // The exact near boundary of the active DDA segment. It remains separate
   // from points nudged only to assign deterministic cell ownership.
-  float t_start = 0.0F;
+  float t_start = input.entry_distance;
 
   // The local observer is exactly at (0, 0), which may lie on one or both
   // shared cell boundaries. Nudge only the coordinate used for ownership so a
   // south/west ray starts in its forward cell; all DDA distances still use the
   // exact observer position and therefore retain t = 0 as their geometry.
   const float boundary_nudge = 1e-3F * delta;
-  const float x_classify = stepx == 0 ? 0.0F : copysign(boundary_nudge, direction.x);
-  const float y_classify = stepy == 0 ? 0.0F : copysign(boundary_nudge, direction.y);
-  int i = clamp(int(floor((y_classify - params.tile_y_min) / delta)), 0, n - 1);
-  int j = clamp(int(floor((x_classify - params.tile_x_min) / delta)), 0, n - 1);
+  const float x_entry = t_start * direction.x;
+  const float y_entry = t_start * direction.y;
+  const float x_classify = stepx == 0 ? x_entry : x_entry + copysign(boundary_nudge, direction.x);
+  const float y_classify = stepy == 0 ? y_entry : y_entry + copysign(boundary_nudge, direction.y);
+  int i = clamp(int(floor((y_classify - tile_y_min) / delta)), 0, n - 1);
+  int j = clamp(int(floor((x_classify - tile_x_min) / delta)), 0, n - 1);
 
   // align to the correct level boundary
   i = (i / scale) * scale;
@@ -254,34 +409,49 @@ kernel void trace_single_tile(
 
   // Cell-traversal distances: `tx` and `ty` are the distances to the next
   // vertical and horizontal cell boundary respectively.
-  float ty =
-      stepy == 0 ? INFINITY : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
-  float tx =
-      stepx == 0 ? INFINITY : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
-  int previous_axis = -1;
-  const uint vertex_count = params.num_cell + 1U;
+  float ty = stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+  float tx = stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+  // A coarse incoming segment can begin inside the other axis's aligned
+  // block. Reposition both so neither moves behind the true hand-off.
+  if (stepy != 0) {
+    ty = next_boundary_after(ty, t_start, scale * dty);
+  }
+  if (stepx != 0) {
+    tx = next_boundary_after(tx, t_start, scale * dtx);
+  }
+
+  int previous_axis = -1; // remember which axis we last moved in
+  const uint vertex_count = num_cell + 1U;
+  const float tile_exit =
+      tile_exit_distance(tile_x_min, tile_y_min, params.cell_size, num_cell, direction, t_start);
+  const float segment_limit = min(tile_exit, params.max_distance);
 
   // Step the ray across the mipmap cell-by-cell until we go off the edge or find an internal
   // collision
   while (i >= 0 && j >= 0 && i < n && j < n) {
+    // shift t to the edge of the next cell/the edge of the tile/max distance, whichever is closest
     const float t_exit = min(tx, ty);
+    const float interval_end = min(t_exit, segment_limit);
 
     // Find the minimum height that the ray has within the cell we've just crossed
-    float z = ray_origin.z + t_exit * dz;
+    float z = ray_origin.z + interval_end * dz;
     if (dz > 0.0F) {
       // Since an upward ray will be higher at the exit boundary, rewind to find the minimum height
       // as the ray crosses the cell.
       z = previous_axis == -1
               ? ray_origin.z + t_start * dz
-              : ray_origin.z + (t_exit - scale * (previous_axis == 0 ? dty : dtx)) * dz;
+              : ray_origin.z + (interval_end - scale * (previous_axis == 0 ? dty : dtx)) * dz;
     }
 
-    const uint level_side = mipmap_level_side(params.num_cell, level);
+    // find the index of the relevant cell (correct level and location) inside the flattened mipmap
+    const uint level_side = mipmap_level_side(num_cell, level);
     const uint cell_index =
         offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
+
+    // Collision check
     if (z <= mipmap[cell_index]) {
       if (level == 1) {
-        // Collision check. Restrict the bilinear root search to this cell's
+        // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
         float t_entry = t_start;
         if (stepx != 0) {
@@ -290,19 +460,22 @@ kernel void trace_single_tile(
         if (stepy != 0) {
           t_entry = max(t_entry, ty - dty);
         }
+
         const Collision collision = bilinear_collision(
             vertices,
             vertex_count,
-            params.tile_x_min + float(j) * delta,
-            params.tile_y_min + float(i) * delta,
+            tile_x_min + float(j) * delta,
+            tile_y_min + float(i) * delta,
             delta,
             uint(i),
             uint(j),
             ray_origin,
             ray_direction,
-            min(t_entry, t_exit),
-            t_exit
+            min(t_entry, interval_end),
+            interval_end
         );
+
+        // Only exit it's a hit
         if (collision.hit) {
           distances[output_index] = collision.distance;
           elevations[output_index] = ray_origin.z + collision.distance * dz;
@@ -331,8 +504,8 @@ kernel void trace_single_tile(
         if (stepy != 0) {
           cell_y += copysign(cell_nudge, direction.y);
         }
-        i = clamp(int(floor((cell_y - params.tile_y_min) / delta)), 0, n - 1);
-        j = clamp(int(floor((cell_x - params.tile_x_min) / delta)), 0, n - 1);
+        i = clamp(int(floor((cell_y - tile_y_min) / delta)), 0, n - 1);
+        j = clamp(int(floor((cell_x - tile_x_min) / delta)), 0, n - 1);
 
         // Fine indices remain in level-1 coordinates. Returning to a child
         // level requires their lower-left child-cell alignment before the
@@ -343,14 +516,14 @@ kernel void trace_single_tile(
         scale /= 2U;
         i = (i / int(scale)) * int(scale);
         j = (j / int(scale)) * int(scale);
+
         // The preceding level occupies `child_side` squared entries directly
         // before this one, so move backward without rebuilding the offset.
-        const uint child_side = mipmap_level_side(params.num_cell, level);
+        const uint child_side = mipmap_level_side(num_cell, level);
         offset -= child_side * child_side;
-        ty = stepy == 0 ? INFINITY
-                        : stepy * (params.tile_y_min / delta + i + (stepy > 0) * scale) * dty;
-        tx = stepx == 0 ? INFINITY
-                        : stepx * (params.tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+        ty = stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
+        tx = stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+
         // An entry through only one edge of a coarse cell may leave the
         // other axis part-way across the selected child. Advance its timer
         // rather than allowing a stale aligned boundary to move backward.
@@ -360,6 +533,7 @@ kernel void trace_single_tile(
         if (stepx != 0) {
           tx = next_boundary_after(tx, t_start, scale * dtx);
         }
+
         // The child begins a fresh DDA segment, so an upward ray's near-edge
         // test must use `t_start` rather than a preceding X or Y step.
         previous_axis = -1;
@@ -367,13 +541,23 @@ kernel void trace_single_tile(
       }
     }
 
-    // go up to a coarser level whenever possible
+    // The ray reached either the far edge of this tile or the configured
+    // global range. Report the distinction explicitly to the CPU scheduler.
+    if (t_exit >= segment_limit) {
+      if (tile_exit <= params.max_distance) {
+        atomic_fetch_min_explicit(&first_unresolved[work_index], polar_index, memory_order_relaxed);
+      }
+      return;
+    }
+
+    // Go up to a coarser level whenever possible
     if (level < params.num_levels) {
       if (ty < tx) {
         if (at_level_boundary(i, stepy, level)) {
           // Crossing a Y boundary joins two vertically adjacent blocks. The
           // X timer must therefore be adjusted from the X cell's sibling.
           tx += offset_jump(j, stepx, level, scale, dtx);
+
           // The current level immediately precedes the coarser level in the
           // flat buffer, so advance by its square element count.
           offset += level_side * level_side;
@@ -385,6 +569,7 @@ kernel void trace_single_tile(
           // Crossing an X boundary joins two horizontally adjacent blocks.
           // Adjust the Y timer from the Y cell's sibling before coarsening.
           ty += offset_jump(i, stepy, level, scale, dty);
+
           // The level transition is identical regardless of the stepped axis.
           offset += level_side * level_side;
           level += 1;
@@ -404,4 +589,103 @@ kernel void trace_single_tile(
       j += scale * stepx;
     }
   }
+  // The DDA normally returns through the segment-limit check above. Retain a
+  // defensive continuation for an unexpected fine-cell exit discrepancy.
+  if (tile_exit <= params.max_distance) {
+    atomic_fetch_min_explicit(&first_unresolved[work_index], polar_index, memory_order_relaxed);
+  }
+}
+
+/// Turn each column's atomic unresolved-polar result into its successor work
+/// item. A hash table maps the outgoing global tile key to a resident slot;
+/// a nonresident successor is returned to the host without changing its exact
+/// hand-off distance.
+kernel void emit_tile_frontier(
+    device const TileWorkItem *active_items [[buffer(0)]],
+    device const ResidentTile *tiles [[buffer(1)]],
+    device const float2 *azimuth_directions [[buffer(2)]],
+    device const atomic_uint *first_unresolved [[buffer(3)]],
+    constant RaytraceParameters &shared_parameters [[buffer(4)]],
+    device const ResidentTileHashEntry *resident_hash [[buffer(5)]],
+    constant uint &hash_capacity [[buffer(6)]],
+    constant uint &next_capacity [[buffer(7)]],
+    device TileWorkItem *next_items [[buffer(8)]],
+    device atomic_uint *next_count [[buffer(9)]],
+    device DeferredTileWork *deferred_items [[buffer(10)]],
+    device atomic_uint *deferred_count [[buffer(11)]],
+    uint work_index [[thread_position_in_grid]]
+) {
+  const TileWorkItem active = active_items[work_index];
+  const ResidentTile current_tile = tiles[active.slot];
+  const RaytraceParameters params = shared_parameters;
+  const float tile_x_min = current_tile.tile_x_min;
+  const float tile_y_min = current_tile.tile_y_min;
+  const uint first_polar =
+      atomic_load_explicit(&first_unresolved[work_index], memory_order_relaxed);
+  if (first_polar >= params.num_polar) {
+    return;
+  }
+
+  const float2 direction = azimuth_directions[active.azimuth];
+  const float entry_distance = tile_exit_distance(
+      tile_x_min,
+      tile_y_min,
+      params.cell_size,
+      mipmap_finest_side(params.num_levels),
+      direction,
+      active.entry_distance
+  );
+  if (entry_distance >= params.max_distance) {
+    return;
+  }
+
+  // The outward nudge selects the neighbour at an edge/corner, while the
+  // original exit distance remains the geometric start of its segment.
+  float x = entry_distance * direction.x;
+  float y = entry_distance * direction.y;
+  const float nudge =
+      max(1e-3F * params.cell_size, 8.0F * FLT_EPSILON * max(1.0F, max(fabs(x), fabs(y))));
+  if (direction.x != 0.0F) {
+    x += copysign(nudge, direction.x);
+  }
+  if (direction.y != 0.0F) {
+    y += copysign(nudge, direction.y);
+  }
+
+  // The nudge makes these comparisons deterministic at shared edges and
+  // corners. A row increases southward while a column increases eastward.
+  const float tile_width = float(mipmap_finest_side(params.num_levels)) * params.cell_size;
+  const float tile_x_max = tile_x_min + tile_width;
+  const float tile_y_max = tile_y_min + tile_width;
+  const long row_offset = y < tile_y_min ? 1L : y >= tile_y_max ? -1L : 0L;
+  const long column_offset = x < tile_x_min ? -1L : x >= tile_x_max ? 1L : 0L;
+  const long successor_row = current_tile.row + row_offset;
+  const long successor_column = current_tile.column + column_offset;
+  const uint successor_slot =
+      lookup_resident_tile(resident_hash, hash_capacity, successor_row, successor_column);
+  // The source directory may contain this successor even though a background
+  // worker has not loaded it into the atlas yet. Preserve its exact hand-off
+  // for host-side retry rather than incorrectly treating it as open sky.
+  if (successor_slot == hash_capacity) {
+    const uint deferred_index = atomic_fetch_add_explicit(deferred_count, 1U, memory_order_relaxed);
+    if (deferred_index < next_capacity) {
+      deferred_items[deferred_index] = {active.azimuth, first_polar, entry_distance};
+    }
+    return;
+  }
+
+  const uint output_index = atomic_fetch_add_explicit(next_count, 1U, memory_order_relaxed);
+  if (output_index >= next_capacity) {
+    // The host allocates one entry per azimuth because a column has only one
+    // unresolved suffix. Dropping an unexpected excess is safer than
+    // corrupting the adjacent buffer; the host detects the counter overflow.
+    return;
+  }
+  next_items[output_index] = {
+      successor_slot,
+      active.azimuth,
+      first_polar,
+      params.num_levels,
+      entry_distance,
+  };
 }

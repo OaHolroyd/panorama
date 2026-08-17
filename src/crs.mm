@@ -27,6 +27,7 @@ constexpr uint32_t kWgs84Epsg = 4326;
   return reference;
 }
 
+/// unique_ptr deleter for an OGR coordinate transformation allocated by GDAL.
 struct CoordinateTransformationDeleter {
   /// Release the transformation allocated by OGRCreateCoordinateTransformation.
   void operator()(OGRCoordinateTransformation *transformation) const {

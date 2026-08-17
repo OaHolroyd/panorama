@@ -9,9 +9,11 @@
 
 namespace panorama {
 
-// One fully resident square terrain tile in tracer order. `size` is the number
-// of level-1 cells along one edge. All arrays are float32 and row-major; row
-// zero is the southern edge, so Y increases northward as required by tracing.
+/// One fully resident square terrain tile in tracer order.
+///
+/// `size` is the number of level-1 cells along one edge. All arrays are
+/// float32 and row-major; row zero is the southern edge, so Y increases
+/// northward as required by tracing.
 struct LoadedTile {
   // True when `vertices` owns exact `(size + 1)²` vertex elevations.
   // Level-1-only tiles leave the pointer null and only support approximate
@@ -40,12 +42,15 @@ struct LoadedTile {
   // from finest to coarsest levels (that is, level 1, level 2, ...).
   std::vector<float> mipmap;
 
-  // Load a single-band, north-up `.tif` into south-to-north tracer row order.
-  // When `supports_level_0_collisions` is true, interpret source values as
-  // vertices and build the required first maximum-mipmap level from them.
-  // Otherwise interpret source values as level-1 cells directly. This does not
-  // create any additional levels of the maximum-mipmap other than the required
-  // first one.
+  /// Load a single-band, north-up `.tif` into south-to-north tracer row order.
+  ///
+  /// When `supports_level_0_collisions` is true, interpret source values as
+  /// vertices and build the required first maximum-mipmap level from them.
+  /// Otherwise interpret source values as level-1 cells directly. Declared
+  /// GeoTIFF no-data samples become the project's zero-elevation placeholder,
+  /// allowing partially covered chunks to retain their valid terrain. This
+  /// does not create any additional maximum-mipmap levels beyond the required
+  /// first one.
   [[nodiscard]] static LoadedTile
   load_tif(const std::filesystem::path &path, bool supports_level_0_collisions);
 

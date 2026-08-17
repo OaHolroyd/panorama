@@ -12,12 +12,23 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
 namespace panorama {
 namespace {
 
+// GDAL driver registration changes process-global state, so serialise it once
+// before terrain-preparation workers begin opening independent datasets.
+std::once_flag gdal_registration_once;
+
+/// Register GDAL's built-in raster drivers exactly once per process.
+void register_gdal_drivers() {
+  std::call_once(gdal_registration_once, [] { GDALAllRegister(); });
+}
+
+/// unique_ptr deleter that closes one GDAL dataset exactly once.
 struct DatasetCloser {
   /// Give GDALDataset unique_ptr ownership semantics and close the file once.
   void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
@@ -77,8 +88,7 @@ struct DatasetCloser {
   return Crs::from_epsg(static_cast<uint32_t>(epsg_code));
 }
 
-// GeoTIFF registration affects how the loader translates its affine transform
-// into LoadedTile's canonical origin, but has no meaning after that conversion.
+/// GeoTIFF registration used only while deriving LoadedTile's canonical origin.
 enum class RasterRegistration {
   PixelIsArea,
   PixelIsPoint,
@@ -98,8 +108,8 @@ enum class RasterRegistration {
 make_level_1_cells(const std::vector<float> &vertices, uint32_t size) {
   std::vector<float> cells(static_cast<size_t>(size) * size);
   const uint32_t vertex_size = size + 1U;
-  for (uint32_t y = 0; y < size; ++y) {
-    for (uint32_t x = 0; x < size; ++x) {
+  for (uint32_t y = 0; y < size; y++) {
+    for (uint32_t x = 0; x < size; x++) {
       const size_t lower_left = static_cast<size_t>(y) * vertex_size + x;
       cells[static_cast<size_t>(y) * size + x] = std::max(
           std::max(vertices[lower_left], vertices[lower_left + 1U]),
@@ -122,7 +132,7 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   // Register GDAL's built-in raster drivers before opening a dataset. GDALOpen
   // returns an opaque pointer owned by GDAL, so immediately wrap it in a
   // unique_ptr to close the file on every success or exception path.
-  GDALAllRegister();
+  register_gdal_drivers();
   GDALDataset *raw_dataset =
       static_cast<GDALDataset *>(GDALOpen(path.string().c_str(), GDALAccess::GA_ReadOnly));
   if (raw_dataset == nullptr) {
@@ -205,23 +215,25 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   // returned row zero is southernmost and tracer Y increases northward.
   std::vector<float> oriented_samples(sample_count);
   float maximum_elevation = -std::numeric_limits<float>::infinity();
-  for (uint32_t source_row = 0; source_row < source_size; ++source_row) {
+  for (uint32_t source_row = 0; source_row < source_size; source_row++) {
     const uint32_t trace_row = source_size - 1U - source_row;
-    for (uint32_t x = 0; x < source_size; ++x) {
+    for (uint32_t x = 0; x < source_size; x++) {
       const size_t source_index = static_cast<size_t>(source_row) * source_size + x;
       const float elevation = source_heights[source_index];
-      // A hole in the elevation field cannot be treated as sea level: it would
-      // create false terrain hits. Reject no-data tiles until coverage handling
-      // is implemented at the multi-tile traversal layer.
-      if (!std::isfinite(elevation) ||
-          (has_no_data != 0 && elevation == static_cast<float>(no_data))) {
-        throw std::runtime_error(
-            "Terrain GeoTIFF contains no-data or non-finite "
-            "elevations"
-        );
+      // Rechunking represents partly unavailable source coverage with the
+      // GeoTIFF no-data value. Preserve valid terrain in the same chunk by
+      // converting that declared sentinel to the project's zero-elevation
+      // placeholder. A future coverage mask can distinguish this placeholder
+      // from real sea-level terrain.
+      const bool is_no_data =
+          has_no_data != 0 &&
+          (std::isnan(no_data) ? std::isnan(elevation) : elevation == static_cast<float>(no_data));
+      if (!is_no_data && !std::isfinite(elevation)) {
+        throw std::runtime_error("Terrain GeoTIFF contains a non-finite elevation");
       }
-      oriented_samples[static_cast<size_t>(trace_row) * source_size + x] = elevation;
-      maximum_elevation = std::max(maximum_elevation, elevation);
+      const float oriented_elevation = is_no_data ? 0.0F : elevation;
+      oriented_samples[static_cast<size_t>(trace_row) * source_size + x] = oriented_elevation;
+      maximum_elevation = std::max(maximum_elevation, oriented_elevation);
     }
   }
 
@@ -286,10 +298,10 @@ void LoadedTile::compute_mipmap() {
   uint32_t previous_side = size;
   size_t previous_offset = 0;
   size_t offset = finest_count;
-  for (uint32_t level = 1; level < num_levels; ++level) {
+  for (uint32_t level = 1; level < num_levels; level++) {
     const uint32_t side = previous_side / 2U;
-    for (uint32_t i = 0; i < side; ++i) {
-      for (uint32_t j = 0; j < side; ++j) {
+    for (uint32_t i = 0; i < side; i++) {
+      for (uint32_t j = 0; j < side; j++) {
         // Parent (i, j) is the maximum of its four 2×2 children. Use side
         // lengths—not the total element counts—as the row-major strides.
         const size_t child_row = static_cast<size_t>(2U * i) * previous_side;
