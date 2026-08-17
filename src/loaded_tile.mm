@@ -12,11 +12,21 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
 namespace panorama {
 namespace {
+
+// GDAL driver registration changes process-global state, so serialise it once
+// before stage-2 worker threads begin opening independent datasets.
+std::once_flag gdal_registration_once;
+
+/// Register GDAL's built-in raster drivers exactly once per process.
+void register_gdal_drivers() {
+  std::call_once(gdal_registration_once, [] { GDALAllRegister(); });
+}
 
 /// unique_ptr deleter that closes one GDAL dataset exactly once.
 struct DatasetCloser {
@@ -122,7 +132,7 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   // Register GDAL's built-in raster drivers before opening a dataset. GDALOpen
   // returns an opaque pointer owned by GDAL, so immediately wrap it in a
   // unique_ptr to close the file on every success or exception path.
-  GDALAllRegister();
+  register_gdal_drivers();
   GDALDataset *raw_dataset =
       static_cast<GDALDataset *>(GDALOpen(path.string().c_str(), GDALAccess::GA_ReadOnly));
   if (raw_dataset == nullptr) {

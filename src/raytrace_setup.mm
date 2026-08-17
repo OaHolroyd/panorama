@@ -5,22 +5,26 @@
 
 #include "loaded_tile.h"
 #include "png_writer.h"
+#include "timer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace panorama {
@@ -31,6 +35,9 @@ namespace {
 #endif
 
 constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
+
+// Number of parallel workers for tile prep (loading from disk and computing the maximum mipmaps)
+constexpr uint32_t kMaximumTilePreparationWorkers = 8U;
 
 /// One horizontal compass direction with the same two-float layout as Metal's
 /// `float2`; x = sin(azimuth) and y = cos(azimuth).
@@ -426,24 +433,21 @@ tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLocation 
 /// eviction, and asynchronous loading deliberately remain a later extension.
 void perform_multi_tile_raytrace(const RaytraceConfig &config) {
   validate_configuration(config);
-  // This interval covers discovery, synchronous all-resident tile preparation,
-  // atlas construction, GPU frontier passes, and their host synchronisation.
-  // It deliberately excludes diagnostic PNG encoding below.
-  const auto started = std::chrono::steady_clock::now();
-  std::chrono::duration<double, std::milli> tile_load =
-      std::chrono::duration<double, std::milli>::zero();
-  std::chrono::duration<double, std::milli> mipmap_generation =
-      std::chrono::duration<double, std::milli>::zero();
+  // This timer owns the complete run, including terrain preparation, GPU
+  // tracing, and diagnostic images. Its named regions distinguish elapsed
+  // wall-clock time from aggregate work performed by parallel workers.
+  Timer timer("Total elapsed");
+  timer.start_wall("Tile preload");
 
   // The observer tile establishes the common grid dimensions and physical
   // coordinate system required by every fixed-stride atlas slot.
-  const auto origin_load_started = std::chrono::steady_clock::now();
+  timer.start_work("Tile load");
   LoadedTile origin = LoadedTile::load_tif(config.tile_path, true);
-  tile_load += std::chrono::steady_clock::now() - origin_load_started;
+  timer.stop("Tile load");
 
-  const auto origin_mipmap_started = std::chrono::steady_clock::now();
+  timer.start_work("Mipmap generation");
   origin.compute_mipmap();
-  mipmap_generation += std::chrono::steady_clock::now() - origin_mipmap_started;
+  timer.stop("Mipmap generation");
 
   const auto [origin_key, names] = parse_tile_name(config.tile_path);
   const TileGrid grid = make_tile_grid(origin, origin_key);
@@ -542,46 +546,94 @@ void perform_multi_tile_raytrace(const RaytraceConfig &config) {
     // Tile metadata mirrors the atlas slots and contains the observer-relative
     // origin that cannot be inferred from a tile's raw height samples.
     std::vector<ResidentTile> metadata(tile_count);
-    for (uint32_t slot = 0U; slot < tile_count; ++slot) {
-      const auto &[key, path] = paths[slot];
-      // Slot zero reuses the already-loaded observer tile. All later slots
-      // are loaded, validated, mipmapped, copied into their atlas range, and
-      // then released before the next tile is prepared.
-      std::unique_ptr<LoadedTile> loaded_neighbour;
-      const LoadedTile *neighbour = &origin;
-      if (slot != 0U) {
-        const auto neighbour_load_started = std::chrono::steady_clock::now();
-        loaded_neighbour = std::make_unique<LoadedTile>(LoadedTile::load_tif(path, true));
-        tile_load += std::chrono::steady_clock::now() - neighbour_load_started;
-        const auto neighbour_mipmap_started = std::chrono::steady_clock::now();
-        loaded_neighbour->compute_mipmap();
-        mipmap_generation += std::chrono::steady_clock::now() - neighbour_mipmap_started;
-        neighbour = loaded_neighbour.get();
-      }
 
-      // Reject a malformed prepared directory before it can create an atlas
-      // whose slots disagree on geometry or sample layout.
-      validate_tile_compatibility(*neighbour, origin);
-      validate_tile_position(*neighbour, key, grid);
-      if (neighbour->mipmap.size() != mip_count || neighbour->vertices->size() != vertex_count) {
-        throw std::runtime_error("Resident tile does not match the atlas dimensions");
-      }
+    // Slot zero reuses the observer tile already loaded above. Copy it before
+    // starting workers, leaving each worker to own one non-overlapping atlas
+    // slot.
+    std::memcpy(mips, origin.mipmap.data(), mip_count * sizeof(float));
+    std::memcpy(vertices, origin.vertices->data(), vertex_count * sizeof(float));
+    metadata[0] = make_resident_tile(origin, config);
 
-      // Copy only immutable terrain data to the slot. The temporary LoadedTile
-      // may be destroyed after this iteration without affecting GPU reads.
-      std::memcpy(
-          mips + static_cast<size_t>(slot) * mip_count,
-          neighbour->mipmap.data(),
-          mip_count * sizeof(float)
-      );
-      std::memcpy(
-          vertices + static_cast<size_t>(slot) * vertex_count,
-          neighbour->vertices->data(),
-          vertex_count * sizeof(float)
-      );
-      // Only the local origin varies from one atlas slot to another.
-      metadata[slot] = make_resident_tile(*neighbour, config);
+    // Independent GeoTIFF files can be decoded and mipmapped concurrently.
+    // All workers use predetermined slots, so they never contend for atlas
+    // memory and completion order cannot change the host/device mapping.
+    std::atomic<uint32_t> next_slot{1U};
+    std::atomic<bool> preparation_failed{false};
+    std::exception_ptr preparation_error;
+    std::mutex preparation_error_mutex;
+    const uint32_t hardware_threads = std::thread::hardware_concurrency();
+    const uint32_t available_workers =
+        std::min(kMaximumTilePreparationWorkers, std::max(1U, hardware_threads));
+    const uint32_t worker_count = std::min(tile_count - 1U, available_workers);
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+
+    for (uint32_t worker = 0U; worker < worker_count; ++worker) {
+      workers.emplace_back([&] {
+        while (!preparation_failed.load(std::memory_order_relaxed)) {
+          const uint32_t slot = next_slot.fetch_add(1U, std::memory_order_relaxed);
+          if (slot >= tile_count) {
+            return;
+          }
+
+          try {
+            const auto &[key, path] = paths[slot];
+            timer.start_work("Tile load");
+            LoadedTile neighbour = LoadedTile::load_tif(path, true);
+            timer.stop("Tile load");
+
+            // Reject malformed files before copying any of their data into the
+            // atlas slot assigned to this worker.
+            validate_tile_compatibility(neighbour, origin);
+            validate_tile_position(neighbour, key, grid);
+
+            timer.start_work("Mipmap generation");
+            neighbour.compute_mipmap();
+            timer.stop("Mipmap generation");
+            if (neighbour.mipmap.size() != mip_count ||
+                neighbour.vertices->size() != vertex_count) {
+              throw std::runtime_error("Resident tile does not match the atlas dimensions");
+            }
+
+            // The slot's ranges are disjoint from every other worker's ranges.
+            // The GPU has not been submitted yet, so writing shared storage is
+            // safe without an additional Metal synchronisation operation.
+            std::memcpy(
+                mips + static_cast<size_t>(slot) * mip_count,
+                neighbour.mipmap.data(),
+                mip_count * sizeof(float)
+            );
+            std::memcpy(
+                vertices + static_cast<size_t>(slot) * vertex_count,
+                neighbour.vertices->data(),
+                vertex_count * sizeof(float)
+            );
+            metadata[slot] = make_resident_tile(neighbour, config);
+          } catch (...) {
+            // Preserve the first failure, ask other workers to stop taking
+            // new tiles, and rethrow only after every thread has joined.
+            {
+              std::lock_guard<std::mutex> lock(preparation_error_mutex);
+              if (preparation_error == nullptr) {
+                preparation_error = std::current_exception();
+              }
+            }
+            preparation_failed.store(true, std::memory_order_relaxed);
+            return;
+          }
+        }
+      });
     }
+    for (std::thread &worker : workers) {
+      worker.join();
+    }
+    if (preparation_error != nullptr) {
+      std::rethrow_exception(preparation_error);
+    }
+
+    // No GPU command has been submitted yet, so the fixed resident atlas is
+    // complete once every worker joins.
+    timer.stop("Tile preload");
 
     // Upload the slot metadata and the ray/output buffers used by every
     // frontier pass. Distance/elevation zero remains the no-hit sky sentinel.
@@ -659,9 +711,12 @@ void perform_multi_tile_raytrace(const RaytraceConfig &config) {
     }
 
     const bool capture = start_capture_if_requested(queue);
-    double gpu_ms = 0.0;
     uint32_t active_count = config.num_azimuth;
     id<MTLBuffer> active = work_a, next = work_b;
+    // Wall time includes the CPU's per-pass buffer setup, command encoding,
+    // submission, and waits. The device timestamps recorded below separately
+    // report the GPU's execution-only work within this same region.
+    timer.start_wall("GPU raytrace");
     try {
       while (active_count != 0U) {
         // The trace kernel atomically lowers one entry per active work item to
@@ -726,7 +781,7 @@ void perform_multi_tile_raytrace(const RaytraceConfig &config) {
           print_error(@"Stage-2 Metal command failed", command.error);
           throw std::runtime_error("Stage-2 Metal command failed");
         }
-        gpu_ms += 1'000.0 * (command.GPUEndTime - command.GPUStartTime);
+        timer.add_work("GPU raytrace", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
 
         // A straight horizontal ray can enter any resident tile at most once,
         // so `tile_count × num_azimuth` is a safe capacity bound.
@@ -750,24 +805,12 @@ void perform_multi_tile_raytrace(const RaytraceConfig &config) {
     if (capture) {
       [[MTLCaptureManager sharedCaptureManager] stopCapture];
     }
-
-    // Report resident capacity separately from actual scene size so a memory
-    // budget change is visible when running a different rechunk level.
-    const std::chrono::duration<double, std::milli> elapsed =
-        std::chrono::steady_clock::now() - started;
-    std::printf(
-        "Resident terrain tiles: %u (cache capacity %llu).\n",
-        tile_count,
-        static_cast<unsigned long long>(slot_capacity)
-    );
-    std::printf("  GPU raytrace   : %8.3f ms\n", gpu_ms);
-    std::printf("  CPU tile load  : %8.3f ms\n", tile_load.count());
-    std::printf("  CPU mipmaps    : %8.3f ms\n", mipmap_generation.count());
-    std::printf("  CPU + GPU total: %8.3f ms\n", elapsed.count());
+    timer.stop("GPU raytrace");
 
     // The completed shared output buffers can now be handed directly to the
-    // PNG writer. Keep this timing separate from terrain preparation/tracing.
-    const auto image_started = std::chrono::steady_clock::now();
+    // PNG writer. Its elapsed time is a named wall-clock region, separate
+    // from terrain preparation and GPU device work.
+    timer.start_wall("PNG generation");
     write_colormapped_png(
         "distances.png",
         view_float_buffer(distances, ray_count, "distance output"),
@@ -782,9 +825,17 @@ void perform_multi_tile_raytrace(const RaytraceConfig &config) {
         config.num_polar,
         colormaps::viridis
     );
-    const std::chrono::duration<double, std::milli> image_elapsed =
-        std::chrono::steady_clock::now() - image_started;
-    std::printf("  PNG generation : %8.3f ms\n", image_elapsed.count());
+    timer.stop("PNG generation");
+
+    // Report resident capacity separately from actual scene size so a memory
+    // budget change is visible when running a different rechunk level.
+    std::printf(
+        "Resident terrain tiles: %u (cache capacity %llu, preparation workers %u).\n",
+        tile_count,
+        static_cast<unsigned long long>(slot_capacity),
+        worker_count
+    );
+    timer.print();
   }
 }
 
