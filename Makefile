@@ -32,6 +32,8 @@ DEBUG ?= 0
 ifeq ($(DEBUG),1)
   BUILD := debug
   OPT_FLAGS := -O0 -g
+  # Expensive host-frontier invariant checks are compiled only in debug builds.
+  CPPFLAGS += -DPANORAMA_DEBUG_VALIDATION=1
 else
   BUILD := release
   OPT_FLAGS := -O3
