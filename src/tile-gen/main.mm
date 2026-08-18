@@ -1,4 +1,5 @@
 #include "geotiff_writer.h"
+#include "metal_tile_writer.h"
 #include "rechunker.h"
 #include "source_catalogue.h"
 #include "terrain_types.h"
@@ -6,6 +7,7 @@
 #include "arguments.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cerrno>
 #include <cmath>
@@ -21,6 +23,12 @@
 
 namespace panorama::terrain {
 namespace {
+
+/// File representation selected for prepared terrain chunks.
+enum class OutputFormat {
+  GeoTiff,
+  MetalTile,
+};
 
 /// Fully parsed command-line configuration for one terrain-preparation run.
 struct Options {
@@ -39,6 +47,9 @@ struct Options {
   uint32_t max_tiles = 0U;
   bool overwrite = false;
   bool dry_run = false;
+  OutputFormat format = OutputFormat::GeoTiff;
+  MetalTileCompression compression = MetalTileCompression::Lz4;
+  bool explicit_compression = false;
 };
 
 /// Print the stable command-line contract without constructing any GDAL state.
@@ -56,12 +67,62 @@ void print_usage(const char *program) {
       "  --origin-y Y        destination grid northern origin (default: 0)\n"
       "  --resolution R      output spacing (default: source resolution)\n"
       "  --nodata VALUE      output no-data value, including nan (default: 0)\n"
+      "  --format NAME       geotiff or metal (default: geotiff)\n"
+      "  --compression NAME  none, zlib, lzfse, lz4, lzma, or lzbitmap\n"
+      "                      (Metal tiles only; default: lz4)\n"
       "  --max-tiles N       stop after N output chunks; zero is unlimited\n"
       "  --overwrite         replace existing output chunks\n"
       "  --dry-run           inspect metadata and report the plan without writing\n"
       "  --help              show this help\n",
       program
   );
+}
+
+/// Parse one codec supported by Metal's compressed-file I/O implementation.
+[[nodiscard]] MetalTileCompression parse_compression(std::string_view text) {
+  if (text == "none") {
+    return MetalTileCompression::None;
+  }
+  if (text == "zlib") {
+    return MetalTileCompression::Zlib;
+  }
+  if (text == "lzfse") {
+    return MetalTileCompression::Lzfse;
+  }
+  if (text == "lz4") {
+    return MetalTileCompression::Lz4;
+  }
+  if (text == "lzma") {
+    return MetalTileCompression::Lzma;
+  }
+  if (text == "lzbitmap") {
+    return MetalTileCompression::LzBitmap;
+  }
+  throw std::invalid_argument("Compression must be none, zlib, lzfse, lz4, lzma, or lzbitmap");
+}
+
+/// Return the human-readable output representation used in progress reports.
+[[nodiscard]] const char *format_name(OutputFormat format) {
+  return format == OutputFormat::GeoTiff ? "GeoTIFF" : "Metal tile";
+}
+
+/// Return the command-line spelling used in default output directory names.
+[[nodiscard]] const char *compression_name(MetalTileCompression compression) {
+  switch (compression) {
+  case MetalTileCompression::None:
+    return "none";
+  case MetalTileCompression::Zlib:
+    return "zlib";
+  case MetalTileCompression::Lzfse:
+    return "lzfse";
+  case MetalTileCompression::Lz4:
+    return "lz4";
+  case MetalTileCompression::Lzma:
+    return "lzma";
+  case MetalTileCompression::LzBitmap:
+    return "lzbitmap";
+  }
+  throw std::logic_error("Unknown Metal tile compression method");
 }
 
 /// Parse a Float32 output sentinel, allowing NaN for collision-free no-data.
@@ -140,6 +201,18 @@ void validate_dataset_name(const std::string &name) {
     } else if (option == "--nodata") {
       options.no_data =
           parse_float_or_nan(arguments::option_value(argc, argv, index, option), "no-data value");
+    } else if (option == "--format") {
+      const std::string_view format = arguments::option_value(argc, argv, index, option);
+      if (format == "geotiff") {
+        options.format = OutputFormat::GeoTiff;
+      } else if (format == "metal") {
+        options.format = OutputFormat::MetalTile;
+      } else {
+        throw std::invalid_argument("Format must be geotiff or metal");
+      }
+    } else if (option == "--compression") {
+      options.compression = parse_compression(arguments::option_value(argc, argv, index, option));
+      options.explicit_compression = true;
     } else if (option == "--max-tiles") {
       options.max_tiles = arguments::parse_uint32(
           arguments::option_value(argc, argv, index, option),
@@ -172,6 +245,18 @@ void validate_dataset_name(const std::string &name) {
   }
   if (options.resolution < 0.0) {
     throw std::invalid_argument("Resolution must be positive");
+  }
+  if (options.format == OutputFormat::GeoTiff && options.explicit_compression) {
+    throw std::invalid_argument("--compression applies only to --format metal");
+  }
+  if (options.format == OutputFormat::MetalTile && options.layout != RasterLayout::Level0) {
+    throw std::invalid_argument("Metal tiles currently support only --layout level-0");
+  }
+  if (options.format == OutputFormat::MetalTile && !std::has_single_bit(options.tile_cell_count)) {
+    throw std::invalid_argument("Metal tiles require a power-of-two cell count");
+  }
+  if (options.format == OutputFormat::MetalTile && !std::isfinite(options.no_data)) {
+    throw std::invalid_argument("Metal tiles require a finite --nodata value");
   }
   return options;
 }
@@ -208,9 +293,13 @@ int main(int argc, const char *argv[]) {
     // of where the original source archive was downloaded or mounted. An
     // explicit --output remains available for external datasets and tests.
     if (options.output_directory.empty()) {
-      options.output_directory = std::filesystem::path("data") /
-                                 (options.dataset_name + "-" + directory_size_name(options) + "-" +
-                                  layout_name(options.layout));
+      std::string directory_name = options.dataset_name + "-" + directory_size_name(options) + "-" +
+                                   layout_name(options.layout);
+      if (options.format == OutputFormat::MetalTile) {
+        directory_name += "-metal-";
+        directory_name += compression_name(options.compression);
+      }
+      options.output_directory = std::filesystem::path("data") / directory_name;
     }
 
     // Phase one reads only source metadata. Excluding the selected destination
@@ -237,7 +326,7 @@ int main(int argc, const char *argv[]) {
         "Discovered %zu GeoTIFFs below %s.\n"
         "  CRS        : %s\n"
         "  Resolution : %.12g\n"
-        "  Output     : %u cells, %u samples (%s)\n"
+        "  Output     : %u cells, %u samples (%s, %s)\n"
         "  Directory  : %s\n"
         "  Candidates : %zu chunks\n",
         catalogue.sources().size(),
@@ -247,6 +336,7 @@ int main(int argc, const char *argv[]) {
         destination.tile_cell_count,
         sample_side(destination),
         layout_name(destination.layout),
+        format_name(options.format),
         options.output_directory.c_str(),
         plan.contributors.size()
     );
@@ -261,7 +351,15 @@ int main(int argc, const char *argv[]) {
     uint32_t empty = 0U;
     for (const auto &[key, contributors] : plan.contributors) {
       const std::filesystem::path output =
-          geotiff_chunk_path(options.output_directory, options.dataset_name, destination, key);
+          options.format == OutputFormat::GeoTiff
+              ? geotiff_chunk_path(options.output_directory, options.dataset_name, destination, key)
+              : metal_tile_chunk_path(
+                    options.output_directory,
+                    options.dataset_name,
+                    destination,
+                    key,
+                    options.compression
+                );
       if (std::filesystem::exists(output) && !options.overwrite) {
         if (options.max_tiles != 0U && written + skipped >= options.max_tiles) {
           break;
@@ -290,9 +388,21 @@ int main(int argc, const char *argv[]) {
         partial++;
       }
 
-      // Phase three currently has one writer. Additional raw and Metal-I/O
-      // writers will consume the same north-to-south TerrainChunk later.
-      write_geotiff_chunk(output, chunk, destination, key, catalogue.grid());
+      // Phase three consumes the same format-neutral chunk. GeoTIFF preserves
+      // conventional GIS row order; the Metal writer converts once into the
+      // exact atlas representation used by the renderer.
+      if (options.format == OutputFormat::GeoTiff) {
+        write_geotiff_chunk(output, chunk, destination, key, catalogue.grid());
+      } else {
+        write_metal_tile_chunk(
+            output,
+            chunk,
+            destination,
+            key,
+            catalogue.grid(),
+            options.compression
+        );
+      }
       written++;
     }
 

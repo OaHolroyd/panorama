@@ -9,15 +9,17 @@
 
 namespace panorama {
 
-/// One fully resident square terrain tile in tracer order.
+/// Host metadata and any CPU-resident terrain for one square tracer tile.
 ///
 /// `size` is the number of level-1 cells along one edge. All arrays are
 /// float32 and row-major; row zero is the southern edge, so Y increases
-/// northward as required by tracing.
+/// northward as required by tracing. Custom Metal tiles initially contain
+/// metadata only because the cache loads their vertices directly into Metal
+/// and builds their maximum mipmap on the GPU.
 struct LoadedTile {
-  // True when `vertices` owns exact `(size + 1)²` vertex elevations.
-  // Level-1-only tiles leave the pointer null and only support approximate
-  // collisions against the first `mipmap` level.
+  // True when the terrain representation supports exact bilinear collisions.
+  // GeoTIFFs then own `(size + 1)²` values in `vertices`; custom Metal tiles
+  // leave the host pointer null because their vertices go straight to Metal.
   bool supports_level_0_collisions;
   Crs crs;
   float maximum_elevation;
@@ -30,8 +32,8 @@ struct LoadedTile {
   double lower_left_y;
   double delta;
 
-  // Exact vertex terrain for bilinear level-0 collisions, or null when the
-  // source tile supplies only level-1 cell values.
+  // Host-resident vertex terrain for bilinear level-0 collisions. This is
+  // null for level-1-only input and for directly loaded custom Metal tiles.
   std::unique_ptr<std::vector<float>> vertices;
 
   // Number of levels in the maximum mipmap, including level 1 and its final
@@ -39,7 +41,9 @@ struct LoadedTile {
   uint32_t num_levels;
 
   // Maximum mipmap stored as a contiguous block of memory. It is laid out
-  // from finest to coarsest levels (that is, level 1, level 2, ...).
+  // from finest to coarsest levels (that is, level 1, level 2, ...). A custom
+  // Metal tile leaves this empty on the host because the GPU builds it after
+  // loading vertices directly into the atlas.
   std::vector<float> mipmap;
 
   /// Load a single-band, north-up `.tif` into south-to-north tracer row order.
@@ -53,6 +57,12 @@ struct LoadedTile {
   /// first one.
   [[nodiscard]] static LoadedTile
   load_tif(const std::filesystem::path &path, bool supports_level_0_collisions);
+
+  /// Load either GeoTIFF terrain or custom-tile metadata into the host model.
+  ///
+  /// Custom files retain their vertices on disk: the returned object contains
+  /// metadata only, and the cache transfers vertices directly into Metal.
+  [[nodiscard]] static LoadedTile load(const std::filesystem::path &path);
 
   /// Fill the mipmap with every coarser maximum level, if not already present.
   void compute_mipmap();

@@ -1,5 +1,7 @@
 #include "tile_preparer.h"
 
+#include "metal_tile.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -65,6 +67,7 @@ void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const T
 
 /// Mutable state kept behind the preparer's small public interface.
 struct AsyncTilePreparer::State {
+  id<MTLDevice> device;
   std::span<const TerrainSource> sources;
   const LoadedTile &origin;
   TileGrid grid;
@@ -95,6 +98,7 @@ struct AsyncTilePreparer::State {
 
   /// Initialise immutable preparation inputs before worker threads exist.
   State(
+      id<MTLDevice> device_value,
       std::span<const TerrainSource> source_values,
       const LoadedTile &origin_value,
       TileGrid grid_value,
@@ -103,12 +107,13 @@ struct AsyncTilePreparer::State {
       uint32_t queue_capacity,
       Timer &timer_value
   )
-      : sources(source_values), origin(origin_value), grid(grid_value),
+      : device(device_value), sources(source_values), origin(origin_value), grid(grid_value),
         expected_mipmap_values(mipmap_values), expected_vertex_values(vertex_values),
         prepared_capacity(queue_capacity), timer(timer_value) {}
 };
 
 AsyncTilePreparer::AsyncTilePreparer(
+    id<MTLDevice> device,
     std::span<const TerrainSource> sources,
     const LoadedTile &origin,
     TileGrid grid,
@@ -120,6 +125,7 @@ AsyncTilePreparer::AsyncTilePreparer(
 )
     : state_(
           std::make_unique<State>(
+              device,
               sources,
               origin,
               grid,
@@ -191,11 +197,38 @@ void AsyncTilePreparer::start() {
         try {
           const TerrainSource &source = worker_state.sources[request.source_index];
 
-          // Load and prepare outside the mutex. Timer work time intentionally
-          // sums concurrent worker effort, unlike wall time.
-          worker_state.timer.start_work("Tile load");
-          auto tile = std::make_unique<LoadedTile>(LoadedTile::load_tif(source.path, true));
-          worker_state.timer.stop("Tile load");
+          // A custom tile contains only vertices in atlas order. Do not
+          // decompress them into host memory here; a null CPU tile tells the
+          // cache to transfer them directly and build its mipmap on the GPU.
+          std::unique_ptr<LoadedTile> tile;
+          id<MTLIOFileHandle> metal_file;
+          if (is_metal_tile_path(source.path)) {
+            // Opening a compressed Metal file performs nontrivial setup.
+            // Do it on preparation workers so the frontier scheduler later
+            // needs only to encode and commit the direct-I/O command.
+            worker_state.timer.start_work("Metal tile open");
+            metal_file = open_metal_tile_file(worker_state.device, source.path);
+            worker_state.timer.stop("Metal tile open");
+          } else {
+            // Load and prepare GeoTIFFs outside the mutex. Timer work time
+            // intentionally sums concurrent worker effort, unlike wall time.
+            worker_state.timer.start_work("Tile load");
+            tile = std::make_unique<LoadedTile>(LoadedTile::load_tif(source.path, true));
+            worker_state.timer.stop("Tile load");
+
+            validate_tile_compatibility(*tile, worker_state.origin);
+            validate_terrain_tile_position(*tile, source.key, worker_state.grid);
+
+            // The resulting maximum hierarchy has exactly the fixed stride
+            // the resident atlas uses for every compatible source.
+            worker_state.timer.start_work("Mipmap generation");
+            tile->compute_mipmap();
+            worker_state.timer.stop("Mipmap generation");
+            if (tile->mipmap.size() != worker_state.expected_mipmap_values ||
+                tile->vertices->size() != worker_state.expected_vertex_values) {
+              throw std::runtime_error("Resident tile does not match the atlas dimensions");
+            }
+          }
 
           {
             std::lock_guard<std::mutex> worker_lock(worker_state.mutex);
@@ -211,19 +244,6 @@ void AsyncTilePreparer::start() {
             }
           }
 
-          validate_tile_compatibility(*tile, worker_state.origin);
-          validate_terrain_tile_position(*tile, source.key, worker_state.grid);
-
-          // The resulting maximum hierarchy has exactly the fixed stride the
-          // resident atlas uses for every compatible source.
-          worker_state.timer.start_work("Mipmap generation");
-          tile->compute_mipmap();
-          worker_state.timer.stop("Mipmap generation");
-          if (tile->mipmap.size() != worker_state.expected_mipmap_values ||
-              tile->vertices->size() != worker_state.expected_vertex_values) {
-            throw std::runtime_error("Resident tile does not match the atlas dimensions");
-          }
-
           // Bound prepared CPU terrain to the atlas capacity. This applies
           // back-pressure instead of letting fast workers consume RAM while
           // the main thread waits for GPU frontier work to complete.
@@ -236,7 +256,7 @@ void AsyncTilePreparer::start() {
             break;
           }
           worker_state.states[request.source_index] = TileLoadState::Prepared;
-          worker_state.prepared.push_back({request.source_index, std::move(tile)});
+          worker_state.prepared.push_back({request.source_index, std::move(tile), metal_file});
           worker_lock.unlock();
           worker_state.prepared_available.notify_one();
         } catch (...) {

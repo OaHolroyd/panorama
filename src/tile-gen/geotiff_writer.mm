@@ -58,10 +58,13 @@ std::filesystem::path geotiff_chunk_path(
     const DestinationGrid &grid,
     ChunkKey key
 ) {
-  const std::string filename = dataset_name + "_" + layout_name(grid.layout) + "_" +
-                               size_name(grid.tile_cell_count) + "_r" + std::to_string(key.row) +
-                               "_c" + std::to_string(key.column) + ".tif";
-  return output_directory / filename;
+  return output_directory / (terrain_chunk_stem(dataset_name, grid, key) + ".tif");
+}
+
+std::string
+terrain_chunk_stem(const std::string &dataset_name, const DestinationGrid &grid, ChunkKey key) {
+  return dataset_name + "_" + layout_name(grid.layout) + "_" + size_name(grid.tile_cell_count) +
+         "_r" + std::to_string(key.row) + "_c" + std::to_string(key.column);
 }
 
 void write_geotiff_chunk(

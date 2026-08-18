@@ -7,6 +7,10 @@
 
 namespace panorama::terrain {
 
+/// Return the extension-free stable name shared by every output format.
+[[nodiscard]] std::string
+terrain_chunk_stem(const std::string &dataset_name, const DestinationGrid &grid, ChunkKey key);
+
 /// Return the stable filename for one prepared GeoTIFF terrain chunk.
 [[nodiscard]] std::filesystem::path geotiff_chunk_path(
     const std::filesystem::path &output_directory,

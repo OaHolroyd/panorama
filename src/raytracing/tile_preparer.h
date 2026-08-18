@@ -4,6 +4,8 @@
 #include "terrain_catalogue.h"
 #include "timer.h"
 
+#import <Metal/Metal.h>
+
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -13,10 +15,15 @@
 
 namespace panorama {
 
-/// One fully prepared source tile awaiting installation in the resident atlas.
+/// One source awaiting installation in the resident atlas.
+///
+/// GeoTIFF sources carry a fully prepared CPU tile. A custom source instead
+/// carries a pre-opened Metal file handle whose payload can be submitted
+/// directly into its reserved atlas slot without blocking the scheduler.
 struct PreparedTile {
   uint32_t source_index;
   std::unique_ptr<LoadedTile> tile;
+  id<MTLIOFileHandle> metal_file;
 };
 
 /// Final counters describing background tile preparation work.
@@ -31,17 +38,19 @@ struct TilePreparationStatistics {
 /// Check that a loaded tile's georeferencing agrees with its catalogue key.
 void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const TileGrid &grid);
 
-/// Prepare compatible terrain tiles concurrently without owning GPU resources.
+/// Prepare compatible terrain sources without owning atlas or command resources.
 ///
 /// The main thread requests catalogue indices by ray-entry priority. Workers
-/// load, validate, and mipmap those files, then place immutable `LoadedTile`
-/// objects into a bounded queue. The resident atlas cache consumes that queue
-/// and is solely responsible for assigning GPU slots and marking a source
-/// resident or evicted.
+/// load, validate, and mipmap GeoTIFFs, then place them into a bounded queue.
+/// Custom Metal workers open their direct-I/O file handles in parallel but do
+/// not allocate buffers or submit commands. The resident atlas cache consumes
+/// both representations and remains solely responsible for GPU slots and
+/// residency state.
 class AsyncTilePreparer {
 public:
   /// Construct a stopped preparer with a bounded prepared-tile hand-off queue.
   AsyncTilePreparer(
+      id<MTLDevice> device,
       std::span<const TerrainSource> sources,
       const LoadedTile &origin,
       TileGrid grid,

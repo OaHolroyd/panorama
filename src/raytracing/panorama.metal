@@ -54,6 +54,43 @@ struct DeferredTileWork {
   float entry_distance;
 };
 
+/// Build one square maximum-mipmap level for a batch of atlas slots.
+///
+/// For level 1, `source` addresses the vertex grid, `source_step` is one, and
+/// every output is the maximum of four adjacent vertices. Later levels bind
+/// the preceding mip level, set `source_step` to two, and reduce each disjoint
+/// 2 by 2 child block. The Z grid coordinate selects an entry in `slots`, so
+/// all newly loaded tiles share one dispatch per level. Separate dispatches
+/// provide the global barrier required before a newly written level becomes
+/// the next dispatch's source.
+kernel void build_maximum_mipmap_level(
+    device const float *source [[buffer(0)]],
+    device float *destination [[buffer(1)]],
+    constant uint &source_side [[buffer(2)]],
+    constant uint &source_step [[buffer(3)]],
+    device const uint *slots [[buffer(4)]],
+    constant uint &source_tile_stride [[buffer(5)]],
+    constant uint &destination_tile_stride [[buffer(6)]],
+    constant uint &tile_count [[buffer(7)]],
+    uint3 output_index [[thread_position_in_grid]]
+) {
+  const uint output_side = source_step == 1U ? source_side - 1U : source_side / 2U;
+  if (output_index.x >= output_side || output_index.y >= output_side ||
+      output_index.z >= tile_count) {
+    return;
+  }
+
+  const uint slot = slots[output_index.z];
+  source += slot * source_tile_stride;
+  destination += slot * destination_tile_stride;
+  const uint source_x = output_index.x * source_step;
+  const uint source_y = output_index.y * source_step;
+  const uint lower_left = source_y * source_side + source_x;
+  destination[output_index.y * output_side + output_index.x] =
+      max(max(source[lower_left], source[lower_left + 1U]),
+          max(source[lower_left + source_side], source[lower_left + source_side + 1U]));
+}
+
 /// Mix one unsigned 64-bit value for the resident tile lookup table.
 inline ulong mix_tile_hash(ulong value) {
   value ^= value >> 30UL;

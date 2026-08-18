@@ -1,5 +1,7 @@
 #include "terrain_catalogue.h"
 
+#include "metal_tile.h"
+
 #include <cpl_error.h>
 #include <gdal_priv.h>
 
@@ -47,11 +49,11 @@ using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
   const std::string name = path.filename().string();
   const size_t row_marker = name.rfind("_r");
   const size_t column_marker = name.rfind("_c");
-  const size_t extension = name.rfind(".tif");
+  const size_t extension = name.find('.', column_marker);
   if (row_marker == std::string::npos || column_marker == std::string::npos ||
       extension == std::string::npos || row_marker >= column_marker || column_marker >= extension) {
     throw std::invalid_argument(
-        "Prepared tile name must end in _rROW_cCOLUMN.tif: " + path.string()
+        "Prepared tile name must contain _rROW_cCOLUMN before its suffix: " + path.string()
     );
   }
   return {
@@ -73,6 +75,22 @@ using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
 /// combining them reconstructs the common north-west grid origin without any
 /// dataset-specific constants.
 [[nodiscard]] TileGrid infer_tile_grid(const TerrainSource &source) {
+  if (is_metal_tile_path(source.path)) {
+    const MetalTileHeader header = read_metal_tile_header(source.path);
+    if (header.row != source.key.row || header.column != source.key.column) {
+      throw std::runtime_error("Metal tile filename and header contain different grid keys");
+    }
+
+    const double tile_width = static_cast<double>(header.cell_count) * header.cell_size;
+    const double origin_x = header.lower_left_x - static_cast<double>(header.column) * tile_width;
+    const double origin_y = header.lower_left_y + static_cast<double>(header.row + 1) * tile_width;
+    if (!std::isfinite(tile_width) || !std::isfinite(origin_x) || !std::isfinite(origin_y) ||
+        tile_width <= 0.0) {
+      throw std::runtime_error("Metal tile has an invalid global grid");
+    }
+    return {origin_x, origin_y, tile_width};
+  }
+
   GDALAllRegister();
   const char *drivers[] = {"GTiff", nullptr};
   GDALDataset *raw_dataset = static_cast<GDALDataset *>(GDALOpenEx(
@@ -170,12 +188,15 @@ TerrainCatalogue TerrainCatalogue::discover(
     throw std::invalid_argument("Prepared terrain path is not a directory: " + tile_dir.string());
   }
 
-  // Filenames provide stable integer keys, while one file's GeoTIFF metadata
+  // Filenames provide stable integer keys, while one file's embedded metadata
   // establishes the dataset-independent physical grid shared by the directory.
   std::vector<TerrainSource> available_sources;
   for (const std::filesystem::directory_entry &entry :
        std::filesystem::directory_iterator(tile_dir)) {
-    if (!entry.is_regular_file() || entry.path().extension() != ".tif") {
+    if (!entry.is_regular_file() && !entry.is_symlink()) {
+      continue;
+    }
+    if (entry.path().extension() != ".tif" && !is_metal_tile_path(entry.path())) {
       continue;
     }
     try {
@@ -186,7 +207,7 @@ TerrainCatalogue TerrainCatalogue::discover(
     }
   }
   if (available_sources.empty()) {
-    throw std::runtime_error("Prepared-terrain directory contains no indexed GeoTIFF tiles");
+    throw std::runtime_error("Prepared-terrain directory contains no indexed terrain tiles");
   }
   std::sort(
       available_sources.begin(),

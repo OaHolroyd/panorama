@@ -75,8 +75,8 @@ $(PANORAMA_EXE): FORCE $(PANORAMA_OBJ) $(SHARED_OBJ) $(METAL_LIB)
 	@printf 'Linking %s\n' '$@'
 	$(CXX) $(OPT_FLAGS) -o $@ $(PANORAMA_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
 
-# The tile generator does not use a metallib yet. It links Metal
-# now because its forthcoming custom writer will use Metal I/O compression.
+# The tile generator does not use a metallib yet. It links Metal because the
+# custom-tile writer uses Metal I/O compression contexts.
 $(TILE_GEN_EXE): FORCE $(TILE_GEN_OBJ) $(SHARED_OBJ)
 	@printf 'Linking %s\n' '$@'
 	$(CXX) $(OPT_FLAGS) -o $@ $(TILE_GEN_OBJ) $(SHARED_OBJ) -framework Foundation -framework Metal $(LDLIBS)

@@ -1,5 +1,7 @@
 #include "loaded_tile.h"
 
+#include "metal_tile.h"
+
 #include <cpl_error.h>
 #include <gdal_priv.h>
 #include <ogr_spatialref.h>
@@ -121,6 +123,26 @@ make_level_1_cells(const std::vector<float> &vertices, uint32_t size) {
 }
 
 } // namespace
+
+LoadedTile LoadedTile::load(const std::filesystem::path &path) {
+  if (!is_metal_tile_path(path)) {
+    return load_tif(path, true);
+  }
+
+  const MetalTileHeader header = read_metal_tile_header(path);
+  return {
+      true,
+      Crs::from_epsg(header.epsg_code),
+      header.maximum_elevation,
+      header.cell_count,
+      header.lower_left_x,
+      header.lower_left_y,
+      header.cell_size,
+      nullptr,
+      header.level_count,
+      {},
+  };
+}
 
 LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_collisions) {
   // Keep the initial file-format contract narrow. Other loaders can later

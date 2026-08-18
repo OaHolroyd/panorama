@@ -4,8 +4,11 @@
 /obj/
 /compile_commands.json
 
-# Image data
+# Elevation data
+*.ptile.*
 *.tif
+
+# Image data
 *.png
 *.gif
 *.mp4

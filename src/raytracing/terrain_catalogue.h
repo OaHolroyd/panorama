@@ -38,10 +38,10 @@ struct TerrainSource {
 /// A finite, indexed catalogue of terrain sources relevant to one render.
 ///
 /// The catalogue scans a prepared-tile directory once, derives its physical
-/// grid from GeoTIFF metadata, retains sources within the configured horizontal
-/// range, and maps their stable grid keys to source indices. It is immutable
-/// thereafter, so foreground scheduling and worker threads can safely share
-/// its source vector without synchronisation.
+/// grid from GeoTIFF metadata or the custom tile header, retains sources within
+/// the configured horizontal range, and maps their stable grid keys to source
+/// indices. It is immutable thereafter, so foreground scheduling and worker
+/// threads can safely share its source vector without synchronisation.
 class TerrainCatalogue {
 public:
   /// Infer the prepared grid, discover sources, and put the observer tile first.

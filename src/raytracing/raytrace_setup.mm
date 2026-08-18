@@ -2,6 +2,7 @@
 
 #include "host_frontier.h"
 #include "loaded_tile.h"
+#include "metal_tile.h"
 #include "png_writer.h"
 #include "raytrace_gpu.h"
 #include "resident_tile_cache.h"
@@ -149,12 +150,17 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   // The observer tile establishes common data dimensions and the projected
   // coordinate system required by every fixed-stride atlas slot.
   timer.start_work("Tile load");
-  LoadedTile origin = LoadedTile::load_tif(catalogue.origin().path, true);
+  LoadedTile origin = LoadedTile::load(catalogue.origin().path);
   timer.stop("Tile load");
 
-  timer.start_work("Mipmap generation");
-  origin.compute_mipmap();
-  timer.stop("Mipmap generation");
+  // GeoTIFF preparation builds its mipmap on the CPU. Custom files deliberately
+  // store vertices only; their hierarchy is generated in the atlas on the GPU.
+  const bool custom_origin = is_metal_tile_path(catalogue.origin().path);
+  if (!custom_origin) {
+    timer.start_work("Mipmap generation");
+    origin.compute_mipmap();
+    timer.stop("Mipmap generation");
+  }
 
   validate_terrain_tile_position(origin, origin_key, grid);
 
@@ -163,8 +169,13 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   // Every rechunked tile must have the origin tile's dimensions, allowing
   // constant per-slot atlas strides. Derive the number of permitted slots
   // from the byte budget rather than hard-coding a tile count.
-  const size_t mip_count = origin.mipmap.size();
-  const size_t vertex_count = origin.vertices->size();
+  const size_t mip_count = static_cast<size_t>(metal_tile_mipmap_value_count(origin.size));
+  const size_t vertex_side = static_cast<size_t>(origin.size) + 1U;
+  const size_t vertex_count = vertex_side * vertex_side;
+  if (mip_count > std::numeric_limits<uint32_t>::max() ||
+      vertex_count > std::numeric_limits<uint32_t>::max()) {
+    throw std::overflow_error("Terrain tile arrays exceed Metal uint indexing");
+  }
   const size_t tile_bytes =
       checked_byte_count(mip_count + vertex_count, sizeof(float), "terrain tile");
   const uint64_t slot_capacity = config.tile_cache_size_bytes / tile_bytes;
@@ -198,10 +209,13 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         gpu(directions, slopes, ray_count, static_cast<uint32_t>(frontier_capacity));
     gpu.initialise_frontier(config.num_azimuth);
 
-    // The cache shares the GPU resource owner's device, while the preparer
-    // remains host-only and returns completed source tiles to that cache.
-    ResidentTileCache cache(gpu.device(), paths, origin, origin_key, config, atlas_slot_count);
+    // The cache shares the GPU resource owner's device. Preparation workers
+    // use that device only to open custom-tile file handles in parallel; the
+    // cache remains the sole owner of atlas buffers and GPU commands.
+    ResidentTileCache
+        cache(gpu.device(), paths, origin, origin_key, config, atlas_slot_count, timer);
     AsyncTilePreparer preparer(
+        gpu.device(),
         paths,
         origin,
         grid,
@@ -297,17 +311,21 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 #endif
 
         timer.start_wall("Frontier bookkeeping");
-        // The next pass may already reference some resident slots. Pin those
-        // slots before installing prepared terrain, so LRU eviction cannot
-        // overwrite a tile which the imminent GPU dispatch will read.
-        const std::vector<uint8_t> pinned_slots =
-            frontier.pin_frontier(gpu.active_frontier(), pass.next_count, cache, false);
-        cache.install_prepared(preparer, pinned_slots, timer);
+        active_count = pass.next_count;
+        if (active_count != 0U || frontier.has_deferred_work()) {
+          // The next pass may already reference some resident slots. Pin those
+          // slots before reserving loading destinations, so neither I/O nor
+          // LRU eviction can overwrite terrain the imminent dispatch will read.
+          const std::vector<uint8_t> pinned_slots =
+              frontier.pin_frontier(gpu.active_frontier(), active_count, cache, false);
 
-        // Append deferred continuations whose terrain became resident while
-        // the preceding command buffer was executing.
-        active_count =
-            frontier.activate_resident(gpu.active_frontier(), pass.next_count, cache, preparer);
+          // Publish batches whose mipmap completion event has fired, then
+          // submit more prepared tiles without waiting for their I/O. Newly
+          // published deferred suffixes can immediately join the next pass.
+          cache.install_prepared(preparer, pinned_slots, timer);
+          active_count =
+              frontier.activate_resident(gpu.active_frontier(), active_count, cache, preparer);
+        }
 #if defined(PANORAMA_DEBUG_VALIDATION)
         frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
@@ -318,7 +336,13 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         // so an empty pin set makes every currently resident slot evictable.
         while (active_count == 0U && frontier.has_deferred_work()) {
           timer.start_wall("Tile availability wait");
-          preparer.wait_for_prepared();
+          if (cache.has_pending_installations()) {
+            // Direct I/O is already feeding reserved atlas slots. Wait for
+            // its chained mipmap command rather than idling on the CPU queue.
+            cache.wait_for_pending_installation(timer);
+          } else {
+            preparer.wait_for_prepared();
+          }
           timer.stop("Tile availability wait");
 
           const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);
@@ -383,9 +407,11 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         static_cast<unsigned long long>(preparation_statistics.reloads)
     );
     std::printf(
-        "  Atlas installations: %llu, copied: %.3f GiB, evictions: %llu.\n",
+        "  Atlas installations: %llu, copied: %.3f GiB, direct I/O: %.3f GiB, "
+        "evictions: %llu.\n",
         static_cast<unsigned long long>(cache_statistics.installations),
         static_cast<double>(cache_statistics.bytes_copied) / (1024.0 * 1024.0 * 1024.0),
+        static_cast<double>(cache_statistics.bytes_loaded_directly) / (1024.0 * 1024.0 * 1024.0),
         static_cast<unsigned long long>(cache_statistics.evictions)
     );
     timer.print();

@@ -44,27 +44,33 @@ struct ResidentTileCacheBindings {
 struct ResidentTileCacheStatistics {
   uint64_t installations;
   uint64_t bytes_copied;
+  uint64_t bytes_loaded_directly;
   uint64_t evictions;
   uint32_t resident_tiles;
   uint32_t slot_capacity;
 };
 
-/// A bounded fixed-stride terrain atlas with safe LRU eviction.
+/// A bounded fixed-stride terrain atlas with pipelined LRU replacement.
 ///
 /// The cache owns the GPU-visible vertex/mipmap buffers, source-to-slot maps,
-/// and resident key hash. The main thread must call `install_prepared` only
-/// between completed command buffers, passing slots used by the next pass so
-/// that no terrain payload is overwritten while the GPU can still read it.
+/// and resident key hash. Between frontier commands it publishes completed
+/// loads, reserves safe unpinned slots, and submits new direct-I/O/mipmap work
+/// without waiting. Loading slots remain absent from the hash until both
+/// operations have completed.
 class ResidentTileCache {
 public:
-  /// Allocate the atlas and install the already-loaded observer tile in slot zero.
+  /// Allocate the atlas and install the observer tile in slot zero.
+  ///
+  /// A GeoTIFF observer is already resident on the CPU. A custom observer
+  /// supplies metadata only and is transferred directly from its file.
   ResidentTileCache(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,
       const LoadedTile &origin,
       TileKey origin_key,
       const RaytraceConfig &config,
-      uint32_t slot_capacity
+      uint32_t slot_capacity,
+      Timer &timer
   );
 
   ResidentTileCache(const ResidentTileCache &) = delete;
@@ -76,12 +82,22 @@ public:
   /// Return the resident slot for a source, or `slot_capacity()` if absent.
   [[nodiscard]] uint32_t slot_for_source(uint32_t source_index) const;
 
-  /// Install every prepared tile which has a safe unpinned atlas slot available.
+  /// Publish completed loads and submit prepared tiles into safe unpinned slots.
+  ///
+  /// This method never waits for direct I/O or GPU mipmap generation.
   void install_prepared(
       AsyncTilePreparer &preparer,
       std::span<const uint8_t> pinned_slots,
       Timer &timer
   );
+
+  /// Return whether one or more reserved slots are still loading.
+  [[nodiscard]] bool has_pending_installations() const;
+
+  /// Wait for the oldest pending installation to become publishable.
+  ///
+  /// The scheduler calls this only when it has no resident frontier work.
+  void wait_for_pending_installation(Timer &timer);
 
   /// Mark the supplied resident slots as recently used and return their pin mask.
   [[nodiscard]] std::vector<uint8_t> pin_slots(std::span<const uint32_t> slots, bool record_use);
