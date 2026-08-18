@@ -1,7 +1,7 @@
 #include "raytrace_setup.h"
 
-#include "loaded_tile.h"
 #include "host_frontier.h"
+#include "loaded_tile.h"
 #include "png_writer.h"
 #include "raytrace_gpu.h"
 #include "resident_tile_cache.h"
@@ -37,9 +37,7 @@ void validate_configuration(const RaytraceConfig &config) {
   if (!std::isfinite(config.observer.easting) || !std::isfinite(config.observer.northing) ||
       !std::isfinite(config.observer.elevation) || !std::isfinite(config.azimuth_start) ||
       !std::isfinite(config.azimuth_end) || !std::isfinite(config.polar_start) ||
-      !std::isfinite(config.polar_end) || !std::isfinite(config.tile_grid_origin_x) ||
-      !std::isfinite(config.tile_grid_origin_y) || !std::isfinite(config.tile_width) ||
-      !std::isfinite(config.max_distance) || config.tile_width <= 0.0 ||
+      !std::isfinite(config.polar_end) || !std::isfinite(config.max_distance) ||
       config.max_distance <= 0.0F) {
     throw std::invalid_argument("Raytrace configuration must be finite");
   }
@@ -80,7 +78,8 @@ make_azimuth_directions(const RaytraceConfig &config) {
   const double step = (config.azimuth_end - config.azimuth_start) / config.num_azimuth;
   for (uint32_t index = 0U; index < config.num_azimuth; index++) {
     const double azimuth = config.azimuth_start + (static_cast<double>(index) + 0.5) * step;
-    directions[index] = {static_cast<float>(std::sin(azimuth)), static_cast<float>(std::cos(azimuth))};
+    directions[index] = {static_cast<float>(std::sin(azimuth)),
+                         static_cast<float>(std::cos(azimuth))};
   }
   return directions;
 }
@@ -138,18 +137,13 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
   // Discover the finite source set once. The catalogue provides the observer
   // source at index zero and an immutable key-to-source lookup thereafter.
-  const TileGrid grid = {
-      config.tile_grid_origin_x,
-      config.tile_grid_origin_y,
-      config.tile_width,
-  };
   const TerrainCatalogue catalogue = TerrainCatalogue::discover(
       config.tile_dir,
-      grid,
       config.observer,
       config.max_distance,
       config.max_tile_count
   );
+  const TileGrid &grid = catalogue.grid();
   const TileKey origin_key = catalogue.origin().key;
 
   // The observer tile establishes common data dimensions and the projected
@@ -171,7 +165,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   // from the byte budget rather than hard-coding a tile count.
   const size_t mip_count = origin.mipmap.size();
   const size_t vertex_count = origin.vertices->size();
-  const size_t tile_bytes = checked_byte_count(mip_count + vertex_count, sizeof(float), "terrain tile");
+  const size_t tile_bytes =
+      checked_byte_count(mip_count + vertex_count, sizeof(float), "terrain tile");
   const uint64_t slot_capacity = config.tile_cache_size_bytes / tile_bytes;
   if (slot_capacity == 0U) {
     throw std::runtime_error("Tile-cache byte budget cannot hold one terrain tile");
@@ -311,12 +306,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
         // Append deferred continuations whose terrain became resident while
         // the preceding command buffer was executing.
-        active_count = frontier.activate_resident(
-            gpu.active_frontier(),
-            pass.next_count,
-            cache,
-            preparer
-        );
+        active_count =
+            frontier.activate_resident(gpu.active_frontier(), pass.next_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
         frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
@@ -332,12 +323,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
           const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);
           cache.install_prepared(preparer, no_pinned_slots, timer);
-          active_count = frontier.activate_resident(
-              gpu.active_frontier(),
-              active_count,
-              cache,
-              preparer
-          );
+          active_count =
+              frontier.activate_resident(gpu.active_frontier(), active_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
           frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif

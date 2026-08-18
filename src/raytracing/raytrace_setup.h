@@ -17,13 +17,6 @@ struct RaytraceConfig {
   // Directory containing prepared level-0 GeoTIFF terrain tiles.
   std::filesystem::path tile_dir;
 
-  // The rechunk grid's north-west origin and fixed physical tile width in
-  // projected metres. Together these locate the observer's initial tile
-  // without requiring the caller to name an arbitrary source file.
-  double tile_grid_origin_x;
-  double tile_grid_origin_y;
-  double tile_width;
-
   ObserverLocation observer;
   // Output resolution
   uint32_t num_azimuth;

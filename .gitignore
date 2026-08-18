@@ -1,10 +1,8 @@
 # Build products
 /panorama
+/panorama-tile-gen
 /obj/
 /compile_commands.json
-
-# Input data
-data/
 
 # Image data
 *.tif
@@ -21,7 +19,8 @@ data/
 *.trace
 *.gputrace
 
-# Scratch space
+# Scratch space/Python
+__pycache__/
 panorama-python
 
 # Xcode user-specific files

@@ -1,16 +1,34 @@
 #include "terrain_catalogue.h"
 
+#include <cpl_error.h>
+#include <gdal_priv.h>
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace panorama {
 namespace {
+
+/// Close a metadata-only GDAL dataset on every return path.
+struct DatasetCloser {
+  void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
+};
+
+using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
+
+/// Append GDAL's latest diagnostic to a catalogue-level error.
+[[nodiscard]] std::string gdal_error(const std::string &context) {
+  const char *detail = CPLGetLastErrorMsg();
+  return context + (detail != nullptr && detail[0] != '\0' ? ": " + std::string(detail) : "");
+}
 
 /// Parse one signed grid coordinate from a prepared terrain filename component.
 [[nodiscard]] int64_t parse_tile_coordinate(std::string_view text, const char *name) {
@@ -32,7 +50,9 @@ namespace {
   const size_t extension = name.rfind(".tif");
   if (row_marker == std::string::npos || column_marker == std::string::npos ||
       extension == std::string::npos || row_marker >= column_marker || column_marker >= extension) {
-    throw std::invalid_argument("Prepared tile name must end in _rROW_cCOLUMN.tif: " + path.string());
+    throw std::invalid_argument(
+        "Prepared tile name must end in _rROW_cCOLUMN.tif: " + path.string()
+    );
   }
   return {
       parse_tile_coordinate(
@@ -44,6 +64,52 @@ namespace {
           "column"
       ),
   };
+}
+
+/// Derive the global tile grid from one prepared level-0 GeoTIFF.
+///
+/// The filename supplies only the signed row and column. The affine transform
+/// and raster dimensions supply the cell spacing and physical tile width;
+/// combining them reconstructs the common north-west grid origin without any
+/// dataset-specific constants.
+[[nodiscard]] TileGrid infer_tile_grid(const TerrainSource &source) {
+  GDALAllRegister();
+  const char *drivers[] = {"GTiff", nullptr};
+  GDALDataset *raw_dataset = static_cast<GDALDataset *>(GDALOpenEx(
+      source.path.string().c_str(),
+      GDAL_OF_RASTER | GDAL_OF_READONLY | GDAL_OF_VERBOSE_ERROR,
+      drivers,
+      nullptr,
+      nullptr
+  ));
+  if (raw_dataset == nullptr) {
+    throw std::runtime_error(gdal_error("Could not inspect prepared tile " + source.path.string()));
+  }
+  DatasetPointer dataset(raw_dataset);
+
+  const int sample_width = dataset->GetRasterXSize();
+  const int sample_height = dataset->GetRasterYSize();
+  if (dataset->GetRasterCount() != 1 || sample_width < 2 || sample_width != sample_height) {
+    throw std::runtime_error("Prepared level-0 terrain tile must be a square single-band raster");
+  }
+
+  double transform[6] = {};
+  if (dataset->GetGeoTransform(transform) != CE_None || transform[1] <= 0.0 ||
+      transform[5] >= 0.0 || transform[2] != 0.0 || transform[4] != 0.0 ||
+      transform[1] != -transform[5]) {
+    throw std::runtime_error("Prepared terrain tile must have a square, north-up affine grid");
+  }
+
+  // A level-0 tile has one more vertex sample than terrain cells. Tile keys
+  // advance by the non-overlapping cell count, not by the stored sample count.
+  const double tile_width = static_cast<double>(sample_width - 1) * transform[1];
+  const double origin_x = transform[0] - static_cast<double>(source.key.column) * tile_width;
+  const double origin_y = transform[3] + static_cast<double>(source.key.row) * tile_width;
+  if (!std::isfinite(tile_width) || !std::isfinite(origin_x) || !std::isfinite(origin_y) ||
+      tile_width <= 0.0) {
+    throw std::runtime_error("Prepared terrain tile has an invalid global grid");
+  }
+  return {origin_x, origin_y, tile_width};
 }
 
 } // namespace
@@ -78,10 +144,10 @@ double tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLo
   const double y_min = y_max - grid.width;
   const double dx = observer.easting < x_min   ? x_min - observer.easting
                     : observer.easting > x_max ? observer.easting - x_max
-                                                : 0.0;
+                                               : 0.0;
   const double dy = observer.northing < y_min   ? y_min - observer.northing
                     : observer.northing > y_max ? observer.northing - y_max
-                                                 : 0.0;
+                                                : 0.0;
   return std::hypot(dx, dy);
 }
 
@@ -96,13 +162,17 @@ TerrainCatalogue::TerrainCatalogue(TileGrid grid, std::vector<TerrainSource> sou
 
 TerrainCatalogue TerrainCatalogue::discover(
     const std::filesystem::path &tile_dir,
-    TileGrid grid,
     const ObserverLocation &observer,
     float max_distance,
     uint32_t max_tile_count
 ) {
-  const TileKey origin_key = tile_key_at(grid, observer.easting, observer.northing);
-  std::vector<TerrainSource> sources;
+  if (!std::filesystem::is_directory(tile_dir)) {
+    throw std::invalid_argument("Prepared terrain path is not a directory: " + tile_dir.string());
+  }
+
+  // Filenames provide stable integer keys, while one file's GeoTIFF metadata
+  // establishes the dataset-independent physical grid shared by the directory.
+  std::vector<TerrainSource> available_sources;
   for (const std::filesystem::directory_entry &entry :
        std::filesystem::directory_iterator(tile_dir)) {
     if (!entry.is_regular_file() || entry.path().extension() != ".tif") {
@@ -110,24 +180,45 @@ TerrainCatalogue TerrainCatalogue::discover(
     }
     try {
       const TileKey key = parse_tile_name(entry.path());
-      if (key == origin_key || tile_minimum_distance(grid, key, observer) <= max_distance) {
-        sources.push_back({key, entry.path()});
-      }
+      available_sources.push_back({key, entry.path()});
     } catch (const std::invalid_argument &) {
       // Prepared-tile directories may contain unrelated GeoTIFFs.
     }
   }
-  std::sort(sources.begin(), sources.end(), [origin_key](const TerrainSource &left,
-                                                          const TerrainSource &right) {
-    const uint64_t left_shell = static_cast<uint64_t>(std::llabs(left.key.row - origin_key.row)) +
-                                static_cast<uint64_t>(std::llabs(left.key.column - origin_key.column));
-    const uint64_t right_shell = static_cast<uint64_t>(std::llabs(right.key.row - origin_key.row)) +
-                                 static_cast<uint64_t>(std::llabs(right.key.column - origin_key.column));
-    if (left_shell != right_shell) {
-      return left_shell < right_shell;
+  if (available_sources.empty()) {
+    throw std::runtime_error("Prepared-terrain directory contains no indexed GeoTIFF tiles");
+  }
+  std::sort(
+      available_sources.begin(),
+      available_sources.end(),
+      [](const TerrainSource &left, const TerrainSource &right) { return left.key < right.key; }
+  );
+
+  const TileGrid grid = infer_tile_grid(available_sources.front());
+  const TileKey origin_key = tile_key_at(grid, observer.easting, observer.northing);
+  std::vector<TerrainSource> sources;
+  for (TerrainSource &source : available_sources) {
+    if (source.key == origin_key ||
+        tile_minimum_distance(grid, source.key, observer) <= max_distance) {
+      sources.push_back(std::move(source));
     }
-    return left.key < right.key;
-  });
+  }
+  std::sort(
+      sources.begin(),
+      sources.end(),
+      [origin_key](const TerrainSource &left, const TerrainSource &right) {
+        const uint64_t left_shell =
+            static_cast<uint64_t>(std::llabs(left.key.row - origin_key.row)) +
+            static_cast<uint64_t>(std::llabs(left.key.column - origin_key.column));
+        const uint64_t right_shell =
+            static_cast<uint64_t>(std::llabs(right.key.row - origin_key.row)) +
+            static_cast<uint64_t>(std::llabs(right.key.column - origin_key.column));
+        if (left_shell != right_shell) {
+          return left_shell < right_shell;
+        }
+        return left.key < right.key;
+      }
+  );
   if (max_tile_count != 0U && sources.size() > max_tile_count) {
     sources.resize(max_tile_count);
   }
