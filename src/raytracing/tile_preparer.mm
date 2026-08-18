@@ -197,15 +197,12 @@ void AsyncTilePreparer::start() {
         try {
           const TerrainSource &source = worker_state.sources[request.source_index];
 
-          // A custom tile contains only vertices in atlas order. Do not
-          // decompress them into host memory here; a null CPU tile tells the
-          // cache to transfer them directly and build its mipmap on the GPU.
+          // A custom tile contains only vertices in atlas order. Do not read
+          // or decompress them into host memory. Opening its Metal handle on
+          // this worker keeps setup off the synchronous scheduler path.
           std::unique_ptr<LoadedTile> tile;
           id<MTLIOFileHandle> metal_file;
           if (is_metal_tile_path(source.path)) {
-            // Opening a compressed Metal file performs nontrivial setup.
-            // Do it on preparation workers so the frontier scheduler later
-            // needs only to encode and commit the direct-I/O command.
             worker_state.timer.start_work("Metal tile open");
             metal_file = open_metal_tile_file(worker_state.device, source.path);
             worker_state.timer.stop("Metal tile open");

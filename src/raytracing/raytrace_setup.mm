@@ -311,21 +311,17 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 #endif
 
         timer.start_wall("Frontier bookkeeping");
-        active_count = pass.next_count;
-        if (active_count != 0U || frontier.has_deferred_work()) {
-          // The next pass may already reference some resident slots. Pin those
-          // slots before reserving loading destinations, so neither I/O nor
-          // LRU eviction can overwrite terrain the imminent dispatch will read.
-          const std::vector<uint8_t> pinned_slots =
-              frontier.pin_frontier(gpu.active_frontier(), active_count, cache, false);
+        // The next pass may already reference some resident slots. Pin those
+        // slots before synchronously installing prepared terrain, so LRU
+        // eviction cannot overwrite a tile the imminent dispatch will read.
+        const std::vector<uint8_t> pinned_slots =
+            frontier.pin_frontier(gpu.active_frontier(), pass.next_count, cache, false);
+        cache.install_prepared(preparer, pinned_slots, timer);
 
-          // Publish batches whose mipmap completion event has fired, then
-          // submit more prepared tiles without waiting for their I/O. Newly
-          // published deferred suffixes can immediately join the next pass.
-          cache.install_prepared(preparer, pinned_slots, timer);
-          active_count =
-              frontier.activate_resident(gpu.active_frontier(), active_count, cache, preparer);
-        }
+        // Append deferred continuations whose terrain became resident during
+        // the synchronous installation above.
+        active_count =
+            frontier.activate_resident(gpu.active_frontier(), pass.next_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
         frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
@@ -336,13 +332,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         // so an empty pin set makes every currently resident slot evictable.
         while (active_count == 0U && frontier.has_deferred_work()) {
           timer.start_wall("Tile availability wait");
-          if (cache.has_pending_installations()) {
-            // Direct I/O is already feeding reserved atlas slots. Wait for
-            // its chained mipmap command rather than idling on the CPU queue.
-            cache.wait_for_pending_installation(timer);
-          } else {
-            preparer.wait_for_prepared();
-          }
+          preparer.wait_for_prepared();
           timer.stop("Tile availability wait");
 
           const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);

@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <deque>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -112,10 +111,7 @@ make_resident_tile(const LoadedTile &tile, TileKey key, const RaytraceConfig &co
   return {static_cast<float>(x), static_cast<float>(y), key.row, key.column};
 }
 
-/// One prepared source paired with its reserved destination atlas slot.
-///
-/// Residency is not published until every payload in the installation batch
-/// has finished loading and every custom tile has a complete GPU mipmap.
+/// One prepared source paired with its selected destination atlas slot.
 struct AtlasInstallation {
   uint32_t slot;
   PreparedTile prepared;
@@ -123,37 +119,10 @@ struct AtlasInstallation {
   double lower_left_y;
 };
 
-/// Host-visible lifecycle of one fixed atlas slot.
-enum class AtlasSlotState : uint8_t {
-  Empty,
-  Loading,
-  Resident,
-};
-
-/// One committed mipmap command and the resources it reads while in flight.
-struct PendingAtlasInstallation {
-  std::vector<AtlasInstallation> installations;
-  std::vector<MetalTileIoSubmission> io_submissions;
-  id<MTLBuffer> slot_buffer;
-  id<MTLCommandBuffer> mipmap_command;
-  id<MTLSharedEvent> completion_event;
-};
-
-/// Completed payload commands retained until Metal releases their queue slots.
-///
-/// A shared event can become visible just before the command-buffer status
-/// changes to Complete. Retaining and counting these commands prevents a call
-/// to `commandBuffer` from blocking on the I/O queue's bounded object pool.
-struct RetiredAtlasCommands {
-  std::vector<MetalTileIoSubmission> io_submissions;
-  id<MTLCommandBuffer> mipmap_command;
-};
-
-/// Resources returned when a mipmap batch has been submitted asynchronously.
+/// Resources retained while one synchronous mipmap command is running.
 struct MipmapSubmission {
   id<MTLBuffer> slot_buffer;
   id<MTLCommandBuffer> command;
-  id<MTLSharedEvent> completion_event;
 };
 
 } // namespace
@@ -190,16 +159,10 @@ struct ResidentTileCache::State {
   ResidentTileHashEntry *hash;
   std::vector<uint32_t> slot_by_source;
   std::vector<uint32_t> source_by_slot;
-  std::vector<AtlasSlotState> slot_states;
   std::vector<uint64_t> last_used;
-  std::deque<PendingAtlasInstallation> pending_installations;
-  std::deque<RetiredAtlasCommands> retired_commands;
 
-  /// Submit every maximum-mipmap level after the corresponding I/O events.
-  [[nodiscard]] MipmapSubmission submit_mipmaps(
-      std::span<const uint32_t> slots,
-      std::span<const MetalTileIoSubmission> io_submissions
-  );
+  /// Submit every maximum-mipmap level for the supplied resident slots.
+  [[nodiscard]] MipmapSubmission submit_mipmaps(std::span<const uint32_t> slots);
 
   /// Build mipmaps synchronously where the observer tile requires them now.
   void generate_mipmaps(std::span<const uint32_t> slots, Timer &timer);
@@ -228,10 +191,8 @@ struct ResidentTileCache::State {
         slot_capacity(slot_values), hash_slot_count(hash_values), bytes_copied(initial_bytes) {}
 };
 
-MipmapSubmission ResidentTileCache::State::submit_mipmaps(
-    std::span<const uint32_t> slots,
-    std::span<const MetalTileIoSubmission> io_submissions
-) {
+MipmapSubmission
+ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
   if (slots.empty()) {
     throw std::invalid_argument("Cannot submit an empty mipmap-generation batch");
   }
@@ -239,25 +200,15 @@ MipmapSubmission ResidentTileCache::State::submit_mipmaps(
     throw std::logic_error("Mipmap-generation batch exceeds its slot buffer");
   }
 
-  // The slot list is immutable until this command completes. A dedicated
-  // shared buffer avoids overwriting indices still consumed by an earlier
-  // asynchronous batch.
+  // The slot list must remain available until this command completes.
   id<MTLBuffer> slot_buffer = [device newBufferWithBytes:slots.data()
                                                   length:slots.size_bytes()
                                                  options:MTLResourceStorageModeShared];
-  id<MTLSharedEvent> completion_event = [device newSharedEvent];
   id<MTLCommandBuffer> command = [mipmap_queue commandBuffer];
-  if (slot_buffer == nil || completion_event == nil || command == nil) {
-    throw std::runtime_error("Could not create an asynchronous mipmap-generation command");
+  if (slot_buffer == nil || command == nil) {
+    throw std::runtime_error("Could not create a mipmap-generation command");
   }
   command.label = @"Generate resident tile mipmaps";
-
-  // Metal I/O and compute use different queues. Waiting in the GPU command
-  // buffer lets the CPU return to frontier scheduling immediately while
-  // preserving the vertex-write-to-mipmap-read dependency for every slot.
-  for (const MetalTileIoSubmission &io : io_submissions) {
-    [command encodeWaitForEvent:io.event value:1U];
-  }
 
   // Generate level 1 for every tile from adjacent vertices, then reduce each
   // preceding level in turn. Ending each encoder supplies the global
@@ -319,16 +270,13 @@ MipmapSubmission ResidentTileCache::State::submit_mipmaps(
     throw std::logic_error("GPU maximum mipmap layout calculation failed");
   }
 
-  // Signal only after the final mip level is complete. The host polls this
-  // event at command-buffer boundaries before publishing the new hash entries.
-  [command encodeSignalEvent:completion_event value:1U];
   [command commit];
-  return {slot_buffer, command, completion_event};
+  return {slot_buffer, command};
 }
 
 void ResidentTileCache::State::generate_mipmaps(std::span<const uint32_t> slots, Timer &timer) {
   timer.start_wall("GPU mipmap generation");
-  const MipmapSubmission submission = submit_mipmaps(slots, {});
+  const MipmapSubmission submission = submit_mipmaps(slots);
   [submission.command waitUntilCompleted];
   timer.stop("GPU mipmap generation");
   if (submission.command.status == MTLCommandBufferStatusError) {
@@ -348,10 +296,10 @@ void ResidentTileCache::State::rebuild_hash(Timer *timer) {
   std::fill_n(hash, hash_slot_count, ResidentTileHashEntry{});
   const uint32_t mask = hash_slot_count - 1U;
   for (uint32_t slot = 0U; slot < slot_capacity; slot++) {
-    if (slot_states[slot] != AtlasSlotState::Resident) {
+    const uint32_t source = source_by_slot[slot];
+    if (source == sources.size()) {
       continue;
     }
-    const uint32_t source = source_by_slot[slot];
     const TileKey key = sources[source].key;
     uint32_t index = static_cast<uint32_t>(tile_key_hash(key)) & mask;
     while (hash[index].occupied != 0U) {
@@ -423,13 +371,11 @@ ResidentTileCache::ResidentTileCache(
       hash_slot_count,
       custom_origin ? 0U : tile_bytes
   );
-  // Shared buffers let the main thread install a prepared tile between two
-  // completed command buffers. No worker thread has access to these buffers.
-  // I/O/mipmap commands write only Loading slots while ray commands read only
-  // Resident slots. Disable whole-resource hazard tracking on these atlases so
-  // Metal does not serialize logically disjoint slot ranges across queues; the
-  // cache state machine and I/O-to-mipmap shared events provide the required
-  // explicit synchronization.
+  // Shared storage supports both CPU GeoTIFF copies and direct Metal I/O.
+  // Installation occurs only between completed frontier commands, and the
+  // host waits for I/O before mipmap generation and for mipmaps before tracing.
+  // Those explicit ordering points make whole-resource hazard tracking
+  // unnecessary for these fixed, non-overlapping slot ranges.
   constexpr MTLResourceOptions kAtlasOptions =
       MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked;
   state->mipmap_atlas = make_buffer(
@@ -540,8 +486,6 @@ ResidentTileCache::ResidentTileCache(
   state->slot_by_source[0] = 0U;
   state->source_by_slot.assign(slot_capacity, static_cast<uint32_t>(sources.size()));
   state->source_by_slot[0] = 0U;
-  state->slot_states.assign(slot_capacity, AtlasSlotState::Empty);
-  state->slot_states[0] = AtlasSlotState::Resident;
   state->last_used.assign(slot_capacity, 0U);
   state->last_used[0] = 1U;
   state_ = std::move(state);
@@ -550,28 +494,7 @@ ResidentTileCache::ResidentTileCache(
   state_->rebuild_hash(nullptr);
 }
 
-ResidentTileCache::~ResidentTileCache() {
-  if (state_ == nullptr) {
-    return;
-  }
-
-  // A final frontier can finish while speculative neighbour loads are still
-  // in flight. Their commands retain the atlas resources, but draining here
-  // also keeps every Objective-C object in the pending records alive until
-  // its command has finished using it.
-  for (PendingAtlasInstallation &pending : state_->pending_installations) {
-    for (const MetalTileIoSubmission &io : pending.io_submissions) {
-      [io.command waitUntilCompleted];
-    }
-    [pending.mipmap_command waitUntilCompleted];
-  }
-  for (RetiredAtlasCommands &retired : state_->retired_commands) {
-    for (const MetalTileIoSubmission &io : retired.io_submissions) {
-      [io.command waitUntilCompleted];
-    }
-    [retired.mipmap_command waitUntilCompleted];
-  }
-}
+ResidentTileCache::~ResidentTileCache() = default;
 
 uint32_t ResidentTileCache::slot_for_source(uint32_t source_index) const {
   return state_->slot_by_source.at(source_index);
@@ -589,136 +512,20 @@ void ResidentTileCache::install_prepared(
   preparer.rethrow_if_failed();
   timer.start_wall("Atlas installation");
 
-  bool hash_changed = false;
-
-  // In addition to imminent-frontier pins, protect every slot published or
-  // reserved during this call. Deferred work is activated only after this
-  // method returns, so immediately evicting a newly completed tile would
-  // otherwise cause an endless load/evict cycle without tracing that tile.
+  // Protect both imminent frontier slots and every destination selected in
+  // this call. A prepared queue can contain more tiles than free atlas slots;
+  // without this mask the LRU search could select one destination repeatedly.
   std::vector<uint8_t> unavailable_slots(pinned_slots.begin(), pinned_slots.end());
-
-  // Reap commands only after Metal reports their command buffers complete.
-  // The batch-completion event is sufficient for publishing data, but it can
-  // precede command-buffer retirement by a short interval. Counting that
-  // interval avoids blocking when requesting another bounded I/O command.
-  for (auto iterator = state.retired_commands.begin(); iterator != state.retired_commands.end();) {
-    bool io_complete = true;
-    for (const MetalTileIoSubmission &io : iterator->io_submissions) {
-      if (io.command.status == MTLIOStatusError || io.command.status == MTLIOStatusCancelled) {
-        const char *detail = io.command.error == nil
-                                 ? "unknown error"
-                                 : io.command.error.localizedDescription.UTF8String;
-        throw std::runtime_error(
-            "Could not load Metal tile batch beginning with " + io.paths.front().string() + ": " +
-            detail
-        );
-      }
-      io_complete = io_complete && io.command.status == MTLIOStatusComplete;
-    }
-    if (iterator->mipmap_command.status == MTLCommandBufferStatusError) {
-      print_error(@"Asynchronous Metal mipmap generation failed", iterator->mipmap_command.error);
-      throw std::runtime_error("Asynchronous Metal mipmap generation failed");
-    }
-    if (!io_complete || iterator->mipmap_command.status != MTLCommandBufferStatusCompleted) {
-      iterator++;
-      continue;
-    }
-    timer.add_work(
-        "GPU mipmap generation",
-        1'000.0 * (iterator->mipmap_command.GPUEndTime - iterator->mipmap_command.GPUStartTime)
-    );
-    iterator = state.retired_commands.erase(iterator);
-  }
-
-  // Shared-event completion is the publication boundary. Until this point a
-  // loading slot has no source-to-slot mapping and no resident-hash entry, so
-  // frontier commands can safely keep using every other resident slot while
-  // Metal I/O and mipmap generation operate in parallel.
-  while (!state.pending_installations.empty()) {
-    PendingAtlasInstallation &pending = state.pending_installations.front();
-    for (const MetalTileIoSubmission &io : pending.io_submissions) {
-      if (io.command.status == MTLIOStatusError || io.command.status == MTLIOStatusCancelled) {
-        const char *detail = io.command.error == nil
-                                 ? "unknown error"
-                                 : io.command.error.localizedDescription.UTF8String;
-        throw std::runtime_error(
-            "Could not load Metal tile batch beginning with " + io.paths.front().string() + ": " +
-            detail
-        );
-      }
-    }
-    if (pending.mipmap_command.status == MTLCommandBufferStatusError) {
-      print_error(@"Asynchronous Metal mipmap generation failed", pending.mipmap_command.error);
-      throw std::runtime_error("Asynchronous Metal mipmap generation failed");
-    }
-    if (pending.completion_event.signaledValue < 1U) {
-      break;
-    }
-
-    // All payload writes preceded the completion signal. Publish the entire
-    // batch atomically from the scheduler's point of view, then rebuild the
-    // hash once after every completed batch has been consumed.
-    for (const AtlasInstallation &installation : pending.installations) {
-      const uint32_t slot = installation.slot;
-      const uint32_t source = installation.prepared.source_index;
-      if (state.slot_states[slot] != AtlasSlotState::Loading) {
-        throw std::logic_error("Completed atlas installation does not own a loading slot");
-      }
-      state.slot_states[slot] = AtlasSlotState::Resident;
-      unavailable_slots[slot] = 1U;
-      state.slot_by_source[source] = slot;
-      state.last_used[slot] = state.next_use_stamp++;
-      state.resident_count++;
-      state.installations++;
-      preparer.mark_resident(source);
-    }
-    state.retired_commands.push_back(
-        {
-            std::move(pending.io_submissions),
-            pending.mipmap_command,
-        }
-    );
-    state.pending_installations.pop_front();
-    hash_changed = true;
-  }
-
-  // A tile installed during this call cannot be used until control returns to
-  // the frontier scheduler. Treat its slot like an imminent-frontier pin for
-  // the rest of this batch. Without this additional mask, a full prepared
-  // queue could repeatedly overwrite the same small set of unpinned slots,
-  // evicting tiles before their deferred rays had any opportunity to run.
-  // Reserve destinations before performing any I/O. This separates cache
-  // admission from payload transfer and gives the custom path a complete set
-  // of independent files which it can submit to Metal I/O concurrently.
   std::vector<AtlasInstallation> installations;
   installations.reserve(state.slot_capacity);
-  size_t io_commands_in_flight = 0U;
-  for (const PendingAtlasInstallation &pending : state.pending_installations) {
-    for (const MetalTileIoSubmission &io : pending.io_submissions) {
-      io_commands_in_flight += io.command.status == MTLIOStatusComplete ? 0U : io.files.size();
-    }
-  }
-  for (const RetiredAtlasCommands &retired : state.retired_commands) {
-    for (const MetalTileIoSubmission &io : retired.io_submissions) {
-      io_commands_in_flight += io.command.status == MTLIOStatusComplete ? 0U : io.files.size();
-    }
-  }
-  const size_t io_capacity = static_cast<size_t>(metal_tile_io_concurrency());
-  size_t available_io_commands = io_capacity - io_commands_in_flight;
 
   while (true) {
-    // Custom tiles require one I/O command each. Do not remove another item
-    // from the preparer's queue until the bounded Metal I/O queue can accept it.
-    if (state.io_queue != nil && available_io_commands == 0U) {
-      break;
-    }
-
     // Prefer an unused slot. Once full, choose the least-recently-used slot
-    // that is neither pinned by the next GPU command nor already selected by
-    // this installation batch.
+    // that is neither pinned nor already selected by this installation batch.
     uint32_t slot = state.slot_capacity;
     for (uint32_t candidate = 0U; candidate < state.slot_capacity; candidate++) {
-      if (state.slot_states[candidate] == AtlasSlotState::Empty) {
+      if (state.source_by_slot[candidate] == state.sources.size() &&
+          unavailable_slots[candidate] == 0U) {
         slot = candidate;
         break;
       }
@@ -726,8 +533,7 @@ void ResidentTileCache::install_prepared(
     if (slot == state.slot_capacity) {
       uint64_t oldest_use = std::numeric_limits<uint64_t>::max();
       for (uint32_t candidate = 0U; candidate < state.slot_capacity; candidate++) {
-        if (state.slot_states[candidate] == AtlasSlotState::Resident &&
-            unavailable_slots[candidate] == 0U && state.last_used[candidate] < oldest_use) {
+        if (unavailable_slots[candidate] == 0U && state.last_used[candidate] < oldest_use) {
           slot = candidate;
           oldest_use = state.last_used[candidate];
         }
@@ -752,33 +558,16 @@ void ResidentTileCache::install_prepared(
         state.grid_origin_x + static_cast<double>(source.key.column) * state.tile_width;
     const double lower_left_y =
         state.grid_origin_y - static_cast<double>(source.key.row + 1) * state.tile_width;
-
-    // Remove the old source before direct I/O can overwrite its payload. The
-    // hash is rebuilt below while the replacement remains explicitly Loading.
-    const uint32_t evicted = state.source_by_slot[slot];
-    if (state.slot_states[slot] == AtlasSlotState::Resident) {
-      state.slot_by_source[evicted] = state.slot_capacity;
-      preparer.mark_evicted(evicted);
-      state.resident_count--;
-      state.evictions++;
-      hash_changed = true;
-    }
-    state.slot_states[slot] = AtlasSlotState::Loading;
-    state.source_by_slot[slot] = prepared->source_index;
     installations.push_back({slot, std::move(*prepared), lower_left_x, lower_left_y});
-    if (is_metal_tile_path(source.path)) {
-      available_io_commands--;
-    }
   }
 
-  // GeoTIFFs already have CPU-resident payloads, while custom files contribute
-  // direct-I/O requests and slot IDs for the following two batched operations.
+  // GeoTIFFs already have CPU-resident payloads. Custom files instead provide
+  // direct-I/O requests and slot IDs for two synchronous batched operations.
   std::vector<MetalTileBufferLoad> custom_loads;
   std::vector<uint32_t> custom_slots;
   custom_loads.reserve(installations.size());
   custom_slots.reserve(installations.size());
-  std::vector<AtlasInstallation> asynchronous_installations;
-  asynchronous_installations.reserve(installations.size());
+
   for (AtlasInstallation &installation : installations) {
     const TerrainSource &source = state.sources[installation.prepared.source_index];
     if (installation.prepared.tile != nullptr) {
@@ -800,16 +589,6 @@ void ResidentTileCache::install_prepared(
           make_resident_tile(*installation.prepared.tile, source.key, state.config);
       state.bytes_copied +=
           static_cast<uint64_t>(state.mip_count + state.vertex_count) * sizeof(float);
-
-      // A CPU copy is complete before this method returns, so GeoTIFF slots
-      // can be published immediately without entering the asynchronous queue.
-      state.slot_states[installation.slot] = AtlasSlotState::Resident;
-      state.slot_by_source[installation.prepared.source_index] = installation.slot;
-      state.last_used[installation.slot] = state.next_use_stamp++;
-      state.resident_count++;
-      state.installations++;
-      preparer.mark_resident(installation.prepared.source_index);
-      hash_changed = true;
     } else {
       // The catalogue and origin header establish the common payload layout.
       // Installation therefore needs only a file and final buffer offset.
@@ -827,15 +606,14 @@ void ResidentTileCache::install_prepared(
           source.key,
           state.config
       );
-      asynchronous_installations.push_back(std::move(installation));
     }
   }
 
   if (!custom_loads.empty()) {
-    // Commit direct loads and immediately chain one mipmap command behind all
-    // of their individual shared events. Neither submission waits on the CPU.
-    timer.start_wall("Metal I/O submission");
-    const std::vector<MetalTileIoSubmission> io_submissions = submit_metal_tiles_into_buffer(
+    // Metal I/O decompresses vertices directly into their final atlas ranges.
+    // Wait here before the mipmap queue reads those same ranges.
+    timer.start_wall("Metal tile I/O");
+    load_metal_tiles_into_buffer(
         state.device,
         state.io_queue,
         custom_loads,
@@ -844,63 +622,38 @@ void ResidentTileCache::install_prepared(
         state.vertex_atlas,
         state.vertex_atlas.length
     );
-    timer.stop("Metal I/O submission");
+    timer.stop("Metal tile I/O");
 
-    timer.start_wall("Mipmap submission");
-    const MipmapSubmission mipmaps = state.submit_mipmaps(custom_slots, io_submissions);
-    timer.stop("Mipmap submission");
-    state.pending_installations.push_back(
-        {
-            std::move(asynchronous_installations),
-            io_submissions,
-            mipmaps.slot_buffer,
-            mipmaps.command,
-            mipmaps.completion_event,
-        }
-    );
+    state.generate_mipmaps(custom_slots, timer);
     state.bytes_loaded_directly +=
         static_cast<uint64_t>(custom_slots.size()) * state.vertex_count * sizeof(float);
   }
 
-  if (hash_changed) {
+  // All payload writes are now complete. Publish slot mappings together so
+  // the rebuilt hash cannot expose a partially installed tile.
+  for (const AtlasInstallation &installation : installations) {
+    const uint32_t slot = installation.slot;
+    const uint32_t source = installation.prepared.source_index;
+    const uint32_t evicted = state.source_by_slot[slot];
+    if (evicted != state.sources.size()) {
+      state.slot_by_source[evicted] = state.slot_capacity;
+      preparer.mark_evicted(evicted);
+      state.evictions++;
+    } else {
+      state.resident_count++;
+    }
+
+    state.slot_by_source[source] = slot;
+    state.source_by_slot[slot] = source;
+    state.last_used[slot] = state.next_use_stamp++;
+    state.installations++;
+    preparer.mark_resident(source);
+  }
+
+  if (!installations.empty()) {
     state.rebuild_hash(&timer);
   }
   timer.stop("Atlas installation");
-}
-
-bool ResidentTileCache::has_pending_installations() const {
-  return !state_->pending_installations.empty();
-}
-
-void ResidentTileCache::wait_for_pending_installation(Timer &timer) {
-  State &state = *state_;
-  if (state.pending_installations.empty()) {
-    return;
-  }
-
-  // The mipmap queue is ordered, so the oldest command is the first batch
-  // which can become publishable. This is the only host wait in the loading
-  // pipeline and the scheduler invokes it only with an empty resident frontier.
-  timer.start_wall("Pending atlas wait");
-  PendingAtlasInstallation &pending = state.pending_installations.front();
-  for (const MetalTileIoSubmission &io : pending.io_submissions) {
-    [io.command waitUntilCompleted];
-    if (io.command.status != MTLIOStatusComplete) {
-      const char *detail = io.command.error == nil
-                               ? "unknown error"
-                               : io.command.error.localizedDescription.UTF8String;
-      throw std::runtime_error(
-          "Could not load Metal tile batch beginning with " + io.paths.front().string() + ": " +
-          detail
-      );
-    }
-  }
-  [pending.mipmap_command waitUntilCompleted];
-  timer.stop("Pending atlas wait");
-  if (pending.mipmap_command.status == MTLCommandBufferStatusError) {
-    print_error(@"Asynchronous Metal mipmap generation failed", pending.mipmap_command.error);
-    throw std::runtime_error("Asynchronous Metal mipmap generation failed");
-  }
 }
 
 std::vector<uint8_t>
@@ -908,7 +661,7 @@ ResidentTileCache::pin_slots(std::span<const uint32_t> slots, bool record_use) {
   State &state = *state_;
   std::vector<uint8_t> pinned(state.slot_capacity, 0U);
   for (uint32_t slot : slots) {
-    if (slot >= state.slot_capacity || state.slot_states[slot] != AtlasSlotState::Resident) {
+    if (slot >= state.slot_capacity || state.source_by_slot[slot] == state.sources.size()) {
       throw std::logic_error("GPU frontier refers to a nonresident tile slot");
     }
     pinned[slot] = 1U;

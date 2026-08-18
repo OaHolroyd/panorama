@@ -18,8 +18,8 @@ namespace panorama {
 /// One source awaiting installation in the resident atlas.
 ///
 /// GeoTIFF sources carry a fully prepared CPU tile. A custom source instead
-/// carries a pre-opened Metal file handle whose payload can be submitted
-/// directly into its reserved atlas slot without blocking the scheduler.
+/// carries a pre-opened Metal file handle but no CPU payload. Opening handles
+/// on workers keeps that cost outside synchronous atlas installation.
 struct PreparedTile {
   uint32_t source_index;
   std::unique_ptr<LoadedTile> tile;
@@ -42,10 +42,9 @@ void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const T
 ///
 /// The main thread requests catalogue indices by ray-entry priority. Workers
 /// load, validate, and mipmap GeoTIFFs, then place them into a bounded queue.
-/// Custom Metal workers open their direct-I/O file handles in parallel but do
-/// not allocate buffers or submit commands. The resident atlas cache consumes
-/// both representations and remains solely responsible for GPU slots and
-/// residency state.
+/// Custom Metal sources need no CPU decoding, so workers open their direct-I/O
+/// handles in parallel. The cache remains solely responsible for GPU slots,
+/// direct I/O, mipmap generation, and residency state.
 class AsyncTilePreparer {
 public:
   /// Construct a stopped preparer with a bounded prepared-tile hand-off queue.

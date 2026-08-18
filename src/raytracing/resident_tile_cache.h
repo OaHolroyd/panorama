@@ -50,13 +50,12 @@ struct ResidentTileCacheStatistics {
   uint32_t slot_capacity;
 };
 
-/// A bounded fixed-stride terrain atlas with pipelined LRU replacement.
+/// A bounded fixed-stride terrain atlas with synchronous LRU replacement.
 ///
 /// The cache owns the GPU-visible vertex/mipmap buffers, source-to-slot maps,
-/// and resident key hash. Between frontier commands it publishes completed
-/// loads, reserves safe unpinned slots, and submits new direct-I/O/mipmap work
-/// without waiting. Loading slots remain absent from the hash until both
-/// operations have completed.
+/// and resident key hash. Between completed frontier commands it installs all
+/// currently prepared tiles, waiting for custom direct I/O and GPU mipmap
+/// generation before publishing their resident hash entries.
 class ResidentTileCache {
 public:
   /// Allocate the atlas and install the observer tile in slot zero.
@@ -76,28 +75,18 @@ public:
   ResidentTileCache(const ResidentTileCache &) = delete;
   ResidentTileCache &operator=(const ResidentTileCache &) = delete;
 
-  /// Destroy atlas buffers after all command buffers using them have completed.
+  /// Release atlas and command resources after synchronous installation work.
   ~ResidentTileCache();
 
   /// Return the resident slot for a source, or `slot_capacity()` if absent.
   [[nodiscard]] uint32_t slot_for_source(uint32_t source_index) const;
 
-  /// Publish completed loads and submit prepared tiles into safe unpinned slots.
-  ///
-  /// This method never waits for direct I/O or GPU mipmap generation.
+  /// Install prepared tiles into safe slots before the next frontier command.
   void install_prepared(
       AsyncTilePreparer &preparer,
       std::span<const uint8_t> pinned_slots,
       Timer &timer
   );
-
-  /// Return whether one or more reserved slots are still loading.
-  [[nodiscard]] bool has_pending_installations() const;
-
-  /// Wait for the oldest pending installation to become publishable.
-  ///
-  /// The scheduler calls this only when it has no resident frontier work.
-  void wait_for_pending_installation(Timer &timer);
 
   /// Mark the supplied resident slots as recently used and return their pin mask.
   [[nodiscard]] std::vector<uint8_t> pin_slots(std::span<const uint32_t> slots, bool record_use);
