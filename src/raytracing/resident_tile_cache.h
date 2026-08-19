@@ -31,6 +31,14 @@ struct ResidentTileHashEntry {
   uint32_t occupied;
 };
 
+/// Fixed byte offsets used by the uint16 trace specialization.
+/// This must remain identical to `QuantizedTerrainLayout` in panorama.metal.
+struct QuantizedTerrainLayout {
+  uint32_t record_stride;
+  uint32_t vertex_offset;
+  uint32_t elevation_base_offset;
+};
+
 /// Host-visible Metal buffers and dimensions required by a frontier dispatch.
 struct ResidentTileCacheBindings {
   id<MTLBuffer> mipmap_atlas;
@@ -38,6 +46,7 @@ struct ResidentTileCacheBindings {
   id<MTLBuffer> metadata;
   id<MTLBuffer> hash;
   uint32_t hash_slot_count;
+  QuantizedTerrainLayout quantized_layout;
 };
 
 /// Final counters describing atlas residency, copies, and evictions.
@@ -54,8 +63,8 @@ struct ResidentTileCacheStatistics {
 ///
 /// The cache owns the GPU-visible vertex/mipmap buffers, source-to-slot maps,
 /// and resident key hash. Between completed frontier commands it installs all
-/// currently prepared tiles, waiting for custom I/O, fixed-point conversion,
-/// and GPU mipmap generation before publishing their resident hash entries.
+/// currently prepared tiles, waiting for custom I/O, optional fixed-point
+/// conversion, and GPU mipmap generation before publishing resident entries.
 class ResidentTileCache {
 public:
   /// Allocate the atlas and install the observer tile in slot zero.

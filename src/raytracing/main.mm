@@ -27,6 +27,7 @@ struct EntrypointSettings {
   uint32_t num_azimuth = 2048U;
   uint32_t num_polar = 1024U;
   float max_distance = 600'000.0F;
+  bool retain_quantized = false;
   double easting = 2623452.4;
   double northing = 1100502.2;
   double elevation = 3415.0;
@@ -44,6 +45,7 @@ void print_usage(const char *program) {
       "  --max-distance M      horizontal trace range in metres (default: 600000)\n"
       "  --azimuth-count N     number of azimuth columns (default: 2048)\n"
       "  --polar-count N       number of polar rays per column (default: 1024)\n"
+      "  --retain-quantized    keep uint16 terrain quantized in the GPU atlas\n"
       "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
       "  --northing M          observer northing in the tile CRS (default: 1100502.2)\n"
       "  --elevation M         observer elevation in metres (default: 3415.0)\n"
@@ -60,6 +62,10 @@ void print_usage(const char *program) {
     if (option == "--help") {
       print_usage(argv[0]);
       std::exit(EXIT_SUCCESS);
+    }
+    if (option == "--retain-quantized") {
+      settings.retain_quantized = true;
+      continue;
     }
 
     const std::string_view value = panorama::arguments::option_value(argc, argv, index, option);
@@ -119,6 +125,7 @@ int main(int argc, const char *argv[]) {
         settings.max_tile_count,
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
+        settings.retain_quantized,
     };
     std::printf(
         "Tracing terrain in %s from projected coordinate (%.3f, %.3f, %.1f).\n",
@@ -131,13 +138,14 @@ int main(int argc, const char *argv[]) {
     // self-describing when several command-line configurations are compared.
     std::printf(
         "Settings: cache %.0f MiB, workers %u, max tiles %u, "
-        "%u azimuths x %u polars, range %.0f m.\n",
+        "%u azimuths x %u polars, range %.0f m, quantized atlas %s.\n",
         static_cast<double>(settings.tile_cache_size_bytes) / static_cast<double>(kBytesPerMiB),
         settings.max_tile_preparation_workers,
         settings.max_tile_count,
         settings.num_azimuth,
         settings.num_polar,
-        settings.max_distance
+        settings.max_distance,
+        settings.retain_quantized ? "retained" : "disabled"
     );
     panorama::raytrace_tiled_heightmap(config);
     return EXIT_SUCCESS;

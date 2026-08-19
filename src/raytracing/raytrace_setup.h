@@ -36,6 +36,8 @@ struct RaytraceConfig {
   uint64_t tile_cache_size_bytes;
   /// Maximum concurrent tile load/mipmap workers; zero selects all hardware threads.
   uint32_t max_tile_preparation_workers;
+  /// Keep uint16 custom terrain quantized through atlas residency and tracing.
+  bool retain_quantized;
 };
 
 /// Trace the fixed angular field through available level-0 terrain tiles.

@@ -82,6 +82,7 @@ struct GpuRaytraceResources::State {
   id<MTLBuffer> deferred_items;
   id<MTLBuffer> deferred_count;
   uint32_t frontier_capacity;
+  bool trace_quantized;
   bool capture_active = false;
 };
 
@@ -89,13 +90,15 @@ GpuRaytraceResources::GpuRaytraceResources(
     std::span<const HorizontalDirection> directions,
     std::span<const float> slopes,
     size_t ray_count,
-    uint32_t frontier_capacity
+    uint32_t frontier_capacity,
+    bool trace_quantized
 ) {
   if (directions.empty() || slopes.empty() || frontier_capacity == 0U) {
     throw std::invalid_argument("GPU raytrace resources require nonempty rays and frontier");
   }
   auto state = std::make_unique<State>();
   state->frontier_capacity = frontier_capacity;
+  state->trace_quantized = trace_quantized;
   state->device = MTLCreateSystemDefaultDevice();
   if (state->device == nil) {
     throw std::runtime_error("No Metal device is available");
@@ -112,7 +115,9 @@ GpuRaytraceResources::GpuRaytraceResources(
     print_error(@"Could not load the Metal library", error);
     throw std::runtime_error("Could not load Metal library");
   }
-  id<MTLFunction> trace = [library newFunctionWithName:@"trace_tile_frontier"];
+  NSString *trace_name =
+      trace_quantized ? @"trace_tile_frontier_quantized" : @"trace_tile_frontier";
+  id<MTLFunction> trace = [library newFunctionWithName:trace_name];
   id<MTLFunction> emit = [library newFunctionWithName:@"emit_tile_frontier"];
   if (trace == nil || emit == nil) {
     throw std::runtime_error("GPU-frontier Metal kernels are missing");
@@ -256,6 +261,11 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setBuffer:state.distance_output offset:0 atIndex:8];
   [encoder setBuffer:state.elevation_output offset:0 atIndex:9];
   [encoder setBuffer:state.unresolved offset:0 atIndex:10];
+  if (state.trace_quantized) {
+    [encoder setBytes:&cache.quantized_layout
+                length:sizeof(cache.quantized_layout)
+               atIndex:11];
+  }
   [encoder dispatchThreads:MTLSizeMake(parameters.num_polar, active_count, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
   [encoder endEncoding];

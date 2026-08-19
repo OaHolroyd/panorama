@@ -164,7 +164,26 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
   validate_terrain_tile_position(origin, origin_key, grid);
 
+  bool trace_quantized = false;
+  QuantizedMetalTileRecordLayout quantized_layout = {};
+  if (config.retain_quantized) {
+    if (!custom_origin) {
+      throw std::invalid_argument("--retain-quantized requires uint16 custom terrain tiles");
+    }
+    const MetalTileHeader header = read_metal_tile_header(catalogue.origin().path);
+    if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
+      throw std::invalid_argument("--retain-quantized requires uint16 custom terrain tiles");
+    }
+    quantized_layout = quantized_metal_tile_record_layout(header);
+    trace_quantized = true;
+  }
+
   const std::vector<TerrainSource> &paths = catalogue.sources();
+  if (trace_quantized && std::any_of(paths.begin(), paths.end(), [](const TerrainSource &source) {
+        return !is_metal_tile_path(source.path);
+      })) {
+    throw std::invalid_argument("--retain-quantized requires a custom-only terrain directory");
+  }
 
   // Every rechunked tile must have the origin tile's dimensions, allowing
   // constant per-slot atlas strides. Derive the number of permitted slots
@@ -177,7 +196,9 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
     throw std::overflow_error("Terrain tile arrays exceed Metal uint indexing");
   }
   const size_t tile_bytes =
-      checked_byte_count(mip_count + vertex_count, sizeof(float), "terrain tile");
+      trace_quantized ? checked_byte_count(mip_count, sizeof(uint16_t), "terrain mipmap") +
+                            quantized_layout.stride
+                      : checked_byte_count(mip_count + vertex_count, sizeof(float), "terrain tile");
   const uint64_t slot_capacity = config.tile_cache_size_bytes / tile_bytes;
   if (slot_capacity == 0U) {
     throw std::runtime_error("Tile-cache byte budget cannot hold one terrain tile");
@@ -205,8 +226,13 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
     // angular inputs, output images, and double-buffered frontier storage.
-    GpuRaytraceResources
-        gpu(directions, slopes, ray_count, static_cast<uint32_t>(frontier_capacity));
+    GpuRaytraceResources gpu(
+        directions,
+        slopes,
+        ray_count,
+        static_cast<uint32_t>(frontier_capacity),
+        trace_quantized
+    );
     gpu.initialise_frontier(config.num_azimuth);
 
     // The cache shares the GPU resource owner's device. Preparation workers
@@ -333,6 +359,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
           preparer.wait_for_prepared();
           timer.stop("Tile availability wait");
 
+          timer.start_wall("Frontier bookkeeping");
           const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);
           cache.install_prepared(preparer, no_pinned_slots, timer);
           active_count =
@@ -340,6 +367,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 #if defined(PANORAMA_DEBUG_VALIDATION)
           frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
+          timer.stop("Frontier bookkeeping");
         }
       }
     } catch (...) {

@@ -306,6 +306,29 @@ uint64_t metal_tile_mipmap_value_count(uint32_t cell_count) {
   return count;
 }
 
+QuantizedMetalTileRecordLayout
+quantized_metal_tile_record_layout(const MetalTileHeader &header) {
+  if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
+    throw std::invalid_argument("Quantized record layout requires uint16 terrain");
+  }
+  const uint64_t maximum_stride = std::numeric_limits<uint32_t>::max();
+  if (header.vertex_offset > maximum_stride ||
+      header.vertex_byte_count > maximum_stride - header.vertex_offset) {
+    throw std::overflow_error("Metal tile logical record exceeds Metal uint indexing");
+  }
+  const uint64_t logical_size = header.vertex_offset + header.vertex_byte_count;
+  const uint64_t stride = (logical_size + 3U) & ~uint64_t{3U};
+  if (stride > maximum_stride) {
+    throw std::overflow_error("Metal tile logical record exceeds Metal uint indexing");
+  }
+  return {
+      static_cast<uint32_t>(logical_size),
+      static_cast<uint32_t>(stride),
+      static_cast<uint32_t>(header.vertex_offset),
+      static_cast<uint32_t>(offsetof(MetalTileHeader, elevation_base_decimeters)),
+  };
+}
+
 void validate_metal_tile_header(
     const MetalTileHeader &header,
     MetalTileCompression expected_compression

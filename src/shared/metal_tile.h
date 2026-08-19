@@ -67,6 +67,14 @@ struct MetalTileData {
   std::vector<float> vertices;
 };
 
+/// Aligned GPU layout for one complete uint16 logical tile record.
+struct QuantizedMetalTileRecordLayout {
+  uint32_t logical_size;
+  uint32_t stride;
+  uint32_t vertex_offset;
+  uint32_t elevation_base_offset;
+};
+
 /// One logical byte range to load into a reserved Metal-buffer range.
 struct MetalTileBufferLoad {
   std::filesystem::path path;
@@ -97,6 +105,10 @@ struct MetalTileIoSubmission {
 
 /// Return the complete number of Float32 values in an N-cell maximum mipmap.
 [[nodiscard]] uint64_t metal_tile_mipmap_value_count(uint32_t cell_count);
+
+/// Derive the aligned resident/staging layout of a validated uint16 record.
+[[nodiscard]] QuantizedMetalTileRecordLayout
+quantized_metal_tile_record_layout(const MetalTileHeader &header);
 
 /// Validate the version, layout, offsets, and compression of one header.
 void validate_metal_tile_header(
