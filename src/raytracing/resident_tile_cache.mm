@@ -137,6 +137,7 @@ struct ResidentTileCache::State {
   id<MTLIOCommandQueue> io_queue;
   id<MTLCommandQueue> mipmap_queue;
   id<MTLComputePipelineState> conversion_pipeline;
+  id<MTLComputePipelineState> initial_mipmap_pipeline;
   id<MTLComputePipelineState> mipmap_pipeline;
   MetalTileHeader header_template;
   QuantizedMetalTileRecordLayout quantized_record;
@@ -356,41 +357,55 @@ ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
   }
   command.label = @"Generate resident tile mipmaps";
 
-  // Generate level 1 for every tile from adjacent vertices, then reduce each
-  // preceding level in turn. Ending each encoder supplies the global
-  // dependency between dispatches; no threadgroup-local barrier would be
-  // sufficient. The Z dimension batches slots without changing level order.
-  uint32_t source_side = header_template.cell_count + 1U;
-  uint32_t source_step = 1U;
+  // Each initial thread builds a 2×2 group of level-1 cells and their level-2
+  // parent from one shared 3×3 vertex patch. A one-cell format cannot use that
+  // grouping and falls back to the generic level-1 dispatch.
+  constexpr uint32_t fused_level_count = 2U;
+  const uint32_t cell_count = header_template.cell_count;
   uint32_t source_tile_stride = retain_quantized ? quantized_record.stride / 2U : vertex_count;
-  uint32_t destination_tile_stride = mip_count;
+  const uint32_t destination_tile_stride = mip_count;
   const uint32_t tile_count = static_cast<uint32_t>(slots.size());
+  const bool fuse_initial_levels =
+      cell_count >= 2U && header_template.level_count >= fused_level_count;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
   if (encoder == nil) {
-    throw std::runtime_error("Could not encode maximum mipmap level 1");
+    throw std::runtime_error("Could not encode initial maximum mipmap levels");
   }
-  encoder.label = @"Build maximum mipmap level 1";
-  [encoder setComputePipelineState:mipmap_pipeline];
+  encoder.label = fuse_initial_levels ? @"Build initial maximum mipmap levels"
+                                      : @"Build maximum mipmap level 1";
+  [encoder setComputePipelineState:fuse_initial_levels ? initial_mipmap_pipeline
+                                                       : mipmap_pipeline];
   [encoder setBuffer:vertex_atlas
                offset:retain_quantized ? quantized_record.vertex_offset : 0U
               atIndex:0];
   [encoder setBuffer:mipmap_atlas offset:0U atIndex:1];
+  uint32_t source_side = fuse_initial_levels ? cell_count : cell_count + 1U;
+  uint32_t source_step = 1U;
   [encoder setBytes:&source_side length:sizeof(source_side) atIndex:2];
   [encoder setBytes:&source_step length:sizeof(source_step) atIndex:3];
   [encoder setBuffer:slot_buffer offset:0U atIndex:4];
   [encoder setBytes:&source_tile_stride length:sizeof(source_tile_stride) atIndex:5];
   [encoder setBytes:&destination_tile_stride length:sizeof(destination_tile_stride) atIndex:6];
   [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
-  const uint32_t cell_count = header_template.cell_count;
-  [encoder dispatchThreads:MTLSizeMake(cell_count, cell_count, tile_count)
+  const uint32_t initial_output_side = fuse_initial_levels ? cell_count / 2U : cell_count;
+  [encoder dispatchThreads:MTLSizeMake(initial_output_side, initial_output_side, tile_count)
       threadsPerThreadgroup:MTLSizeMake(32U, 8U, 1U)];
   [encoder endEncoding];
 
   size_t previous_offset = 0U;
   size_t output_offset = static_cast<size_t>(cell_count) * cell_count;
+  uint32_t first_reduction_level = 2U;
   source_side = cell_count;
+  if (fuse_initial_levels) {
+    for (uint32_t level = 2U; level <= fused_level_count; level++) {
+      previous_offset = output_offset;
+      source_side /= 2U;
+      output_offset += static_cast<size_t>(source_side) * source_side;
+    }
+    first_reduction_level = fused_level_count + 1U;
+  }
   source_step = 2U;
-  for (uint32_t level = 2U; level <= header_template.level_count; level++) {
+  for (uint32_t level = first_reduction_level; level <= header_template.level_count; level++) {
     const uint32_t output_side = source_side / 2U;
     encoder = [command computeCommandEncoder];
     if (encoder == nil) {
@@ -586,6 +601,21 @@ ResidentTileCache::ResidentTileCache(
       print_error(@"Could not load the Metal library", error);
       throw std::runtime_error("Could not load Metal library for terrain preparation");
     }
+    NSString *initial_mipmap_name =
+        retain_quantized ? @"build_quantized_initial_maximum_mipmap_levels"
+                         : @"build_initial_maximum_mipmap_levels";
+    id<MTLFunction> initial_mipmap_function =
+        [library newFunctionWithName:initial_mipmap_name];
+    if (initial_mipmap_function == nil) {
+      throw std::runtime_error("Metal terrain-preparation kernel is missing");
+    }
+    state->initial_mipmap_pipeline =
+        [device newComputePipelineStateWithFunction:initial_mipmap_function error:&error];
+    if (state->initial_mipmap_pipeline == nil) {
+      print_error(@"Could not create the initial mipmap-generation pipeline", error);
+      throw std::runtime_error("Could not create the initial mipmap-generation pipeline");
+    }
+
     NSString *mipmap_name = retain_quantized ? @"build_quantized_maximum_mipmap_level"
                                              : @"build_maximum_mipmap_level";
     id<MTLFunction> mipmap_function = [library newFunctionWithName:mipmap_name];
