@@ -11,11 +11,11 @@ namespace panorama {
 
 /// Host metadata and any CPU-resident terrain for one square tracer tile.
 ///
-/// `size` is the number of level-1 cells along one edge. All arrays are
-/// Float32 and row-major; row zero is the southern edge, so Y increases
-/// northward as required by tracing. Custom Metal tiles initially contain
-/// metadata only because the cache loads their vertices directly to GPU-visible
-/// buffers, expanding fixed-point payloads before building the maximum mipmap.
+/// `size` is the number of level-1 cells along one edge. Host arrays, when
+/// present, are Float32 and row-major; row zero is the southern edge, so Y
+/// increases northward as required by tracing. Custom Metal tiles contain
+/// metadata only because the cache loads their payloads directly into
+/// GPU-visible buffers, either retaining or expanding fixed-point samples.
 struct LoadedTile {
   // True when the terrain representation supports exact bilinear collisions.
   // GeoTIFFs then own `(size + 1)²` values in `vertices`; custom Metal tiles
@@ -42,8 +42,8 @@ struct LoadedTile {
 
   // Maximum mipmap stored as a contiguous block of memory. It is laid out
   // from finest to coarsest levels (that is, level 1, level 2, ...). A custom
-  // Metal tile leaves this empty on the host because the GPU builds it after
-  // expanding vertices into the atlas.
+  // Metal tile leaves this empty on the host because the GPU builds it from
+  // the representation selected for the resident atlas.
   std::vector<float> mipmap;
 
   /// Load a single-band, north-up `.tif` into south-to-north tracer row order.

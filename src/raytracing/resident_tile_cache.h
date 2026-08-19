@@ -70,7 +70,8 @@ public:
   /// Allocate the atlas and install the observer tile in slot zero.
   ///
   /// A GeoTIFF observer is already resident on the CPU. A custom observer
-  /// supplies metadata only and is staged and converted from its file.
+  /// supplies metadata only and is loaded directly or staged for conversion,
+  /// according to its representation and the trace configuration.
   ResidentTileCache(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,
@@ -105,9 +106,6 @@ public:
 
   /// Return the number of fixed-size resident atlas slots.
   [[nodiscard]] uint32_t slot_capacity() const;
-
-  /// Return the number of slots currently populated with a source tile.
-  [[nodiscard]] uint32_t resident_tile_count() const;
 
   /// Return final cache counters for command-line diagnostics.
   [[nodiscard]] ResidentTileCacheStatistics statistics() const;

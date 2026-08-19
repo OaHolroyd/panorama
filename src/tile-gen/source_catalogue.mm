@@ -1,7 +1,8 @@
 #include "source_catalogue.h"
 
+#include "gdal_utils.h"
+
 #include <cpl_conv.h>
-#include <cpl_error.h>
 #include <gdal_priv.h>
 #include <ogr_spatialref.h>
 
@@ -11,7 +12,6 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -20,19 +20,6 @@
 
 namespace panorama::terrain {
 namespace {
-
-/// Close a GDAL dataset when its unique_ptr leaves scope.
-struct DatasetCloser {
-  void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
-};
-
-using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
-
-/// Append GDAL's most recent diagnostic to a higher-level error message.
-[[nodiscard]] std::string gdal_error(const std::string &context) {
-  const char *detail = CPLGetLastErrorMsg();
-  return context + (detail != nullptr && detail[0] != '\0' ? ": " + std::string(detail) : "");
-}
 
 /// Return whether a path has a case-insensitive TIFF filename extension.
 [[nodiscard]] bool has_tiff_extension(const std::filesystem::path &path) {
@@ -75,12 +62,6 @@ is_within(const std::filesystem::path &candidate, const std::filesystem::path &d
   return static_cast<uint32_t>(value);
 }
 
-/// Return whether two floating-point grid properties agree at metadata precision.
-[[nodiscard]] bool approximately_equal(double left, double right) {
-  const double scale = std::max({1.0, std::abs(left), std::abs(right)});
-  return std::abs(left - right) <= 1e-10 * scale;
-}
-
 /// Require a coordinate to occupy an integer location on a reference sample grid.
 void validate_grid_alignment(
     double coordinate,
@@ -107,7 +88,7 @@ void validate_grid_alignment(
 }
 
 /// Open one candidate through GDAL's GeoTIFF driver only.
-[[nodiscard]] DatasetPointer open_geotiff(const std::filesystem::path &path) {
+[[nodiscard]] GdalDatasetPointer open_geotiff(const std::filesystem::path &path) {
   const char *drivers[] = {"GTiff", nullptr};
   GDALDataset *dataset = static_cast<GDALDataset *>(GDALOpenEx(
       path.string().c_str(),
@@ -119,13 +100,13 @@ void validate_grid_alignment(
   if (dataset == nullptr) {
     throw std::runtime_error(gdal_error("Could not open GeoTIFF " + path.string()));
   }
-  return DatasetPointer(dataset);
+  return GdalDatasetPointer(dataset);
 }
 
 /// Parse and validate one GeoTIFF without reading its elevation pixels.
 [[nodiscard]] SourceRaster
 inspect_source(const std::filesystem::path &path, SourceGrid *shared_grid, bool first_source) {
-  DatasetPointer dataset = open_geotiff(path);
+  GdalDatasetPointer dataset = open_geotiff(path);
   if (dataset->GetRasterCount() != 1) {
     throw std::runtime_error("DEM GeoTIFF must have exactly one raster band: " + path.string());
   }
@@ -232,7 +213,7 @@ SourceCatalogue SourceCatalogue::discover(
     const std::filesystem::path &input_directory,
     const std::filesystem::path &excluded_directory
 ) {
-  GDALAllRegister();
+  register_gdal_drivers();
   const std::filesystem::path input = normal_path(input_directory);
   const std::filesystem::path excluded =
       excluded_directory.empty() ? std::filesystem::path() : normal_path(excluded_directory);

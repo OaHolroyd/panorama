@@ -1,31 +1,18 @@
 #include "geotiff_writer.h"
 
-#include <cpl_error.h>
+#include "gdal_utils.h"
+
 #include <cpl_string.h>
 #include <gdal_priv.h>
 
 #include <algorithm>
 #include <bit>
 #include <cstdint>
-#include <memory>
 #include <stdexcept>
 #include <string>
 
 namespace panorama::terrain {
 namespace {
-
-/// Close a newly written GDAL dataset, flushing its directory and pixel data.
-struct DatasetCloser {
-  void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
-};
-
-using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
-
-/// Append GDAL's most recent diagnostic to a writer-level error.
-[[nodiscard]] std::string gdal_error(const std::string &context) {
-  const char *detail = CPLGetLastErrorMsg();
-  return context + (detail != nullptr && detail[0] != '\0' ? ": " + std::string(detail) : "");
-}
 
 /// Return the on-disk name for a sample interpretation.
 [[nodiscard]] const char *layout_name(RasterLayout layout) {
@@ -100,7 +87,7 @@ void write_geotiff_chunk(
   if (raw_dataset == nullptr) {
     throw std::runtime_error(gdal_error("Could not create GeoTIFF " + path.string()));
   }
-  DatasetPointer dataset(raw_dataset);
+  GdalDatasetPointer dataset(raw_dataset);
 
   // Prepared GeoTIFFs retain the conventional north-up raster layout: row
   // zero begins at `top` and subsequent rows move south by one resolution.

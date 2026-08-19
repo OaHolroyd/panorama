@@ -1,6 +1,7 @@
 #include "rechunker.h"
 
-#include <cpl_error.h>
+#include "gdal_utils.h"
+
 #include <gdal_priv.h>
 
 #include <algorithm>
@@ -8,32 +9,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace panorama::terrain {
 namespace {
-
-/// Close a source dataset after reading the window needed by one output chunk.
-struct DatasetCloser {
-  void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
-};
-
-using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
-
-/// Append GDAL's thread-local diagnostic to an operation-level error.
-[[nodiscard]] std::string gdal_error(const std::string &context) {
-  const char *detail = CPLGetLastErrorMsg();
-  return context + (detail != nullptr && detail[0] != '\0' ? ": " + std::string(detail) : "");
-}
-
-/// Return whether two grid coordinates agree within floating-point metadata precision.
-[[nodiscard]] bool approximately_equal(double left, double right) {
-  const double scale = std::max({1.0, std::abs(left), std::abs(right)});
-  return std::abs(left - right) <= 1e-10 * scale;
-}
 
 /// Convert an aligned coordinate difference to an exact signed sample index.
 [[nodiscard]] int64_t
@@ -60,7 +41,7 @@ aligned_index(double coordinate, double origin, double resolution, const char *a
 }
 
 /// Open a source GeoTIFF for the pixel-reading pass.
-[[nodiscard]] DatasetPointer open_source(const std::filesystem::path &path) {
+[[nodiscard]] GdalDatasetPointer open_source(const std::filesystem::path &path) {
   const char *drivers[] = {"GTiff", nullptr};
   GDALDataset *dataset = static_cast<GDALDataset *>(GDALOpenEx(
       path.string().c_str(),
@@ -72,7 +53,7 @@ aligned_index(double coordinate, double origin, double resolution, const char *a
   if (dataset == nullptr) {
     throw std::runtime_error(gdal_error("Could not open GeoTIFF " + path.string()));
   }
-  return DatasetPointer(dataset);
+  return GdalDatasetPointer(dataset);
 }
 
 /// Return whether one decoded source value represents usable terrain.
@@ -206,7 +187,7 @@ TerrainChunk build_chunk(
     const uint32_t height = static_cast<uint32_t>(row_end - row_start);
     const size_t window_count = static_cast<size_t>(width) * height;
     std::vector<float> source_values(window_count);
-    DatasetPointer dataset = open_source(source.path);
+    GdalDatasetPointer dataset = open_source(source.path);
     GDALRasterBand *band = dataset->GetRasterBand(1);
     if (band->RasterIO(
             GF_Read,

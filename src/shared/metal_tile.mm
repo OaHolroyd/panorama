@@ -169,21 +169,6 @@ void complete_io(id<MTLIOCommandBuffer> command, const std::filesystem::path &pa
   };
 }
 
-/// Expand a fixed-point payload into the diagnostic Float32 representation.
-void decode_uint16_vertices(
-    const MetalTileHeader &header,
-    std::span<const uint16_t> encoded,
-    std::span<float> decoded
-) {
-  if (encoded.size() != decoded.size()) {
-    throw std::invalid_argument("Metal tile vertex buffers have different lengths");
-  }
-  const float base = static_cast<float>(header.elevation_base_decimeters);
-  for (size_t index = 0U; index < decoded.size(); index++) {
-    decoded[index] = (base + static_cast<float>(encoded[index])) * 0.1F;
-  }
-}
-
 void publish_temporary_file(
     const std::filesystem::path &temporary,
     const std::filesystem::path &destination
@@ -441,74 +426,6 @@ id<MTLIOFileHandle> open_metal_tile_file(id<MTLDevice> device, const std::filesy
 
 NSUInteger metal_tile_io_concurrency() { return kMetalIoConcurrency; }
 
-MetalTileData read_metal_tile(const std::filesystem::path &path) {
-  const MetalTileCompression compression = metal_tile_compression(path);
-  if (compression == MetalTileCompression::None) {
-    const MetalTileHeader header = read_raw_header(path);
-    validate_metal_tile_header(header, compression);
-    MetalTileData data = {
-        header,
-        std::vector<float>(
-            (static_cast<uint64_t>(header.cell_count) + 1U) *
-            (static_cast<uint64_t>(header.cell_count) + 1U)
-        ),
-    };
-    std::ifstream stream(path, std::ios::binary);
-    stream.seekg(static_cast<std::streamoff>(header.vertex_offset));
-    if (header.sample_type == MetalTileSampleType::Float32) {
-      stream.read(reinterpret_cast<char *>(data.vertices.data()), header.vertex_byte_count);
-    } else {
-      std::vector<uint16_t> quantized(data.vertices.size());
-      stream.read(reinterpret_cast<char *>(quantized.data()), header.vertex_byte_count);
-      decode_uint16_vertices(header, quantized, data.vertices);
-    }
-    if (!stream) {
-      throw std::runtime_error("Could not read raw Metal tile payload " + path.string());
-    }
-    return data;
-  }
-
-  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-  if (device == nil) {
-    throw std::runtime_error("No Metal device is available to decompress " + path.string());
-  }
-  id<MTLIOCommandQueue> queue = make_metal_io_queue(device);
-  id<MTLIOFileHandle> handle = open_metal_file(device, path, compression);
-  MetalTileHeaderBytes header_bytes = {};
-  id<MTLIOCommandBuffer> header_command = [queue commandBuffer];
-  [header_command loadBytes:header_bytes.data()
-                       size:header_bytes.size()
-               sourceHandle:handle
-         sourceHandleOffset:0U];
-  complete_io(header_command, path);
-  const MetalTileHeader header = decode_header(header_bytes);
-  validate_metal_tile_header(header, compression);
-
-  MetalTileData data = {
-      header,
-      std::vector<float>(
-          (static_cast<uint64_t>(header.cell_count) + 1U) *
-          (static_cast<uint64_t>(header.cell_count) + 1U)
-      ),
-  };
-  id<MTLIOCommandBuffer> payload_command = [queue commandBuffer];
-  std::vector<uint16_t> quantized;
-  void *destination = data.vertices.data();
-  if (header.sample_type == MetalTileSampleType::Uint16Decimeters) {
-    quantized.resize(data.vertices.size());
-    destination = quantized.data();
-  }
-  [payload_command loadBytes:destination
-                        size:header.vertex_byte_count
-                sourceHandle:handle
-          sourceHandleOffset:header.vertex_offset];
-  complete_io(payload_command, path);
-  if (!quantized.empty()) {
-    decode_uint16_vertices(header, quantized, data.vertices);
-  }
-  return data;
-}
-
 MetalTileHeader read_metal_tile_header(const std::filesystem::path &path) {
   const MetalTileCompression compression = metal_tile_compression(path);
   if (compression == MetalTileCompression::None) {
@@ -535,7 +452,7 @@ MetalTileHeader read_metal_tile_header(const std::filesystem::path &path) {
   return header;
 }
 
-std::vector<MetalTileIoSubmission> submit_metal_tiles_into_buffer(
+void load_metal_tiles_into_buffer(
     id<MTLDevice> device,
     id<MTLIOCommandQueue> queue,
     std::span<const MetalTileBufferLoad> loads,
@@ -544,12 +461,6 @@ std::vector<MetalTileIoSubmission> submit_metal_tiles_into_buffer(
     id<MTLBuffer> vertex_buffer,
     NSUInteger vertex_buffer_length
 ) {
-  if (loads.empty()) {
-    return {};
-  }
-  if (loads.size() > kMetalIoConcurrency) {
-    throw std::invalid_argument("Metal tile submission exceeds the I/O queue concurrency");
-  }
   if (vertex_byte_count > static_cast<uint64_t>(std::numeric_limits<NSUInteger>::max())) {
     throw std::overflow_error("Metal tile vertex payload exceeds NSUInteger range");
   }
@@ -562,63 +473,41 @@ std::vector<MetalTileIoSubmission> submit_metal_tiles_into_buffer(
   }
 
   // Separate command buffers allow a concurrent queue to decompress several
-  // independent compressed streams in parallel. Each command gets its own
-  // event because a later concurrent command must not satisfy an earlier
-  // load's dependency by signaling a larger value on one shared event.
-  std::vector<MetalTileIoSubmission> submissions;
-  submissions.reserve(loads.size());
-  for (const MetalTileBufferLoad &load : loads) {
-    id<MTLIOFileHandle> file =
-        load.file == nil ? open_metal_tile_file(device, load.path) : load.file;
-    id<MTLIOCommandBuffer> command = [queue commandBuffer];
-    id<MTLSharedEvent> event = [device newSharedEvent];
-    if (command == nil || event == nil) {
-      throw std::runtime_error("Could not create an asynchronous Metal tile I/O command");
-    }
-    [command loadBuffer:vertex_buffer
-                    offset:load.destination_offset
-                      size:load_size
-              sourceHandle:file
-        sourceHandleOffset:vertex_offset];
-    [command signalEvent:event value:1U];
-    [command commit];
-    submissions.push_back({{load.path}, {file}, command, event});
-  }
-  return submissions;
-}
-
-void load_metal_tiles_into_buffer(
-    id<MTLDevice> device,
-    id<MTLIOCommandQueue> queue,
-    std::span<const MetalTileBufferLoad> loads,
-    uint64_t vertex_offset,
-    uint64_t vertex_byte_count,
-    id<MTLBuffer> vertex_buffer,
-    NSUInteger vertex_buffer_length
-) {
-  // Preserve the synchronous diagnostic/origin API by submitting bounded
-  // waves through the asynchronous primitive and waiting only in this wrapper.
+  // independent streams in parallel. Retain their file handles until the
+  // whole wave completes, then reuse the queue for the next bounded wave.
   for (size_t wave_start = 0U; wave_start < loads.size(); wave_start += kMetalIoConcurrency) {
     const size_t wave_size =
         std::min(static_cast<size_t>(kMetalIoConcurrency), loads.size() - wave_start);
-    const std::vector<MetalTileIoSubmission> submissions = submit_metal_tiles_into_buffer(
-        device,
-        queue,
-        loads.subspan(wave_start, wave_size),
-        vertex_offset,
-        vertex_byte_count,
-        vertex_buffer,
-        vertex_buffer_length
-    );
-    for (const MetalTileIoSubmission &submission : submissions) {
-      [submission.command waitUntilCompleted];
-      if (submission.command.status != MTLIOStatusComplete) {
-        const char *detail = submission.command.error == nil
+    std::vector<id<MTLIOFileHandle>> files;
+    std::vector<id<MTLIOCommandBuffer>> commands;
+    files.reserve(wave_size);
+    commands.reserve(wave_size);
+    for (size_t index = 0U; index < wave_size; index++) {
+      const MetalTileBufferLoad &load = loads[wave_start + index];
+      id<MTLIOFileHandle> file =
+          load.file == nil ? open_metal_tile_file(device, load.path) : load.file;
+      id<MTLIOCommandBuffer> command = [queue commandBuffer];
+      if (command == nil) {
+        throw std::runtime_error("Could not create a Metal tile I/O command");
+      }
+      [command loadBuffer:vertex_buffer
+                      offset:load.destination_offset
+                        size:load_size
+                sourceHandle:file
+          sourceHandleOffset:vertex_offset];
+      [command commit];
+      files.push_back(file);
+      commands.push_back(command);
+    }
+    for (size_t index = 0U; index < wave_size; index++) {
+      id<MTLIOCommandBuffer> command = commands[index];
+      [command waitUntilCompleted];
+      if (command.status != MTLIOStatusComplete) {
+        const char *detail = command.error == nil
                                  ? "unknown error"
-                                 : submission.command.error.localizedDescription.UTF8String;
+                                 : command.error.localizedDescription.UTF8String;
         throw std::runtime_error(
-            "Could not load Metal tile batch beginning with " + submission.paths.front().string() +
-            ": " + detail
+            "Could not load Metal tile " + loads[wave_start + index].path.string() + ": " + detail
         );
       }
     }

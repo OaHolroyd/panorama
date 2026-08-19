@@ -120,7 +120,7 @@ compile_commands:
 rebuild: clean all
 
 clean:
-	rm -rf $(PANORAMA_EXE) $(TILE_GEN_EXE) $(OBJ_ROOT) $(COMPILE_DB)
+	rm -rf $(PANORAMA_EXE) $(TILE_GEN_EXE) $(OBJ_ROOT) compile_commands.json
 
 # A phony prerequisite makes the shared executable relink when switching
 # between debug and release object directories.

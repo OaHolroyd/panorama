@@ -1,8 +1,8 @@
 #include "terrain_catalogue.h"
 
+#include "gdal_utils.h"
 #include "metal_tile.h"
 
-#include <cpl_error.h>
 #include <gdal_priv.h>
 
 #include <algorithm>
@@ -10,7 +10,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -18,19 +17,6 @@
 
 namespace panorama {
 namespace {
-
-/// Close a metadata-only GDAL dataset on every return path.
-struct DatasetCloser {
-  void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
-};
-
-using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
-
-/// Append GDAL's latest diagnostic to a catalogue-level error.
-[[nodiscard]] std::string gdal_error(const std::string &context) {
-  const char *detail = CPLGetLastErrorMsg();
-  return context + (detail != nullptr && detail[0] != '\0' ? ": " + std::string(detail) : "");
-}
 
 /// Parse one signed grid coordinate from a prepared terrain filename component.
 [[nodiscard]] int64_t parse_tile_coordinate(std::string_view text, const char *name) {
@@ -91,7 +77,7 @@ using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
     return {origin_x, origin_y, tile_width};
   }
 
-  GDALAllRegister();
+  register_gdal_drivers();
   const char *drivers[] = {"GTiff", nullptr};
   GDALDataset *raw_dataset = static_cast<GDALDataset *>(GDALOpenEx(
       source.path.string().c_str(),
@@ -103,7 +89,7 @@ using DatasetPointer = std::unique_ptr<GDALDataset, DatasetCloser>;
   if (raw_dataset == nullptr) {
     throw std::runtime_error(gdal_error("Could not inspect prepared tile " + source.path.string()));
   }
-  DatasetPointer dataset(raw_dataset);
+  GdalDatasetPointer dataset(raw_dataset);
 
   const int sample_width = dataset->GetRasterXSize();
   const int sample_height = dataset->GetRasterYSize();

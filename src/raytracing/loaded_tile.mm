@@ -1,8 +1,8 @@
 #include "loaded_tile.h"
 
+#include "gdal_utils.h"
 #include "metal_tile.h"
 
-#include <cpl_error.h>
 #include <gdal_priv.h>
 #include <ogr_spatialref.h>
 
@@ -14,33 +14,11 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 
 namespace panorama {
 namespace {
-
-// GDAL driver registration changes process-global state, so serialise it once
-// before terrain-preparation workers begin opening independent datasets.
-std::once_flag gdal_registration_once;
-
-/// Register GDAL's built-in raster drivers exactly once per process.
-void register_gdal_drivers() {
-  std::call_once(gdal_registration_once, [] { GDALAllRegister(); });
-}
-
-/// unique_ptr deleter that closes one GDAL dataset exactly once.
-struct DatasetCloser {
-  /// Give GDALDataset unique_ptr ownership semantics and close the file once.
-  void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
-};
-
-/// Append GDAL's thread-local error text to an operation-level error message.
-[[nodiscard]] std::string gdal_error(const std::string &context) {
-  const char *detail = CPLGetLastErrorMsg();
-  return context + (detail != nullptr && detail[0] != '\0' ? ": " + std::string(detail) : "");
-}
 
 /// Validate a positive GDAL raster dimension before narrowing it to uint32_t.
 [[nodiscard]] uint32_t checked_dimension(int value, const char *name) {
@@ -160,7 +138,7 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   if (raw_dataset == nullptr) {
     throw std::runtime_error(gdal_error("Could not open GeoTIFF " + path.string()));
   }
-  std::unique_ptr<GDALDataset, DatasetCloser> dataset(raw_dataset);
+  GdalDatasetPointer dataset(raw_dataset);
 
   // Terrain is one scalar elevation field, not a multi-band image.
   if (dataset->GetRasterCount() != 1) {
