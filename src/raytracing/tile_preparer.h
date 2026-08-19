@@ -28,10 +28,12 @@ struct PreparedTile {
 
 /// Final counters describing background tile preparation work.
 struct TilePreparationStatistics {
+  /// All scheduler request calls; the two following counters partition this total.
   uint64_t requests;
-  uint64_t load_operations;
-  uint64_t unique_loads;
-  uint64_t reloads;
+  /// First request for a source during this render.
+  uint64_t unique_requests;
+  /// Repeat request for a source, whether deduplicated or requeued after eviction.
+  uint64_t duplicate_requests;
   uint32_t worker_count;
 };
 
@@ -67,7 +69,7 @@ public:
   /// Start the configured background workers exactly once.
   void start();
 
-  /// Queue a nonresident source, keeping its smallest requested priority.
+  /// Record a request and queue a nonresident source at its smallest priority.
   void request(uint32_t source_index, float priority);
 
   /// Return and remove one completed prepared source, or no value when none is ready.

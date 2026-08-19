@@ -11,6 +11,12 @@
 
 namespace panorama {
 
+/// Host-side terrain-culling decisions made before atlas preparation.
+struct HostFrontierStatistics {
+  uint64_t locally_skipped_tiles;
+  uint64_t globally_skipped_tiles;
+};
+
 /// Host-side state for unresolved terrain continuations between GPU passes.
 ///
 /// The GPU stores work for resident tiles in its double-buffered frontier.
@@ -24,6 +30,7 @@ public:
       const RaytraceConfig &config,
       const TerrainCatalogue &catalogue,
       std::span<const HorizontalDirection> directions,
+      std::span<const float> slopes,
       const RaytraceParameters &parameters
   );
 
@@ -33,7 +40,7 @@ public:
   /// Append GPU-emitted continuations whose successor terrain was absent.
   void append_deferred(std::span<const DeferredTileWork> deferred);
 
-  /// Activate deferred work whose successor source now occupies an atlas slot.
+  /// Cull clear successor tiles, then activate or request the first required one.
   [[nodiscard]] uint32_t activate_resident(
       id<MTLBuffer> buffer,
       uint32_t count,
@@ -52,6 +59,9 @@ public:
   /// Return whether unresolved work is waiting for nonresident terrain.
   [[nodiscard]] bool has_deferred_work() const;
 
+  /// Return culling decisions made while resolving deferred continuations.
+  [[nodiscard]] HostFrontierStatistics statistics() const;
+
 #if defined(PANORAMA_DEBUG_VALIDATION)
   /// Check that a GPU frontier contains at most one suffix per azimuth.
   void validate_frontier(id<MTLBuffer> buffer, uint32_t count, const char *name);
@@ -64,8 +74,11 @@ private:
   const RaytraceConfig &config_;
   const TerrainCatalogue &catalogue_;
   std::span<const HorizontalDirection> directions_;
+  std::span<const float> slopes_;
   const RaytraceParameters &parameters_;
   std::vector<DeferredTileWork> deferred_;
+  uint64_t locally_skipped_tiles_ = 0U;
+  uint64_t globally_skipped_tiles_ = 0U;
 
 #if defined(PANORAMA_DEBUG_VALIDATION)
   std::vector<uint8_t> claimed_azimuth_;

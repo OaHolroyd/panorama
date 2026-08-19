@@ -21,6 +21,8 @@ struct HorizontalDirection {
 struct RaytraceParameters {
   float cell_size;
   float observer_elevation;
+  float curvature_coefficient;
+  float global_maximum_elevation;
   uint32_t num_levels;
   uint32_t num_azimuth;
   uint32_t num_polar;

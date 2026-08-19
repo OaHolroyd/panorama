@@ -2,6 +2,7 @@
 #include "metal_tile_writer.h"
 #include "rechunker.h"
 #include "source_catalogue.h"
+#include "terrain_manifest.h"
 #include "terrain_types.h"
 
 #include "arguments.h"
@@ -17,9 +18,11 @@
 #include <exception>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace panorama::terrain {
 namespace {
@@ -362,6 +365,26 @@ int main(int argc, const char *argv[]) {
     }
 
     std::filesystem::create_directories(options.output_directory);
+    std::map<ChunkKey, float> previous_maximum_by_key;
+    const std::filesystem::path manifest =
+        panorama::terrain_manifest_path(options.output_directory);
+    if (options.format == OutputFormat::MetalTile && std::filesystem::exists(manifest)) {
+      for (const panorama::TerrainManifestEntry &entry :
+           panorama::read_terrain_manifest(manifest)) {
+        if (!previous_maximum_by_key
+                 .emplace(ChunkKey{entry.row, entry.column}, entry.maximum_elevation)
+                 .second) {
+          throw std::runtime_error("Terrain manifest contains duplicate tile keys");
+        }
+      }
+    }
+
+    // The manifest is acceleration metadata: an interrupted update must leave
+    // it absent, never silently stale relative to an already replaced tile.
+    if (options.format == OutputFormat::MetalTile) {
+      std::filesystem::remove(manifest);
+    }
+    std::vector<panorama::TerrainManifestEntry> manifest_entries;
     uint32_t written = 0U;
     uint32_t skipped = 0U;
     uint32_t partial = 0U;
@@ -380,6 +403,13 @@ int main(int argc, const char *argv[]) {
       if (std::filesystem::exists(output) && !options.overwrite) {
         if (options.max_tiles != 0U && written + skipped >= options.max_tiles) {
           break;
+        }
+        if (options.format == OutputFormat::MetalTile) {
+          const auto previous = previous_maximum_by_key.find(key);
+          const float maximum = previous == previous_maximum_by_key.end()
+                                    ? panorama::read_metal_tile_header(output).maximum_elevation
+                                    : previous->second;
+          manifest_entries.push_back({key.row, key.column, maximum});
         }
         skipped++;
         continue;
@@ -411,7 +441,7 @@ int main(int argc, const char *argv[]) {
       if (options.format == OutputFormat::GeoTiff) {
         write_geotiff_chunk(output, chunk, destination, key, catalogue.grid());
       } else {
-        write_metal_tile_chunk(
+        const float maximum = write_metal_tile_chunk(
             output,
             chunk,
             destination,
@@ -420,8 +450,13 @@ int main(int argc, const char *argv[]) {
             options.compression,
             options.sample_type
         );
+        manifest_entries.push_back({key.row, key.column, maximum});
       }
       written++;
+    }
+
+    if (options.format == OutputFormat::MetalTile) {
+      panorama::write_terrain_manifest(manifest, manifest_entries);
     }
 
     std::printf(

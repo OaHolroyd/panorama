@@ -138,13 +138,15 @@ int main(int argc, const char *argv[]) {
     // self-describing when several command-line configurations are compared.
     std::printf(
         "Settings: cache %.0f MiB, workers %u, max tiles %u, "
-        "%u azimuths x %u polars, range %.0f m, quantized atlas %s.\n",
+        "%u azimuths x %u polars, range %.0f m, curvature %.4f m/mile^2, "
+        "quantized atlas %s.\n",
         static_cast<double>(settings.tile_cache_size_bytes) / static_cast<double>(kBytesPerMiB),
         settings.max_tile_preparation_workers,
         settings.max_tile_count,
         settings.num_azimuth,
         settings.num_polar,
         settings.max_distance,
+        panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
         settings.retain_quantized ? "retained" : "disabled"
     );
     panorama::raytrace_tiled_heightmap(config);
