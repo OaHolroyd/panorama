@@ -69,9 +69,9 @@ class ResidentTileCache {
 public:
   /// Allocate the atlas and install the observer tile in slot zero.
   ///
-  /// A GeoTIFF observer is already resident on the CPU. A custom observer
-  /// supplies metadata only and is loaded directly or staged for conversion,
-  /// according to its representation and the trace configuration.
+  /// A GeoTIFF observer's payload is already resident on the CPU. A custom
+  /// observer supplies metadata only and is loaded directly or staged for
+  /// conversion according to its representation and the trace configuration.
   ResidentTileCache(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,

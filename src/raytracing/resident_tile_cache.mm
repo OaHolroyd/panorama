@@ -170,7 +170,7 @@ struct ResidentTileCache::State {
   /// Submit every maximum-mipmap level for the supplied resident slots.
   [[nodiscard]] MipmapSubmission submit_mipmaps(std::span<const uint32_t> slots);
 
-  /// Load custom vertices directly, retaining or expanding fixed-point records.
+  /// Load custom payloads directly, retaining or expanding fixed-point records.
   void load_custom_vertices(
       std::span<const MetalTileBufferLoad> loads,
       std::span<const uint32_t> slots,
@@ -643,7 +643,7 @@ ResidentTileCache::ResidentTileCache(
 
   // Slot zero permanently starts as the observer tile, so the first frontier
   // can run before any asynchronous source has finished preparation. Custom
-  // vertices take the same Metal I/O and GPU-reduction path as later tiles.
+  // payloads take the same Metal I/O and GPU-reduction path as later tiles.
   if (custom_origin) {
     const MetalTileBufferLoad load = {sources.front().path, 0U, nil};
     const uint32_t slot = 0U;
@@ -730,8 +730,8 @@ void ResidentTileCache::install_prepared(
       }
     }
     if (slot == state.slot_capacity) {
-      // Every resident tile is needed immediately. Leave completed CPU tiles
-      // in the preparer's bounded hand-off queue until eviction becomes safe.
+      // Every resident tile is needed immediately. Leave completed sources in
+      // the preparer's bounded hand-off queue until eviction becomes safe.
       break;
     }
     std::optional<PreparedTile> prepared = preparer.try_take_prepared();

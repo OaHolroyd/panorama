@@ -113,7 +113,7 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 } // namespace
 
 /// Trace a fixed observer's angular ray field through a set of terrain tiles
-/// using a GPU-owned frontier and a CPU-owned resident-tile cache.
+/// using a GPU-owned frontier and a host-managed resident-tile cache.
 ///
 /// Initially, one work item represents the unresolved polar-ray column for
 /// each azimuth entering the observer tile. Each frontier iteration traces
@@ -123,13 +123,13 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 /// its exact entry distance, requests that tile's preparation, and activates
 /// the suffix once an atlas slot becomes available.
 ///
-/// Background workers load, validate, and mipmap requested source tiles. The
-/// main thread installs completed tiles into fixed-stride vertex and maximum-
-/// mipmap atlases between GPU command buffers, rebuilding the GPU tile-key
-/// lookup table after changes. When the atlas is full, it evicts the least-
-/// recently-used slot not referenced by the imminent frontier. The loop ends
-/// when every azimuth column has intersected terrain, reached the range limit,
-/// or left available terrain coverage.
+/// Background workers load, validate, and mipmap GeoTIFF sources or open custom
+/// tile handles. The main thread installs prepared sources into fixed-stride
+/// terrain and maximum-mipmap atlases between GPU command buffers, rebuilding
+/// the GPU tile-key lookup table after changes. When the atlas is full, it
+/// evicts the least-recently-used slot not referenced by the imminent frontier.
+/// The loop ends when every azimuth column has intersected terrain, reached the
+/// range limit, or left available terrain coverage.
 void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   validate_configuration(config);
   // Start a composite timer.
@@ -153,8 +153,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   LoadedTile origin = LoadedTile::load(catalogue.origin().path);
   timer.stop("Tile load");
 
-  // GeoTIFF preparation builds its mipmap on the CPU. Custom files deliberately
-  // store vertices only; their hierarchy is generated in the atlas on the GPU.
+  // GeoTIFF preparation builds its mipmap on the CPU. Custom files store no
+  // mipmap hierarchy, so the cache generates it in the atlas on the GPU.
   const bool custom_origin = is_metal_tile_path(catalogue.origin().path);
   if (!custom_origin) {
     timer.start_work("Mipmap generation");
@@ -255,9 +255,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
     // workers continue to prepare later source tiles.
     timer.stop("Initial setup");
 
-    // Command buffers are still synchronised one frontier iteration at a time
-    // because the CPU needs the next append count to size the following grid.
-    // Removing this wait is a later asynchronous-cache optimisation.
+    // Each frontier pass completes synchronously because the CPU needs its
+    // emitted counts and deferred entries before it can schedule the next pass.
     gpu.start_capture_if_requested();
     uint32_t active_count = config.num_azimuth;
 
@@ -404,10 +403,10 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
     const TilePreparationStatistics preparation_statistics = preparer.statistics();
     const ResidentTileCacheStatistics cache_statistics = cache.statistics();
     std::printf(
-        "Terrain sources: %u (resident slots %u / cache capacity %llu, preparation workers %u).\n",
+        "Terrain sources: %u (resident slots %u / cache capacity %u, preparation workers %u).\n",
         tile_count,
         cache_statistics.resident_tiles,
-        static_cast<unsigned long long>(slot_capacity),
+        cache_statistics.slot_capacity,
         preparation_statistics.worker_count
     );
     std::printf(

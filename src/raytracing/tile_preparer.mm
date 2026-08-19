@@ -197,9 +197,9 @@ void AsyncTilePreparer::start() {
         try {
           const TerrainSource &source = worker_state.sources[request.source_index];
 
-          // A custom tile contains only vertices in atlas order. Do not read
-          // or decompress them into host memory. Opening its Metal handle on
-          // this worker keeps setup off the synchronous scheduler path.
+          // A custom tile's terrain payload already stores vertices in atlas
+          // order and contains no mipmap. Keep the payload out of host memory;
+          // opening its Metal handle here also keeps work off the scheduler.
           std::unique_ptr<LoadedTile> tile;
           id<MTLIOFileHandle> metal_file;
           if (is_metal_tile_path(source.path)) {
@@ -241,9 +241,9 @@ void AsyncTilePreparer::start() {
             }
           }
 
-          // Bound prepared CPU terrain to the atlas capacity. This applies
-          // back-pressure instead of letting fast workers consume RAM while
-          // the main thread waits for GPU frontier work to complete.
+          // Bound the prepared hand-off queue to the atlas capacity. This
+          // applies back-pressure instead of preparing sources the cache
+          // cannot install while the current frontier is in flight.
           std::unique_lock<std::mutex> worker_lock(worker_state.mutex);
           worker_state.prepared_space_available.wait(worker_lock, [&] {
             return worker_state.stop.load(std::memory_order_relaxed) ||

@@ -19,7 +19,7 @@ namespace panorama {
 struct LoadedTile {
   // True when the terrain representation supports exact bilinear collisions.
   // GeoTIFFs then own `(size + 1)²` values in `vertices`; custom Metal tiles
-  // leave the host pointer null because their vertices stay on the GPU path.
+  // leave the host pointer null because their payload stays on the GPU path.
   bool supports_level_0_collisions;
   Crs crs;
   float maximum_elevation;
@@ -60,8 +60,9 @@ struct LoadedTile {
 
   /// Load either GeoTIFF terrain or custom-tile metadata into the host model.
   ///
-  /// Custom files retain their vertices on disk: the returned object contains
-  /// metadata only, and the cache loads vertices through Metal I/O.
+  /// Custom files retain their terrain payload on disk: the returned object
+  /// contains metadata only, and the cache loads the required record range
+  /// through Metal I/O.
   [[nodiscard]] static LoadedTile load(const std::filesystem::path &path);
 
   /// Fill the mipmap with every coarser maximum level, if not already present.

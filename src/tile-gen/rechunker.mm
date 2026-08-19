@@ -92,15 +92,12 @@ make_rechunk_plan(const SourceCatalogue &catalogue, const DestinationGrid &desti
   const SourceGrid &source_grid = catalogue.grid();
   if (!approximately_equal(destination.resolution, source_grid.x_resolution) ||
       !approximately_equal(destination.resolution, source_grid.y_resolution)) {
-    throw std::invalid_argument(
-        "This first rechunker requires the destination and source resolutions to match"
-    );
+    throw std::invalid_argument("Rechunking requires matching source and destination resolutions");
   }
 
-  // The current implementation copies aligned source windows without
-  // resampling. An arbitrary output origin is supported when it is itself on
-  // the source grid; reprojection and sub-pixel origins belong to the later
-  // general warp path.
+  // Rechunking copies aligned source windows without resampling. An arbitrary
+  // output origin is supported only when it lies on the source sample grid;
+  // reprojection and sub-pixel origins are not supported.
   const int64_t destination_x_alignment =
       aligned_index(destination.origin_x, source_grid.reference_x, destination.resolution, "X");
   const int64_t destination_y_alignment =

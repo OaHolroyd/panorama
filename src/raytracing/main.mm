@@ -40,7 +40,7 @@ void print_usage(const char *program) {
       "  --tile-dir DIR        prepared level-0 tile directory\n"
       "                        (default: data/swissalti3d-10-level-0)\n"
       "  --tile-cache-mib N    resident terrain-cache budget in MiB (default: 128)\n"
-      "  --workers N           tile load/mipmap workers; 0 uses all hardware threads (default: 8)\n"
+      "  --workers N           preparation workers; 0 uses all hardware threads (default: 8)\n"
       "  --max-tiles N         limit available source tiles; 0 is unlimited (default: 0)\n"
       "  --max-distance M      horizontal trace range in metres (default: 600000)\n"
       "  --azimuth-count N     number of azimuth columns (default: 2048)\n"

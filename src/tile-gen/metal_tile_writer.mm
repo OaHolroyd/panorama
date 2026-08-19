@@ -74,8 +74,8 @@ void write_metal_tile_chunk(
     throw std::invalid_argument("Metal tiles require a power-of-two level-0 destination grid");
   }
 
-  // Reverse whole rows into the raytracer's south-to-north convention. No
-  // runtime swizzle or temporary decode buffer is needed after this conversion.
+  // Reverse whole rows into the raytracer's south-to-north convention so both
+  // stored sample representations already match atlas order.
   std::vector<float> vertices(chunk.elevations.size());
   for (uint32_t source_row = 0U; source_row < chunk.sample_side; source_row++) {
     const uint32_t destination_row = chunk.sample_side - 1U - source_row;

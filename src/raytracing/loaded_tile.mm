@@ -123,8 +123,8 @@ LoadedTile LoadedTile::load(const std::filesystem::path &path) {
 }
 
 LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_collisions) {
-  // Keep the initial file-format contract narrow. Other loaders can later
-  // prepare exactly the same LoadedTile representation from other sources.
+  // This entry point is specifically the CPU-backed GeoTIFF path; custom
+  // files are represented by metadata and loaded directly by the cache.
   if (path.extension() != ".tif") {
     throw std::invalid_argument("Only .tif terrain tiles are supported: " + path.string());
   }
@@ -192,7 +192,7 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   const double no_data = band->GetNoDataValue(&has_no_data);
   const size_t sample_count = static_cast<size_t>(source_size) * source_size;
   // RasterIO converts the source's native sample format directly to float32.
-  // This is the only terrain precision the eventual Metal tracer supports.
+  // GeoTIFF terrain uses the host-backed float atlas path.
   std::vector<float> source_heights(sample_count);
   if (band->RasterIO(
           GF_Read,
@@ -240,8 +240,8 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   std::unique_ptr<std::vector<float>> level_0_vertices;
   std::vector<float> level_1_cells;
   if (level_0_collisions) {
-    // Preserve the original vertices for future exact bilinear collision and
-    // derive the first conservative maximum level used by all traversal modes.
+    // Preserve the original vertices for exact bilinear collision and derive
+    // the first conservative maximum level used by all traversal modes.
     level_0_vertices = std::make_unique<std::vector<float>>(std::move(oriented_samples));
     level_1_cells = make_level_1_cells(*level_0_vertices, size);
   } else {

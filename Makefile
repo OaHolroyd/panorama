@@ -2,9 +2,9 @@
 PANORAMA_EXE := panorama
 TILE_GEN_EXE := panorama-tile-gen
 
-# Keep each executable's implementation separate. Future file-format code can
-# live in shared/ and be linked into both without either depending on the
-# other's entry point or application-specific implementation.
+# Keep each executable's implementation separate. Common format and argument
+# code lives in shared/ and is linked into both without either depending on
+# the other's entry point or application-specific implementation.
 SRC_DIR := src
 RAYTRACE_SRC_DIR := $(SRC_DIR)/raytracing
 TILE_GEN_SRC_DIR := $(SRC_DIR)/tile-gen
@@ -75,7 +75,7 @@ $(PANORAMA_EXE): FORCE $(PANORAMA_OBJ) $(SHARED_OBJ) $(METAL_LIB)
 	@printf 'Linking %s\n' '$@'
 	$(CXX) $(OPT_FLAGS) -o $@ $(PANORAMA_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
 
-# The tile generator does not use a metallib yet. It links Metal because the
+# The tile generator does not use a metallib. It links Metal because the
 # custom-tile writer uses Metal I/O compression contexts.
 $(TILE_GEN_EXE): FORCE $(TILE_GEN_OBJ) $(SHARED_OBJ)
 	@printf 'Linking %s\n' '$@'

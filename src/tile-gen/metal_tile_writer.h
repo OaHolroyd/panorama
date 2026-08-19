@@ -22,7 +22,8 @@ namespace panorama::terrain {
 /// The source chunk is north-to-south for conventional GIS writers. This
 /// writer flips it once into atlas order. Float32 output remains version 2;
 /// Uint16 output quantizes onto a global decimetre lattice and stores offsets
-/// from a per-tile integer base. The renderer accepts both representations.
+/// from a per-tile integer base. The renderer can expand Uint16 during atlas
+/// installation or retain it through tracing with `--retain-quantized`.
 void write_metal_tile_chunk(
     const std::filesystem::path &path,
     const TerrainChunk &chunk,

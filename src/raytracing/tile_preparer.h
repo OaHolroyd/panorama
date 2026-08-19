@@ -70,7 +70,7 @@ public:
   /// Queue a nonresident source, keeping its smallest requested priority.
   void request(uint32_t source_index, float priority);
 
-  /// Return and remove one completed CPU tile, or no value when none is ready.
+  /// Return and remove one completed prepared source, or no value when none is ready.
   [[nodiscard]] std::optional<PreparedTile> try_take_prepared();
 
   /// Block until one prepared tile is available or a worker reports an error.

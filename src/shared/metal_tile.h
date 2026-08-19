@@ -68,7 +68,7 @@ struct QuantizedMetalTileRecordLayout {
   uint32_t elevation_base_offset;
 };
 
-/// One logical byte range to load into a reserved Metal-buffer range.
+/// One source file and destination for a shared logical byte-range load.
 struct MetalTileBufferLoad {
   std::filesystem::path path;
   NSUInteger destination_offset;
@@ -111,7 +111,7 @@ void write_metal_tile(
     std::span<const uint16_t> vertices
 );
 
-/// Read and validate only the fixed header, without retaining terrain data.
+/// Read and validate only the versioned header, without retaining terrain data.
 ///
 /// Compressed files use a small Metal I/O request because their header is
 /// part of the compressed logical stream. Raw files use an ordinary read.
@@ -127,11 +127,12 @@ open_metal_tile_file(id<MTLDevice> device, const std::filesystem::path &path);
 /// Return the number of command buffers accepted concurrently by our I/O queue.
 [[nodiscard]] NSUInteger metal_tile_io_concurrency();
 
-/// Decompress equal logical byte ranges into reserved Metal-buffer ranges.
+/// Load equal logical byte ranges into reserved Metal-buffer ranges.
 ///
 /// Independent I/O command buffers allow the concurrent queue to service
-/// several files at once. The caller selects the logical source range and each
-/// load supplies its destination byte offset.
+/// several files at once. Metal I/O decompresses compressed sources; raw
+/// sources are copied directly. The caller selects the common source range and
+/// each load supplies its destination byte offset.
 void load_metal_tiles_into_buffer(
     id<MTLDevice> device,
     id<MTLIOCommandQueue> queue,
