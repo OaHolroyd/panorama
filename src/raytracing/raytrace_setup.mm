@@ -288,7 +288,9 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
       // exists. Any later failure is caught below, which stops and joins these
       // threads before unwinding their owning vector.
       preparer.start();
-      frontier.prefetch_observer_neighbours(preparer);
+      // The first observer-tile pass reveals the surviving polar suffix for
+      // each azimuth. Neighbour preparation begins only after those suffixes
+      // pass through HostFrontier's local and global maximum checks.
 
       // Keep going until all rays have completed
       while (active_count != 0U) {

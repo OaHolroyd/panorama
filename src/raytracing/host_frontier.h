@@ -34,9 +34,6 @@ public:
       const RaytraceParameters &parameters
   );
 
-  /// Request the eight catalogue neighbours surrounding the observer tile.
-  void prefetch_observer_neighbours(AsyncTilePreparer &preparer);
-
   /// Append GPU-emitted continuations whose successor terrain was absent.
   void append_deferred(std::span<const DeferredTileWork> deferred);
 

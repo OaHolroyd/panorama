@@ -102,26 +102,6 @@ HostFrontier::HostFrontier(
   }
 }
 
-void HostFrontier::prefetch_observer_neighbours(AsyncTilePreparer &preparer) {
-  const TileKey origin = catalogue_.origin().key;
-  for (int64_t row_offset = -1; row_offset <= 1; row_offset++) {
-    for (int64_t column_offset = -1; column_offset <= 1; column_offset++) {
-      if (row_offset == 0 && column_offset == 0) {
-        continue;
-      }
-      const TileKey neighbour = {origin.row + row_offset, origin.column + column_offset};
-      const std::optional<uint32_t> source = catalogue_.find_source(neighbour);
-      if (source.has_value()) {
-        preparer.request(
-            *source,
-            static_cast<float>(tile_minimum_distance(catalogue_.grid(), neighbour, config_.observer))
-        );
-        request_outstanding_[*source] = 1U;
-      }
-    }
-  }
-}
-
 void HostFrontier::append_deferred(std::span<const DeferredTileWork> deferred) {
   deferred_.insert(deferred_.end(), deferred.begin(), deferred.end());
 }
