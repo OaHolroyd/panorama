@@ -29,19 +29,21 @@ struct TileGrid {
   double width;
 };
 
-/// One available prepared-terrain file and its global grid location.
+/// One available prepared-terrain file, grid location, and optional culling bound.
 struct TerrainSource {
   TileKey key;
   std::filesystem::path path;
+  std::optional<float> maximum_elevation;
 };
 
 /// A finite, indexed catalogue of terrain sources relevant to one render.
 ///
 /// The catalogue scans a prepared-tile directory once, derives its physical
-/// grid from GeoTIFF metadata or the custom tile header, retains sources within
-/// the configured horizontal range, and maps their stable grid keys to source
-/// indices. It is immutable thereafter, so foreground scheduling and worker
-/// threads can safely share its source vector without synchronisation.
+/// grid from GeoTIFF metadata or the custom tile header, attaches any maxima
+/// published in the directory manifest, retains sources within the configured
+/// horizontal range, and maps their stable grid keys to source indices. It is
+/// immutable thereafter, so foreground scheduling and worker threads can
+/// safely share its source vector without synchronisation.
 class TerrainCatalogue {
 public:
   /// Infer the prepared grid, discover sources, and put the observer tile first.
@@ -61,6 +63,10 @@ public:
   /// Return all retained sources in stable scheduler order.
   [[nodiscard]] const std::vector<TerrainSource> &sources() const;
 
+  /// Return a conservative upper bound for the retained terrain, when every
+  /// source published a manifest maximum.
+  [[nodiscard]] std::optional<float> maximum_elevation() const;
+
   /// Return a source index for a grid key, or no value when coverage is absent.
   [[nodiscard]] std::optional<uint32_t> find_source(TileKey key) const;
 
@@ -71,6 +77,7 @@ private:
   TileGrid grid_;
   std::vector<TerrainSource> sources_;
   std::map<TileKey, uint32_t> source_index_by_key_;
+  std::optional<float> maximum_elevation_;
 };
 
 /// Return the global rechunked tile key containing one projected coordinate.

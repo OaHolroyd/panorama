@@ -10,6 +10,8 @@ using namespace metal;
 struct RaytraceParameters {
   float cell_size;
   float observer_elevation;
+  float curvature_coefficient;
+  float global_maximum_elevation;
   uint num_levels;
   uint num_azimuth;
   uint num_polar;
@@ -250,6 +252,39 @@ inline float sample_elevation(ushort sample, int base_decimeters) {
   return (float(base_decimeters) + float(sample)) * 0.1F;
 }
 
+/// Return ray elevation relative to the curved terrain datum at horizontal distance t.
+inline float curved_ray_elevation(float origin, float slope, float curvature, float t) {
+  return fma(curvature, t * t, fma(slope, t, origin));
+}
+
+/// Return the minimum curved ray elevation over one closed distance interval.
+inline float minimum_curved_ray_elevation(
+    float origin,
+    float slope,
+    float curvature,
+    float t_entry,
+    float t_exit
+) {
+  const float minimum_distance =
+      curvature > 0.0F ? clamp(-slope / (2.0F * curvature), t_entry, t_exit)
+                       : (slope > 0.0F ? t_entry : t_exit);
+  return curved_ray_elevation(origin, slope, curvature, minimum_distance);
+}
+
+/// Return whether a rising ray is now permanently above all catalogued terrain.
+inline bool above_global_terrain(
+    float origin,
+    float slope,
+    float curvature,
+    float distance,
+    float global_maximum
+) {
+  constexpr float kElevationCullingMargin = 1.0F;
+  return isfinite(global_maximum) && slope + 2.0F * curvature * distance >= 0.0F &&
+         curved_ray_elevation(origin, slope, curvature, distance) >
+             global_maximum + kElevationCullingMargin;
+}
+
 /// Solve the exact intersection with one bilinear level-0 terrain patch. The
 /// local parameter begins at t_entry to avoid cancellation on distant cells.
 template <typename Sample>
@@ -264,6 +299,7 @@ inline Collision bilinear_collision(
     uint j,
     float3 ray_origin,
     float3 ray_direction,
+    float curvature,
     float t_entry,
     float t_exit
 ) {
@@ -284,10 +320,12 @@ inline Collision bilinear_collision(
   const float dzdy = z10 - z00;
   const float twist = z11 - z10 - z01 + z00;
 
-  const float a = -twist * sx1 * sy1;
-  const float b = ray_direction.z - dzdx * sx1 - dzdy * sy1 - twist * (sx0 * sy1 + sx1 * sy0);
+  const float a = curvature - twist * sx1 * sy1;
+  const float b = ray_direction.z + 2.0F * curvature * t_entry - dzdx * sx1 - dzdy * sy1 -
+                  twist * (sx0 * sy1 + sx1 * sy0);
   const float c =
-      ray_origin.z + t_entry * ray_direction.z - z00 - dzdx * sx0 - dzdy * sy0 - twist * sx0 * sy0;
+      curved_ray_elevation(ray_origin.z, ray_direction.z, curvature, t_entry) - z00 -
+      dzdx * sx0 - dzdy * sy0 - twist * sx0 * sy0;
 
   const float cell_speed = max(max(fabs(sx1), fabs(sy1)), 1e-12F);
   const float direction_error = FLT_EPSILON * max(fabs(t_entry), fabs(t_exit)) * cell_speed;
@@ -298,7 +336,8 @@ inline Collision bilinear_collision(
   // the ray is below all four vertices by this interval's end, recover the
   // intersection on the near boundary as in the Python reference.
   const auto conservative_boundary_hit = [&]() -> Collision {
-    if (ray_origin.z + t_exit * ray_direction.z <= min(min(z00, z01), min(z10, z11))) {
+    if (curved_ray_elevation(ray_origin.z, ray_direction.z, curvature, t_exit) <=
+        min(min(z00, z01), min(z10, z11))) {
       return {true, t_entry};
     }
     return {false, 0.0F};
@@ -335,9 +374,21 @@ inline Collision bilinear_collision(
     }
   }
 
+  // Form the roots without subtracting nearly equal values. Curvature makes
+  // even a flat terrain patch quadratic, and the naïve formula loses useful
+  // distance precision for steep rays whose near root is much smaller than
+  // their far root.
   const float root = sqrt(discriminant);
-  float local_t0 = (-b - root) / (2.0F * a);
-  float local_t1 = (-b + root) / (2.0F * a);
+  const float root_product = -0.5F * (b + copysign(root, b));
+  float local_t0 = 0.0F;
+  float local_t1 = 0.0F;
+  if (root_product == 0.0F) {
+    local_t0 = -b / (2.0F * a);
+    local_t1 = local_t0;
+  } else {
+    local_t0 = root_product / a;
+    local_t1 = c / root_product;
+  }
   if (local_t0 > local_t1) {
     const float temporary = local_t0;
     local_t0 = local_t1;
@@ -541,7 +592,6 @@ inline void trace_tile_frontier_impl(
     tx = next_boundary_after(tx, t_start, scale * dtx);
   }
 
-  int previous_axis = -1; // remember which axis we last moved in
   const uint vertex_count = num_cell + 1U;
   const float tile_exit =
       tile_exit_distance(tile_x_min, tile_y_min, params.cell_size, num_cell, direction, t_start);
@@ -554,15 +604,35 @@ inline void trace_tile_frontier_impl(
     const float t_exit = min(tx, ty);
     const float interval_end = min(t_exit, segment_limit);
 
-    // Find the minimum height that the ray has within the cell we've just crossed
-    float z = ray_origin.z + interval_end * dz;
-    if (dz > 0.0F) {
-      // Since an upward ray will be higher at the exit boundary, rewind to find the minimum height
-      // as the ray crosses the cell.
-      z = previous_axis == -1
-              ? ray_origin.z + t_start * dz
-              : ray_origin.z + (interval_end - scale * (previous_axis == 0 ? dty : dtx)) * dz;
+    // Derive the exact near edge of this DDA block. The curved ray is convex,
+    // so its minimum can occur at either edge or at its stationary point.
+    float interval_start = t_start;
+    if (stepx != 0) {
+      interval_start = max(interval_start, tx - scale * dtx);
     }
+    if (stepy != 0) {
+      interval_start = max(interval_start, ty - scale * dty);
+    }
+    interval_start = min(interval_start, interval_end);
+
+    // Once this ray is both rising and above the complete catalogue's upper
+    // bound, curvature guarantees it can never intersect a later cell or tile.
+    if (above_global_terrain(
+            ray_origin.z,
+            dz,
+            params.curvature_coefficient,
+            interval_start,
+            params.global_maximum_elevation
+        )) {
+      return;
+    }
+    const float z = minimum_curved_ray_elevation(
+        ray_origin.z,
+        dz,
+        params.curvature_coefficient,
+        interval_start,
+        interval_end
+    );
 
     // find the index of the relevant cell (correct level and location) inside the flattened mipmap
     const uint level_side = mipmap_level_side(num_cell, level);
@@ -574,14 +644,6 @@ inline void trace_tile_frontier_impl(
       if (level == 1) {
         // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
-        float t_entry = t_start;
-        if (stepx != 0) {
-          t_entry = max(t_entry, tx - dtx);
-        }
-        if (stepy != 0) {
-          t_entry = max(t_entry, ty - dty);
-        }
-
         const Collision collision = bilinear_collision(
             vertices,
             vertex_count,
@@ -593,26 +655,26 @@ inline void trace_tile_frontier_impl(
             uint(j),
             ray_origin,
             ray_direction,
-            min(t_entry, interval_end),
+            params.curvature_coefficient,
+            interval_start,
             interval_end
         );
 
-        // Only exit it's a hit
+        // Exit only after the exact patch test confirms a hit.
         if (collision.hit) {
           distances[output_index] = collision.distance;
-          elevations[output_index] = ray_origin.z + collision.distance * dz;
+          elevations[output_index] = curved_ray_elevation(
+              ray_origin.z,
+              dz,
+              params.curvature_coefficient,
+              collision.distance
+          );
           return;
         }
       } else {
         // There might be a real collision inside this coarse cell. Descend to
         // the child containing the ray at the coarse cell's true near edge.
-        float cell_entry = t_start;
-        if (stepx != 0) {
-          cell_entry = max(cell_entry, tx - scale * dtx);
-        }
-        if (stepy != 0) {
-          cell_entry = max(cell_entry, ty - scale * dty);
-        }
+        const float cell_entry = interval_start;
 
         // Reclassify a point just inside the child. The nudge controls shared
         // boundary ownership only; `cell_entry` remains the exact geometry.
@@ -656,9 +718,6 @@ inline void trace_tile_frontier_impl(
           tx = next_boundary_after(tx, t_start, scale * dtx);
         }
 
-        // The child begins a fresh DDA segment, so an upward ray's near-edge
-        // test must use `t_start` rather than a preceding X or Y step.
-        previous_axis = -1;
         continue;
       }
     }
@@ -702,11 +761,9 @@ inline void trace_tile_frontier_impl(
 
     // Step forwards
     if (ty < tx) {
-      previous_axis = 0;
       ty += scale * dty;
       i += scale * stepy;
     } else {
-      previous_axis = 1;
       tx += scale * dtx;
       j += scale * stepx;
     }

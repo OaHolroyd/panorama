@@ -21,7 +21,7 @@ namespace {
 constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
 
 static_assert(sizeof(HorizontalDirection) == 2U * sizeof(float));
-static_assert(sizeof(RaytraceParameters) == 6U * sizeof(uint32_t));
+static_assert(sizeof(RaytraceParameters) == 8U * sizeof(uint32_t));
 static_assert(sizeof(TileWorkItem) == 5U * sizeof(uint32_t));
 static_assert(sizeof(DeferredTileWork) == 3U * sizeof(uint32_t));
 

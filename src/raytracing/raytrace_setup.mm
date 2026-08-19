@@ -54,10 +54,17 @@ void validate_configuration(const RaytraceConfig &config) {
 
 /// Build the scalar tracing ABI shared by compatible resident terrain tiles.
 [[nodiscard]] RaytraceParameters
-make_raytrace_parameters(const LoadedTile &tile, const RaytraceConfig &config) {
+make_raytrace_parameters(
+    const LoadedTile &tile,
+    const RaytraceConfig &config,
+    const TerrainCatalogue &catalogue
+) {
+  const double curvature_lift =
+      kCurvatureCoefficient * static_cast<double>(config.max_distance) * config.max_distance;
   if (tile.delta > static_cast<double>(std::numeric_limits<float>::max()) ||
       config.observer.elevation < static_cast<double>(std::numeric_limits<float>::lowest()) ||
       config.observer.elevation > static_cast<double>(std::numeric_limits<float>::max()) ||
+      curvature_lift > static_cast<double>(std::numeric_limits<float>::max()) ||
       tile.num_levels == 0U || tile.num_levels >= 32U ||
       tile.size != (1U << (tile.num_levels - 1U))) {
     throw std::overflow_error("Raytrace geometry has an invalid float32 mipmap layout");
@@ -65,6 +72,8 @@ make_raytrace_parameters(const LoadedTile &tile, const RaytraceConfig &config) {
   return {
       static_cast<float>(tile.delta),
       static_cast<float>(config.observer.elevation),
+      static_cast<float>(kCurvatureCoefficient),
+      catalogue.maximum_elevation().value_or(std::numeric_limits<float>::infinity()),
       tile.num_levels,
       config.num_azimuth,
       config.num_polar,
@@ -120,8 +129,9 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 /// every resident work item through its tile, writes terrain hits, and emits
 /// at most one unresolved suffix per azimuth. A suffix whose successor tile
 /// is resident immediately joins the next frontier; otherwise the host keeps
-/// its exact entry distance, requests that tile's preparation, and activates
-/// the suffix once an atlas slot becomes available.
+/// its exact entry distance, advances across tiles proven lower than every
+/// unresolved ray, and requests the first required tile. Rays terminate once
+/// curvature carries them above the complete catalogue's elevation bound.
 ///
 /// Background workers load, validate, and mipmap GeoTIFF sources or open custom
 /// tile handles. The main thread installs prepared sources into fixed-stride
@@ -221,7 +231,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   const std::vector<HorizontalDirection> directions = make_azimuth_directions(config);
   const std::vector<float> slopes = make_polar_slopes(config);
   const size_t ray_count = static_cast<size_t>(config.num_azimuth) * config.num_polar;
-  const RaytraceParameters shared_parameters = make_raytrace_parameters(origin, config);
+  const RaytraceParameters shared_parameters = make_raytrace_parameters(origin, config, catalogue);
 
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
@@ -262,7 +272,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
     // Host-frontier state owns deferred continuations, source lookup, and the
     // one-suffix-per-azimuth invariant used by the current column scheduler.
-    HostFrontier frontier(config, catalogue, directions, shared_parameters);
+    HostFrontier frontier(config, catalogue, directions, slopes, shared_parameters);
 
     // Keep GPU lookup outcomes distinct from host load requests. A deferred
     // continuation can later terminate as open sky when no source covers it.
@@ -278,7 +288,9 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
       // exists. Any later failure is caught below, which stops and joins these
       // threads before unwinding their owning vector.
       preparer.start();
-      frontier.prefetch_observer_neighbours(preparer);
+      // The first observer-tile pass reveals the surviving polar suffix for
+      // each azimuth. Neighbour preparation begins only after those suffixes
+      // pass through HostFrontier's local and global maximum checks.
 
       // Keep going until all rays have completed
       while (active_count != 0U) {
@@ -326,7 +338,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         deferred_successor_work += static_cast<uint64_t>(pass.deferred_count);
 
         // Preserve every continuation that did not find a resident successor.
-        // The host maps it to a source tile and retries it after installation.
+        // The host may cull clear tiles before requesting and activating the
+        // first source whose elevation range can still intersect the column.
         const std::span<const DeferredTileWork> deferred = gpu.deferred_work(pass.deferred_count);
         frontier.append_deferred(deferred);
 #if defined(PANORAMA_DEBUG_VALIDATION)
@@ -339,7 +352,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         // eviction cannot overwrite a tile the imminent dispatch will read.
         const std::vector<uint8_t> pinned_slots =
             frontier.pin_frontier(gpu.active_frontier(), pass.next_count, cache, false);
-        cache.install_prepared(preparer, pinned_slots, timer);
+        frontier.mark_installed(cache.install_prepared(preparer, pinned_slots, timer));
 
         // Append deferred continuations whose terrain became resident during
         // the synchronous installation above.
@@ -360,7 +373,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
           timer.start_wall("Frontier bookkeeping");
           const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);
-          cache.install_prepared(preparer, no_pinned_slots, timer);
+          frontier.mark_installed(cache.install_prepared(preparer, no_pinned_slots, timer));
           active_count =
               frontier.activate_resident(gpu.active_frontier(), active_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
@@ -402,6 +415,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
     // cache, so a memory-budget change is visible when rechunk levels vary.
     const TilePreparationStatistics preparation_statistics = preparer.statistics();
     const ResidentTileCacheStatistics cache_statistics = cache.statistics();
+    const HostFrontierStatistics frontier_statistics = frontier.statistics();
     std::printf(
         "Terrain sources: %u (resident slots %u / cache capacity %u, preparation workers %u).\n",
         tile_count,
@@ -414,12 +428,18 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         static_cast<unsigned long long>(resident_successor_work),
         static_cast<unsigned long long>(deferred_successor_work)
     );
+    const uint64_t skipped_tiles = frontier_statistics.locally_skipped_tiles +
+                                   frontier_statistics.globally_skipped_tiles;
     std::printf(
-        "  Tile requests: %llu, load operations: %llu, unique loads: %llu, reloads: %llu.\n",
+        "  Tile I/O: %llu requests (%llu unique, %llu duplicate); %llu skips "
+        "(%llu local, %llu global; %s).\n",
         static_cast<unsigned long long>(preparation_statistics.requests),
-        static_cast<unsigned long long>(preparation_statistics.load_operations),
-        static_cast<unsigned long long>(preparation_statistics.unique_loads),
-        static_cast<unsigned long long>(preparation_statistics.reloads)
+        static_cast<unsigned long long>(preparation_statistics.unique_requests),
+        static_cast<unsigned long long>(preparation_statistics.duplicate_requests),
+        static_cast<unsigned long long>(skipped_tiles),
+        static_cast<unsigned long long>(frontier_statistics.locally_skipped_tiles),
+        static_cast<unsigned long long>(frontier_statistics.globally_skipped_tiles),
+        catalogue.maximum_elevation().has_value() ? "GPU cutoff enabled" : "no complete maxima"
     );
     std::printf(
         "  Atlas installations: %llu, copied: %.3f GiB, Metal I/O: %.3f GiB, "

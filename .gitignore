@@ -8,6 +8,7 @@
 # Elevation data
 *.ptile*
 *.tif
+*.bin
 
 # Image data
 *.png

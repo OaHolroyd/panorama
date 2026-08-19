@@ -91,8 +91,8 @@ public:
   /// Return the resident slot for a source, or `slot_capacity()` if absent.
   [[nodiscard]] uint32_t slot_for_source(uint32_t source_index) const;
 
-  /// Install prepared tiles into safe slots before the next frontier command.
-  void install_prepared(
+  /// Install prepared tiles and return the source indices published to safe slots.
+  [[nodiscard]] std::vector<uint32_t> install_prepared(
       AsyncTilePreparer &preparer,
       std::span<const uint8_t> pinned_slots,
       Timer &timer

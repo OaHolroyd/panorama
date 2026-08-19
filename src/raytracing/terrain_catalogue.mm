@@ -2,6 +2,7 @@
 
 #include "gdal_utils.h"
 #include "metal_tile.h"
+#include "terrain_manifest.h"
 
 #include <gdal_priv.h>
 
@@ -157,10 +158,20 @@ double tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLo
 
 TerrainCatalogue::TerrainCatalogue(TileGrid grid, std::vector<TerrainSource> sources)
     : grid_(grid), sources_(std::move(sources)) {
+  float maximum_elevation = std::numeric_limits<float>::lowest();
+  bool has_complete_maxima = true;
   for (uint32_t index = 0U; index < sources_.size(); index++) {
     if (!source_index_by_key_.emplace(sources_[index].key, index).second) {
       throw std::runtime_error("Prepared-terrain directory contains duplicate tile keys");
     }
+    if (!sources_[index].maximum_elevation.has_value()) {
+      has_complete_maxima = false;
+      continue;
+    }
+    maximum_elevation = std::max(maximum_elevation, *sources_[index].maximum_elevation);
+  }
+  if (has_complete_maxima) {
+    maximum_elevation_ = maximum_elevation;
   }
 }
 
@@ -172,6 +183,17 @@ TerrainCatalogue TerrainCatalogue::discover(
 ) {
   if (!std::filesystem::is_directory(tile_dir)) {
     throw std::invalid_argument("Prepared terrain path is not a directory: " + tile_dir.string());
+  }
+
+  std::map<TileKey, float> maximum_elevation_by_key;
+  const std::filesystem::path manifest = terrain_manifest_path(tile_dir);
+  if (std::filesystem::exists(manifest)) {
+    for (const TerrainManifestEntry &entry : read_terrain_manifest(manifest)) {
+      const TileKey key = {entry.row, entry.column};
+      if (!maximum_elevation_by_key.emplace(key, entry.maximum_elevation).second) {
+        throw std::runtime_error("Terrain manifest contains duplicate tile keys");
+      }
+    }
   }
 
   // Filenames provide stable integer keys, while one file's embedded metadata
@@ -187,7 +209,14 @@ TerrainCatalogue TerrainCatalogue::discover(
     }
     try {
       const TileKey key = parse_tile_name(entry.path());
-      available_sources.push_back({key, entry.path()});
+      const auto maximum = maximum_elevation_by_key.find(key);
+      available_sources.push_back({
+          key,
+          entry.path(),
+          !is_metal_tile_path(entry.path()) || maximum == maximum_elevation_by_key.end()
+              ? std::nullopt
+              : std::optional<float>(maximum->second),
+      });
     } catch (const std::invalid_argument &) {
       // Prepared-tile directories may contain unrelated GeoTIFFs.
     }
@@ -238,6 +267,7 @@ TerrainCatalogue TerrainCatalogue::discover(
 const TileGrid &TerrainCatalogue::grid() const { return grid_; }
 const TerrainSource &TerrainCatalogue::origin() const { return sources_.front(); }
 const std::vector<TerrainSource> &TerrainCatalogue::sources() const { return sources_; }
+std::optional<float> TerrainCatalogue::maximum_elevation() const { return maximum_elevation_; }
 
 std::optional<uint32_t> TerrainCatalogue::find_source(TileKey key) const {
   const auto found = source_index_by_key_.find(key);

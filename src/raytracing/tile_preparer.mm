@@ -85,14 +85,13 @@ struct AsyncTilePreparer::State {
       requests;
   std::vector<TileLoadState> states;
   std::vector<float> queued_priorities;
-  std::vector<uint8_t> loaded_before;
+  std::vector<uint8_t> requested_before;
   std::deque<PreparedTile> prepared;
   std::vector<std::thread> workers;
   std::exception_ptr error;
   uint64_t request_count = 0U;
-  uint64_t load_operations = 0U;
-  uint64_t unique_loads = 0U;
-  uint64_t reloads = 0U;
+  uint64_t unique_request_count = 0U;
+  uint64_t duplicate_request_count = 0U;
   uint32_t worker_count = 0U;
   bool started = false;
 
@@ -142,7 +141,7 @@ AsyncTilePreparer::AsyncTilePreparer(
   state_->states.assign(sources.size(), TileLoadState::Unrequested);
   state_->states[0] = TileLoadState::Resident;
   state_->queued_priorities.assign(sources.size(), std::numeric_limits<float>::infinity());
-  state_->loaded_before.assign(sources.size(), 0U);
+  state_->requested_before.assign(sources.size(), 0U);
 
   const uint32_t hardware_threads = std::thread::hardware_concurrency();
   const uint32_t available_workers =
@@ -227,20 +226,6 @@ void AsyncTilePreparer::start() {
             }
           }
 
-          {
-            std::lock_guard<std::mutex> worker_lock(worker_state.mutex);
-
-            // Keep physical loads distinct from unique sources: an evicted
-            // source may need a later reload when deferred work reaches it.
-            worker_state.load_operations++;
-            if (worker_state.loaded_before[request.source_index] == 0U) {
-              worker_state.loaded_before[request.source_index] = 1U;
-              worker_state.unique_loads++;
-            } else {
-              worker_state.reloads++;
-            }
-          }
-
           // Bound the prepared hand-off queue to the atlas capacity. This
           // applies back-pressure instead of preparing sources the cache
           // cannot install while the current frontier is in flight.
@@ -280,12 +265,18 @@ void AsyncTilePreparer::request(uint32_t source_index, float priority) {
   if (source_index >= state.sources.size()) {
     throw std::out_of_range("Tile preparation request refers to an unknown source");
   }
+  state.request_count++;
+  if (state.requested_before[source_index] == 0U) {
+    state.requested_before[source_index] = 1U;
+    state.unique_request_count++;
+  } else {
+    state.duplicate_request_count++;
+  }
   TileLoadState &source_state = state.states[source_index];
   if (source_state == TileLoadState::Unrequested) {
     source_state = TileLoadState::Queued;
     state.queued_priorities[source_index] = priority;
     state.requests.push({priority, source_index});
-    state.request_count++;
     state.request_available.notify_one();
   } else if (source_state == TileLoadState::Queued &&
              priority < state.queued_priorities[source_index]) {
@@ -358,9 +349,8 @@ TilePreparationStatistics AsyncTilePreparer::statistics() const {
   std::lock_guard<std::mutex> lock(state_->mutex);
   return {
       state_->request_count,
-      state_->load_operations,
-      state_->unique_loads,
-      state_->reloads,
+      state_->unique_request_count,
+      state_->duplicate_request_count,
       state_->worker_count,
   };
 }

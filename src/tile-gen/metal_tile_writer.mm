@@ -60,7 +60,7 @@ std::filesystem::path metal_tile_chunk_path(
          (terrain_chunk_stem(dataset_name, grid, key) + metal_tile_suffix(compression));
 }
 
-void write_metal_tile_chunk(
+float write_metal_tile_chunk(
     const std::filesystem::path &path,
     const TerrainChunk &chunk,
     const DestinationGrid &grid,
@@ -115,7 +115,7 @@ void write_metal_tile_chunk(
         static_cast<uint64_t>(vertices.size()) * sizeof(float),
     };
     write_metal_tile(path, header, vertices);
-    return;
+    return header.maximum_elevation;
   }
   if (sample_type != MetalTileSampleType::Uint16Decimeters) {
     throw std::invalid_argument("Unsupported Metal tile sample type");
@@ -159,6 +159,7 @@ void write_metal_tile_chunk(
       static_cast<uint64_t>(quantized_vertices.size()) * sizeof(uint16_t),
   };
   write_metal_tile(path, header, quantized_vertices);
+  return header.maximum_elevation;
 }
 
 } // namespace panorama::terrain
