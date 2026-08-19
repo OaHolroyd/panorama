@@ -17,18 +17,20 @@ namespace panorama::terrain {
     MetalTileCompression compression
 );
 
-/// Convert one level-0 chunk into the exact two arrays used by the raytracer.
+/// Convert one level-0 chunk into a Float32 or fixed-point Metal terrain tile.
 ///
 /// The source chunk is north-to-south for conventional GIS writers. This
-/// writer flips it once and stores the vertices in their final GPU atlas order
-/// before applying Metal compression. The renderer builds mipmaps on the GPU.
+/// writer flips it once into atlas order. Float32 output remains version 2;
+/// Uint16 output quantizes onto a global decimetre lattice and stores offsets
+/// from a per-tile integer base. The renderer accepts both representations.
 void write_metal_tile_chunk(
     const std::filesystem::path &path,
     const TerrainChunk &chunk,
     const DestinationGrid &grid,
     ChunkKey key,
     const SourceGrid &source_grid,
-    MetalTileCompression compression
+    MetalTileCompression compression,
+    MetalTileSampleType sample_type
 );
 
 } // namespace panorama::terrain

@@ -5,6 +5,7 @@
 #include "metal_tile.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -125,6 +126,37 @@ struct MipmapSubmission {
   id<MTLCommandBuffer> command;
 };
 
+/// Byte layout used when staging one complete fixed-point tile record.
+struct QuantizedRecordLayout {
+  uint32_t logical_size;
+  uint32_t stride;
+  uint32_t vertex_offset;
+  uint32_t elevation_base_offset;
+};
+
+/// Derive the aligned GPU staging layout from the validated dataset header.
+[[nodiscard]] QuantizedRecordLayout quantized_record_layout(const MetalTileHeader &header) {
+  if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
+    throw std::invalid_argument("Quantized staging requires uint16 terrain");
+  }
+  const uint64_t maximum_stride = std::numeric_limits<uint32_t>::max();
+  if (header.vertex_offset > maximum_stride ||
+      header.vertex_byte_count > maximum_stride - header.vertex_offset) {
+    throw std::overflow_error("Metal tile logical record exceeds Metal uint indexing");
+  }
+  const uint64_t logical_size = header.vertex_offset + header.vertex_byte_count;
+  const uint64_t stride = (logical_size + 3U) & ~uint64_t{3U};
+  if (stride > maximum_stride) {
+    throw std::overflow_error("Metal tile logical record exceeds Metal uint indexing");
+  }
+  return {
+      static_cast<uint32_t>(logical_size),
+      static_cast<uint32_t>(stride),
+      static_cast<uint32_t>(header.vertex_offset),
+      static_cast<uint32_t>(offsetof(MetalTileHeader, elevation_base_decimeters)),
+  };
+}
+
 } // namespace
 
 /// Mutable atlas state hidden behind the cache's ownership-oriented interface.
@@ -134,6 +166,7 @@ struct ResidentTileCache::State {
   id<MTLDevice> device;
   id<MTLIOCommandQueue> io_queue;
   id<MTLCommandQueue> mipmap_queue;
+  id<MTLComputePipelineState> conversion_pipeline;
   id<MTLComputePipelineState> mipmap_pipeline;
   MetalTileHeader header_template;
   double grid_origin_x;
@@ -147,10 +180,11 @@ struct ResidentTileCache::State {
   uint64_t next_use_stamp = 2U;
   uint64_t installations = 1U;
   uint64_t bytes_copied;
-  uint64_t bytes_loaded_directly = 0U;
+  uint64_t bytes_loaded_with_metal_io = 0U;
   uint64_t evictions = 0U;
   id<MTLBuffer> mipmap_atlas;
   id<MTLBuffer> vertex_atlas;
+  id<MTLBuffer> quantized_staging;
   id<MTLBuffer> metadata_buffer;
   id<MTLBuffer> hash_buffer;
   float *mipmaps;
@@ -163,6 +197,13 @@ struct ResidentTileCache::State {
 
   /// Submit every maximum-mipmap level for the supplied resident slots.
   [[nodiscard]] MipmapSubmission submit_mipmaps(std::span<const uint32_t> slots);
+
+  /// Load Float32 vertices directly or expand fixed-point records into atlas slots.
+  void load_custom_vertices(
+      std::span<const MetalTileBufferLoad> loads,
+      std::span<const uint32_t> slots,
+      Timer &timer
+  );
 
   /// Build mipmaps synchronously where the observer tile requires them now.
   void generate_mipmaps(std::span<const uint32_t> slots, Timer &timer);
@@ -190,6 +231,122 @@ struct ResidentTileCache::State {
         tile_width(width), mip_count(mip_values), vertex_count(vertex_values),
         slot_capacity(slot_values), hash_slot_count(hash_values), bytes_copied(initial_bytes) {}
 };
+
+void ResidentTileCache::State::load_custom_vertices(
+    std::span<const MetalTileBufferLoad> loads,
+    std::span<const uint32_t> slots,
+    Timer &timer
+) {
+  if (loads.empty() || loads.size() != slots.size()) {
+    throw std::invalid_argument("Metal tile loads require one destination slot per file");
+  }
+  if (io_queue == nil) {
+    throw std::logic_error("Metal tile loading resources are unavailable");
+  }
+
+  if (header_template.sample_type == MetalTileSampleType::Float32) {
+    std::vector<MetalTileBufferLoad> direct_loads;
+    direct_loads.reserve(loads.size());
+    for (size_t index = 0U; index < loads.size(); index++) {
+      direct_loads.push_back(
+          {
+              loads[index].path,
+              static_cast<NSUInteger>(slots[index]) * header_template.vertex_byte_count,
+              loads[index].file,
+          }
+      );
+    }
+    timer.start_wall("Metal tile I/O");
+    load_metal_tiles_into_buffer(
+        device,
+        io_queue,
+        direct_loads,
+        header_template.vertex_offset,
+        header_template.vertex_byte_count,
+        vertex_atlas,
+        vertex_atlas.length
+    );
+    timer.stop("Metal tile I/O");
+    return;
+  }
+  if (header_template.sample_type != MetalTileSampleType::Uint16Decimeters ||
+      conversion_pipeline == nil || quantized_staging == nil) {
+    throw std::logic_error("Fixed-point tile conversion resources are unavailable");
+  }
+
+  const QuantizedRecordLayout record = quantized_record_layout(header_template);
+  const uint32_t wave_capacity = static_cast<uint32_t>(metal_tile_io_concurrency());
+
+  for (size_t wave_start = 0U; wave_start < loads.size(); wave_start += wave_capacity) {
+    const size_t wave_size =
+        std::min(static_cast<size_t>(wave_capacity), loads.size() - wave_start);
+    std::vector<MetalTileBufferLoad> staged_loads;
+    staged_loads.reserve(wave_size);
+    for (size_t index = 0U; index < wave_size; index++) {
+      const MetalTileBufferLoad &load = loads[wave_start + index];
+      staged_loads.push_back(
+          {
+              load.path,
+              static_cast<NSUInteger>(index * static_cast<size_t>(record.stride)),
+              load.file,
+          }
+      );
+    }
+
+    timer.start_wall("Metal tile I/O");
+    load_metal_tiles_into_buffer(
+        device,
+        io_queue,
+        staged_loads,
+        0U,
+        record.logical_size,
+        quantized_staging,
+        quantized_staging.length
+    );
+    timer.stop("Metal tile I/O");
+
+    const std::span<const uint32_t> wave_slots = slots.subspan(wave_start, wave_size);
+    id<MTLBuffer> slot_buffer = [device newBufferWithBytes:wave_slots.data()
+                                                    length:wave_slots.size_bytes()
+                                                   options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> command = [mipmap_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (slot_buffer == nil || command == nil || encoder == nil) {
+      throw std::runtime_error("Could not create a fixed-point vertex-conversion command");
+    }
+    command.label = @"Convert fixed-point terrain vertices";
+    encoder.label = @"Convert fixed-point terrain vertices";
+    [encoder setComputePipelineState:conversion_pipeline];
+    [encoder setBuffer:quantized_staging offset:0U atIndex:0];
+    [encoder setBuffer:vertex_atlas offset:0U atIndex:1];
+    [encoder setBuffer:slot_buffer offset:0U atIndex:2];
+    [encoder setBytes:&record.stride length:sizeof(record.stride) atIndex:3];
+    [encoder setBytes:&record.vertex_offset length:sizeof(record.vertex_offset) atIndex:4];
+    [encoder setBytes:&record.elevation_base_offset
+                length:sizeof(record.elevation_base_offset)
+               atIndex:5];
+    [encoder setBytes:&vertex_count length:sizeof(vertex_count) atIndex:6];
+    const uint32_t tile_count = static_cast<uint32_t>(wave_size);
+    [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
+    [encoder dispatchThreads:MTLSizeMake(vertex_count, tile_count, 1U)
+        threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    [encoder endEncoding];
+
+    timer.start_wall("GPU vertex conversion");
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status == MTLCommandBufferStatusError) {
+      timer.stop("GPU vertex conversion");
+      print_error(@"Metal vertex conversion failed", command.error);
+      throw std::runtime_error("Metal fixed-point vertex conversion failed");
+    }
+    timer.add_work(
+        "GPU vertex conversion",
+        1'000.0 * (command.GPUEndTime - command.GPUStartTime)
+    );
+    timer.stop("GPU vertex conversion");
+  }
+}
 
 MipmapSubmission
 ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
@@ -336,24 +493,29 @@ ResidentTileCache::ResidentTileCache(
       origin.lower_left_x - static_cast<double>(origin_key.column) * tile_width;
   const double grid_origin_y =
       origin.lower_left_y + static_cast<double>(origin_key.row + 1) * tile_width;
-  const MetalTileHeader header_template = {
-      kMetalTileMagic,
-      kMetalTileVersion,
-      static_cast<uint32_t>(sizeof(MetalTileHeader)),
-      MetalTileCompression::None,
-      origin.crs.epsg_code(),
-      origin.size,
-      origin.num_levels,
-      origin.maximum_elevation,
-      MetalTileSampleType::Float32,
-      origin_key.row,
-      origin_key.column,
-      origin.lower_left_x,
-      origin.lower_left_y,
-      origin.delta,
-      sizeof(MetalTileHeader),
-      static_cast<uint64_t>(vertex_count) * sizeof(float),
-  };
+  const MetalTileHeader header_template = custom_origin
+                                               ? read_metal_tile_header(sources.front().path)
+                                               : MetalTileHeader{
+                                                     kMetalTileFloat32Magic,
+                                                     kMetalTileFloat32Version,
+                                                     kMetalTileFloat32HeaderSize,
+                                                     MetalTileCompression::None,
+                                                     origin.crs.epsg_code(),
+                                                     origin.size,
+                                                     origin.num_levels,
+                                                     origin.maximum_elevation,
+                                                     MetalTileSampleType::Float32,
+                                                     0,
+                                                     0U,
+                                                     origin_key.row,
+                                                     origin_key.column,
+                                                     origin.lower_left_x,
+                                                     origin.lower_left_y,
+                                                     origin.delta,
+                                                     kMetalTileFloat32HeaderSize,
+                                                     static_cast<uint64_t>(vertex_count) *
+                                                         sizeof(float),
+                                                 };
 
   // Each slot has the same payload length. Metal derives an address from a
   // slot index and this stride, so a work item never needs per-tile offsets.
@@ -415,20 +577,22 @@ ResidentTileCache::ResidentTileCache(
   if (needs_metal_io) {
     state->io_queue = make_metal_io_queue(device);
 
-    // Custom files contain vertices only. Compile the small reduction kernel
-    // once; every direct installation reuses it to populate a slot batch.
+    // Custom files contain atlas-ordered vertices. Both representations need
+    // GPU mipmap reduction; fixed-point tiles additionally need conversion.
     NSError *error = nil;
     NSURL *library_url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:kMetallibPath]];
     id<MTLLibrary> library = [device newLibraryWithURL:library_url error:&error];
     if (library == nil) {
       print_error(@"Could not load the Metal library", error);
-      throw std::runtime_error("Could not load Metal library for mipmap generation");
+      throw std::runtime_error("Could not load Metal library for terrain preparation");
     }
-    id<MTLFunction> function = [library newFunctionWithName:@"build_maximum_mipmap_level"];
-    if (function == nil) {
-      throw std::runtime_error("Metal mipmap-generation kernel is missing");
+    id<MTLFunction> mipmap_function =
+        [library newFunctionWithName:@"build_maximum_mipmap_level"];
+    if (mipmap_function == nil) {
+      throw std::runtime_error("Metal terrain-preparation kernel is missing");
     }
-    state->mipmap_pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+    state->mipmap_pipeline =
+        [device newComputePipelineStateWithFunction:mipmap_function error:&error];
     if (state->mipmap_pipeline == nil) {
       print_error(@"Could not create the mipmap-generation pipeline", error);
       throw std::runtime_error("Could not create the mipmap-generation pipeline");
@@ -436,6 +600,35 @@ ResidentTileCache::ResidentTileCache(
     state->mipmap_queue = [device newCommandQueue];
     if (state->mipmap_queue == nil) {
       throw std::runtime_error("Could not create the mipmap-generation command queue");
+    }
+
+    if (state->header_template.sample_type == MetalTileSampleType::Uint16Decimeters) {
+      id<MTLFunction> conversion_function =
+          [library newFunctionWithName:@"convert_quantized_vertices"];
+      if (conversion_function == nil) {
+        throw std::runtime_error("Metal vertex-conversion kernel is missing");
+      }
+      state->conversion_pipeline =
+          [device newComputePipelineStateWithFunction:conversion_function error:&error];
+      if (state->conversion_pipeline == nil) {
+        print_error(@"Could not create the vertex-conversion pipeline", error);
+        throw std::runtime_error("Could not create the vertex-conversion pipeline");
+      }
+
+      const QuantizedRecordLayout record = quantized_record_layout(state->header_template);
+      const size_t staging_tiles = std::min(
+          static_cast<size_t>(slot_capacity),
+          static_cast<size_t>(metal_tile_io_concurrency())
+      );
+      state->quantized_staging = make_buffer(
+          device,
+          checked_buffer_length(
+              staging_tiles,
+              static_cast<size_t>(record.stride),
+              "tile staging"
+          ),
+          "quantized tile staging"
+      );
     }
   }
   state->mipmaps = static_cast<float *>(state->mipmap_atlas.contents);
@@ -449,23 +642,17 @@ ResidentTileCache::ResidentTileCache(
 
   // Slot zero permanently starts as the observer tile, so the first frontier
   // can run before any asynchronous source has finished preparation. Custom
-  // vertices take the same direct I/O and GPU-reduction path as later tiles.
+  // vertices take the same Metal I/O and GPU-reduction path as later tiles.
   if (custom_origin) {
     const MetalTileBufferLoad load = {sources.front().path, 0U, nil};
-    timer.start_wall("Metal tile I/O");
-    load_metal_tiles_into_buffer(
-        device,
-        state->io_queue,
-        std::span<const MetalTileBufferLoad>(&load, 1U),
-        state->header_template.vertex_offset,
-        state->header_template.vertex_byte_count,
-        state->vertex_atlas,
-        state->vertex_atlas.length
-    );
-    timer.stop("Metal tile I/O");
     const uint32_t slot = 0U;
+    state->load_custom_vertices(
+        std::span<const MetalTileBufferLoad>(&load, 1U),
+        std::span<const uint32_t>(&slot, 1U),
+        timer
+    );
     state->generate_mipmaps(std::span<const uint32_t>(&slot, 1U), timer);
-    state->bytes_loaded_directly = static_cast<uint64_t>(vertex_count) * sizeof(float);
+    state->bytes_loaded_with_metal_io = state->header_template.vertex_byte_count;
   } else {
     if (origin.mipmap.size() != mip_count || origin.vertices->size() != vertex_count) {
       throw std::logic_error("GeoTIFF origin tile does not match the atlas dimensions");
@@ -562,7 +749,7 @@ void ResidentTileCache::install_prepared(
   }
 
   // GeoTIFFs already have CPU-resident payloads. Custom files instead provide
-  // direct-I/O requests and slot IDs for two synchronous batched operations.
+  // Metal I/O requests and slot IDs for synchronous GPU preparation.
   std::vector<MetalTileBufferLoad> custom_loads;
   std::vector<uint32_t> custom_slots;
   custom_loads.reserve(installations.size());
@@ -590,15 +777,9 @@ void ResidentTileCache::install_prepared(
       state.bytes_copied +=
           static_cast<uint64_t>(state.mip_count + state.vertex_count) * sizeof(float);
     } else {
-      // The catalogue and origin header establish the common payload layout.
-      // Installation therefore needs only a file and final buffer offset.
-      custom_loads.push_back(
-          {
-              source.path,
-              static_cast<NSUInteger>(installation.slot) * state.header_template.vertex_byte_count,
-              installation.prepared.metal_file,
-          }
-      );
+      // Float32 payloads load directly into their final atlas slots. Fixed-point
+      // records are staged and converted on the GPU into those same slots.
+      custom_loads.push_back({source.path, 0U, installation.prepared.metal_file});
       custom_slots.push_back(installation.slot);
       state.metadata[installation.slot] = make_resident_tile(
           installation.lower_left_x,
@@ -610,23 +791,13 @@ void ResidentTileCache::install_prepared(
   }
 
   if (!custom_loads.empty()) {
-    // Metal I/O decompresses vertices directly into their final atlas ranges.
-    // Wait here before the mipmap queue reads those same ranges.
-    timer.start_wall("Metal tile I/O");
-    load_metal_tiles_into_buffer(
-        state.device,
-        state.io_queue,
-        custom_loads,
-        state.header_template.vertex_offset,
-        state.header_template.vertex_byte_count,
-        state.vertex_atlas,
-        state.vertex_atlas.length
-    );
-    timer.stop("Metal tile I/O");
+    // Metal I/O decompresses complete records into a bounded GPU staging
+    // buffer. Conversion must finish before mipmap generation reads vertices.
+    state.load_custom_vertices(custom_loads, custom_slots, timer);
 
     state.generate_mipmaps(custom_slots, timer);
-    state.bytes_loaded_directly +=
-        static_cast<uint64_t>(custom_slots.size()) * state.vertex_count * sizeof(float);
+    state.bytes_loaded_with_metal_io +=
+        static_cast<uint64_t>(custom_slots.size()) * state.header_template.vertex_byte_count;
   }
 
   // All payload writes are now complete. Publish slot mappings together so
@@ -688,7 +859,7 @@ ResidentTileCacheStatistics ResidentTileCache::statistics() const {
   const State &state = *state_;
   return {state.installations,
           state.bytes_copied,
-          state.bytes_loaded_directly,
+          state.bytes_loaded_with_metal_io,
           state.evictions,
           state.resident_count,
           state.slot_capacity};

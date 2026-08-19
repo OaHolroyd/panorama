@@ -219,8 +219,6 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         paths,
         origin,
         grid,
-        static_cast<uint32_t>(mip_count),
-        static_cast<uint32_t>(vertex_count),
         atlas_slot_count,
         config.max_tile_preparation_workers,
         timer
@@ -397,11 +395,12 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         static_cast<unsigned long long>(preparation_statistics.reloads)
     );
     std::printf(
-        "  Atlas installations: %llu, copied: %.3f GiB, direct I/O: %.3f GiB, "
+        "  Atlas installations: %llu, copied: %.3f GiB, Metal I/O: %.3f GiB, "
         "evictions: %llu.\n",
         static_cast<unsigned long long>(cache_statistics.installations),
         static_cast<double>(cache_statistics.bytes_copied) / (1024.0 * 1024.0 * 1024.0),
-        static_cast<double>(cache_statistics.bytes_loaded_directly) / (1024.0 * 1024.0 * 1024.0),
+        static_cast<double>(cache_statistics.bytes_loaded_with_metal_io) /
+            (1024.0 * 1024.0 * 1024.0),
         static_cast<unsigned long long>(cache_statistics.evictions)
     );
     timer.print();

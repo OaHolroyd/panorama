@@ -49,7 +49,9 @@ struct Options {
   bool dry_run = false;
   OutputFormat format = OutputFormat::GeoTiff;
   MetalTileCompression compression = MetalTileCompression::Lz4;
+  MetalTileSampleType sample_type = MetalTileSampleType::Float32;
   bool explicit_compression = false;
+  bool explicit_sample_type = false;
 };
 
 /// Print the stable command-line contract without constructing any GDAL state.
@@ -68,7 +70,8 @@ void print_usage(const char *program) {
       "  --resolution R      output spacing (default: source resolution)\n"
       "  --nodata VALUE      output no-data value, including nan (default: 0)\n"
       "  --format NAME       geotiff or metal (default: geotiff)\n"
-      "  --compression NAME  none, zlib, lzfse, lz4, lzma, or lzbitmap\n"
+      "  --sample-type NAME  float32 or uint16 (Metal tiles; default: float32)\n"
+      "  --compression NAME  none, zlib, lz4, lzma, or lzbitmap\n"
       "                      (Metal tiles only; default: lz4)\n"
       "  --max-tiles N       stop after N output chunks; zero is unlimited\n"
       "  --overwrite         replace existing output chunks\n"
@@ -76,6 +79,17 @@ void print_usage(const char *program) {
       "  --help              show this help\n",
       program
   );
+}
+
+/// Parse the scalar representation stored in a Metal tile payload.
+[[nodiscard]] MetalTileSampleType parse_sample_type(std::string_view text) {
+  if (text == "float32") {
+    return MetalTileSampleType::Float32;
+  }
+  if (text == "uint16") {
+    return MetalTileSampleType::Uint16Decimeters;
+  }
+  throw std::invalid_argument("Sample type must be float32 or uint16");
 }
 
 /// Parse one codec supported by Metal's compressed-file I/O implementation.
@@ -86,9 +100,6 @@ void print_usage(const char *program) {
   if (text == "zlib") {
     return MetalTileCompression::Zlib;
   }
-  if (text == "lzfse") {
-    return MetalTileCompression::Lzfse;
-  }
   if (text == "lz4") {
     return MetalTileCompression::Lz4;
   }
@@ -98,7 +109,7 @@ void print_usage(const char *program) {
   if (text == "lzbitmap") {
     return MetalTileCompression::LzBitmap;
   }
-  throw std::invalid_argument("Compression must be none, zlib, lzfse, lz4, lzma, or lzbitmap");
+  throw std::invalid_argument("Compression must be none, zlib, lz4, lzma, or lzbitmap");
 }
 
 /// Return the human-readable output representation used in progress reports.
@@ -113,8 +124,6 @@ void print_usage(const char *program) {
     return "none";
   case MetalTileCompression::Zlib:
     return "zlib";
-  case MetalTileCompression::Lzfse:
-    return "lzfse";
   case MetalTileCompression::Lz4:
     return "lz4";
   case MetalTileCompression::Lzma:
@@ -213,6 +222,9 @@ void validate_dataset_name(const std::string &name) {
     } else if (option == "--compression") {
       options.compression = parse_compression(arguments::option_value(argc, argv, index, option));
       options.explicit_compression = true;
+    } else if (option == "--sample-type") {
+      options.sample_type = parse_sample_type(arguments::option_value(argc, argv, index, option));
+      options.explicit_sample_type = true;
     } else if (option == "--max-tiles") {
       options.max_tiles = arguments::parse_uint32(
           arguments::option_value(argc, argv, index, option),
@@ -248,6 +260,9 @@ void validate_dataset_name(const std::string &name) {
   }
   if (options.format == OutputFormat::GeoTiff && options.explicit_compression) {
     throw std::invalid_argument("--compression applies only to --format metal");
+  }
+  if (options.format == OutputFormat::GeoTiff && options.explicit_sample_type) {
+    throw std::invalid_argument("--sample-type applies only to --format metal");
   }
   if (options.format == OutputFormat::MetalTile && options.layout != RasterLayout::Level0) {
     throw std::invalid_argument("Metal tiles currently support only --layout level-0");
@@ -296,7 +311,9 @@ int main(int argc, const char *argv[]) {
       std::string directory_name = options.dataset_name + "-" + directory_size_name(options) + "-" +
                                    layout_name(options.layout);
       if (options.format == OutputFormat::MetalTile) {
-        directory_name += "-metal-";
+        directory_name += options.sample_type == panorama::MetalTileSampleType::Float32
+                              ? "-metal-"
+                              : "-metal-u16-";
         directory_name += compression_name(options.compression);
       }
       options.output_directory = std::filesystem::path("data") / directory_name;
@@ -400,7 +417,8 @@ int main(int argc, const char *argv[]) {
             destination,
             key,
             catalogue.grid(),
-            options.compression
+            options.compression,
+            options.sample_type
         );
       }
       written++;

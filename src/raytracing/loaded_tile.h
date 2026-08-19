@@ -12,14 +12,14 @@ namespace panorama {
 /// Host metadata and any CPU-resident terrain for one square tracer tile.
 ///
 /// `size` is the number of level-1 cells along one edge. All arrays are
-/// float32 and row-major; row zero is the southern edge, so Y increases
+/// Float32 and row-major; row zero is the southern edge, so Y increases
 /// northward as required by tracing. Custom Metal tiles initially contain
-/// metadata only because the cache loads their vertices directly into Metal
-/// and builds their maximum mipmap on the GPU.
+/// metadata only because the cache loads their vertices directly to GPU-visible
+/// buffers, expanding fixed-point payloads before building the maximum mipmap.
 struct LoadedTile {
   // True when the terrain representation supports exact bilinear collisions.
   // GeoTIFFs then own `(size + 1)²` values in `vertices`; custom Metal tiles
-  // leave the host pointer null because their vertices go straight to Metal.
+  // leave the host pointer null because their vertices stay on the GPU path.
   bool supports_level_0_collisions;
   Crs crs;
   float maximum_elevation;
@@ -33,7 +33,7 @@ struct LoadedTile {
   double delta;
 
   // Host-resident vertex terrain for bilinear level-0 collisions. This is
-  // null for level-1-only input and for directly loaded custom Metal tiles.
+  // null for level-1-only input and for GPU-loaded custom Metal tiles.
   std::unique_ptr<std::vector<float>> vertices;
 
   // Number of levels in the maximum mipmap, including level 1 and its final
@@ -43,7 +43,7 @@ struct LoadedTile {
   // Maximum mipmap stored as a contiguous block of memory. It is laid out
   // from finest to coarsest levels (that is, level 1, level 2, ...). A custom
   // Metal tile leaves this empty on the host because the GPU builds it after
-  // loading vertices directly into the atlas.
+  // expanding vertices into the atlas.
   std::vector<float> mipmap;
 
   /// Load a single-band, north-up `.tif` into south-to-north tracer row order.
@@ -61,7 +61,7 @@ struct LoadedTile {
   /// Load either GeoTIFF terrain or custom-tile metadata into the host model.
   ///
   /// Custom files retain their vertices on disk: the returned object contains
-  /// metadata only, and the cache transfers vertices directly into Metal.
+  /// metadata only, and the cache loads vertices through Metal I/O.
   [[nodiscard]] static LoadedTile load(const std::filesystem::path &path);
 
   /// Fill the mipmap with every coarser maximum level, if not already present.

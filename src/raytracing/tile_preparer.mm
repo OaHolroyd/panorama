@@ -71,8 +71,8 @@ struct AsyncTilePreparer::State {
   std::span<const TerrainSource> sources;
   const LoadedTile &origin;
   TileGrid grid;
-  uint32_t expected_mipmap_values;
-  uint32_t expected_vertex_values;
+  size_t expected_mipmap_values;
+  size_t expected_vertex_values;
   uint32_t prepared_capacity;
   Timer &timer;
 
@@ -102,13 +102,17 @@ struct AsyncTilePreparer::State {
       std::span<const TerrainSource> source_values,
       const LoadedTile &origin_value,
       TileGrid grid_value,
-      uint32_t mipmap_values,
-      uint32_t vertex_values,
       uint32_t queue_capacity,
       Timer &timer_value
   )
       : device(device_value), sources(source_values), origin(origin_value), grid(grid_value),
-        expected_mipmap_values(mipmap_values), expected_vertex_values(vertex_values),
+        expected_mipmap_values(
+            static_cast<size_t>(metal_tile_mipmap_value_count(origin_value.size))
+        ),
+        expected_vertex_values(
+            (static_cast<size_t>(origin_value.size) + 1U) *
+            (static_cast<size_t>(origin_value.size) + 1U)
+        ),
         prepared_capacity(queue_capacity), timer(timer_value) {}
 };
 
@@ -117,8 +121,6 @@ AsyncTilePreparer::AsyncTilePreparer(
     std::span<const TerrainSource> sources,
     const LoadedTile &origin,
     TileGrid grid,
-    uint32_t expected_mipmap_values,
-    uint32_t expected_vertex_values,
     uint32_t prepared_capacity,
     uint32_t configured_workers,
     Timer &timer
@@ -129,8 +131,6 @@ AsyncTilePreparer::AsyncTilePreparer(
               sources,
               origin,
               grid,
-              expected_mipmap_values,
-              expected_vertex_values,
               prepared_capacity,
               timer
           )

@@ -54,6 +54,35 @@ struct DeferredTileWork {
   float entry_distance;
 };
 
+/// Expand fixed-point tile vertices from a Metal I/O staging buffer into
+/// their final Float32 atlas slots. Each staged record contains the complete
+/// logical tile stream, allowing this kernel to read the per-tile base from
+/// its header without a separate host-side metadata request.
+kernel void convert_quantized_vertices(
+    device const uchar *source_records [[buffer(0)]],
+    device float *destination [[buffer(1)]],
+    device const uint *destination_slots [[buffer(2)]],
+    constant uint &source_record_stride [[buffer(3)]],
+    constant uint &vertex_offset [[buffer(4)]],
+    constant uint &elevation_base_offset [[buffer(5)]],
+    constant uint &vertex_count [[buffer(6)]],
+    constant uint &tile_count [[buffer(7)]],
+    uint2 output_index [[thread_position_in_grid]]
+) {
+  if (output_index.x >= vertex_count || output_index.y >= tile_count) {
+    return;
+  }
+
+  device const uchar *record = source_records + output_index.y * source_record_stride;
+  device const int *base =
+      reinterpret_cast<device const int *>(record + elevation_base_offset);
+  device const ushort *vertices =
+      reinterpret_cast<device const ushort *>(record + vertex_offset);
+  const uint slot = destination_slots[output_index.y];
+  destination[slot * vertex_count + output_index.x] =
+      (float(*base) + float(vertices[output_index.x])) * 0.1F;
+}
+
 /// Build one square maximum-mipmap level for a batch of atlas slots.
 ///
 /// For level 1, `source` addresses the vertex grid, `source_step` is one, and

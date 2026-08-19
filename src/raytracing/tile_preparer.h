@@ -42,9 +42,9 @@ void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const T
 ///
 /// The main thread requests catalogue indices by ray-entry priority. Workers
 /// load, validate, and mipmap GeoTIFFs, then place them into a bounded queue.
-/// Custom Metal sources need no CPU decoding, so workers open their direct-I/O
+/// Custom Metal sources need no CPU decoding, so workers open their Metal I/O
 /// handles in parallel. The cache remains solely responsible for GPU slots,
-/// direct I/O, mipmap generation, and residency state.
+/// Metal I/O, fixed-point conversion, mipmap generation, and residency state.
 class AsyncTilePreparer {
 public:
   /// Construct a stopped preparer with a bounded prepared-tile hand-off queue.
@@ -53,8 +53,6 @@ public:
       std::span<const TerrainSource> sources,
       const LoadedTile &origin,
       TileGrid grid,
-      uint32_t expected_mipmap_values,
-      uint32_t expected_vertex_values,
       uint32_t prepared_capacity,
       uint32_t configured_workers,
       Timer &timer

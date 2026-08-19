@@ -44,7 +44,7 @@ struct ResidentTileCacheBindings {
 struct ResidentTileCacheStatistics {
   uint64_t installations;
   uint64_t bytes_copied;
-  uint64_t bytes_loaded_directly;
+  uint64_t bytes_loaded_with_metal_io;
   uint64_t evictions;
   uint32_t resident_tiles;
   uint32_t slot_capacity;
@@ -54,14 +54,14 @@ struct ResidentTileCacheStatistics {
 ///
 /// The cache owns the GPU-visible vertex/mipmap buffers, source-to-slot maps,
 /// and resident key hash. Between completed frontier commands it installs all
-/// currently prepared tiles, waiting for custom direct I/O and GPU mipmap
-/// generation before publishing their resident hash entries.
+/// currently prepared tiles, waiting for custom I/O, fixed-point conversion,
+/// and GPU mipmap generation before publishing their resident hash entries.
 class ResidentTileCache {
 public:
   /// Allocate the atlas and install the observer tile in slot zero.
   ///
   /// A GeoTIFF observer is already resident on the CPU. A custom observer
-  /// supplies metadata only and is transferred directly from its file.
+  /// supplies metadata only and is staged and converted from its file.
   ResidentTileCache(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,

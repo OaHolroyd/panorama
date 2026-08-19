@@ -3,9 +3,10 @@
 /panorama-tile-gen
 /obj/
 /compile_commands.json
+/benchmark-results/
 
 # Elevation data
-*.ptile.*
+*.ptile*
 *.tif
 
 # Image data
