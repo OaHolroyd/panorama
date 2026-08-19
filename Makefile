@@ -1,9 +1,14 @@
-# The command-line executable produced by the default target.
-EXE := panorama
-COMPILE_DB := compile_commands.json
+# Raytracing and tile-generation command-line executables.
+PANORAMA_EXE := panorama
+TILE_GEN_EXE := panorama-tile-gen
 
-# Keep source files flat for now; all generated files stay below obj/.
+# Keep each executable's implementation separate. Common format and argument
+# code lives in shared/ and is linked into both without either depending on
+# the other's entry point or application-specific implementation.
 SRC_DIR := src
+RAYTRACE_SRC_DIR := $(SRC_DIR)/raytracing
+TILE_GEN_SRC_DIR := $(SRC_DIR)/tile-gen
+SHARED_SRC_DIR := $(SRC_DIR)/shared
 OBJ_ROOT := obj
 
 # Objective-C++ host compiler and the two Metal shader-toolchain stages.
@@ -19,8 +24,10 @@ GDAL_LIBS := $(shell $(GDAL_CONFIG) --libs)
 
 # Host compiler options.  -MMD/-MP generate makefile dependency files next to
 # each object, and ARC is required by the Objective-C++ Metal host code.
-CPPFLAGS := -I$(SRC_DIR)
-CPPFLAGS += $(GDAL_CFLAGS)
+CPPFLAGS := $(GDAL_CFLAGS)
+RAYTRACE_INCLUDES := -I$(RAYTRACE_SRC_DIR) -I$(SHARED_SRC_DIR)
+TILE_GEN_INCLUDES := -I$(TILE_GEN_SRC_DIR) -I$(SHARED_SRC_DIR)
+SHARED_INCLUDES := -I$(SHARED_SRC_DIR)
 WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion
 COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
 # ImageIO/CoreGraphics encode diagnostic and rendered images as PNG files.
@@ -42,36 +49,55 @@ endif
 # Separate configurations so `make DEBUG=1` cannot reuse release objects.
 OBJ_DIR := $(OBJ_ROOT)/$(BUILD)
 
-# Discover every host and shader source in src/.  Adding a .mm or .metal file
-# therefore needs no Makefile edit.  All shaders share one runtime library.
-HOST_SRC := $(wildcard $(SRC_DIR)/*.mm)
-HOST_OBJ := $(patsubst $(SRC_DIR)/%.mm,$(OBJ_DIR)/%.o,$(HOST_SRC))
-METAL_SRC := $(wildcard $(SRC_DIR)/*.metal)
-METAL_AIR := $(patsubst $(SRC_DIR)/%.metal,$(OBJ_DIR)/%.air,$(METAL_SRC))
-METAL_LIB := $(OBJ_DIR)/panorama.metallib
+# Each executable has its own source and object directory. Shared translation
+# units are compiled once per build configuration and linked into both.
+PANORAMA_SRC := $(wildcard $(RAYTRACE_SRC_DIR)/*.mm)
+PANORAMA_OBJ := $(patsubst $(RAYTRACE_SRC_DIR)/%.mm,$(OBJ_DIR)/raytracing/%.o,$(PANORAMA_SRC))
+TILE_GEN_SRC := $(wildcard $(TILE_GEN_SRC_DIR)/*.mm)
+TILE_GEN_OBJ := $(patsubst $(TILE_GEN_SRC_DIR)/%.mm,$(OBJ_DIR)/tile-gen/%.o,$(TILE_GEN_SRC))
+SHARED_SRC := $(wildcard $(SHARED_SRC_DIR)/*.mm)
+SHARED_OBJ := $(patsubst $(SHARED_SRC_DIR)/%.mm,$(OBJ_DIR)/shared/%.o,$(SHARED_SRC))
+METAL_SRC := $(wildcard $(RAYTRACE_SRC_DIR)/*.metal)
+METAL_AIR := $(patsubst $(RAYTRACE_SRC_DIR)/%.metal,$(OBJ_DIR)/raytracing/%.air,$(METAL_SRC))
+METAL_LIB := $(OBJ_DIR)/raytracing/panorama.metallib
 # Tell the host where this configuration's generated metallib is located.
-CPPFLAGS += -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
+RAYTRACE_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
-DEPS := $(HOST_OBJ:.o=.d)
+DEPS := $(PANORAMA_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) $(SHARED_OBJ:.o=.d)
 
 .PHONY: all clean rebuild compile_commands FORCE
 
-all: $(EXE)
+all: $(PANORAMA_EXE) $(TILE_GEN_EXE)
 
 # The executable name is shared by configurations, so relink it to the
 # configuration requested by this invocation even if the other build was newer.
-$(EXE): FORCE $(HOST_OBJ) $(METAL_LIB)
+$(PANORAMA_EXE): FORCE $(PANORAMA_OBJ) $(SHARED_OBJ) $(METAL_LIB)
 	@printf 'Linking %s\n' '$@'
-	$(CXX) $(OPT_FLAGS) -o $@ $(HOST_OBJ) $(FRAMEWORKS) $(LDLIBS)
+	$(CXX) $(OPT_FLAGS) -o $@ $(PANORAMA_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
 
-# Compile one Objective-C++ source file into its matching object file.
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.mm | $(OBJ_DIR)
+# The tile generator does not use a metallib. It links Metal because the
+# custom-tile writer uses Metal I/O compression contexts.
+$(TILE_GEN_EXE): FORCE $(TILE_GEN_OBJ) $(SHARED_OBJ)
+	@printf 'Linking %s\n' '$@'
+	$(CXX) $(OPT_FLAGS) -o $@ $(TILE_GEN_OBJ) $(SHARED_OBJ) -framework Foundation -framework Metal $(LDLIBS)
+
+# Compile the raytracer and tile generator into distinct object directories so
+# their respective main.mm files cannot collide.
+$(OBJ_DIR)/raytracing/%.o: $(RAYTRACE_SRC_DIR)/%.mm | $(OBJ_DIR)/raytracing
 	@printf 'Compiling %s\n' '$@'
-	$(CXX) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
+	$(CXX) $(RAYTRACE_INCLUDES) $(CPPFLAGS) $(RAYTRACE_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/tile-gen/%.o: $(TILE_GEN_SRC_DIR)/%.mm | $(OBJ_DIR)/tile-gen
+	@printf 'Compiling %s\n' '$@'
+	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/shared/%.o: $(SHARED_SRC_DIR)/%.mm | $(OBJ_DIR)/shared
+	@printf 'Compiling %s\n' '$@'
+	$(CXX) $(SHARED_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
 
 # Metal source compiles to AIR (Apple Intermediate Representation) before the
 # metallib tool packages every AIR file into one library.
-$(OBJ_DIR)/%.air: $(SRC_DIR)/%.metal | $(OBJ_DIR)
+$(OBJ_DIR)/raytracing/%.air: $(RAYTRACE_SRC_DIR)/%.metal | $(OBJ_DIR)/raytracing
 	@printf 'Compiling %s\n' '$@'
 	$(METAL) -c -o $@ $<
 
@@ -79,7 +105,7 @@ $(METAL_LIB): $(METAL_AIR)
 	@printf 'Creating %s\n' '$@'
 	$(METALLIB) -o $@ $<
 
-$(OBJ_DIR):
+$(OBJ_DIR)/raytracing $(OBJ_DIR)/tile-gen $(OBJ_DIR)/shared:
 	mkdir -p $@
 
 # Generate the compilation database consumed by clangd/objc-clangd. Bear
@@ -88,13 +114,13 @@ $(OBJ_DIR):
 # recipe. `-B` deliberately rebuilds the executable: there must be real
 # compiler processes for Bear to observe.
 compile_commands:
-	rm -f $(COMPILE_DB)
-	bear --output $(COMPILE_DB) -- $(MAKE) --no-print-directory -B $(EXE)
+	rm -f compile_commands.json
+	bear --output compile_commands.json -- $(MAKE) --no-print-directory -B all
 
 rebuild: clean all
 
 clean:
-	rm -rf $(EXE) $(OBJ_ROOT) $(COMPILE_DB)
+	rm -rf $(PANORAMA_EXE) $(TILE_GEN_EXE) $(OBJ_ROOT) compile_commands.json
 
 # A phony prerequisite makes the shared executable relink when switching
 # between debug and release object directories.

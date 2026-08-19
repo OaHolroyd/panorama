@@ -4,6 +4,8 @@
 #include "terrain_catalogue.h"
 #include "timer.h"
 
+#import <Metal/Metal.h>
+
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -13,10 +15,15 @@
 
 namespace panorama {
 
-/// One fully prepared source tile awaiting installation in the resident atlas.
+/// One source awaiting installation in the resident atlas.
+///
+/// GeoTIFF sources carry a fully prepared CPU tile. A custom source instead
+/// carries a pre-opened Metal file handle but no CPU payload. Opening handles
+/// on workers keeps that cost outside synchronous atlas installation.
 struct PreparedTile {
   uint32_t source_index;
   std::unique_ptr<LoadedTile> tile;
+  id<MTLIOFileHandle> metal_file;
 };
 
 /// Final counters describing background tile preparation work.
@@ -31,22 +38,21 @@ struct TilePreparationStatistics {
 /// Check that a loaded tile's georeferencing agrees with its catalogue key.
 void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const TileGrid &grid);
 
-/// Prepare compatible terrain tiles concurrently without owning GPU resources.
+/// Prepare compatible terrain sources without owning atlas or command resources.
 ///
 /// The main thread requests catalogue indices by ray-entry priority. Workers
-/// load, validate, and mipmap those files, then place immutable `LoadedTile`
-/// objects into a bounded queue. The resident atlas cache consumes that queue
-/// and is solely responsible for assigning GPU slots and marking a source
-/// resident or evicted.
+/// load, validate, and mipmap GeoTIFFs, then place them into a bounded queue.
+/// Custom Metal sources need no CPU decoding, so workers open their Metal I/O
+/// handles in parallel. The cache remains solely responsible for GPU slots,
+/// Metal I/O, fixed-point conversion, mipmap generation, and residency state.
 class AsyncTilePreparer {
 public:
   /// Construct a stopped preparer with a bounded prepared-tile hand-off queue.
   AsyncTilePreparer(
+      id<MTLDevice> device,
       std::span<const TerrainSource> sources,
       const LoadedTile &origin,
       TileGrid grid,
-      uint32_t expected_mipmap_values,
-      uint32_t expected_vertex_values,
       uint32_t prepared_capacity,
       uint32_t configured_workers,
       Timer &timer
@@ -64,7 +70,7 @@ public:
   /// Queue a nonresident source, keeping its smallest requested priority.
   void request(uint32_t source_index, float priority);
 
-  /// Return and remove one completed CPU tile, or no value when none is ready.
+  /// Return and remove one completed prepared source, or no value when none is ready.
   [[nodiscard]] std::optional<PreparedTile> try_take_prepared();
 
   /// Block until one prepared tile is available or a worker reports an error.

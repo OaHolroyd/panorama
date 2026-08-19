@@ -64,7 +64,8 @@ public:
       std::span<const HorizontalDirection> directions,
       std::span<const float> slopes,
       size_t ray_count,
-      uint32_t frontier_capacity
+      uint32_t frontier_capacity,
+      bool trace_quantized
   );
 
   GpuRaytraceResources(const GpuRaytraceResources &) = delete;

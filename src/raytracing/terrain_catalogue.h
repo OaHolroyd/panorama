@@ -37,16 +37,16 @@ struct TerrainSource {
 
 /// A finite, indexed catalogue of terrain sources relevant to one render.
 ///
-/// The catalogue scans a prepared-tile directory once, retains sources within
+/// The catalogue scans a prepared-tile directory once, derives its physical
+/// grid from GeoTIFF metadata or the custom tile header, retains sources within
 /// the configured horizontal range, and maps their stable grid keys to source
 /// indices. It is immutable thereafter, so foreground scheduling and worker
 /// threads can safely share its source vector without synchronisation.
 class TerrainCatalogue {
 public:
-  /// Discover available sources around an observer and put its tile at index zero.
+  /// Infer the prepared grid, discover sources, and put the observer tile first.
   [[nodiscard]] static TerrainCatalogue discover(
       const std::filesystem::path &tile_dir,
-      TileGrid grid,
       const ObserverLocation &observer,
       float max_distance,
       uint32_t max_tile_count
@@ -77,10 +77,7 @@ private:
 [[nodiscard]] TileKey tile_key_at(const TileGrid &grid, double easting, double northing);
 
 /// Return the shortest horizontal distance from an observer to one tile square.
-[[nodiscard]] double tile_minimum_distance(
-    const TileGrid &grid,
-    TileKey key,
-    const ObserverLocation &observer
-);
+[[nodiscard]] double
+tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLocation &observer);
 
 } // namespace panorama

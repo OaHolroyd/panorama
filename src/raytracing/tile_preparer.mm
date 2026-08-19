@@ -1,5 +1,7 @@
 #include "tile_preparer.h"
 
+#include "metal_tile.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -65,11 +67,12 @@ void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const T
 
 /// Mutable state kept behind the preparer's small public interface.
 struct AsyncTilePreparer::State {
+  id<MTLDevice> device;
   std::span<const TerrainSource> sources;
   const LoadedTile &origin;
   TileGrid grid;
-  uint32_t expected_mipmap_values;
-  uint32_t expected_vertex_values;
+  size_t expected_mipmap_values;
+  size_t expected_vertex_values;
   uint32_t prepared_capacity;
   Timer &timer;
 
@@ -95,36 +98,39 @@ struct AsyncTilePreparer::State {
 
   /// Initialise immutable preparation inputs before worker threads exist.
   State(
+      id<MTLDevice> device_value,
       std::span<const TerrainSource> source_values,
       const LoadedTile &origin_value,
       TileGrid grid_value,
-      uint32_t mipmap_values,
-      uint32_t vertex_values,
       uint32_t queue_capacity,
       Timer &timer_value
   )
-      : sources(source_values), origin(origin_value), grid(grid_value),
-        expected_mipmap_values(mipmap_values), expected_vertex_values(vertex_values),
+      : device(device_value), sources(source_values), origin(origin_value), grid(grid_value),
+        expected_mipmap_values(
+            static_cast<size_t>(metal_tile_mipmap_value_count(origin_value.size))
+        ),
+        expected_vertex_values(
+            (static_cast<size_t>(origin_value.size) + 1U) *
+            (static_cast<size_t>(origin_value.size) + 1U)
+        ),
         prepared_capacity(queue_capacity), timer(timer_value) {}
 };
 
 AsyncTilePreparer::AsyncTilePreparer(
+    id<MTLDevice> device,
     std::span<const TerrainSource> sources,
     const LoadedTile &origin,
     TileGrid grid,
-    uint32_t expected_mipmap_values,
-    uint32_t expected_vertex_values,
     uint32_t prepared_capacity,
     uint32_t configured_workers,
     Timer &timer
 )
     : state_(
           std::make_unique<State>(
+              device,
               sources,
               origin,
               grid,
-              expected_mipmap_values,
-              expected_vertex_values,
               prepared_capacity,
               timer
           )
@@ -191,11 +197,35 @@ void AsyncTilePreparer::start() {
         try {
           const TerrainSource &source = worker_state.sources[request.source_index];
 
-          // Load and prepare outside the mutex. Timer work time intentionally
-          // sums concurrent worker effort, unlike wall time.
-          worker_state.timer.start_work("Tile load");
-          auto tile = std::make_unique<LoadedTile>(LoadedTile::load_tif(source.path, true));
-          worker_state.timer.stop("Tile load");
+          // A custom tile's terrain payload already stores vertices in atlas
+          // order and contains no mipmap. Keep the payload out of host memory;
+          // opening its Metal handle here also keeps work off the scheduler.
+          std::unique_ptr<LoadedTile> tile;
+          id<MTLIOFileHandle> metal_file;
+          if (is_metal_tile_path(source.path)) {
+            worker_state.timer.start_work("Metal tile open");
+            metal_file = open_metal_tile_file(worker_state.device, source.path);
+            worker_state.timer.stop("Metal tile open");
+          } else {
+            // Load and prepare GeoTIFFs outside the mutex. Timer work time
+            // intentionally sums concurrent worker effort, unlike wall time.
+            worker_state.timer.start_work("Tile load");
+            tile = std::make_unique<LoadedTile>(LoadedTile::load_tif(source.path, true));
+            worker_state.timer.stop("Tile load");
+
+            validate_tile_compatibility(*tile, worker_state.origin);
+            validate_terrain_tile_position(*tile, source.key, worker_state.grid);
+
+            // The resulting maximum hierarchy has exactly the fixed stride
+            // the resident atlas uses for every compatible source.
+            worker_state.timer.start_work("Mipmap generation");
+            tile->compute_mipmap();
+            worker_state.timer.stop("Mipmap generation");
+            if (tile->mipmap.size() != worker_state.expected_mipmap_values ||
+                tile->vertices->size() != worker_state.expected_vertex_values) {
+              throw std::runtime_error("Resident tile does not match the atlas dimensions");
+            }
+          }
 
           {
             std::lock_guard<std::mutex> worker_lock(worker_state.mutex);
@@ -211,22 +241,9 @@ void AsyncTilePreparer::start() {
             }
           }
 
-          validate_tile_compatibility(*tile, worker_state.origin);
-          validate_terrain_tile_position(*tile, source.key, worker_state.grid);
-
-          // The resulting maximum hierarchy has exactly the fixed stride the
-          // resident atlas uses for every compatible source.
-          worker_state.timer.start_work("Mipmap generation");
-          tile->compute_mipmap();
-          worker_state.timer.stop("Mipmap generation");
-          if (tile->mipmap.size() != worker_state.expected_mipmap_values ||
-              tile->vertices->size() != worker_state.expected_vertex_values) {
-            throw std::runtime_error("Resident tile does not match the atlas dimensions");
-          }
-
-          // Bound prepared CPU terrain to the atlas capacity. This applies
-          // back-pressure instead of letting fast workers consume RAM while
-          // the main thread waits for GPU frontier work to complete.
+          // Bound the prepared hand-off queue to the atlas capacity. This
+          // applies back-pressure instead of preparing sources the cache
+          // cannot install while the current frontier is in flight.
           std::unique_lock<std::mutex> worker_lock(worker_state.mutex);
           worker_state.prepared_space_available.wait(worker_lock, [&] {
             return worker_state.stop.load(std::memory_order_relaxed) ||
@@ -236,7 +253,7 @@ void AsyncTilePreparer::start() {
             break;
           }
           worker_state.states[request.source_index] = TileLoadState::Prepared;
-          worker_state.prepared.push_back({request.source_index, std::move(tile)});
+          worker_state.prepared.push_back({request.source_index, std::move(tile), metal_file});
           worker_lock.unlock();
           worker_state.prepared_available.notify_one();
         } catch (...) {

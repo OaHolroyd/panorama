@@ -1,7 +1,8 @@
 #include "raytrace_setup.h"
 
-#include "loaded_tile.h"
 #include "host_frontier.h"
+#include "loaded_tile.h"
+#include "metal_tile.h"
 #include "png_writer.h"
 #include "raytrace_gpu.h"
 #include "resident_tile_cache.h"
@@ -37,9 +38,7 @@ void validate_configuration(const RaytraceConfig &config) {
   if (!std::isfinite(config.observer.easting) || !std::isfinite(config.observer.northing) ||
       !std::isfinite(config.observer.elevation) || !std::isfinite(config.azimuth_start) ||
       !std::isfinite(config.azimuth_end) || !std::isfinite(config.polar_start) ||
-      !std::isfinite(config.polar_end) || !std::isfinite(config.tile_grid_origin_x) ||
-      !std::isfinite(config.tile_grid_origin_y) || !std::isfinite(config.tile_width) ||
-      !std::isfinite(config.max_distance) || config.tile_width <= 0.0 ||
+      !std::isfinite(config.polar_end) || !std::isfinite(config.max_distance) ||
       config.max_distance <= 0.0F) {
     throw std::invalid_argument("Raytrace configuration must be finite");
   }
@@ -80,7 +79,8 @@ make_azimuth_directions(const RaytraceConfig &config) {
   const double step = (config.azimuth_end - config.azimuth_start) / config.num_azimuth;
   for (uint32_t index = 0U; index < config.num_azimuth; index++) {
     const double azimuth = config.azimuth_start + (static_cast<double>(index) + 0.5) * step;
-    directions[index] = {static_cast<float>(std::sin(azimuth)), static_cast<float>(std::cos(azimuth))};
+    directions[index] = {static_cast<float>(std::sin(azimuth)),
+                         static_cast<float>(std::cos(azimuth))};
   }
   return directions;
 }
@@ -113,7 +113,7 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 } // namespace
 
 /// Trace a fixed observer's angular ray field through a set of terrain tiles
-/// using a GPU-owned frontier and a CPU-owned resident-tile cache.
+/// using a GPU-owned frontier and a host-managed resident-tile cache.
 ///
 /// Initially, one work item represents the unresolved polar-ray column for
 /// each azimuth entering the observer tile. Each frontier iteration traces
@@ -123,13 +123,13 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 /// its exact entry distance, requests that tile's preparation, and activates
 /// the suffix once an atlas slot becomes available.
 ///
-/// Background workers load, validate, and mipmap requested source tiles. The
-/// main thread installs completed tiles into fixed-stride vertex and maximum-
-/// mipmap atlases between GPU command buffers, rebuilding the GPU tile-key
-/// lookup table after changes. When the atlas is full, it evicts the least-
-/// recently-used slot not referenced by the imminent frontier. The loop ends
-/// when every azimuth column has intersected terrain, reached the range limit,
-/// or left available terrain coverage.
+/// Background workers load, validate, and mipmap GeoTIFF sources or open custom
+/// tile handles. The main thread installs prepared sources into fixed-stride
+/// terrain and maximum-mipmap atlases between GPU command buffers, rebuilding
+/// the GPU tile-key lookup table after changes. When the atlas is full, it
+/// evicts the least-recently-used slot not referenced by the imminent frontier.
+/// The loop ends when every azimuth column has intersected terrain, reached the
+/// range limit, or left available terrain coverage.
 void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   validate_configuration(config);
   // Start a composite timer.
@@ -138,40 +138,67 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
   // Discover the finite source set once. The catalogue provides the observer
   // source at index zero and an immutable key-to-source lookup thereafter.
-  const TileGrid grid = {
-      config.tile_grid_origin_x,
-      config.tile_grid_origin_y,
-      config.tile_width,
-  };
   const TerrainCatalogue catalogue = TerrainCatalogue::discover(
       config.tile_dir,
-      grid,
       config.observer,
       config.max_distance,
       config.max_tile_count
   );
+  const TileGrid &grid = catalogue.grid();
   const TileKey origin_key = catalogue.origin().key;
 
   // The observer tile establishes common data dimensions and the projected
   // coordinate system required by every fixed-stride atlas slot.
   timer.start_work("Tile load");
-  LoadedTile origin = LoadedTile::load_tif(catalogue.origin().path, true);
+  LoadedTile origin = LoadedTile::load(catalogue.origin().path);
   timer.stop("Tile load");
 
-  timer.start_work("Mipmap generation");
-  origin.compute_mipmap();
-  timer.stop("Mipmap generation");
+  // GeoTIFF preparation builds its mipmap on the CPU. Custom files store no
+  // mipmap hierarchy, so the cache generates it in the atlas on the GPU.
+  const bool custom_origin = is_metal_tile_path(catalogue.origin().path);
+  if (!custom_origin) {
+    timer.start_work("Mipmap generation");
+    origin.compute_mipmap();
+    timer.stop("Mipmap generation");
+  }
 
   validate_terrain_tile_position(origin, origin_key, grid);
 
+  bool trace_quantized = false;
+  QuantizedMetalTileRecordLayout quantized_layout = {};
+  if (config.retain_quantized) {
+    if (!custom_origin) {
+      throw std::invalid_argument("--retain-quantized requires uint16 custom terrain tiles");
+    }
+    const MetalTileHeader header = read_metal_tile_header(catalogue.origin().path);
+    if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
+      throw std::invalid_argument("--retain-quantized requires uint16 custom terrain tiles");
+    }
+    quantized_layout = quantized_metal_tile_record_layout(header);
+    trace_quantized = true;
+  }
+
   const std::vector<TerrainSource> &paths = catalogue.sources();
+  if (trace_quantized && std::any_of(paths.begin(), paths.end(), [](const TerrainSource &source) {
+        return !is_metal_tile_path(source.path);
+      })) {
+    throw std::invalid_argument("--retain-quantized requires a custom-only terrain directory");
+  }
 
   // Every rechunked tile must have the origin tile's dimensions, allowing
   // constant per-slot atlas strides. Derive the number of permitted slots
   // from the byte budget rather than hard-coding a tile count.
-  const size_t mip_count = origin.mipmap.size();
-  const size_t vertex_count = origin.vertices->size();
-  const size_t tile_bytes = checked_byte_count(mip_count + vertex_count, sizeof(float), "terrain tile");
+  const size_t mip_count = static_cast<size_t>(metal_tile_mipmap_value_count(origin.size));
+  const size_t vertex_side = static_cast<size_t>(origin.size) + 1U;
+  const size_t vertex_count = vertex_side * vertex_side;
+  if (mip_count > std::numeric_limits<uint32_t>::max() ||
+      vertex_count > std::numeric_limits<uint32_t>::max()) {
+    throw std::overflow_error("Terrain tile arrays exceed Metal uint indexing");
+  }
+  const size_t tile_bytes =
+      trace_quantized ? checked_byte_count(mip_count, sizeof(uint16_t), "terrain mipmap") +
+                            quantized_layout.stride
+                      : checked_byte_count(mip_count + vertex_count, sizeof(float), "terrain tile");
   const uint64_t slot_capacity = config.tile_cache_size_bytes / tile_bytes;
   if (slot_capacity == 0U) {
     throw std::runtime_error("Tile-cache byte budget cannot hold one terrain tile");
@@ -199,19 +226,25 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
     // angular inputs, output images, and double-buffered frontier storage.
-    GpuRaytraceResources
-        gpu(directions, slopes, ray_count, static_cast<uint32_t>(frontier_capacity));
+    GpuRaytraceResources gpu(
+        directions,
+        slopes,
+        ray_count,
+        static_cast<uint32_t>(frontier_capacity),
+        trace_quantized
+    );
     gpu.initialise_frontier(config.num_azimuth);
 
-    // The cache shares the GPU resource owner's device, while the preparer
-    // remains host-only and returns completed source tiles to that cache.
-    ResidentTileCache cache(gpu.device(), paths, origin, origin_key, config, atlas_slot_count);
+    // The cache shares the GPU resource owner's device. Preparation workers
+    // use that device only to open custom-tile file handles in parallel; the
+    // cache remains the sole owner of atlas buffers and GPU commands.
+    ResidentTileCache
+        cache(gpu.device(), paths, origin, origin_key, config, atlas_slot_count, timer);
     AsyncTilePreparer preparer(
+        gpu.device(),
         paths,
         origin,
         grid,
-        static_cast<uint32_t>(mip_count),
-        static_cast<uint32_t>(vertex_count),
         atlas_slot_count,
         config.max_tile_preparation_workers,
         timer
@@ -222,9 +255,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
     // workers continue to prepare later source tiles.
     timer.stop("Initial setup");
 
-    // Command buffers are still synchronised one frontier iteration at a time
-    // because the CPU needs the next append count to size the following grid.
-    // Removing this wait is a later asynchronous-cache optimisation.
+    // Each frontier pass completes synchronously because the CPU needs its
+    // emitted counts and deferred entries before it can schedule the next pass.
     gpu.start_capture_if_requested();
     uint32_t active_count = config.num_azimuth;
 
@@ -303,20 +335,16 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
         timer.start_wall("Frontier bookkeeping");
         // The next pass may already reference some resident slots. Pin those
-        // slots before installing prepared terrain, so LRU eviction cannot
-        // overwrite a tile which the imminent GPU dispatch will read.
+        // slots before synchronously installing prepared terrain, so LRU
+        // eviction cannot overwrite a tile the imminent dispatch will read.
         const std::vector<uint8_t> pinned_slots =
             frontier.pin_frontier(gpu.active_frontier(), pass.next_count, cache, false);
         cache.install_prepared(preparer, pinned_slots, timer);
 
-        // Append deferred continuations whose terrain became resident while
-        // the preceding command buffer was executing.
-        active_count = frontier.activate_resident(
-            gpu.active_frontier(),
-            pass.next_count,
-            cache,
-            preparer
-        );
+        // Append deferred continuations whose terrain became resident during
+        // the synchronous installation above.
+        active_count =
+            frontier.activate_resident(gpu.active_frontier(), pass.next_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
         frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
@@ -330,17 +358,15 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
           preparer.wait_for_prepared();
           timer.stop("Tile availability wait");
 
+          timer.start_wall("Frontier bookkeeping");
           const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);
           cache.install_prepared(preparer, no_pinned_slots, timer);
-          active_count = frontier.activate_resident(
-              gpu.active_frontier(),
-              active_count,
-              cache,
-              preparer
-          );
+          active_count =
+              frontier.activate_resident(gpu.active_frontier(), active_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
           frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
+          timer.stop("Frontier bookkeeping");
         }
       }
     } catch (...) {
@@ -377,10 +403,10 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
     const TilePreparationStatistics preparation_statistics = preparer.statistics();
     const ResidentTileCacheStatistics cache_statistics = cache.statistics();
     std::printf(
-        "Terrain sources: %u (resident slots %u / cache capacity %llu, preparation workers %u).\n",
+        "Terrain sources: %u (resident slots %u / cache capacity %u, preparation workers %u).\n",
         tile_count,
         cache_statistics.resident_tiles,
-        static_cast<unsigned long long>(slot_capacity),
+        cache_statistics.slot_capacity,
         preparation_statistics.worker_count
     );
     std::printf(
@@ -396,9 +422,12 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         static_cast<unsigned long long>(preparation_statistics.reloads)
     );
     std::printf(
-        "  Atlas installations: %llu, copied: %.3f GiB, evictions: %llu.\n",
+        "  Atlas installations: %llu, copied: %.3f GiB, Metal I/O: %.3f GiB, "
+        "evictions: %llu.\n",
         static_cast<unsigned long long>(cache_statistics.installations),
         static_cast<double>(cache_statistics.bytes_copied) / (1024.0 * 1024.0 * 1024.0),
+        static_cast<double>(cache_statistics.bytes_loaded_with_metal_io) /
+            (1024.0 * 1024.0 * 1024.0),
         static_cast<unsigned long long>(cache_statistics.evictions)
     );
     timer.print();

@@ -1,6 +1,8 @@
 #include "loaded_tile.h"
 
-#include <cpl_error.h>
+#include "gdal_utils.h"
+#include "metal_tile.h"
+
 #include <gdal_priv.h>
 #include <ogr_spatialref.h>
 
@@ -12,33 +14,11 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 
 namespace panorama {
 namespace {
-
-// GDAL driver registration changes process-global state, so serialise it once
-// before terrain-preparation workers begin opening independent datasets.
-std::once_flag gdal_registration_once;
-
-/// Register GDAL's built-in raster drivers exactly once per process.
-void register_gdal_drivers() {
-  std::call_once(gdal_registration_once, [] { GDALAllRegister(); });
-}
-
-/// unique_ptr deleter that closes one GDAL dataset exactly once.
-struct DatasetCloser {
-  /// Give GDALDataset unique_ptr ownership semantics and close the file once.
-  void operator()(GDALDataset *dataset) const { GDALClose(dataset); }
-};
-
-/// Append GDAL's thread-local error text to an operation-level error message.
-[[nodiscard]] std::string gdal_error(const std::string &context) {
-  const char *detail = CPLGetLastErrorMsg();
-  return context + (detail != nullptr && detail[0] != '\0' ? ": " + std::string(detail) : "");
-}
 
 /// Validate a positive GDAL raster dimension before narrowing it to uint32_t.
 [[nodiscard]] uint32_t checked_dimension(int value, const char *name) {
@@ -122,9 +102,29 @@ make_level_1_cells(const std::vector<float> &vertices, uint32_t size) {
 
 } // namespace
 
+LoadedTile LoadedTile::load(const std::filesystem::path &path) {
+  if (!is_metal_tile_path(path)) {
+    return load_tif(path, true);
+  }
+
+  const MetalTileHeader header = read_metal_tile_header(path);
+  return {
+      true,
+      Crs::from_epsg(header.epsg_code),
+      header.maximum_elevation,
+      header.cell_count,
+      header.lower_left_x,
+      header.lower_left_y,
+      header.cell_size,
+      nullptr,
+      header.level_count,
+      {},
+  };
+}
+
 LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_collisions) {
-  // Keep the initial file-format contract narrow. Other loaders can later
-  // prepare exactly the same LoadedTile representation from other sources.
+  // This entry point is specifically the CPU-backed GeoTIFF path; custom
+  // files are represented by metadata and loaded directly by the cache.
   if (path.extension() != ".tif") {
     throw std::invalid_argument("Only .tif terrain tiles are supported: " + path.string());
   }
@@ -138,7 +138,7 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   if (raw_dataset == nullptr) {
     throw std::runtime_error(gdal_error("Could not open GeoTIFF " + path.string()));
   }
-  std::unique_ptr<GDALDataset, DatasetCloser> dataset(raw_dataset);
+  GdalDatasetPointer dataset(raw_dataset);
 
   // Terrain is one scalar elevation field, not a multi-band image.
   if (dataset->GetRasterCount() != 1) {
@@ -192,7 +192,7 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   const double no_data = band->GetNoDataValue(&has_no_data);
   const size_t sample_count = static_cast<size_t>(source_size) * source_size;
   // RasterIO converts the source's native sample format directly to float32.
-  // This is the only terrain precision the eventual Metal tracer supports.
+  // GeoTIFF terrain uses the host-backed float atlas path.
   std::vector<float> source_heights(sample_count);
   if (band->RasterIO(
           GF_Read,
@@ -240,8 +240,8 @@ LoadedTile LoadedTile::load_tif(const std::filesystem::path &path, bool level_0_
   std::unique_ptr<std::vector<float>> level_0_vertices;
   std::vector<float> level_1_cells;
   if (level_0_collisions) {
-    // Preserve the original vertices for future exact bilinear collision and
-    // derive the first conservative maximum level used by all traversal modes.
+    // Preserve the original vertices for exact bilinear collision and derive
+    // the first conservative maximum level used by all traversal modes.
     level_0_vertices = std::make_unique<std::vector<float>>(std::move(oriented_samples));
     level_1_cells = make_level_1_cells(*level_0_vertices, size);
   } else {

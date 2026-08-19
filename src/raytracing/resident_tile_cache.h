@@ -31,6 +31,14 @@ struct ResidentTileHashEntry {
   uint32_t occupied;
 };
 
+/// Fixed byte offsets used by the uint16 trace specialization.
+/// This must remain identical to `QuantizedTerrainLayout` in panorama.metal.
+struct QuantizedTerrainLayout {
+  uint32_t record_stride;
+  uint32_t vertex_offset;
+  uint32_t elevation_base_offset;
+};
+
 /// Host-visible Metal buffers and dimensions required by a frontier dispatch.
 struct ResidentTileCacheBindings {
   id<MTLBuffer> mipmap_atlas;
@@ -38,45 +46,52 @@ struct ResidentTileCacheBindings {
   id<MTLBuffer> metadata;
   id<MTLBuffer> hash;
   uint32_t hash_slot_count;
+  QuantizedTerrainLayout quantized_layout;
 };
 
 /// Final counters describing atlas residency, copies, and evictions.
 struct ResidentTileCacheStatistics {
   uint64_t installations;
   uint64_t bytes_copied;
+  uint64_t bytes_loaded_with_metal_io;
   uint64_t evictions;
   uint32_t resident_tiles;
   uint32_t slot_capacity;
 };
 
-/// A bounded fixed-stride terrain atlas with safe LRU eviction.
+/// A bounded fixed-stride terrain atlas with synchronous LRU replacement.
 ///
 /// The cache owns the GPU-visible vertex/mipmap buffers, source-to-slot maps,
-/// and resident key hash. The main thread must call `install_prepared` only
-/// between completed command buffers, passing slots used by the next pass so
-/// that no terrain payload is overwritten while the GPU can still read it.
+/// and resident key hash. Between completed frontier commands it installs all
+/// currently prepared tiles, waiting for custom I/O, optional fixed-point
+/// conversion, and GPU mipmap generation before publishing resident entries.
 class ResidentTileCache {
 public:
-  /// Allocate the atlas and install the already-loaded observer tile in slot zero.
+  /// Allocate the atlas and install the observer tile in slot zero.
+  ///
+  /// A GeoTIFF observer's payload is already resident on the CPU. A custom
+  /// observer supplies metadata only and is loaded directly or staged for
+  /// conversion according to its representation and the trace configuration.
   ResidentTileCache(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,
       const LoadedTile &origin,
       TileKey origin_key,
       const RaytraceConfig &config,
-      uint32_t slot_capacity
+      uint32_t slot_capacity,
+      Timer &timer
   );
 
   ResidentTileCache(const ResidentTileCache &) = delete;
   ResidentTileCache &operator=(const ResidentTileCache &) = delete;
 
-  /// Destroy atlas buffers after all command buffers using them have completed.
+  /// Release atlas and command resources after synchronous installation work.
   ~ResidentTileCache();
 
   /// Return the resident slot for a source, or `slot_capacity()` if absent.
   [[nodiscard]] uint32_t slot_for_source(uint32_t source_index) const;
 
-  /// Install every prepared tile which has a safe unpinned atlas slot available.
+  /// Install prepared tiles into safe slots before the next frontier command.
   void install_prepared(
       AsyncTilePreparer &preparer,
       std::span<const uint8_t> pinned_slots,
@@ -91,9 +106,6 @@ public:
 
   /// Return the number of fixed-size resident atlas slots.
   [[nodiscard]] uint32_t slot_capacity() const;
-
-  /// Return the number of slots currently populated with a source tile.
-  [[nodiscard]] uint32_t resident_tile_count() const;
 
   /// Return final cache counters for command-line diagnostics.
   [[nodiscard]] ResidentTileCacheStatistics statistics() const;

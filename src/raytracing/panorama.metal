@@ -54,6 +54,127 @@ struct DeferredTileWork {
   float entry_distance;
 };
 
+/// Fixed record offsets for a uint16 terrain atlas, mirrored by the host's
+/// `QuantizedTerrainLayout`.
+struct QuantizedTerrainLayout {
+  uint record_stride;
+  uint vertex_offset;
+  uint elevation_base_offset;
+};
+
+/// Expand fixed-point tile vertices from a Metal I/O staging buffer into
+/// their final Float32 atlas slots. Each staged record contains the complete
+/// logical tile stream, allowing this kernel to read the per-tile base from
+/// its header without a separate host-side metadata request.
+kernel void convert_quantized_vertices(
+    device const uchar *source_records [[buffer(0)]],
+    device float *destination [[buffer(1)]],
+    device const uint *destination_slots [[buffer(2)]],
+    constant uint &source_record_stride [[buffer(3)]],
+    constant uint &vertex_offset [[buffer(4)]],
+    constant uint &elevation_base_offset [[buffer(5)]],
+    constant uint &vertex_count [[buffer(6)]],
+    constant uint &tile_count [[buffer(7)]],
+    uint2 output_index [[thread_position_in_grid]]
+) {
+  if (output_index.x >= vertex_count || output_index.y >= tile_count) {
+    return;
+  }
+
+  device const uchar *record = source_records + output_index.y * source_record_stride;
+  device const int *base = reinterpret_cast<device const int *>(record + elevation_base_offset);
+  device const ushort *vertices = reinterpret_cast<device const ushort *>(record + vertex_offset);
+  const uint slot = destination_slots[output_index.y];
+  destination[slot * vertex_count + output_index.x] =
+      (float(*base) + float(vertices[output_index.x])) * 0.1F;
+}
+
+/// Build one square maximum-mipmap level for a batch of atlas slots.
+///
+/// For level 1, `source` addresses the vertex grid, `source_step` is one, and
+/// every output is the maximum of four adjacent vertices. Later levels bind
+/// the preceding mip level, set `source_step` to two, and reduce each disjoint
+/// 2 by 2 child block. The Z grid coordinate selects an entry in `slots`, so
+/// all newly loaded tiles share one dispatch per level. Separate dispatches
+/// provide the global barrier required before a newly written level becomes
+/// the next dispatch's source.
+template <typename Sample>
+inline void build_maximum_mipmap_level_impl(
+    device const Sample *source,
+    device Sample *destination,
+    uint source_side,
+    uint source_step,
+    device const uint *slots,
+    uint source_tile_stride,
+    uint destination_tile_stride,
+    uint tile_count,
+    uint3 output_index
+) {
+  const uint output_side = source_step == 1U ? source_side - 1U : source_side / 2U;
+  if (output_index.x >= output_side || output_index.y >= output_side ||
+      output_index.z >= tile_count) {
+    return;
+  }
+
+  const uint slot = slots[output_index.z];
+  source += slot * source_tile_stride;
+  destination += slot * destination_tile_stride;
+  const uint source_x = output_index.x * source_step;
+  const uint source_y = output_index.y * source_step;
+  const uint lower_left = source_y * source_side + source_x;
+  destination[output_index.y * output_side + output_index.x] =
+      max(max(source[lower_left], source[lower_left + 1U]),
+          max(source[lower_left + source_side], source[lower_left + source_side + 1U]));
+}
+
+kernel void build_maximum_mipmap_level(
+    device const float *source [[buffer(0)]],
+    device float *destination [[buffer(1)]],
+    constant uint &source_side [[buffer(2)]],
+    constant uint &source_step [[buffer(3)]],
+    device const uint *slots [[buffer(4)]],
+    constant uint &source_tile_stride [[buffer(5)]],
+    constant uint &destination_tile_stride [[buffer(6)]],
+    constant uint &tile_count [[buffer(7)]],
+    uint3 output_index [[thread_position_in_grid]]
+) {
+  build_maximum_mipmap_level_impl(
+      source,
+      destination,
+      source_side,
+      source_step,
+      slots,
+      source_tile_stride,
+      destination_tile_stride,
+      tile_count,
+      output_index
+  );
+}
+
+kernel void build_quantized_maximum_mipmap_level(
+    device const ushort *source [[buffer(0)]],
+    device ushort *destination [[buffer(1)]],
+    constant uint &source_side [[buffer(2)]],
+    constant uint &source_step [[buffer(3)]],
+    device const uint *slots [[buffer(4)]],
+    constant uint &source_tile_stride [[buffer(5)]],
+    constant uint &destination_tile_stride [[buffer(6)]],
+    constant uint &tile_count [[buffer(7)]],
+    uint3 output_index [[thread_position_in_grid]]
+) {
+  build_maximum_mipmap_level_impl(
+      source,
+      destination,
+      source_side,
+      source_step,
+      slots,
+      source_tile_stride,
+      destination_tile_stride,
+      tile_count,
+      output_index
+  );
+}
+
 /// Mix one unsigned 64-bit value for the resident tile lookup table.
 inline ulong mix_tile_hash(ulong value) {
   value ^= value >> 30UL;
@@ -122,11 +243,20 @@ inline bool valid_root(
          sy >= -coordinate_tolerance && sy <= 1.0F + coordinate_tolerance;
 }
 
+/// Decode one stored terrain sample. Float32 specialization is an identity.
+inline float sample_elevation(float sample, int) { return sample; }
+
+inline float sample_elevation(ushort sample, int base_decimeters) {
+  return (float(base_decimeters) + float(sample)) * 0.1F;
+}
+
 /// Solve the exact intersection with one bilinear level-0 terrain patch. The
 /// local parameter begins at t_entry to avoid cancellation on distant cells.
+template <typename Sample>
 inline Collision bilinear_collision(
-    device const float *vertices,
+    device const Sample *vertices,
     uint vertex_count,
+    int base_decimeters,
     float cell_x,
     float cell_y,
     float delta,
@@ -139,10 +269,11 @@ inline Collision bilinear_collision(
 ) {
   constexpr float kPolynomialEpsilon = 1e-12F;
   const uint lower_left = i * vertex_count + j;
-  const float z00 = vertices[lower_left];
-  const float z01 = vertices[lower_left + 1U];
-  const float z10 = vertices[lower_left + vertex_count];
-  const float z11 = vertices[lower_left + vertex_count + 1U];
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 =
+      sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
   const float interval_length = t_exit - t_entry;
 
   const float sx0 = (ray_origin.x + t_entry * ray_direction.x - cell_x) / delta;
@@ -312,32 +443,26 @@ inline float tile_exit_distance(
   return tile_exit;
 }
 
-/// Trace one independent polar ray through one GPU-frontier terrain segment.
-///
-/// Each work item is one azimuth column.  Its polar rays run in parallel and
-/// atomically record the first unresolved polar index when they leave the
-/// tile.  A later kernel turns that suffix into the next frontier item.
-kernel void trace_tile_frontier(
-    device const float *mipmap_atlas [[buffer(0)]],
-    device const float *vertex_atlas [[buffer(1)]],
-    device const float2 *azimuth_directions [[buffer(2)]],
-    device const float *polar_slopes [[buffer(3)]],
-    device const TileWorkItem *work_items [[buffer(4)]],
-    device const ResidentTile *tiles [[buffer(5)]],
-    constant RaytraceParameters &shared_parameters [[buffer(6)]],
-    constant uint &mipmap_value_count [[buffer(7)]],
-    device float *distances [[buffer(8)]],
-    device float *elevations [[buffer(9)]],
-    device atomic_uint *first_unresolved [[buffer(10)]],
-    uint2 ray_index [[thread_position_in_grid]]
+/// Shared traversal specialized at compile time for Float32 or uint16 terrain.
+template <typename Sample>
+inline void trace_tile_frontier_impl(
+    device const Sample *mipmap,
+    device const Sample *vertices,
+    int base_decimeters,
+    device const float2 *azimuth_directions,
+    device const float *polar_slopes,
+    TileWorkItem input,
+    device const ResidentTile *tiles,
+    RaytraceParameters params,
+    device float *distances,
+    device float *elevations,
+    device atomic_uint *first_unresolved,
+    uint work_index,
+    uint polar_index
 ) {
   // Neighboring lanes differ in polar index and share the DDA path represented
   // by one azimuth-column work item.
-  const uint polar_index = ray_index.x;
-  const uint work_index = ray_index.y;
-  const TileWorkItem input = work_items[work_index];
   const ResidentTile resident_tile = tiles[input.slot];
-  const RaytraceParameters params = shared_parameters;
   const float tile_x_min = resident_tile.tile_x_min;
   const float tile_y_min = resident_tile.tile_y_min;
   if (polar_index >= params.num_polar || input.azimuth >= params.num_azimuth) {
@@ -352,12 +477,8 @@ kernel void trace_tile_frontier(
     return;
   }
 
-  // All resident slots share dimensions, so their fixed atlas strides can be
-  // derived from the common complete maximum-mipmap hierarchy.
+  // All resident slots share dimensions.
   const uint num_cell = mipmap_finest_side(params.num_levels);
-  const uint vertex_value_count = (num_cell + 1U) * (num_cell + 1U);
-  device const float *mipmap = mipmap_atlas + input.slot * mipmap_value_count;
-  device const float *vertices = vertex_atlas + input.slot * vertex_value_count;
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
@@ -449,7 +570,7 @@ kernel void trace_tile_frontier(
         offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
 
     // Collision check
-    if (z <= mipmap[cell_index]) {
+    if (z <= sample_elevation(mipmap[cell_index], base_decimeters)) {
       if (level == 1) {
         // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
@@ -464,6 +585,7 @@ kernel void trace_tile_frontier(
         const Collision collision = bilinear_collision(
             vertices,
             vertex_count,
+            base_decimeters,
             tile_x_min + float(j) * delta,
             tile_y_min + float(i) * delta,
             delta,
@@ -594,6 +716,81 @@ kernel void trace_tile_frontier(
   if (tile_exit <= params.max_distance) {
     atomic_fetch_min_explicit(&first_unresolved[work_index], polar_index, memory_order_relaxed);
   }
+}
+
+/// Trace one independent polar ray through Float32 resident terrain.
+kernel void trace_tile_frontier(
+    device const float *mipmap_atlas [[buffer(0)]],
+    device const float *vertex_atlas [[buffer(1)]],
+    device const float2 *azimuth_directions [[buffer(2)]],
+    device const float *polar_slopes [[buffer(3)]],
+    device const TileWorkItem *work_items [[buffer(4)]],
+    device const ResidentTile *tiles [[buffer(5)]],
+    constant RaytraceParameters &shared_parameters [[buffer(6)]],
+    constant uint &mipmap_value_count [[buffer(7)]],
+    device float *distances [[buffer(8)]],
+    device float *elevations [[buffer(9)]],
+    device atomic_uint *first_unresolved [[buffer(10)]],
+    uint2 ray_index [[thread_position_in_grid]]
+) {
+  const TileWorkItem input = work_items[ray_index.y];
+  const uint num_cell = mipmap_finest_side(shared_parameters.num_levels);
+  const uint vertex_value_count = (num_cell + 1U) * (num_cell + 1U);
+  trace_tile_frontier_impl(
+      mipmap_atlas + input.slot * mipmap_value_count,
+      vertex_atlas + input.slot * vertex_value_count,
+      0,
+      azimuth_directions,
+      polar_slopes,
+      input,
+      tiles,
+      shared_parameters,
+      distances,
+      elevations,
+      first_unresolved,
+      ray_index.y,
+      ray_index.x
+  );
+}
+
+/// Trace one independent polar ray while decoding uint16 elevations only when
+/// the traversal reads a mipmap maximum or exact bilinear-patch vertex.
+kernel void trace_tile_frontier_quantized(
+    device const ushort *mipmap_atlas [[buffer(0)]],
+    device const uchar *vertex_records [[buffer(1)]],
+    device const float2 *azimuth_directions [[buffer(2)]],
+    device const float *polar_slopes [[buffer(3)]],
+    device const TileWorkItem *work_items [[buffer(4)]],
+    device const ResidentTile *tiles [[buffer(5)]],
+    constant RaytraceParameters &shared_parameters [[buffer(6)]],
+    constant uint &mipmap_value_count [[buffer(7)]],
+    device float *distances [[buffer(8)]],
+    device float *elevations [[buffer(9)]],
+    device atomic_uint *first_unresolved [[buffer(10)]],
+    constant QuantizedTerrainLayout &layout [[buffer(11)]],
+    uint2 ray_index [[thread_position_in_grid]]
+) {
+  const TileWorkItem input = work_items[ray_index.y];
+  device const uchar *record = vertex_records + input.slot * layout.record_stride;
+  device const int *base =
+      reinterpret_cast<device const int *>(record + layout.elevation_base_offset);
+  device const ushort *vertices =
+      reinterpret_cast<device const ushort *>(record + layout.vertex_offset);
+  trace_tile_frontier_impl(
+      mipmap_atlas + input.slot * mipmap_value_count,
+      vertices,
+      *base,
+      azimuth_directions,
+      polar_slopes,
+      input,
+      tiles,
+      shared_parameters,
+      distances,
+      elevations,
+      first_unresolved,
+      ray_index.y,
+      ray_index.x
+  );
 }
 
 /// Turn each column's atomic unresolved-polar result into its successor work
