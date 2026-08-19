@@ -690,7 +690,7 @@ uint32_t ResidentTileCache::slot_for_source(uint32_t source_index) const {
   return state_->slot_by_source.at(source_index);
 }
 
-void ResidentTileCache::install_prepared(
+std::vector<uint32_t> ResidentTileCache::install_prepared(
     AsyncTilePreparer &preparer,
     std::span<const uint8_t> pinned_slots,
     Timer &timer
@@ -831,6 +831,13 @@ void ResidentTileCache::install_prepared(
     state.rebuild_hash(&timer);
   }
   timer.stop("Atlas installation");
+
+  std::vector<uint32_t> installed_sources;
+  installed_sources.reserve(installations.size());
+  for (const AtlasInstallation &installation : installations) {
+    installed_sources.push_back(installation.prepared.source_index);
+  }
+  return installed_sources;
 }
 
 std::vector<uint8_t>

@@ -35,10 +35,13 @@ public:
   );
 
   /// Request the eight catalogue neighbours surrounding the observer tile.
-  void prefetch_observer_neighbours(AsyncTilePreparer &preparer) const;
+  void prefetch_observer_neighbours(AsyncTilePreparer &preparer);
 
   /// Append GPU-emitted continuations whose successor terrain was absent.
   void append_deferred(std::span<const DeferredTileWork> deferred);
+
+  /// Clear pending-request state for sources just published by the atlas cache.
+  void mark_installed(std::span<const uint32_t> source_indices);
 
   /// Cull clear successor tiles, then activate or request the first required one.
   [[nodiscard]] uint32_t activate_resident(
@@ -77,6 +80,8 @@ private:
   std::span<const float> slopes_;
   const RaytraceParameters &parameters_;
   std::vector<DeferredTileWork> deferred_;
+  /// Sources with preparation already queued, loading, or awaiting installation.
+  std::vector<uint8_t> request_outstanding_;
   uint64_t locally_skipped_tiles_ = 0U;
   uint64_t globally_skipped_tiles_ = 0U;
 

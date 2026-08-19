@@ -91,7 +91,7 @@ HostFrontier::HostFrontier(
     std::span<const float> slopes,
     const RaytraceParameters &parameters
 ) : config_(config), catalogue_(catalogue), directions_(directions), slopes_(slopes),
-    parameters_(parameters)
+    parameters_(parameters), request_outstanding_(catalogue.sources().size(), 0U)
 #if defined(PANORAMA_DEBUG_VALIDATION)
   , claimed_azimuth_(config.num_azimuth, 0U)
 #endif
@@ -102,7 +102,7 @@ HostFrontier::HostFrontier(
   }
 }
 
-void HostFrontier::prefetch_observer_neighbours(AsyncTilePreparer &preparer) const {
+void HostFrontier::prefetch_observer_neighbours(AsyncTilePreparer &preparer) {
   const TileKey origin = catalogue_.origin().key;
   for (int64_t row_offset = -1; row_offset <= 1; row_offset++) {
     for (int64_t column_offset = -1; column_offset <= 1; column_offset++) {
@@ -116,6 +116,7 @@ void HostFrontier::prefetch_observer_neighbours(AsyncTilePreparer &preparer) con
             *source,
             static_cast<float>(tile_minimum_distance(catalogue_.grid(), neighbour, config_.observer))
         );
+        request_outstanding_[*source] = 1U;
       }
     }
   }
@@ -123,6 +124,12 @@ void HostFrontier::prefetch_observer_neighbours(AsyncTilePreparer &preparer) con
 
 void HostFrontier::append_deferred(std::span<const DeferredTileWork> deferred) {
   deferred_.insert(deferred_.end(), deferred.begin(), deferred.end());
+}
+
+void HostFrontier::mark_installed(std::span<const uint32_t> source_indices) {
+  for (uint32_t source_index : source_indices) {
+    request_outstanding_.at(source_index) = 0U;
+  }
 }
 
 uint32_t HostFrontier::activate_resident(
@@ -212,10 +219,14 @@ uint32_t HostFrontier::activate_resident(
 
       const uint32_t slot = cache.slot_for_source(*source_index);
       if (slot == cache.slot_capacity()) {
-        preparer.request(*source_index, deferred.entry_distance);
+        if (request_outstanding_[*source_index] == 0U) {
+          preparer.request(*source_index, deferred.entry_distance);
+          request_outstanding_[*source_index] = 1U;
+        }
         still_waiting.push_back(deferred);
         break;
       }
+      request_outstanding_[*source_index] = 0U;
       if (count >= config_.num_azimuth) {
         throw std::runtime_error("GPU frontier exceeds the azimuth frontier capacity");
       }

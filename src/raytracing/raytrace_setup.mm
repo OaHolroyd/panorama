@@ -350,7 +350,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         // eviction cannot overwrite a tile the imminent dispatch will read.
         const std::vector<uint8_t> pinned_slots =
             frontier.pin_frontier(gpu.active_frontier(), pass.next_count, cache, false);
-        cache.install_prepared(preparer, pinned_slots, timer);
+        frontier.mark_installed(cache.install_prepared(preparer, pinned_slots, timer));
 
         // Append deferred continuations whose terrain became resident during
         // the synchronous installation above.
@@ -371,7 +371,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
 
           timer.start_wall("Frontier bookkeeping");
           const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);
-          cache.install_prepared(preparer, no_pinned_slots, timer);
+          frontier.mark_installed(cache.install_prepared(preparer, no_pinned_slots, timer));
           active_count =
               frontier.activate_resident(gpu.active_frontier(), active_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
