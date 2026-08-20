@@ -11,10 +11,12 @@
 
 namespace panorama {
 
-/// One horizontal direction with the same two-float layout as Metal `float2`.
+/// One horizontal direction and its reciprocals, matching Metal `float4`.
 struct HorizontalDirection {
   float x;
   float y;
+  float inverse_x;
+  float inverse_y;
 };
 
 /// Scalar-only tracing ABI shared with the Metal frontier kernels.

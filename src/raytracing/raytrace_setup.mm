@@ -80,15 +80,21 @@ void validate_configuration(const RaytraceConfig &config) {
   };
 }
 
-/// Construct float32 compass directions from evenly spaced azimuth centres.
+/// Construct float32 compass directions and reusable reciprocals.
 [[nodiscard]] std::vector<HorizontalDirection>
 make_azimuth_directions(const RaytraceConfig &config) {
   std::vector<HorizontalDirection> directions(config.num_azimuth);
   const double step = (config.azimuth_end - config.azimuth_start) / config.num_azimuth;
   for (uint32_t index = 0U; index < config.num_azimuth; index++) {
     const double azimuth = config.azimuth_start + (static_cast<double>(index) + 0.5) * step;
-    directions[index] = {static_cast<float>(std::sin(azimuth)),
-                         static_cast<float>(std::cos(azimuth))};
+    const float x = static_cast<float>(std::sin(azimuth));
+    const float y = static_cast<float>(std::cos(azimuth));
+    directions[index] = {
+        x,
+        y,
+        x == 0.0F ? std::numeric_limits<float>::infinity() : 1.0F / x,
+        y == 0.0F ? std::numeric_limits<float>::infinity() : 1.0F / y,
+    };
   }
   return directions;
 }

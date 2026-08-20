@@ -53,23 +53,23 @@ curved_ray_elevation(float origin, float slope, float curvature, float distance)
   const float tile_y_max = tile_y_min + tile_width;
   float tile_exit = std::numeric_limits<float>::infinity();
   if (direction.x > 0.0F) {
-    const float candidate = tile_x_max / direction.x;
+    const float candidate = tile_x_max * direction.inverse_x;
     if (candidate > entry_distance) {
       tile_exit = std::min(tile_exit, candidate);
     }
   } else if (direction.x < 0.0F) {
-    const float candidate = tile_x_min / direction.x;
+    const float candidate = tile_x_min * direction.inverse_x;
     if (candidate > entry_distance) {
       tile_exit = std::min(tile_exit, candidate);
     }
   }
   if (direction.y > 0.0F) {
-    const float candidate = tile_y_max / direction.y;
+    const float candidate = tile_y_max * direction.inverse_y;
     if (candidate > entry_distance) {
       tile_exit = std::min(tile_exit, candidate);
     }
   } else if (direction.y < 0.0F) {
-    const float candidate = tile_y_min / direction.y;
+    const float candidate = tile_y_min * direction.inverse_y;
     if (candidate > entry_distance) {
       tile_exit = std::min(tile_exit, candidate);
     }
