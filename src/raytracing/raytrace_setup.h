@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ray_projection.h"
+
 #include <cstdint>
 #include <filesystem>
 
@@ -23,15 +25,6 @@ struct RaytraceConfig {
   std::filesystem::path tile_dir;
 
   ObserverLocation observer;
-  /// Output resolution.
-  uint32_t num_azimuth;
-  uint32_t num_polar;
-  /// Azimuthal angle range.
-  double azimuth_start;
-  double azimuth_end;
-  /// Polar angle range.
-  double polar_start;
-  double polar_end;
   /// Maximum horizontal trace distance and source-catalogue radius.
   float max_distance;
   /// Maximum number of sources retained in the terrain catalogue; zero means no limit.
@@ -44,7 +37,7 @@ struct RaytraceConfig {
   bool retain_quantized;
 };
 
-/// Trace the fixed angular field through available level-0 terrain tiles.
-void raytrace_tiled_heightmap(const RaytraceConfig &config);
+/// Trace an explicitly supplied per-pixel ray field.
+void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &field);
 
 } // namespace panorama

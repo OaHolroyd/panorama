@@ -1,15 +1,14 @@
 #include "raytrace_setup.h"
 
 #include "arguments.h"
+#include "ray_projection_arguments.h"
 
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <limits>
-#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -24,13 +23,12 @@ struct EntrypointSettings {
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t max_tile_preparation_workers = 8U;
   uint32_t max_tile_count = 0U;
-  uint32_t num_azimuth = 2048U;
-  uint32_t num_polar = 1024U;
   float max_distance = 600'000.0F;
   bool retain_quantized = false;
   double easting = 2623452.4;
   double northing = 1100502.2;
   double elevation = 3415.0;
+  panorama::RayProjectionArguments projection;
 };
 
 /// Print the command-line options accepted by the raytracing executable.
@@ -43,18 +41,21 @@ void print_usage(const char *program) {
       "  --workers N           preparation workers; 0 uses all hardware threads (default: 8)\n"
       "  --max-tiles N         limit available source tiles; 0 is unlimited (default: 0)\n"
       "  --max-distance M      horizontal trace range in metres (default: 600000)\n"
-      "  --azimuth-count N     number of azimuth columns (default: 2048)\n"
-      "  --polar-count N       number of polar rays per column (default: 1024)\n"
+      "\n",
+      program
+  );
+  panorama::print_ray_projection_usage();
+  std::printf(
+      "General output and observer options:\n"
       "  --retain-quantized    keep uint16 terrain quantized in the GPU atlas\n"
       "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
       "  --northing M          observer northing in the tile CRS (default: 1100502.2)\n"
       "  --elevation M         observer elevation in metres (default: 3415.0)\n"
-      "  --help                show this message\n",
-      program
+      "  --help                show this message\n"
   );
 }
 
-/// Parse the command-line settings used to construct `RaytraceConfig`.
+/// Parse tracing settings and one of the supported output projections.
 [[nodiscard]] EntrypointSettings parse_arguments(int argc, const char *argv[]) {
   EntrypointSettings settings;
   for (int index = 1; index < argc; index++) {
@@ -88,26 +89,23 @@ void print_usage(const char *program) {
         throw std::out_of_range("Maximum distance must be a positive float32 value");
       }
       settings.max_distance = static_cast<float>(parsed);
-    } else if (option == "--azimuth-count") {
-      settings.num_azimuth = panorama::arguments::parse_uint32(value, option, false);
-    } else if (option == "--polar-count") {
-      settings.num_polar = panorama::arguments::parse_uint32(value, option, false);
     } else if (option == "--easting") {
       settings.easting = panorama::arguments::parse_finite_double(value, option);
     } else if (option == "--northing") {
       settings.northing = panorama::arguments::parse_finite_double(value, option);
     } else if (option == "--elevation") {
       settings.elevation = panorama::arguments::parse_finite_double(value, option);
-    } else {
+    } else if (!settings.projection.parse_option(option, value)) {
       throw std::invalid_argument("Unknown option: " + std::string(option));
     }
   }
+  settings.projection.validate();
   return settings;
 }
 
 } // namespace
 
-/// Trace one prepared projected terrain dataset around the selected observer.
+/// Generate the selected output rays and trace one prepared terrain dataset.
 int main(int argc, const char *argv[]) {
   try {
     const EntrypointSettings settings = parse_arguments(argc, argv);
@@ -115,18 +113,13 @@ int main(int argc, const char *argv[]) {
     const panorama::RaytraceConfig config = {
         settings.tile_dir,
         {settings.easting, settings.northing, settings.elevation},
-        settings.num_azimuth,
-        settings.num_polar,
-        0.0 * std::numbers::pi_v<double>,
-        2.0 * std::numbers::pi_v<double>,
-        -0.5 * std::numbers::pi_v<double>,
-        0.5 * std::numbers::pi_v<double>,
         settings.max_distance,
         settings.max_tile_count,
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
         settings.retain_quantized,
     };
+    const panorama::RayField rays = settings.projection.make_ray_field();
     std::printf(
         "Tracing terrain in %s from projected coordinate (%.3f, %.3f, %.1f).\n",
         settings.tile_dir.c_str(),
@@ -137,19 +130,19 @@ int main(int argc, const char *argv[]) {
     // Echo every benchmark-relevant setting so redirected timing logs remain
     // self-describing when several command-line configurations are compared.
     std::printf(
-        "Settings: cache %.0f MiB, workers %u, max tiles %u, "
-        "%u azimuths x %u polars, range %.0f m, curvature %.4f m/mile^2, "
-        "quantized atlas %s.\n",
+        "Settings: cache %.0f MiB, workers %u, max tiles %u, ",
         static_cast<double>(settings.tile_cache_size_bytes) / static_cast<double>(kBytesPerMiB),
         settings.max_tile_preparation_workers,
-        settings.max_tile_count,
-        settings.num_azimuth,
-        settings.num_polar,
+        settings.max_tile_count
+    );
+    settings.projection.print_settings();
+    std::printf(
+        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s.\n",
         settings.max_distance,
         panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
         settings.retain_quantized ? "retained" : "disabled"
     );
-    panorama::raytrace_tiled_heightmap(config);
+    panorama::raytrace_tiled_heightmap(config, rays);
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

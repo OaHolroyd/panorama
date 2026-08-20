@@ -12,23 +12,17 @@
 
 namespace panorama {
 
-/// One immutable tile origin stored beside the corresponding atlas payload.
+/// Immutable spatial metadata stored beside one resident atlas payload.
 ///
 /// All other raytrace parameters are common to compatible atlas slots and are
 /// supplied once per GPU frontier dispatch.
 struct ResidentTile {
   float tile_x_min;
   float tile_y_min;
+  float maximum_elevation;
+  uint32_t padding;
   int64_t row;
   int64_t column;
-};
-
-/// One open-addressed GPU lookup-table entry for a resident global tile key.
-struct ResidentTileHashEntry {
-  int64_t row;
-  int64_t column;
-  uint32_t slot;
-  uint32_t occupied;
 };
 
 /// Fixed byte offsets used by the uint16 trace specialization.
@@ -44,8 +38,6 @@ struct ResidentTileCacheBindings {
   id<MTLBuffer> mipmap_atlas;
   id<MTLBuffer> vertex_atlas;
   id<MTLBuffer> metadata;
-  id<MTLBuffer> hash;
-  uint32_t hash_slot_count;
   QuantizedTerrainLayout quantized_layout;
 };
 
@@ -61,10 +53,10 @@ struct ResidentTileCacheStatistics {
 
 /// A bounded fixed-stride terrain atlas with synchronous LRU replacement.
 ///
-/// The cache owns the GPU-visible vertex/mipmap buffers, source-to-slot maps,
-/// and resident key hash. Between completed frontier commands it installs all
-/// currently prepared tiles, waiting for custom I/O, optional fixed-point
-/// conversion, and GPU mipmap generation before publishing resident entries.
+/// The cache owns the GPU-visible vertex/mipmap buffers and source-to-slot
+/// maps. Between completed frontier commands it installs all currently
+/// prepared tiles, waiting for custom I/O, optional fixed-point conversion,
+/// and GPU mipmap generation before publishing resident entries.
 class ResidentTileCache {
 public:
   /// Allocate the atlas and install the observer tile in slot zero.
@@ -98,10 +90,10 @@ public:
       Timer &timer
   );
 
-  /// Mark the supplied resident slots as recently used and return their pin mask.
-  [[nodiscard]] std::vector<uint8_t> pin_slots(std::span<const uint32_t> slots, bool record_use);
+  /// Mark the supplied resident slots as recently used by the GPU frontier.
+  void record_slot_use(std::span<const uint32_t> slots);
 
-  /// Return the atlas buffers and resident hash for the next GPU dispatch.
+  /// Return the atlas buffers and layout metadata for the next GPU dispatch.
   [[nodiscard]] ResidentTileCacheBindings bindings() const;
 
   /// Return the number of fixed-size resident atlas slots.

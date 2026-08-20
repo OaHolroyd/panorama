@@ -13,9 +13,18 @@ struct RaytraceParameters {
   float curvature_coefficient;
   float global_maximum_elevation;
   uint num_levels;
-  uint num_azimuth;
-  uint num_polar;
+  uint ray_count;
   float max_distance;
+};
+
+/// One normalized horizontal direction and vertical slope per output pixel.
+/// This must remain identical to `RayDirection` in ray_projection.h.
+struct RayDirection {
+  float x;
+  float y;
+  float inverse_x;
+  float inverse_y;
+  float slope;
 };
 
 /// One observer-relative origin for a resident atlas slot, mirrored
@@ -23,36 +32,36 @@ struct RaytraceParameters {
 struct ResidentTile {
   float tile_x_min;
   float tile_y_min;
+  float maximum_elevation;
+  uint padding;
   long row;
   long column;
 };
 
-/// One open-addressed lookup entry mapping a global tile key to an atlas slot.
-/// This must remain identical to `ResidentTileHashEntry` in resident_tile_cache.h.
-struct ResidentTileHashEntry {
+/// One immutable catalogue key, manifest maximum, and host source index.
+struct CatalogueTileHashEntry {
   long row;
   long column;
-  uint slot;
-  uint occupied;
+  float maximum_elevation;
+  uint source_index;
 };
 
-/// One unresolved azimuth-column segment in the GPU-owned work frontier.
-/// This must remain identical to `TileWorkItem` in raytrace_gpu.h.
-struct TileWorkItem {
+/// One unresolved ray segment in the GPU-owned work frontier.
+/// This must remain identical to `RayWorkItem` in raytrace_gpu.h.
+struct RayWorkItem {
   uint slot;
-  uint azimuth;
-  uint first_polar;
+  uint ray_index;
   uint start_level;
   float entry_distance;
 };
 
 /// One continuation whose successor terrain tile is not resident yet.
 ///
-/// The CPU resolves its tile key and retries it after the tile loader assigns
-/// that terrain to an atlas slot. This mirrors `DeferredTileWork` on the host.
-struct DeferredTileWork {
-  uint azimuth;
-  uint first_polar;
+/// The GPU resolves its catalogue source; the CPU retries the ray after the
+/// loader assigns that source to an atlas slot. This mirrors the host type.
+struct DeferredRayWork {
+  uint ray_index;
+  uint source_index;
   float entry_distance;
 };
 
@@ -276,7 +285,7 @@ kernel void build_quantized_maximum_mipmap_level(
   );
 }
 
-/// Mix one unsigned 64-bit value for the resident tile lookup table.
+/// Mix one unsigned 64-bit value for the catalogue tile lookup table.
 inline ulong mix_tile_hash(ulong value) {
   value ^= value >> 30UL;
   value *= 0xbf58476d1ce4e5b9UL;
@@ -293,26 +302,26 @@ inline uint tile_key_hash(long row, long column, uint mask) {
   return uint(mix_tile_hash(mixed_row ^ (mixed_column + 0x9e3779b97f4a7c15UL))) & mask;
 }
 
-/// Return a resident atlas slot for a key, or `hash_capacity` when absent.
-inline uint lookup_resident_tile(
-    device const ResidentTileHashEntry *entries,
-    uint hash_capacity,
+/// Return catalogue metadata for a key, or null when terrain coverage ends.
+inline device const CatalogueTileHashEntry *lookup_catalogue_tile(
+    device const CatalogueTileHashEntry *entries,
+    uint capacity,
     long row,
     long column
 ) {
-  const uint mask = hash_capacity - 1U;
+  const uint mask = capacity - 1U;
   uint index = tile_key_hash(row, column, mask);
-  for (uint probe = 0U; probe < hash_capacity; probe++) {
-    const ResidentTileHashEntry entry = entries[index];
-    if (entry.occupied == 0U) {
-      return hash_capacity;
+  for (uint probe = 0U; probe < capacity; probe++) {
+    device const CatalogueTileHashEntry *entry = entries + index;
+    if (entry->source_index == 0xffffffffU) {
+      return nullptr;
     }
-    if (entry.row == row && entry.column == column) {
-      return entry.slot;
+    if (entry->row == row && entry->column == column) {
+      return entry;
     }
     index = (index + 1U) & mask;
   }
-  return hash_capacity;
+  return nullptr;
 }
 
 /// Result of an exact bilinear terrain-patch intersection test.
@@ -628,45 +637,32 @@ inline float tile_exit_distance(
 
 /// Shared traversal specialized at compile time for Float32 or uint16 terrain.
 template <typename Sample>
-inline void trace_tile_frontier_impl(
+inline float trace_tile_frontier_impl(
     device const Sample *mipmap,
     device const Sample *vertices,
     int base_decimeters,
-    device const float4 *azimuth_directions,
-    device const float *polar_slopes,
-    TileWorkItem input,
+    RayDirection ray,
+    RayWorkItem input,
     device const ResidentTile *tiles,
     RaytraceParameters params,
     uint mipmap_value_count,
     device float *distances,
-    device float *elevations,
-    device atomic_uint *first_unresolved,
-    uint work_index,
-    uint polar_index
+    device float *elevations
 ) {
-  // Neighboring lanes differ in polar index and share the DDA path represented
-  // by one azimuth-column work item.
   const ResidentTile resident_tile = tiles[input.slot];
   const float tile_x_min = resident_tile.tile_x_min;
   const float tile_y_min = resident_tile.tile_y_min;
-  if (polar_index >= params.num_polar || input.azimuth >= params.num_azimuth) {
-    return;
+  if (input.ray_index >= params.ray_count) {
+    return INFINITY;
   }
-  const uint azimuth_index = input.azimuth;
-  const uint output_index = polar_index * params.num_azimuth + azimuth_index;
-
-  // Rays in a given column that have already intersected (and are therefore below the first index
-  // that needs tracing because of the 2.5D nature of the heightfield).
-  if (polar_index < input.first_polar) {
-    return;
-  }
+  const uint output_index = input.ray_index;
 
   // All resident slots share dimensions.
   const uint num_cell = mipmap_finest_side(params.num_levels);
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
-  const float4 horizontal_direction = azimuth_directions[azimuth_index];
+  const float4 horizontal_direction = float4(ray.x, ray.y, ray.inverse_x, ray.inverse_y);
   const float2 direction = horizontal_direction.xy;
   const int stepx = int(direction.x > 0.0F) - int(direction.x < 0.0F);
   const int stepy = int(direction.y > 0.0F) - int(direction.y < 0.0F);
@@ -674,7 +670,7 @@ inline void trace_tile_frontier_impl(
   const float inverse_delta = 1.0F / delta;
   const float dtx = stepx == 0 ? INFINITY : delta * fabs(horizontal_direction.z);
   const float dty = stepy == 0 ? INFINITY : delta * fabs(horizontal_direction.w);
-  const float dz = polar_slopes[polar_index];
+  const float dz = ray.slope;
   const float observer_elevation = params.observer_elevation;
   const float curvature = params.curvature_coefficient;
   const float stationary_distance = curvature > 0.0F
@@ -682,10 +678,8 @@ inline void trace_tile_frontier_impl(
                                         : (dz >= 0.0F ? -INFINITY : INFINITY);
   const int n = int(num_cell);
 
-  // The observer tile begins at level 1. An incoming tile begins at its
-  // maximum level so the maximum pyramid can skip empty terrain immediately.
-  // TODO: check whether it would be better to start at the coarsest level no matter what since we
-  // are no longer using the CPU-based continuation trick
+  // The observer tile begins at level 1; incoming tiles begin at their
+  // coarsest maximum so clear terrain can be rejected immediately.
   uint level = input.start_level;
   uint scale = 1 << (level - 1);
   // Host-created items start at either the full level-1 field or the final
@@ -741,6 +735,21 @@ inline void trace_tile_frontier_impl(
   );
   const float segment_limit = min(tile_exit, params.max_distance);
 
+  // A resident tile's manifest maximum can reject the complete segment before
+  // any mipmap or vertex data is touched. The one-metre margin matches
+  // successor culling and keeps quantization/rounding conservative.
+  if (isfinite(resident_tile.maximum_elevation) && tile_exit <= params.max_distance &&
+      minimum_curved_ray_elevation(
+          observer_elevation,
+          dz,
+          curvature,
+          stationary_distance,
+          t_start,
+          tile_exit
+      ) > resident_tile.maximum_elevation + 1.0F) {
+    return tile_exit;
+  }
+
   // Step the ray across the mipmap cell-by-cell until we go off the edge or find an internal
   // collision
   while (i >= 0 && j >= 0 && i < n && j < n) {
@@ -769,7 +778,7 @@ inline void trace_tile_frontier_impl(
             interval_start,
             params.global_maximum_elevation
         )) {
-      return;
+      return INFINITY;
     }
     const float z = minimum_curved_ray_elevation(
         observer_elevation,
@@ -816,7 +825,7 @@ inline void trace_tile_frontier_impl(
               curvature,
               collision.distance
           );
-          return;
+          return INFINITY;
         }
       } else {
         // There might be a real collision inside this coarse cell. Descend to
@@ -877,9 +886,9 @@ inline void trace_tile_frontier_impl(
     // global range. Report the distinction explicitly to the CPU scheduler.
     if (t_exit >= segment_limit) {
       if (tile_exit <= params.max_distance) {
-        atomic_fetch_min_explicit(&first_unresolved[work_index], polar_index, memory_order_relaxed);
+        return tile_exit;
       }
-      return;
+      return INFINITY;
     }
 
     // Go up to a coarser level whenever possible
@@ -922,184 +931,196 @@ inline void trace_tile_frontier_impl(
   // The DDA normally returns through the segment-limit check above. Retain a
   // defensive continuation for an unexpected fine-cell exit discrepancy.
   if (tile_exit <= params.max_distance) {
-    atomic_fetch_min_explicit(&first_unresolved[work_index], polar_index, memory_order_relaxed);
+    return tile_exit;
   }
+  return INFINITY;
 }
 
-/// Trace one independent polar ray through Float32 resident terrain.
+/// Trace one arbitrary output ray through Float32 resident terrain.
 kernel void trace_tile_frontier(
     device const float *mipmap_atlas [[buffer(0)]],
     device const float *vertex_atlas [[buffer(1)]],
-    device const float4 *azimuth_directions [[buffer(2)]],
-    device const float *polar_slopes [[buffer(3)]],
-    device const TileWorkItem *work_items [[buffer(4)]],
-    device const ResidentTile *tiles [[buffer(5)]],
-    constant RaytraceParameters &shared_parameters [[buffer(6)]],
-    constant uint &mipmap_value_count [[buffer(7)]],
-    device float *distances [[buffer(8)]],
-    device float *elevations [[buffer(9)]],
-    device atomic_uint *first_unresolved [[buffer(10)]],
-    constant uint &polar_offset [[buffer(12)]],
-    uint2 ray_index [[thread_position_in_grid]]
+    device const RayDirection *rays [[buffer(2)]],
+    device const RayWorkItem *work_items [[buffer(3)]],
+    device const ResidentTile *tiles [[buffer(4)]],
+    constant RaytraceParameters &shared_parameters [[buffer(5)]],
+    constant uint &mipmap_value_count [[buffer(6)]],
+    device float *distances [[buffer(7)]],
+    device float *elevations [[buffer(8)]],
+    device float *continuations [[buffer(9)]],
+    uint work_index [[thread_position_in_grid]]
 ) {
-  // The host omits the polar prefix already resolved by every active column.
-  ray_index.x += polar_offset;
-  const TileWorkItem input = work_items[ray_index.y];
+  const RayWorkItem input = work_items[work_index];
   const uint num_cell = mipmap_finest_side(shared_parameters.num_levels);
   const uint vertex_value_count = (num_cell + 1U) * (num_cell + 1U);
-  trace_tile_frontier_impl(
+  continuations[work_index] = trace_tile_frontier_impl(
       mipmap_atlas + input.slot * mipmap_value_count,
       vertex_atlas + input.slot * vertex_value_count,
       0,
-      azimuth_directions,
-      polar_slopes,
+      rays[input.ray_index],
       input,
       tiles,
       shared_parameters,
       mipmap_value_count,
       distances,
-      elevations,
-      first_unresolved,
-      ray_index.y,
-      ray_index.x
+      elevations
   );
 }
 
-/// Trace one independent polar ray while decoding uint16 elevations only when
-/// the traversal reads a mipmap maximum or exact bilinear-patch vertex.
+/// Trace one arbitrary output ray while decoding uint16 elevations on demand.
 kernel void trace_tile_frontier_quantized(
     device const ushort *mipmap_atlas [[buffer(0)]],
     device const uchar *vertex_records [[buffer(1)]],
-    device const float4 *azimuth_directions [[buffer(2)]],
-    device const float *polar_slopes [[buffer(3)]],
-    device const TileWorkItem *work_items [[buffer(4)]],
-    device const ResidentTile *tiles [[buffer(5)]],
-    constant RaytraceParameters &shared_parameters [[buffer(6)]],
-    constant uint &mipmap_value_count [[buffer(7)]],
-    device float *distances [[buffer(8)]],
-    device float *elevations [[buffer(9)]],
-    device atomic_uint *first_unresolved [[buffer(10)]],
-    constant QuantizedTerrainLayout &layout [[buffer(11)]],
-    constant uint &polar_offset [[buffer(12)]],
-    uint2 ray_index [[thread_position_in_grid]]
+    device const RayDirection *rays [[buffer(2)]],
+    device const RayWorkItem *work_items [[buffer(3)]],
+    device const ResidentTile *tiles [[buffer(4)]],
+    constant RaytraceParameters &shared_parameters [[buffer(5)]],
+    constant uint &mipmap_value_count [[buffer(6)]],
+    device float *distances [[buffer(7)]],
+    device float *elevations [[buffer(8)]],
+    device float *continuations [[buffer(9)]],
+    constant QuantizedTerrainLayout &layout [[buffer(10)]],
+    uint work_index [[thread_position_in_grid]]
 ) {
-  // The host omits the polar prefix already resolved by every active column.
-  ray_index.x += polar_offset;
-  const TileWorkItem input = work_items[ray_index.y];
+  const RayWorkItem input = work_items[work_index];
   device const uchar *record = vertex_records + input.slot * layout.record_stride;
   device const int *base =
       reinterpret_cast<device const int *>(record + layout.elevation_base_offset);
   device const ushort *vertices =
       reinterpret_cast<device const ushort *>(record + layout.vertex_offset);
-  trace_tile_frontier_impl(
+  continuations[work_index] = trace_tile_frontier_impl(
       mipmap_atlas + input.slot * mipmap_value_count,
       vertices,
       *base,
-      azimuth_directions,
-      polar_slopes,
+      rays[input.ray_index],
       input,
       tiles,
       shared_parameters,
       mipmap_value_count,
       distances,
-      elevations,
-      first_unresolved,
-      ray_index.y,
-      ray_index.x
+      elevations
   );
 }
 
-/// Turn each column's atomic unresolved-polar result into its successor work
-/// item. A hash table maps the outgoing global tile key to a resident slot;
-/// a nonresident successor is returned to the host without changing its exact
-/// hand-off distance.
+/// Cull clear successors and return every required ray to a host source bucket.
 kernel void emit_tile_frontier(
-    device const TileWorkItem *active_items [[buffer(0)]],
+    device const RayWorkItem *active_items [[buffer(0)]],
     device const ResidentTile *tiles [[buffer(1)]],
-    device const float4 *azimuth_directions [[buffer(2)]],
-    device const atomic_uint *first_unresolved [[buffer(3)]],
+    device const RayDirection *rays [[buffer(2)]],
+    device const float *continuations [[buffer(3)]],
     constant RaytraceParameters &shared_parameters [[buffer(4)]],
-    device const ResidentTileHashEntry *resident_hash [[buffer(5)]],
-    constant uint &hash_capacity [[buffer(6)]],
-    constant uint &next_capacity [[buffer(7)]],
-    device TileWorkItem *next_items [[buffer(8)]],
-    device atomic_uint *next_count [[buffer(9)]],
-    device DeferredTileWork *deferred_items [[buffer(10)]],
-    device atomic_uint *deferred_count [[buffer(11)]],
+    constant uint &frontier_capacity [[buffer(5)]],
+    device DeferredRayWork *deferred_items [[buffer(6)]],
+    device atomic_uint *deferred_count [[buffer(7)]],
+    device const CatalogueTileHashEntry *catalogue_hash [[buffer(8)]],
+    constant uint &catalogue_hash_capacity [[buffer(9)]],
+    device atomic_uint *local_skip_count [[buffer(10)]],
+    device atomic_uint *global_skip_count [[buffer(11)]],
     uint work_index [[thread_position_in_grid]]
 ) {
-  const TileWorkItem active = active_items[work_index];
+  float entry_distance = continuations[work_index];
+  if (!isfinite(entry_distance)) {
+    return;
+  }
+  const RayWorkItem active = active_items[work_index];
   const ResidentTile current_tile = tiles[active.slot];
   const RaytraceParameters params = shared_parameters;
-  const float tile_x_min = current_tile.tile_x_min;
-  const float tile_y_min = current_tile.tile_y_min;
-  const uint first_polar =
-      atomic_load_explicit(&first_unresolved[work_index], memory_order_relaxed);
-  if (first_polar >= params.num_polar) {
-    return;
-  }
-
-  const float4 horizontal_direction = azimuth_directions[active.azimuth];
-  const float2 direction = horizontal_direction.xy;
-  const float entry_distance = tile_exit_distance(
-      tile_x_min,
-      tile_y_min,
-      params.cell_size,
-      mipmap_finest_side(params.num_levels),
-      horizontal_direction,
-      active.entry_distance
-  );
-  if (entry_distance >= params.max_distance) {
-    return;
-  }
-
-  // The outward nudge selects the neighbour at an edge/corner, while the
-  // original exit distance remains the geometric start of its segment.
-  float x = entry_distance * direction.x;
-  float y = entry_distance * direction.y;
-  const float nudge =
-      max(1e-3F * params.cell_size, 8.0F * FLT_EPSILON * max(1.0F, max(fabs(x), fabs(y))));
-  if (direction.x != 0.0F) {
-    x += copysign(nudge, direction.x);
-  }
-  if (direction.y != 0.0F) {
-    y += copysign(nudge, direction.y);
-  }
-
-  // The nudge makes these comparisons deterministic at shared edges and
-  // corners. A row increases southward while a column increases eastward.
+  const RayDirection ray = rays[active.ray_index];
+  const float2 direction = float2(ray.x, ray.y);
   const float tile_width = float(mipmap_finest_side(params.num_levels)) * params.cell_size;
-  const float tile_x_max = tile_x_min + tile_width;
-  const float tile_y_max = tile_y_min + tile_width;
-  const long row_offset = y < tile_y_min ? 1L : y >= tile_y_max ? -1L : 0L;
-  const long column_offset = x < tile_x_min ? -1L : x >= tile_x_max ? 1L : 0L;
-  const long successor_row = current_tile.row + row_offset;
-  const long successor_column = current_tile.column + column_offset;
-  const uint successor_slot =
-      lookup_resident_tile(resident_hash, hash_capacity, successor_row, successor_column);
-  // The source directory may contain this successor even though a background
-  // worker has not loaded it into the atlas yet. Preserve its exact hand-off
-  // for host-side retry rather than incorrectly treating it as open sky.
-  if (successor_slot == hash_capacity) {
-    const uint deferred_index = atomic_fetch_add_explicit(deferred_count, 1U, memory_order_relaxed);
-    if (deferred_index < next_capacity) {
-      deferred_items[deferred_index] = {active.azimuth, first_polar, entry_distance};
-    }
-    return;
-  }
+  float tile_x_min = current_tile.tile_x_min;
+  float tile_y_min = current_tile.tile_y_min;
+  long tile_row = current_tile.row;
+  long tile_column = current_tile.column;
+  uint local_skips = 0U;
+  uint global_skips = 0U;
 
-  const uint output_index = atomic_fetch_add_explicit(next_count, 1U, memory_order_relaxed);
-  if (output_index >= next_capacity) {
-    // The host allocates one entry per azimuth because a column has only one
-    // unresolved suffix. Dropping an unexpected excess is safer than
-    // corrupting the adjacent buffer; the host detects the counter overflow.
-    return;
+  for (;;) {
+    // The outward nudge deterministically selects a neighbour at shared edges
+    // and corners while retaining the exact distance for its trace segment.
+    float x = entry_distance * direction.x;
+    float y = entry_distance * direction.y;
+    const float nudge =
+        max(1e-3F * params.cell_size, 8.0F * FLT_EPSILON * max(1.0F, max(fabs(x), fabs(y))));
+    if (direction.x != 0.0F) {
+      x += copysign(nudge, direction.x);
+    }
+    if (direction.y != 0.0F) {
+      y += copysign(nudge, direction.y);
+    }
+    const long row_offset = y < tile_y_min ? 1L : y >= tile_y_min + tile_width ? -1L : 0L;
+    const long column_offset =
+        x < tile_x_min ? -1L : x >= tile_x_min + tile_width ? 1L : 0L;
+    if (row_offset == 0L && column_offset == 0L) {
+      break;
+    }
+    tile_row += row_offset;
+    tile_column += column_offset;
+    tile_x_min += float(column_offset) * tile_width;
+    tile_y_min -= float(row_offset) * tile_width;
+
+    device const CatalogueTileHashEntry *source = lookup_catalogue_tile(
+        catalogue_hash, catalogue_hash_capacity, tile_row, tile_column
+    );
+    if (source == nullptr) {
+      break;
+    }
+    const float elevation_at_entry = curved_ray_elevation(
+        params.observer_elevation,
+        ray.slope,
+        params.curvature_coefficient,
+        entry_distance
+    );
+    const float elevation_derivative =
+        ray.slope + 2.0F * params.curvature_coefficient * entry_distance;
+    if (isfinite(params.global_maximum_elevation) && elevation_derivative >= 0.0F &&
+        elevation_at_entry > params.global_maximum_elevation + 1.0F) {
+      global_skips++;
+      break;
+    }
+
+    const float exit_distance = tile_exit_distance(
+        tile_x_min,
+        tile_y_min,
+        params.cell_size,
+        mipmap_finest_side(params.num_levels),
+        float4(ray.x, ray.y, ray.inverse_x, ray.inverse_y),
+        entry_distance
+    );
+    const float stationary_distance = params.curvature_coefficient > 0.0F
+                                          ? -ray.slope / (2.0F * params.curvature_coefficient)
+                                          : (ray.slope >= 0.0F ? -INFINITY : INFINITY);
+    if (isfinite(source->maximum_elevation) && isfinite(exit_distance) &&
+        minimum_curved_ray_elevation(
+            params.observer_elevation,
+            ray.slope,
+            params.curvature_coefficient,
+            stationary_distance,
+            entry_distance,
+            exit_distance
+        ) > source->maximum_elevation + 1.0F) {
+      local_skips++;
+      entry_distance = exit_distance;
+      if (entry_distance >= params.max_distance) {
+        break;
+      }
+      continue;
+    }
+
+    const uint deferred_index = atomic_fetch_add_explicit(deferred_count, 1U, memory_order_relaxed);
+    if (deferred_index < frontier_capacity) {
+      deferred_items[deferred_index] = {
+          active.ray_index,
+          source->source_index,
+          entry_distance,
+      };
+    }
+    break;
   }
-  next_items[output_index] = {
-      successor_slot,
-      active.azimuth,
-      first_polar,
-      params.num_levels,
-      entry_distance,
-  };
+  if (local_skips != 0U) {
+    atomic_fetch_add_explicit(local_skip_count, local_skips, memory_order_relaxed);
+  }
+  if (global_skips != 0U) {
+    atomic_fetch_add_explicit(global_skip_count, global_skips, memory_order_relaxed);
+  }
 }

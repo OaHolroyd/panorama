@@ -20,10 +20,47 @@ namespace {
 
 constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
 
-static_assert(sizeof(HorizontalDirection) == 4U * sizeof(float));
-static_assert(sizeof(RaytraceParameters) == 8U * sizeof(uint32_t));
-static_assert(sizeof(TileWorkItem) == 5U * sizeof(uint32_t));
-static_assert(sizeof(DeferredTileWork) == 3U * sizeof(uint32_t));
+static_assert(sizeof(RayDirection) == 5U * sizeof(float));
+static_assert(sizeof(RaytraceParameters) == 7U * sizeof(uint32_t));
+static_assert(sizeof(RayWorkItem) == 4U * sizeof(uint32_t));
+static_assert(sizeof(DeferredRayWork) == 3U * sizeof(uint32_t));
+
+struct CatalogueTileHashEntry {
+  int64_t row;
+  int64_t column;
+  float maximum_elevation;
+  uint32_t source_index;
+};
+
+static_assert(sizeof(CatalogueTileHashEntry) == 3U * sizeof(uint64_t));
+
+[[nodiscard]] uint64_t mix_tile_hash(uint64_t value) {
+  value ^= value >> 30U;
+  value *= 0xbf58476d1ce4e5b9ULL;
+  value ^= value >> 27U;
+  value *= 0x94d049bb133111ebULL;
+  value ^= value >> 31U;
+  return value;
+}
+
+[[nodiscard]] uint32_t catalogue_hash_capacity(size_t source_count) {
+  uint64_t capacity = 1U;
+  while (capacity < 2U * source_count) {
+    capacity <<= 1U;
+  }
+  if (capacity > std::numeric_limits<uint32_t>::max()) {
+    throw std::overflow_error("Terrain catalogue hash exceeds Metal uint range");
+  }
+  return static_cast<uint32_t>(capacity);
+}
+
+[[nodiscard]] uint32_t tile_hash(TileKey key, uint32_t mask) {
+  const uint64_t row = mix_tile_hash(static_cast<uint64_t>(key.row));
+  const uint64_t column = mix_tile_hash(static_cast<uint64_t>(key.column));
+  return static_cast<uint32_t>(
+      mix_tile_hash(row ^ (column + 0x9e3779b97f4a7c15ULL)) & mask
+  );
+}
 
 /// Print a Foundation error in the command-line form used by host tools.
 void print_error(NSString *context, NSError *error) {
@@ -69,35 +106,34 @@ struct GpuRaytraceResources::State {
   id<MTLCommandQueue> queue;
   id<MTLComputePipelineState> trace_pipeline;
   id<MTLComputePipelineState> emit_pipeline;
-  id<MTLBuffer> azimuths;
-  id<MTLBuffer> slopes;
+  id<MTLBuffer> rays;
   id<MTLBuffer> distance_output;
   id<MTLBuffer> elevation_output;
-  id<MTLBuffer> work_a;
-  id<MTLBuffer> work_b;
   id<MTLBuffer> active;
-  id<MTLBuffer> next;
-  id<MTLBuffer> unresolved;
-  id<MTLBuffer> next_count;
+  id<MTLBuffer> continuations;
   id<MTLBuffer> deferred_items;
   id<MTLBuffer> deferred_count;
+  id<MTLBuffer> catalogue_hash;
+  id<MTLBuffer> local_skip_count;
+  id<MTLBuffer> global_skip_count;
   uint32_t frontier_capacity;
+  uint32_t catalogue_hash_capacity;
   bool trace_quantized;
   bool capture_active = false;
 };
 
 GpuRaytraceResources::GpuRaytraceResources(
-    std::span<const HorizontalDirection> directions,
-    std::span<const float> slopes,
-    size_t ray_count,
-    uint32_t frontier_capacity,
+    std::span<const RayDirection> rays,
+    std::span<const TerrainSource> sources,
     bool trace_quantized
 ) {
-  if (directions.empty() || slopes.empty() || frontier_capacity == 0U) {
-    throw std::invalid_argument("GPU raytrace resources require nonempty rays and frontier");
+  if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
+      sources.size() > std::numeric_limits<uint32_t>::max()) {
+    throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
   }
   auto state = std::make_unique<State>();
-  state->frontier_capacity = frontier_capacity;
+  state->frontier_capacity = static_cast<uint32_t>(rays.size());
+  state->catalogue_hash_capacity = catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
   state->device = MTLCreateSystemDefaultDevice();
   if (state->device == nil) {
@@ -133,92 +169,100 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::runtime_error("Could not create continuation pipeline");
   }
 
-  // Static angular inputs and output images persist for every frontier pass.
-  state->azimuths = make_buffer(
+  // Static per-pixel directions and output images persist for every pass.
+  state->rays = make_buffer(
       state->device,
-      directions.data(),
-      checked_buffer_length(directions.size(), sizeof(HorizontalDirection), "azimuth directions"),
-      "azimuth directions"
-  );
-  state->slopes = make_buffer(
-      state->device,
-      slopes.data(),
-      checked_buffer_length(slopes.size(), sizeof(float), "polar slopes"),
-      "polar slopes"
+      rays.data(),
+      checked_buffer_length(rays.size(), sizeof(RayDirection), "ray directions"),
+      "ray directions"
   );
   state->distance_output = make_buffer(
       state->device,
       nullptr,
-      checked_buffer_length(ray_count, sizeof(float), "distance output"),
+      checked_buffer_length(rays.size(), sizeof(float), "distance output"),
       "distance output"
   );
   state->elevation_output = make_buffer(
       state->device,
       nullptr,
-      checked_buffer_length(ray_count, sizeof(float), "elevation output"),
+      checked_buffer_length(rays.size(), sizeof(float), "elevation output"),
       "elevation output"
   );
   clear_buffer(state->distance_output, "distance output");
   clear_buffer(state->elevation_output, "elevation output");
 
-  // The two frontier buffers are swapped after each completed trace/emit pass.
-  state->work_a = make_buffer(
+  // A command completes before the host replaces this frontier with the next
+  // source-bucketed batch, so one shared work buffer is sufficient.
+  state->active = make_buffer(
       state->device,
       nullptr,
-      checked_buffer_length(frontier_capacity, sizeof(TileWorkItem), "active frontier"),
+      checked_buffer_length(rays.size(), sizeof(RayWorkItem), "active frontier"),
       "active frontier"
   );
-  state->work_b = make_buffer(
+  state->continuations = make_buffer(
       state->device,
       nullptr,
-      checked_buffer_length(frontier_capacity, sizeof(TileWorkItem), "next frontier"),
-      "next frontier"
+      checked_buffer_length(rays.size(), sizeof(float), "ray continuations"),
+      "ray continuations"
   );
-  state->unresolved = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(frontier_capacity, sizeof(uint32_t), "unresolved polar indices"),
-      "unresolved polar indices"
-  );
-  state->next_count = make_buffer(state->device, nullptr, sizeof(uint32_t), "next frontier count");
   state->deferred_items = make_buffer(
       state->device,
       nullptr,
-      checked_buffer_length(frontier_capacity, sizeof(DeferredTileWork), "deferred frontier"),
+      checked_buffer_length(rays.size(), sizeof(DeferredRayWork), "deferred frontier"),
       "deferred frontier"
   );
   state->deferred_count =
       make_buffer(state->device, nullptr, sizeof(uint32_t), "deferred frontier count");
-  state->active = state->work_a;
-  state->next = state->work_b;
+  std::vector<CatalogueTileHashEntry> catalogue_entries(
+      state->catalogue_hash_capacity,
+      {0, 0, std::numeric_limits<float>::infinity(), std::numeric_limits<uint32_t>::max()}
+  );
+  const uint32_t catalogue_mask = state->catalogue_hash_capacity - 1U;
+  for (uint32_t source_index = 0U; source_index < static_cast<uint32_t>(sources.size());
+       source_index++) {
+    const TerrainSource &source = sources[source_index];
+    uint32_t index = tile_hash(source.key, catalogue_mask);
+    while (catalogue_entries[index].source_index != std::numeric_limits<uint32_t>::max()) {
+      index = (index + 1U) & catalogue_mask;
+    }
+    catalogue_entries[index] = {
+        source.key.row,
+        source.key.column,
+        source.maximum_elevation.value_or(std::numeric_limits<float>::infinity()),
+        source_index,
+    };
+  }
+  state->catalogue_hash = make_buffer(
+      state->device,
+      catalogue_entries.data(),
+      checked_buffer_length(
+          catalogue_entries.size(), sizeof(CatalogueTileHashEntry), "catalogue hash"
+      ),
+      "catalogue hash"
+  );
+  state->local_skip_count =
+      make_buffer(state->device, nullptr, sizeof(uint32_t), "local skip count");
+  state->global_skip_count =
+      make_buffer(state->device, nullptr, sizeof(uint32_t), "global skip count");
   state_ = std::move(state);
 }
 
 GpuRaytraceResources::~GpuRaytraceResources() { stop_capture(); }
 
-void GpuRaytraceResources::initialise_frontier(uint32_t num_azimuth) {
+void GpuRaytraceResources::initialise_frontier() {
   State &state = *state_;
-  if (num_azimuth > state.frontier_capacity) {
-    throw std::invalid_argument("Initial GPU frontier exceeds its capacity");
-  }
-  auto *items = static_cast<TileWorkItem *>(state.active.contents);
+  auto *items = static_cast<RayWorkItem *>(state.active.contents);
   if (items == nullptr) {
     throw std::runtime_error("Could not map active frontier buffer");
   }
-  for (uint32_t azimuth = 0U; azimuth < num_azimuth; azimuth++) {
-    items[azimuth] = {0U, azimuth, 0U, 1U, 0.0F};
+  for (uint32_t ray = 0U; ray < state.frontier_capacity; ray++) {
+    items[ray] = {0U, ray, 1U, 0.0F};
   }
 }
 
 id<MTLDevice> GpuRaytraceResources::device() const { return state_->device; }
 
 id<MTLBuffer> GpuRaytraceResources::active_frontier() const { return state_->active; }
-
-void GpuRaytraceResources::swap_frontiers() {
-  id<MTLBuffer> temporary = state_->active;
-  state_->active = state_->next;
-  state_->next = temporary;
-}
 
 GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
     const ResidentTileCacheBindings &cache,
@@ -231,26 +275,16 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   if (active_count > state.frontier_capacity) {
     throw std::invalid_argument("GPU frontier exceeds its capacity");
   }
-  auto *first_unresolved = static_cast<uint32_t *>(state.unresolved.contents);
-  auto *next_total = static_cast<uint32_t *>(state.next_count.contents);
   auto *deferred_total = static_cast<uint32_t *>(state.deferred_count.contents);
-  const auto *active_items = static_cast<const TileWorkItem *>(state.active.contents);
-  if (first_unresolved == nullptr || next_total == nullptr || deferred_total == nullptr ||
-      active_items == nullptr) {
+  auto *local_skips = static_cast<uint32_t *>(state.local_skip_count.contents);
+  auto *global_skips = static_cast<uint32_t *>(state.global_skip_count.contents);
+  if (deferred_total == nullptr || local_skips == nullptr || global_skips == nullptr ||
+      state.continuations.contents == nullptr) {
     throw std::runtime_error("Could not map GPU frontier buffers");
   }
-  uint32_t polar_offset = parameters.num_polar;
-  for (uint32_t index = 0U; index < active_count; index++) {
-    polar_offset = std::min(polar_offset, active_items[index].first_polar);
-  }
-  // Every item has already resolved the polar prefix below `first_polar`.
-  // Trim the prefix common to this pass while retaining one rectangular
-  // dispatch, which gives the GPU substantially better occupancy than many
-  // exact but narrow per-suffix dispatches.
-  const uint32_t dispatched_polar_count = parameters.num_polar - polar_offset;
-  std::fill_n(first_unresolved, active_count, parameters.num_polar);
-  *next_total = 0U;
   *deferred_total = 0U;
+  *local_skips = 0U;
+  *global_skips = 0U;
 
   timer.start_wall("GPU command encoding");
   id<MTLCommandBuffer> command = [state.queue commandBuffer];
@@ -263,21 +297,19 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setComputePipelineState:state.trace_pipeline];
   [encoder setBuffer:cache.mipmap_atlas offset:0 atIndex:0];
   [encoder setBuffer:cache.vertex_atlas offset:0 atIndex:1];
-  [encoder setBuffer:state.azimuths offset:0 atIndex:2];
-  [encoder setBuffer:state.slopes offset:0 atIndex:3];
-  [encoder setBuffer:state.active offset:0 atIndex:4];
-  [encoder setBuffer:cache.metadata offset:0 atIndex:5];
-  [encoder setBytes:&parameters length:sizeof(parameters) atIndex:6];
-  [encoder setBytes:&mipmap_value_count length:sizeof(mipmap_value_count) atIndex:7];
-  [encoder setBuffer:state.distance_output offset:0 atIndex:8];
-  [encoder setBuffer:state.elevation_output offset:0 atIndex:9];
-  [encoder setBuffer:state.unresolved offset:0 atIndex:10];
+  [encoder setBuffer:state.rays offset:0 atIndex:2];
+  [encoder setBuffer:state.active offset:0 atIndex:3];
+  [encoder setBuffer:cache.metadata offset:0 atIndex:4];
+  [encoder setBytes:&parameters length:sizeof(parameters) atIndex:5];
+  [encoder setBytes:&mipmap_value_count length:sizeof(mipmap_value_count) atIndex:6];
+  [encoder setBuffer:state.distance_output offset:0 atIndex:7];
+  [encoder setBuffer:state.elevation_output offset:0 atIndex:8];
+  [encoder setBuffer:state.continuations offset:0 atIndex:9];
   if (state.trace_quantized) {
-    [encoder setBytes:&cache.quantized_layout length:sizeof(cache.quantized_layout) atIndex:11];
+    [encoder setBytes:&cache.quantized_layout length:sizeof(cache.quantized_layout) atIndex:10];
   }
-  [encoder setBytes:&polar_offset length:sizeof(polar_offset) atIndex:12];
-  [encoder dispatchThreads:MTLSizeMake(dispatched_polar_count, active_count, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+  [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [encoder endEncoding];
 
   encoder = [command computeCommandEncoder];
@@ -288,16 +320,18 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setComputePipelineState:state.emit_pipeline];
   [encoder setBuffer:state.active offset:0 atIndex:0];
   [encoder setBuffer:cache.metadata offset:0 atIndex:1];
-  [encoder setBuffer:state.azimuths offset:0 atIndex:2];
-  [encoder setBuffer:state.unresolved offset:0 atIndex:3];
+  [encoder setBuffer:state.rays offset:0 atIndex:2];
+  [encoder setBuffer:state.continuations offset:0 atIndex:3];
   [encoder setBytes:&parameters length:sizeof(parameters) atIndex:4];
-  [encoder setBuffer:cache.hash offset:0 atIndex:5];
-  [encoder setBytes:&cache.hash_slot_count length:sizeof(cache.hash_slot_count) atIndex:6];
-  [encoder setBytes:&state.frontier_capacity length:sizeof(state.frontier_capacity) atIndex:7];
-  [encoder setBuffer:state.next offset:0 atIndex:8];
-  [encoder setBuffer:state.next_count offset:0 atIndex:9];
-  [encoder setBuffer:state.deferred_items offset:0 atIndex:10];
-  [encoder setBuffer:state.deferred_count offset:0 atIndex:11];
+  [encoder setBytes:&state.frontier_capacity length:sizeof(state.frontier_capacity) atIndex:5];
+  [encoder setBuffer:state.deferred_items offset:0 atIndex:6];
+  [encoder setBuffer:state.deferred_count offset:0 atIndex:7];
+  [encoder setBuffer:state.catalogue_hash offset:0 atIndex:8];
+  [encoder setBytes:&state.catalogue_hash_capacity
+              length:sizeof(state.catalogue_hash_capacity)
+             atIndex:9];
+  [encoder setBuffer:state.local_skip_count offset:0 atIndex:10];
+  [encoder setBuffer:state.global_skip_count offset:0 atIndex:11];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [encoder endEncoding];
@@ -312,14 +346,14 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
     throw std::runtime_error("GPU frontier Metal command failed");
   }
   const double device_milliseconds = 1'000.0 * (command.GPUEndTime - command.GPUStartTime);
-  return {*next_total, *deferred_total, device_milliseconds};
+  return {*deferred_total, *local_skips, *global_skips, device_milliseconds};
 }
 
-std::span<const DeferredTileWork> GpuRaytraceResources::deferred_work(uint32_t count) const {
+std::span<const DeferredRayWork> GpuRaytraceResources::deferred_work(uint32_t count) const {
   if (count > state_->frontier_capacity) {
     throw std::invalid_argument("Deferred GPU frontier exceeds its capacity");
   }
-  const auto *items = static_cast<const DeferredTileWork *>(state_->deferred_items.contents);
+  const auto *items = static_cast<const DeferredRayWork *>(state_->deferred_items.contents);
   if (items == nullptr) {
     throw std::runtime_error("Could not map deferred frontier buffer");
   }

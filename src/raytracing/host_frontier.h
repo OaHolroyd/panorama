@@ -4,86 +4,82 @@
 #include "terrain_catalogue.h"
 #include "tile_preparer.h"
 
+#include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <span>
 #include <vector>
 
 namespace panorama {
 
-/// Host-side terrain-culling decisions made before atlas preparation.
-struct HostFrontierStatistics {
-  uint64_t locally_skipped_tiles;
-  uint64_t globally_skipped_tiles;
-};
-
 /// Host-side state for unresolved terrain continuations between GPU passes.
 ///
-/// The GPU stores work for resident tiles in its double-buffered frontier.
-/// This component owns the complementary deferred suffixes, requests missing
-/// sources from the asynchronous preparer, and enforces the current one-
-/// unresolved-suffix-per-azimuth scheduling invariant.
+/// The GPU stores work for resident tiles in a reusable frontier buffer. This
+/// component owns complementary deferred rays, groups them by required source,
+/// and requests each source once from the asynchronous preparer.
 class HostFrontier {
 public:
   /// Construct the scheduler state for one fixed observer and ray direction set.
   HostFrontier(
-      const RaytraceConfig &config,
       const TerrainCatalogue &catalogue,
-      std::span<const HorizontalDirection> directions,
-      std::span<const float> slopes,
-      const RaytraceParameters &parameters
+      std::span<const RayDirection> rays,
+      const RaytraceParameters &parameters,
+      uint32_t resident_slot_capacity
   );
-
-  /// Append GPU-emitted continuations whose successor terrain was absent.
-  void append_deferred(std::span<const DeferredTileWork> deferred);
 
   /// Clear pending-request state for sources just published by the atlas cache.
   void mark_installed(std::span<const uint32_t> source_indices);
 
-  /// Cull clear successor tiles, then activate or request the first required one.
+  /// Consume new GPU continuations, activate nearby work, and request sources.
   [[nodiscard]] uint32_t activate_resident(
       id<MTLBuffer> buffer,
       uint32_t count,
       ResidentTileCache &cache,
-      AsyncTilePreparer &preparer
+      AsyncTilePreparer &preparer,
+      std::span<const DeferredRayWork> incoming = {}
   );
 
-  /// Return the atlas slots read by a frontier and optionally update their LRU use.
-  [[nodiscard]] std::vector<uint8_t> pin_frontier(
-      id<MTLBuffer> buffer,
-      uint32_t count,
-      ResidentTileCache &cache,
-      bool record_use
-  ) const;
+  /// Update LRU use for the resident slots referenced by the active frontier.
+  void record_active_slot_use(ResidentTileCache &cache) const;
 
   /// Return whether unresolved work is waiting for nonresident terrain.
   [[nodiscard]] bool has_deferred_work() const;
 
-  /// Return culling decisions made while resolving deferred continuations.
-  [[nodiscard]] HostFrontierStatistics statistics() const;
-
 #if defined(PANORAMA_DEBUG_VALIDATION)
-  /// Check that a GPU frontier contains at most one suffix per azimuth.
+  /// Check that a GPU frontier contains at most one segment per ray.
   void validate_frontier(id<MTLBuffer> buffer, uint32_t count, const char *name);
 
-  /// Check the same invariant for host-resident deferred continuations.
-  void validate_deferred_work();
+  /// Check the same invariant across host state and new GPU continuations.
+  void validate_deferred_work(std::span<const DeferredRayWork> incoming = {});
 #endif
 
 private:
-  const RaytraceConfig &config_;
+  struct SourceBucket {
+    std::vector<DeferredRayWork> pending;
+    std::vector<DeferredRayWork> waiting;
+    float minimum_pending_distance;
+  };
+
   const TerrainCatalogue &catalogue_;
-  std::span<const HorizontalDirection> directions_;
-  std::span<const float> slopes_;
+  std::span<const RayDirection> rays_;
   const RaytraceParameters &parameters_;
-  std::vector<DeferredTileWork> deferred_;
+  /// Deferred rays grouped by their next required catalogue source.
+  std::vector<SourceBucket> source_buckets_;
+  /// Sources with nonempty pending buckets, ordered only by insertion.
+  std::vector<uint32_t> pending_sources_;
+  std::vector<uint8_t> source_is_pending_;
+  size_t pending_count_ = 0U;
+  size_t waiting_count_ = 0U;
   /// Sources with preparation already queued, loading, or awaiting installation.
   std::vector<uint8_t> request_outstanding_;
-  uint64_t locally_skipped_tiles_ = 0U;
-  uint64_t globally_skipped_tiles_ = 0U;
-
+  /// Scratch state reused while routing one GPU continuation buffer.
+  std::vector<float> request_distances_;
+  std::vector<uint32_t> request_sources_;
+  std::vector<uint32_t> activation_slots_;
+  /// Unique resident slots referenced by the current active GPU frontier.
+  std::vector<uint32_t> active_slots_;
+  std::vector<uint8_t> active_slot_seen_;
 #if defined(PANORAMA_DEBUG_VALIDATION)
-  std::vector<uint8_t> claimed_azimuth_;
+  std::vector<uint8_t> claimed_ray_;
 #endif
 };
 
