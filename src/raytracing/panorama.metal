@@ -18,7 +18,7 @@ struct RaytraceParameters {
 };
 
 /// One normalized horizontal direction and vertical slope per output pixel.
-/// This must remain identical to `RayDirection` in raytrace_setup.h.
+/// This must remain identical to `RayDirection` in ray_projection.h.
 struct RayDirection {
   float x;
   float y;

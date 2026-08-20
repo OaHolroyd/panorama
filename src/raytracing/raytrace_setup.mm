@@ -24,11 +24,8 @@
 namespace panorama {
 namespace {
 
-/// Reject a count that cannot be represented by the Metal `uint` interface.
+/// Validate trace settings which do not belong to the output projection.
 void validate_configuration(const RaytraceConfig &config) {
-  if (config.num_azimuth == 0U || config.num_polar == 0U) {
-    throw std::invalid_argument("Ray counts must both be positive");
-  }
   if (config.tile_cache_size_bytes == 0U) {
     throw std::invalid_argument("Tile-cache byte budget must be positive");
   }
@@ -36,9 +33,7 @@ void validate_configuration(const RaytraceConfig &config) {
     throw std::invalid_argument("Terrain tile directory must not be empty");
   }
   if (!std::isfinite(config.observer.easting) || !std::isfinite(config.observer.northing) ||
-      !std::isfinite(config.observer.elevation) || !std::isfinite(config.azimuth_start) ||
-      !std::isfinite(config.azimuth_end) || !std::isfinite(config.polar_start) ||
-      !std::isfinite(config.polar_end) || !std::isfinite(config.max_distance) ||
+      !std::isfinite(config.observer.elevation) || !std::isfinite(config.max_distance) ||
       config.max_distance <= 0.0F) {
     throw std::invalid_argument("Raytrace configuration must be finite");
   }
@@ -80,42 +75,9 @@ void validate_configuration(const RaytraceConfig &config) {
   };
 }
 
-/// Construct the current rectilinear angular projection as explicit pixel rays.
-[[nodiscard]] RayField make_rectilinear_ray_field(const RaytraceConfig &config) {
-  const size_t ray_count = static_cast<size_t>(config.num_azimuth) * config.num_polar;
-  RayField field = {config.num_azimuth, config.num_polar, std::vector<RayDirection>(ray_count)};
-  const double azimuth_step = (config.azimuth_end - config.azimuth_start) / config.num_azimuth;
-  const double polar_step = (config.polar_end - config.polar_start) / config.num_polar;
-  for (uint32_t row = 0U; row < config.num_polar; row++) {
-    const double polar = config.polar_start + (static_cast<double>(row) + 0.5) * polar_step;
-    const double slope = std::tan(polar);
-    if (!std::isfinite(slope) || slope < std::numeric_limits<float>::lowest() ||
-        slope > std::numeric_limits<float>::max()) {
-      throw std::invalid_argument("Polar range produces an invalid float32 slope");
-    }
-    for (uint32_t column = 0U; column < config.num_azimuth; column++) {
-      const double azimuth =
-          config.azimuth_start + (static_cast<double>(column) + 0.5) * azimuth_step;
-      const float x = static_cast<float>(std::sin(azimuth));
-      const float y = static_cast<float>(std::cos(azimuth));
-      field.rays[static_cast<size_t>(row) * config.num_azimuth + column] = {
-          x,
-          y,
-          x == 0.0F ? std::numeric_limits<float>::infinity() : 1.0F / x,
-          y == 0.0F ? std::numeric_limits<float>::infinity() : 1.0F / y,
-          static_cast<float>(slope),
-      };
-    }
-  }
-  return field;
-}
-
 /// Validate the projection-independent ray buffer and its Metal indexing.
-[[nodiscard]] uint32_t validate_ray_field(const RaytraceConfig &config, const RayField &field) {
-  if (field.width != config.num_azimuth || field.height != config.num_polar) {
-    throw std::invalid_argument("Ray field dimensions must match the configured output");
-  }
-  const uint64_t ray_count = static_cast<uint64_t>(field.width) * field.height;
+[[nodiscard]] uint32_t validate_ray_field(const RayField &field) {
+  const uint64_t ray_count = static_cast<uint64_t>(field.image.width) * field.image.height;
   if (ray_count == 0U || ray_count > std::numeric_limits<uint32_t>::max() ||
       field.rays.size() != ray_count) {
     throw std::invalid_argument("Ray field has invalid dimensions or storage");
@@ -160,14 +122,9 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 /// imminent frontier.
 /// The loop ends when every ray has intersected terrain, reached the range
 /// limit, risen above the catalogue, or left available terrain coverage.
-void raytrace_tiled_heightmap(const RaytraceConfig &config) {
-  validate_configuration(config);
-  raytrace_tiled_heightmap(config, make_rectilinear_ray_field(config));
-}
-
 void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &field) {
   validate_configuration(config);
-  const uint32_t ray_count = validate_ray_field(config, field);
+  const uint32_t ray_count = validate_ray_field(field);
   // Start a composite timer.
   Timer timer("Total elapsed");
   timer.start_wall("Initial setup");
@@ -393,26 +350,6 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
     gpu.stop_capture();
     timer.stop("GPU raytrace");
 
-    // The completed shared output buffers can now be handed directly to the
-    // PNG writer. Its elapsed time is a named wall-clock region, separate
-    // from terrain preparation and GPU device work.
-    timer.start_wall("PNG generation");
-    write_colormapped_png(
-        "distances.png",
-        view_float_buffer(gpu.distances(), ray_count, "distance output"),
-        field.width,
-        field.height,
-        colormaps::viridis
-    );
-    write_colormapped_png(
-        "elevations.png",
-        view_float_buffer(gpu.elevations(), ray_count, "elevation output"),
-        field.width,
-        field.height,
-        colormaps::viridis
-    );
-    timer.stop("PNG generation");
-
     // Report the finite source catalogue separately from the bounded resident
     // cache, so a memory-budget change is visible when rechunk levels vary.
     const TilePreparationStatistics preparation_statistics = preparer.statistics();
@@ -452,6 +389,26 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
         static_cast<unsigned long long>(cache_statistics.evictions)
     );
     timer.print();
+
+    // PNG encoding is a placeholder output stage rather than part of terrain
+    // tracing. Report it as an independent top-level timer so `Total elapsed`
+    // remains comparable with future output backends which may omit PNGs.
+    Timer png_timer("PNG generation");
+    write_colormapped_png(
+        "distances.png",
+        view_float_buffer(gpu.distances(), ray_count, "distance output"),
+        field.image.width,
+        field.image.height,
+        colormaps::viridis
+    );
+    write_colormapped_png(
+        "elevations.png",
+        view_float_buffer(gpu.elevations(), ray_count, "elevation output"),
+        field.image.width,
+        field.image.height,
+        colormaps::viridis
+    );
+    png_timer.print();
   }
 }
 

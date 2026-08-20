@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ray_projection.h"
 #include "resident_tile_cache.h"
 #include "terrain_catalogue.h"
 
