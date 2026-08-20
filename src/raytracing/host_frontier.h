@@ -59,19 +59,24 @@ public:
 #endif
 
 private:
+  struct SourceBucket {
+    std::vector<DeferredRayWork> pending;
+    std::vector<DeferredRayWork> waiting;
+    float minimum_pending_distance;
+  };
+
   const TerrainCatalogue &catalogue_;
   std::span<const RayDirection> rays_;
   const RaytraceParameters &parameters_;
-  /// Source-resolved work awaiting a locality-controlled activation attempt.
-  std::vector<DeferredRayWork> pending_;
-  /// Work already resolved to a source which is being prepared.
-  std::vector<std::vector<DeferredRayWork>> waiting_by_source_;
+  /// Deferred rays grouped by their next required catalogue source.
+  std::vector<SourceBucket> source_buckets_;
+  /// Sources with nonempty pending buckets, ordered only by insertion.
+  std::vector<uint32_t> pending_sources_;
+  std::vector<uint8_t> source_is_pending_;
+  size_t pending_count_ = 0U;
   size_t waiting_count_ = 0U;
   /// Sources with preparation already queued, loading, or awaiting installation.
   std::vector<uint8_t> request_outstanding_;
-  /// Minimum entry distance collected for each source during one activation.
-  std::vector<float> request_distances_;
-  std::vector<uint32_t> request_sources_;
 #if defined(PANORAMA_DEBUG_VALIDATION)
   std::vector<uint8_t> claimed_ray_;
 #endif

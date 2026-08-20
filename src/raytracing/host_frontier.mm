@@ -1,7 +1,6 @@
 #include "host_frontier.h"
 
 #include <algorithm>
-#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -13,9 +12,12 @@ HostFrontier::HostFrontier(
     const RaytraceParameters &parameters
 )
     : catalogue_(catalogue), rays_(rays), parameters_(parameters),
-      waiting_by_source_(catalogue.sources().size()),
-      request_outstanding_(catalogue.sources().size(), 0U),
-      request_distances_(catalogue.sources().size(), std::numeric_limits<float>::infinity())
+      source_buckets_(
+          catalogue.sources().size(),
+          {{}, {}, std::numeric_limits<float>::infinity()}
+      ),
+      source_is_pending_(catalogue.sources().size(), 0U),
+      request_outstanding_(catalogue.sources().size(), 0U)
 #if defined(PANORAMA_DEBUG_VALIDATION)
       ,
       claimed_ray_(rays.size(), 0U)
@@ -27,16 +29,41 @@ HostFrontier::HostFrontier(
 }
 
 void HostFrontier::append_deferred(std::span<const DeferredRayWork> deferred) {
-  pending_.insert(pending_.end(), deferred.begin(), deferred.end());
+  for (const DeferredRayWork &work : deferred) {
+    if (work.ray_index >= rays_.size() || work.source_index >= source_buckets_.size()) {
+      throw std::runtime_error("Deferred frontier contains an invalid ray or source index");
+    }
+    SourceBucket &bucket = source_buckets_[work.source_index];
+    if (source_is_pending_[work.source_index] == 0U) {
+      pending_sources_.push_back(work.source_index);
+      source_is_pending_[work.source_index] = 1U;
+    }
+    bucket.pending.push_back(work);
+    bucket.minimum_pending_distance =
+        std::min(bucket.minimum_pending_distance, work.entry_distance);
+    pending_count_++;
+  }
 }
 
 void HostFrontier::mark_installed(std::span<const uint32_t> source_indices) {
   for (uint32_t source_index : source_indices) {
     request_outstanding_.at(source_index) = 0U;
-    std::vector<DeferredRayWork> &waiting = waiting_by_source_.at(source_index);
-    waiting_count_ -= waiting.size();
-    pending_.insert(pending_.end(), waiting.begin(), waiting.end());
-    waiting.clear();
+    SourceBucket &bucket = source_buckets_.at(source_index);
+    if (bucket.waiting.empty()) {
+      continue;
+    }
+    if (source_is_pending_[source_index] == 0U) {
+      pending_sources_.push_back(source_index);
+      source_is_pending_[source_index] = 1U;
+    }
+    for (const DeferredRayWork &work : bucket.waiting) {
+      bucket.minimum_pending_distance =
+          std::min(bucket.minimum_pending_distance, work.entry_distance);
+    }
+    pending_count_ += bucket.waiting.size();
+    waiting_count_ -= bucket.waiting.size();
+    bucket.pending.insert(bucket.pending.end(), bucket.waiting.begin(), bucket.waiting.end());
+    bucket.waiting.clear();
   }
 }
 
@@ -50,53 +77,66 @@ uint32_t HostFrontier::activate_resident(
   if (items == nullptr) {
     throw std::runtime_error("Could not map active frontier buffer");
   }
-  const size_t source_count = catalogue_.sources().size();
   float nearest_entry = std::numeric_limits<float>::infinity();
-  for (const DeferredRayWork &deferred : pending_) {
-    nearest_entry = std::min(nearest_entry, deferred.entry_distance);
+  for (uint32_t source_index : pending_sources_) {
+    nearest_entry = std::min(
+        nearest_entry, source_buckets_[source_index].minimum_pending_distance
+    );
   }
   // Keep independently advancing rays within one tile width of the nearest
   // work. This limits cache churn without restoring any projection-specific
   // column grouping.
   const float activation_limit = nearest_entry + static_cast<float>(catalogue_.grid().width);
-  request_sources_.clear();
-  size_t retained_count = 0U;
-  const size_t pending_count = pending_.size();
-  for (size_t index = 0U; index < pending_count; index++) {
-    const DeferredRayWork deferred = pending_[index];
-    if (deferred.ray_index >= rays_.size() || deferred.source_index >= source_count) {
-      throw std::runtime_error("Deferred frontier contains an invalid ray or source index");
-    }
-    if (deferred.entry_distance > activation_limit) {
-      pending_[retained_count++] = deferred;
+  size_t retained_source_count = 0U;
+  const size_t pending_source_count = pending_sources_.size();
+  for (size_t source_position = 0U; source_position < pending_source_count; source_position++) {
+    const uint32_t source_index = pending_sources_[source_position];
+    SourceBucket &bucket = source_buckets_[source_index];
+    if (bucket.minimum_pending_distance > activation_limit) {
+      pending_sources_[retained_source_count++] = source_index;
       continue;
     }
-    const uint32_t slot = cache.slot_for_source(deferred.source_index);
-    if (slot == cache.slot_capacity()) {
-      waiting_count_++;
-      waiting_by_source_[deferred.source_index].push_back(deferred);
-      if (request_outstanding_[deferred.source_index] == 0U) {
-        float &request_distance = request_distances_[deferred.source_index];
-        if (!std::isfinite(request_distance)) {
-          request_sources_.push_back(deferred.source_index);
-        }
-        request_distance = std::min(request_distance, deferred.entry_distance);
+
+    const uint32_t slot = cache.slot_for_source(source_index);
+    const bool resident = slot != cache.slot_capacity();
+    const float request_distance = bucket.minimum_pending_distance;
+    float remaining_minimum = std::numeric_limits<float>::infinity();
+    size_t retained_work_count = 0U;
+    const size_t work_count = bucket.pending.size();
+    for (size_t work_index = 0U; work_index < work_count; work_index++) {
+      const DeferredRayWork work = bucket.pending[work_index];
+      if (work.entry_distance > activation_limit) {
+        bucket.pending[retained_work_count++] = work;
+        remaining_minimum = std::min(remaining_minimum, work.entry_distance);
+        continue;
       }
-      continue;
+      pending_count_--;
+      if (!resident) {
+        bucket.waiting.push_back(work);
+        waiting_count_++;
+      } else {
+        if (count >= rays_.size()) {
+          throw std::runtime_error("GPU frontier exceeds the ray frontier capacity");
+        }
+        items[count] = {slot, work.ray_index, parameters_.num_levels, work.entry_distance};
+        count++;
+      }
     }
-    request_outstanding_[deferred.source_index] = 0U;
-    if (count >= rays_.size()) {
-      throw std::runtime_error("GPU frontier exceeds the ray frontier capacity");
+    bucket.pending.resize(retained_work_count);
+    bucket.minimum_pending_distance = remaining_minimum;
+    if (retained_work_count != 0U) {
+      pending_sources_[retained_source_count++] = source_index;
+    } else {
+      source_is_pending_[source_index] = 0U;
     }
-    items[count] = {slot, deferred.ray_index, parameters_.num_levels, deferred.entry_distance};
-    count++;
+    if (resident) {
+      request_outstanding_[source_index] = 0U;
+    } else if (request_outstanding_[source_index] == 0U) {
+      preparer.request(source_index, request_distance);
+      request_outstanding_[source_index] = 1U;
+    }
   }
-  pending_.resize(retained_count);
-  for (uint32_t source_index : request_sources_) {
-    preparer.request(source_index, request_distances_[source_index]);
-    request_outstanding_[source_index] = 1U;
-    request_distances_[source_index] = std::numeric_limits<float>::infinity();
-  }
+  pending_sources_.resize(retained_source_count);
   return count;
 }
 
@@ -126,7 +166,7 @@ std::vector<uint8_t> HostFrontier::pin_frontier(
   return cache.pin_slots(slots, record_use);
 }
 
-bool HostFrontier::has_deferred_work() const { return !pending_.empty() || waiting_count_ != 0U; }
+bool HostFrontier::has_deferred_work() const { return pending_count_ != 0U || waiting_count_ != 0U; }
 
 #if defined(PANORAMA_DEBUG_VALIDATION)
 void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const char *name) {
@@ -148,23 +188,49 @@ void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const
 }
 
 void HostFrontier::validate_deferred_work() {
-  if (pending_.size() + waiting_count_ > rays_.size()) {
+  if (pending_count_ + waiting_count_ > rays_.size()) {
     throw std::runtime_error("Deferred frontier exceeds the ray frontier capacity");
   }
   std::fill(claimed_ray_.begin(), claimed_ray_.end(), 0U);
+  std::vector<uint8_t> listed_source(source_buckets_.size(), 0U);
+  for (uint32_t source_index : pending_sources_) {
+    if (source_index >= source_buckets_.size() || listed_source[source_index] != 0U ||
+        source_is_pending_[source_index] == 0U) {
+      throw std::runtime_error("Pending source list contains an invalid or duplicate bucket");
+    }
+    listed_source[source_index] = 1U;
+  }
   const auto claim = [this](const DeferredRayWork &deferred) {
     if (deferred.ray_index >= rays_.size() || claimed_ray_[deferred.ray_index] != 0U) {
       throw std::runtime_error("Deferred frontier violates the one-segment-per-ray invariant");
     }
     claimed_ray_[deferred.ray_index] = 1U;
   };
-  for (const DeferredRayWork &deferred : pending_) {
-    claim(deferred);
-  }
-  for (const std::vector<DeferredRayWork> &waiting : waiting_by_source_) {
-    for (const DeferredRayWork &deferred : waiting) {
-      claim(deferred);
+  size_t observed_pending = 0U;
+  size_t observed_waiting = 0U;
+  for (uint32_t source_index = 0U; source_index < source_buckets_.size(); source_index++) {
+    const SourceBucket &bucket = source_buckets_[source_index];
+    if ((bucket.pending.empty() ? 0U : 1U) != source_is_pending_[source_index] ||
+        source_is_pending_[source_index] != listed_source[source_index]) {
+      throw std::runtime_error("Deferred source bucket has inconsistent pending state");
     }
+    observed_pending += bucket.pending.size();
+    observed_waiting += bucket.waiting.size();
+    for (const DeferredRayWork &work : bucket.pending) {
+      if (work.source_index != source_index) {
+        throw std::runtime_error("Deferred ray is stored in the wrong source bucket");
+      }
+      claim(work);
+    }
+    for (const DeferredRayWork &work : bucket.waiting) {
+      if (work.source_index != source_index) {
+        throw std::runtime_error("Waiting ray is stored in the wrong source bucket");
+      }
+      claim(work);
+    }
+  }
+  if (observed_pending != pending_count_ || observed_waiting != waiting_count_) {
+    throw std::runtime_error("Deferred source-bucket counts are inconsistent");
   }
 }
 #endif
