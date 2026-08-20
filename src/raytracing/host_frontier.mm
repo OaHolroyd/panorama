@@ -10,7 +10,8 @@ namespace panorama {
 HostFrontier::HostFrontier(
     const TerrainCatalogue &catalogue,
     std::span<const RayDirection> rays,
-    const RaytraceParameters &parameters
+    const RaytraceParameters &parameters,
+    uint32_t resident_slot_capacity
 )
     : catalogue_(catalogue), rays_(rays), parameters_(parameters),
       source_buckets_(
@@ -20,15 +21,19 @@ HostFrontier::HostFrontier(
       source_is_pending_(catalogue.sources().size(), 0U),
       request_outstanding_(catalogue.sources().size(), 0U),
       request_distances_(catalogue.sources().size(), std::numeric_limits<float>::infinity()),
-      activation_slots_(catalogue.sources().size(), std::numeric_limits<uint32_t>::max())
+      activation_slots_(catalogue.sources().size(), std::numeric_limits<uint32_t>::max()),
+      active_slots_{0U}, active_slot_seen_(resident_slot_capacity, 0U)
 #if defined(PANORAMA_DEBUG_VALIDATION)
       ,
       claimed_ray_(rays.size(), 0U)
 #endif
 {
-  if (rays_.empty() || rays_.size() != parameters_.ray_count) {
+  if (rays_.empty() || rays_.size() != parameters_.ray_count || resident_slot_capacity == 0U) {
     throw std::invalid_argument("Host frontier requires one direction per output ray");
   }
+  // ResidentTileCache installs the observer tile in slot zero, and the first
+  // GPU frontier contains every ray in that tile.
+  active_slot_seen_[0] = 1U;
 }
 
 void HostFrontier::mark_installed(std::span<const uint32_t> source_indices) {
@@ -80,6 +85,12 @@ uint32_t HostFrontier::activate_resident(
   // work. This limits cache churn without restoring any projection-specific
   // column grouping.
   const float activation_limit = nearest_entry + static_cast<float>(catalogue_.grid().width);
+  if (count == 0U) {
+    for (uint32_t slot : active_slots_) {
+      active_slot_seen_[slot] = 0U;
+    }
+    active_slots_.clear();
+  }
   std::fill(
       activation_slots_.begin(),
       activation_slots_.end(),
@@ -90,6 +101,13 @@ uint32_t HostFrontier::activate_resident(
     uint32_t &slot = activation_slots_[source_index];
     if (slot == std::numeric_limits<uint32_t>::max()) {
       slot = cache.slot_for_source(source_index);
+      if (slot != cache.slot_capacity()) {
+        if (slot >= active_slot_seen_.size()) {
+          throw std::logic_error("Active frontier references an invalid resident slot");
+        }
+        active_slot_seen_[slot] = 1U;
+        active_slots_.push_back(slot);
+      }
     }
     return slot;
   };
@@ -114,7 +132,6 @@ uint32_t HostFrontier::activate_resident(
         std::min(bucket.minimum_pending_distance, work.entry_distance);
     pending_count_++;
   };
-
   size_t retained_source_count = 0U;
   const size_t pending_source_count = pending_sources_.size();
   for (size_t source_position = 0U; source_position < pending_source_count; source_position++) {
@@ -195,30 +212,8 @@ uint32_t HostFrontier::activate_resident(
   return count;
 }
 
-std::vector<uint8_t> HostFrontier::pin_frontier(
-    id<MTLBuffer> buffer,
-    uint32_t count,
-    ResidentTileCache &cache,
-    bool record_use
-) const {
-  const auto *items = static_cast<const RayWorkItem *>(buffer.contents);
-  if (items == nullptr) {
-    throw std::runtime_error("Could not map active frontier buffer");
-  }
-  std::vector<uint8_t> seen(cache.slot_capacity(), 0U);
-  std::vector<uint32_t> slots;
-  slots.reserve(std::min(count, cache.slot_capacity()));
-  for (uint32_t index = 0U; index < count; index++) {
-    const uint32_t slot = items[index].slot;
-    if (slot >= seen.size()) {
-      throw std::runtime_error("Active frontier references an invalid resident slot");
-    }
-    if (seen[slot] == 0U) {
-      seen[slot] = 1U;
-      slots.push_back(slot);
-    }
-  }
-  return cache.pin_slots(slots, record_use);
+void HostFrontier::record_active_slot_use(ResidentTileCache &cache) const {
+  cache.record_slot_use(active_slots_);
 }
 
 bool HostFrontier::has_deferred_work() const { return pending_count_ != 0U || waiting_count_ != 0U; }
@@ -233,12 +228,23 @@ void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const
     throw std::runtime_error(std::string("Could not map ") + name);
   }
   std::fill(claimed_ray_.begin(), claimed_ray_.end(), 0U);
+  std::vector<uint8_t> observed_slots(active_slot_seen_.size(), 0U);
   for (uint32_t index = 0U; index < count; index++) {
     const uint32_t ray = items[index].ray_index;
+    const uint32_t slot = items[index].slot;
     if (ray >= rays_.size() || claimed_ray_[ray] != 0U) {
       throw std::runtime_error(std::string(name) + " violates the one-segment-per-ray invariant");
     }
+    if (slot >= active_slot_seen_.size() || active_slot_seen_[slot] == 0U) {
+      throw std::runtime_error(std::string(name) + " has inconsistent active-slot tracking");
+    }
     claimed_ray_[ray] = 1U;
+    observed_slots[slot] = 1U;
+  }
+  for (uint32_t slot : active_slots_) {
+    if (slot >= observed_slots.size() || observed_slots[slot] == 0U) {
+      throw std::runtime_error(std::string(name) + " has inconsistent active-slot tracking");
+    }
   }
 }
 

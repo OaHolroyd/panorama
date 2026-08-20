@@ -22,7 +22,8 @@ public:
   HostFrontier(
       const TerrainCatalogue &catalogue,
       std::span<const RayDirection> rays,
-      const RaytraceParameters &parameters
+      const RaytraceParameters &parameters,
+      uint32_t resident_slot_capacity
   );
 
   /// Clear pending-request state for sources just published by the atlas cache.
@@ -37,13 +38,8 @@ public:
       std::span<const DeferredRayWork> incoming = {}
   );
 
-  /// Return the atlas slots read by a frontier and optionally update their LRU use.
-  [[nodiscard]] std::vector<uint8_t> pin_frontier(
-      id<MTLBuffer> buffer,
-      uint32_t count,
-      ResidentTileCache &cache,
-      bool record_use
-  ) const;
+  /// Update LRU use for the resident slots referenced by the active frontier.
+  void record_active_slot_use(ResidentTileCache &cache) const;
 
   /// Return whether unresolved work is waiting for nonresident terrain.
   [[nodiscard]] bool has_deferred_work() const;
@@ -79,6 +75,9 @@ private:
   std::vector<float> request_distances_;
   std::vector<uint32_t> request_sources_;
   std::vector<uint32_t> activation_slots_;
+  /// Unique resident slots referenced by the current active GPU frontier.
+  std::vector<uint32_t> active_slots_;
+  std::vector<uint8_t> active_slot_seen_;
 #if defined(PANORAMA_DEBUG_VALIDATION)
   std::vector<uint8_t> claimed_ray_;
 #endif

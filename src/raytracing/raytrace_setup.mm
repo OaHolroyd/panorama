@@ -283,7 +283,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
     uint32_t active_count = ray_count;
 
     // Host-frontier state owns deferred continuations and source lookup.
-    HostFrontier frontier(catalogue, field.rays, shared_parameters);
+    HostFrontier frontier(catalogue, field.rays, shared_parameters, cache.slot_capacity());
     const std::vector<uint8_t> no_pinned_slots(cache.slot_capacity(), 0U);
 
     // Count GPU-resolved continuations independently of host load requests;
@@ -316,8 +316,9 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
 #endif
 
         // This pass is about to read every referenced slot. Updating the LRU
-        // stamp now makes recently traced terrain the last cache victim.
-        (void)frontier.pin_frontier(gpu.active_frontier(), active_count, cache, true);
+        // stamp now makes recently traced terrain the last cache victim. The
+        // unique slot set was recorded while the frontier was constructed.
+        frontier.record_active_slot_use(cache);
 
         // The GPU resource resets its append counters, encodes the ordered
         // trace/emit kernels, waits for their shared results, and returns the

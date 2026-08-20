@@ -90,8 +90,8 @@ public:
       Timer &timer
   );
 
-  /// Mark the supplied resident slots as recently used and return their pin mask.
-  [[nodiscard]] std::vector<uint8_t> pin_slots(std::span<const uint32_t> slots, bool record_use);
+  /// Mark the supplied resident slots as recently used by the GPU frontier.
+  void record_slot_use(std::span<const uint32_t> slots);
 
   /// Return the atlas buffers and layout metadata for the next GPU dispatch.
   [[nodiscard]] ResidentTileCacheBindings bindings() const;

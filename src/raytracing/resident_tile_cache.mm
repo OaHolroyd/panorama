@@ -789,20 +789,14 @@ std::vector<uint32_t> ResidentTileCache::install_prepared(
   return installed_sources;
 }
 
-std::vector<uint8_t>
-ResidentTileCache::pin_slots(std::span<const uint32_t> slots, bool record_use) {
+void ResidentTileCache::record_slot_use(std::span<const uint32_t> slots) {
   State &state = *state_;
-  std::vector<uint8_t> pinned(state.slot_capacity, 0U);
   for (uint32_t slot : slots) {
     if (slot >= state.slot_capacity || state.source_by_slot[slot] == state.sources.size()) {
       throw std::logic_error("GPU frontier refers to a nonresident tile slot");
     }
-    pinned[slot] = 1U;
-    if (record_use) {
-      state.last_used[slot] = state.next_use_stamp++;
-    }
+    state.last_used[slot] = state.next_use_stamp++;
   }
-  return pinned;
 }
 
 ResidentTileCacheBindings ResidentTileCache::bindings() const {
