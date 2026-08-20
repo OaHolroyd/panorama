@@ -384,6 +384,22 @@ inline bool above_global_terrain(
              global_maximum + kElevationCullingMargin;
 }
 
+/// Recover a near-boundary hit when DDA rounding assigns the root to an
+/// adjacent cell even though the ray ends below this patch's lowest vertex.
+inline Collision conservative_boundary_collision(
+    float observer_elevation,
+    float slope,
+    float curvature,
+    float t_entry,
+    float t_exit,
+    float minimum_vertex
+) {
+  if (curved_ray_elevation(observer_elevation, slope, curvature, t_exit) <= minimum_vertex) {
+    return {true, t_entry};
+  }
+  return {false, 0.0F};
+}
+
 /// Solve the exact intersection with one bilinear level-0 terrain patch. The
 /// local parameter begins at t_entry to avoid cancellation on distant cells.
 template <typename Sample>
@@ -393,57 +409,64 @@ inline Collision bilinear_collision(
     int base_decimeters,
     float cell_x,
     float cell_y,
-    float delta,
+    float inverse_delta,
     uint i,
     uint j,
-    float3 ray_origin,
-    float3 ray_direction,
+    float observer_elevation,
+    float2 direction,
+    float slope,
     float curvature,
     float t_entry,
     float t_exit
 ) {
   constexpr float kPolynomialEpsilon = 1e-12F;
   const uint lower_left = i * vertex_count + j;
-  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
-  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
-  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
-  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
   const float interval_length = t_exit - t_entry;
 
-  const float sx0 = (ray_origin.x + t_entry * ray_direction.x - cell_x) / delta;
-  const float sy0 = (ray_origin.y + t_entry * ray_direction.y - cell_y) / delta;
-  const float sx1 = ray_direction.x / delta;
-  const float sy1 = ray_direction.y / delta;
-  const float dzdx = z01 - z00;
-  const float dzdy = z10 - z00;
-  const float twist = z11 - z10 - z01 + z00;
+  const float sx0 = (t_entry * direction.x - cell_x) * inverse_delta;
+  const float sy0 = (t_entry * direction.y - cell_y) * inverse_delta;
+  const float sx1 = direction.x * inverse_delta;
+  const float sy1 = direction.y * inverse_delta;
 
-  const float a = curvature - twist * sx1 * sy1;
-  const float b = ray_direction.z + 2.0F * curvature * t_entry - dzdx * sx1 - dzdy * sy1 -
-                  twist * (sx0 * sy1 + sx1 * sy0);
-  const float c = curved_ray_elevation(ray_origin.z, ray_direction.z, curvature, t_entry) - z00 -
-                  dzdx * sx0 - dzdy * sy0 - twist * sx0 * sy0;
+  // Keep decoded samples and surface gradients out of the root solver's live
+  // set. Only the polynomial and the conservative fallback bound are needed
+  // after this scope.
+  float a;
+  float b;
+  float c;
+  float minimum_vertex;
+  {
+    const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+    const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+    const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+    const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+    const float dzdx = z01 - z00;
+    const float dzdy = z10 - z00;
+    const float twist = z11 - z10 - z01 + z00;
+
+    a = curvature - twist * sx1 * sy1;
+    b = slope + 2.0F * curvature * t_entry - dzdx * sx1 - dzdy * sy1 -
+        twist * (sx0 * sy1 + sx1 * sy0);
+    c = curved_ray_elevation(observer_elevation, slope, curvature, t_entry) - z00 - dzdx * sx0 -
+        dzdy * sy0 - twist * sx0 * sy0;
+    minimum_vertex = min(min(z00, z01), min(z10, z11));
+  }
 
   const float cell_speed = max(max(fabs(sx1), fabs(sy1)), 1e-12F);
   const float direction_error = FLT_EPSILON * max(fabs(t_entry), fabs(t_exit)) * cell_speed;
-  const float coordinate_tolerance = max(5e-5F, max(128.0F * direction_error, 0.05F / delta));
+  const float coordinate_tolerance =
+      max(5e-5F, max(128.0F * direction_error, 0.05F * inverse_delta));
   const float t_tolerance = coordinate_tolerance / cell_speed;
 
   // A near-corner DDA transition can leave the root in an adjacent cell. If
   // the ray is below all four vertices by this interval's end, recover the
   // intersection on the near boundary as in the Python reference.
-  const auto conservative_boundary_hit = [&]() -> Collision {
-    if (curved_ray_elevation(ray_origin.z, ray_direction.z, curvature, t_exit) <=
-        min(min(z00, z01), min(z10, z11))) {
-      return {true, t_entry};
-    }
-    return {false, 0.0F};
-  };
-
   float local_t = 0.0F;
   if (fabs(a) < kPolynomialEpsilon) {
     if (fabs(b) < kPolynomialEpsilon) {
-      return conservative_boundary_hit();
+      return conservative_boundary_collision(
+          observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+      );
     }
     local_t = -c / b;
     if (valid_root(
@@ -459,7 +482,9 @@ inline Collision bilinear_collision(
         )) {
       return {true, t_entry + local_t};
     }
-    return conservative_boundary_hit();
+    return conservative_boundary_collision(
+        observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+    );
   }
 
   float discriminant = b * b - 4.0F * a * c;
@@ -467,7 +492,9 @@ inline Collision bilinear_collision(
     if (discriminant > -kPolynomialEpsilon) {
       discriminant = 0.0F;
     } else {
-      return conservative_boundary_hit();
+      return conservative_boundary_collision(
+          observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+      );
     }
   }
 
@@ -517,7 +544,9 @@ inline Collision bilinear_collision(
       )) {
     return {true, t_entry + local_t};
   }
-  return conservative_boundary_hit();
+  return conservative_boundary_collision(
+      observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+  );
 }
 
 /// Return whether the index is a at the boundary of a level+1 block (and would thus be permitted to
@@ -642,14 +671,15 @@ inline void trace_tile_frontier_impl(
   const int stepx = int(direction.x > 0.0F) - int(direction.x < 0.0F);
   const int stepy = int(direction.y > 0.0F) - int(direction.y < 0.0F);
   const float delta = params.cell_size;
+  const float inverse_delta = 1.0F / delta;
   const float dtx = stepx == 0 ? INFINITY : delta * fabs(horizontal_direction.z);
   const float dty = stepy == 0 ? INFINITY : delta * fabs(horizontal_direction.w);
   const float dz = polar_slopes[polar_index];
-  const float stationary_distance = params.curvature_coefficient > 0.0F
-                                        ? -dz / (2.0F * params.curvature_coefficient)
+  const float observer_elevation = params.observer_elevation;
+  const float curvature = params.curvature_coefficient;
+  const float stationary_distance = curvature > 0.0F
+                                        ? -dz / (2.0F * curvature)
                                         : (dz >= 0.0F ? -INFINITY : INFINITY);
-  const float3 ray_origin = {0.0F, 0.0F, params.observer_elevation};
-  const float3 ray_direction = {direction.x, direction.y, dz};
   const int n = int(num_cell);
 
   // The observer tile begins at level 1. An incoming tile begins at its
@@ -676,8 +706,8 @@ inline void trace_tile_frontier_impl(
   const float y_entry = t_start * direction.y;
   const float x_classify = stepx == 0 ? x_entry : x_entry + copysign(boundary_nudge, direction.x);
   const float y_classify = stepy == 0 ? y_entry : y_entry + copysign(boundary_nudge, direction.y);
-  int i = clamp(int(floor((y_classify - tile_y_min) / delta)), 0, n - 1);
-  int j = clamp(int(floor((x_classify - tile_x_min) / delta)), 0, n - 1);
+  int i = clamp(int(floor((y_classify - tile_y_min) * inverse_delta)), 0, n - 1);
+  int j = clamp(int(floor((x_classify - tile_x_min) * inverse_delta)), 0, n - 1);
 
   // align to the correct level boundary
   i = align_to_level(i, scale);
@@ -685,8 +715,12 @@ inline void trace_tile_frontier_impl(
 
   // Cell-traversal distances: `tx` and `ty` are the distances to the next
   // vertical and horizontal cell boundary respectively.
-  float ty = stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
-  float tx = stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+  float ty = stepy == 0
+                 ? INFINITY
+                 : stepy * (tile_y_min * inverse_delta + i + (stepy > 0) * scale) * dty;
+  float tx = stepx == 0
+                 ? INFINITY
+                 : stepx * (tile_x_min * inverse_delta + j + (stepx > 0) * scale) * dtx;
   // A coarse incoming segment can begin inside the other axis's aligned
   // block. Reposition both so neither moves behind the true hand-off.
   if (stepy != 0) {
@@ -728,9 +762,9 @@ inline void trace_tile_frontier_impl(
     // Once this ray is both rising and above the complete catalogue's upper
     // bound, curvature guarantees it can never intersect a later cell or tile.
     if (above_global_terrain(
-            ray_origin.z,
+            observer_elevation,
             dz,
-            params.curvature_coefficient,
+            curvature,
             stationary_distance,
             interval_start,
             params.global_maximum_elevation
@@ -738,9 +772,9 @@ inline void trace_tile_frontier_impl(
       return;
     }
     const float z = minimum_curved_ray_elevation(
-        ray_origin.z,
+        observer_elevation,
         dz,
-        params.curvature_coefficient,
+        curvature,
         stationary_distance,
         interval_start,
         interval_end
@@ -762,12 +796,13 @@ inline void trace_tile_frontier_impl(
             base_decimeters,
             tile_x_min + float(j) * delta,
             tile_y_min + float(i) * delta,
-            delta,
+            inverse_delta,
             uint(i),
             uint(j),
-            ray_origin,
-            ray_direction,
-            params.curvature_coefficient,
+            observer_elevation,
+            direction,
+            dz,
+            curvature,
             interval_start,
             interval_end
         );
@@ -776,9 +811,9 @@ inline void trace_tile_frontier_impl(
         if (collision.hit) {
           distances[output_index] = collision.distance;
           elevations[output_index] = curved_ray_elevation(
-              ray_origin.z,
+              observer_elevation,
               dz,
-              params.curvature_coefficient,
+              curvature,
               collision.distance
           );
           return;
@@ -790,8 +825,8 @@ inline void trace_tile_frontier_impl(
 
         // Reclassify a point just inside the child. The nudge controls shared
         // boundary ownership only; `cell_entry` remains the exact geometry.
-        float cell_x = ray_origin.x + cell_entry * direction.x;
-        float cell_y = ray_origin.y + cell_entry * direction.y;
+        float cell_x = cell_entry * direction.x;
+        float cell_y = cell_entry * direction.y;
         const float cell_nudge =
             max(1e-3F * delta, 8.0F * FLT_EPSILON * max(1.0F, max(fabs(cell_x), fabs(cell_y))));
         if (stepx != 0) {
@@ -800,8 +835,8 @@ inline void trace_tile_frontier_impl(
         if (stepy != 0) {
           cell_y += copysign(cell_nudge, direction.y);
         }
-        i = clamp(int(floor((cell_y - tile_y_min) / delta)), 0, n - 1);
-        j = clamp(int(floor((cell_x - tile_x_min) / delta)), 0, n - 1);
+        i = clamp(int(floor((cell_y - tile_y_min) * inverse_delta)), 0, n - 1);
+        j = clamp(int(floor((cell_x - tile_x_min) * inverse_delta)), 0, n - 1);
 
         // Fine indices remain in level-1 coordinates. Returning to a child
         // level requires their lower-left child-cell alignment before the
@@ -817,8 +852,12 @@ inline void trace_tile_frontier_impl(
         // before this one, so move backward without rebuilding the offset.
         const uint child_side = mipmap_level_side(num_cell, level);
         offset -= child_side * child_side;
-        ty = stepy == 0 ? INFINITY : stepy * (tile_y_min / delta + i + (stepy > 0) * scale) * dty;
-        tx = stepx == 0 ? INFINITY : stepx * (tile_x_min / delta + j + (stepx > 0) * scale) * dtx;
+        ty = stepy == 0
+                 ? INFINITY
+                 : stepy * (tile_y_min * inverse_delta + i + (stepy > 0) * scale) * dty;
+        tx = stepx == 0
+                 ? INFINITY
+                 : stepx * (tile_x_min * inverse_delta + j + (stepx > 0) * scale) * dtx;
 
         // An entry through only one edge of a coarse cell may leave the
         // other axis part-way across the selected child. Advance its timer
