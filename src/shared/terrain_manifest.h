@@ -18,8 +18,7 @@ struct TerrainManifestEntry {
 };
 
 /// Return the manifest sidecar belonging to a prepared-terrain directory.
-[[nodiscard]] std::filesystem::path
-terrain_manifest_path(const std::filesystem::path &directory);
+[[nodiscard]] std::filesystem::path terrain_manifest_path(const std::filesystem::path &directory);
 
 /// Read and validate a versioned terrain manifest.
 [[nodiscard]] std::vector<TerrainManifestEntry>

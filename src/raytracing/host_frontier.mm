@@ -12,12 +12,8 @@ namespace {
 constexpr float kElevationCullingMargin = 1.0F;
 
 /// Evaluate the curved ray using the same nested form as the Metal kernel.
-[[nodiscard]] float curved_ray_elevation(
-    float origin,
-    float slope,
-    float curvature,
-    float distance
-) {
+[[nodiscard]] float
+curved_ray_elevation(float origin, float slope, float curvature, float distance) {
   return std::fma(curvature, distance * distance, std::fma(slope, distance, origin));
 }
 
@@ -30,9 +26,8 @@ constexpr float kElevationCullingMargin = 1.0F;
     float exit_distance
 ) {
   const float minimum_distance =
-      curvature > 0.0F
-          ? std::clamp(-slope / (2.0F * curvature), entry_distance, exit_distance)
-          : (slope > 0.0F ? entry_distance : exit_distance);
+      curvature > 0.0F ? std::clamp(-slope / (2.0F * curvature), entry_distance, exit_distance)
+                       : (slope > 0.0F ? entry_distance : exit_distance);
   return curved_ray_elevation(origin, slope, curvature, minimum_distance);
 }
 
@@ -90,10 +85,12 @@ HostFrontier::HostFrontier(
     std::span<const HorizontalDirection> directions,
     std::span<const float> slopes,
     const RaytraceParameters &parameters
-) : config_(config), catalogue_(catalogue), directions_(directions), slopes_(slopes),
-    parameters_(parameters), request_outstanding_(catalogue.sources().size(), 0U)
+)
+    : config_(config), catalogue_(catalogue), directions_(directions), slopes_(slopes),
+      parameters_(parameters), request_outstanding_(catalogue.sources().size(), 0U)
 #if defined(PANORAMA_DEBUG_VALIDATION)
-  , claimed_azimuth_(config.num_azimuth, 0U)
+      ,
+      claimed_azimuth_(config.num_azimuth, 0U)
 #endif
 {
   if (directions_.size() != config_.num_azimuth || slopes_.size() != config_.num_polar ||
@@ -145,10 +142,8 @@ uint32_t HostFrontier::activate_resident(
       );
       const float elevation_derivative =
           slope + 2.0F * parameters_.curvature_coefficient * deferred.entry_distance;
-      if (std::isfinite(parameters_.global_maximum_elevation) &&
-          elevation_derivative >= 0.0F &&
-          elevation_at_entry >
-              parameters_.global_maximum_elevation + kElevationCullingMargin) {
+      if (std::isfinite(parameters_.global_maximum_elevation) && elevation_derivative >= 0.0F &&
+          elevation_at_entry > parameters_.global_maximum_elevation + kElevationCullingMargin) {
         globally_skipped_tiles_++;
         break;
       }
@@ -210,7 +205,10 @@ uint32_t HostFrontier::activate_resident(
       if (count >= config_.num_azimuth) {
         throw std::runtime_error("GPU frontier exceeds the azimuth frontier capacity");
       }
-      items[count] = {slot, deferred.azimuth, deferred.first_polar, parameters_.num_levels,
+      items[count] = {slot,
+                      deferred.azimuth,
+                      deferred.first_polar,
+                      parameters_.num_levels,
                       deferred.entry_distance};
       count++;
       break;
@@ -257,7 +255,9 @@ void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const
   for (uint32_t index = 0U; index < count; index++) {
     const uint32_t azimuth = items[index].azimuth;
     if (azimuth >= config_.num_azimuth || claimed_azimuth_[azimuth] != 0U) {
-      throw std::runtime_error(std::string(name) + " violates the one-suffix-per-azimuth invariant");
+      throw std::runtime_error(
+          std::string(name) + " violates the one-suffix-per-azimuth invariant"
+      );
     }
     claimed_azimuth_[azimuth] = 1U;
   }
