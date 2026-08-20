@@ -131,14 +131,10 @@ inline void build_initial_maximum_mipmap_levels_impl(
   const Sample value_21 = source[row_2 + 1U];
   const Sample value_22 = source[row_2 + 2U];
 
-  const Sample maximum_00 =
-      max(max(value_00, value_01), max(value_10, value_11));
-  const Sample maximum_01 =
-      max(max(value_01, value_02), max(value_11, value_12));
-  const Sample maximum_10 =
-      max(max(value_10, value_11), max(value_20, value_21));
-  const Sample maximum_11 =
-      max(max(value_11, value_12), max(value_21, value_22));
+  const Sample maximum_00 = max(max(value_00, value_01), max(value_10, value_11));
+  const Sample maximum_01 = max(max(value_01, value_02), max(value_11, value_12));
+  const Sample maximum_10 = max(max(value_10, value_11), max(value_20, value_21));
+  const Sample maximum_11 = max(max(value_11, value_12), max(value_21, value_22));
 
   const uint level_1_x = 2U * output_index.x;
   const uint level_1_y = 2U * output_index.y;
@@ -365,12 +361,11 @@ inline float minimum_curved_ray_elevation(
     float origin,
     float slope,
     float curvature,
+    float stationary_distance,
     float t_entry,
     float t_exit
 ) {
-  const float minimum_distance =
-      curvature > 0.0F ? clamp(-slope / (2.0F * curvature), t_entry, t_exit)
-                       : (slope > 0.0F ? t_entry : t_exit);
+  const float minimum_distance = clamp(stationary_distance, t_entry, t_exit);
   return curved_ray_elevation(origin, slope, curvature, minimum_distance);
 }
 
@@ -379,11 +374,12 @@ inline bool above_global_terrain(
     float origin,
     float slope,
     float curvature,
+    float stationary_distance,
     float distance,
     float global_maximum
 ) {
   constexpr float kElevationCullingMargin = 1.0F;
-  return isfinite(global_maximum) && slope + 2.0F * curvature * distance >= 0.0F &&
+  return isfinite(global_maximum) && distance >= stationary_distance &&
          curved_ray_elevation(origin, slope, curvature, distance) >
              global_maximum + kElevationCullingMargin;
 }
@@ -411,8 +407,7 @@ inline Collision bilinear_collision(
   const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
   const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
   const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
-  const float z11 =
-      sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
   const float interval_length = t_exit - t_entry;
 
   const float sx0 = (ray_origin.x + t_entry * ray_direction.x - cell_x) / delta;
@@ -426,9 +421,8 @@ inline Collision bilinear_collision(
   const float a = curvature - twist * sx1 * sy1;
   const float b = ray_direction.z + 2.0F * curvature * t_entry - dzdx * sx1 - dzdy * sy1 -
                   twist * (sx0 * sy1 + sx1 * sy0);
-  const float c =
-      curved_ray_elevation(ray_origin.z, ray_direction.z, curvature, t_entry) - z00 -
-      dzdx * sx0 - dzdy * sy0 - twist * sx0 * sy0;
+  const float c = curved_ray_elevation(ray_origin.z, ray_direction.z, curvature, t_entry) - z00 -
+                  dzdx * sx0 - dzdy * sy0 - twist * sx0 * sy0;
 
   const float cell_speed = max(max(fabs(sx1), fabs(sy1)), 1e-12F);
   const float direction_error = FLT_EPSILON * max(fabs(t_entry), fabs(t_exit)) * cell_speed;
@@ -528,18 +522,24 @@ inline Collision bilinear_collision(
 
 /// Return whether the index is a at the boundary of a level+1 block (and would thus be permitted to
 /// go up a level)
-inline bool at_level_boundary(int index, int direction, uint level) {
-  const uint block_size = 1 << level; // the size of a block in the level above
-  const uint boundary_remainder =
-      direction > 0 ? block_size - 1 : 0; // remainder at a level boundary
-  return (direction != 0) && (index % block_size == boundary_remainder);
+inline bool at_level_boundary(int index, int direction, uint scale) {
+  const uint block_mask = 2U * scale - 1U;
+  const uint boundary_remainder = direction > 0 ? block_mask : 0U;
+  return direction != 0 && (uint(index) & block_mask) == boundary_remainder;
 }
 
-/// Return the offset required in the opposite component when going up from `level` to `level+1`
-inline float offset_jump(int index, int direction, uint level, uint scale, float dt) {
-  const int parity = (index >> (level - 1)) + (direction > 0);
-  return (parity % 2) * scale * dt;
+/// Return the opposite-axis DDA adjustment when moving to the next coarser level.
+inline float offset_jump(int index, int direction, uint scale, float dt) {
+  if (direction == 0) {
+    return 0.0F;
+  }
+  const bool upper_sibling = (uint(index) & scale) != 0U;
+  const bool crosses_sibling = upper_sibling != (direction > 0);
+  return float(crosses_sibling) * float(scale) * dt;
 }
+
+/// Align a nonnegative level-1 cell index to its containing power-of-two block.
+inline int align_to_level(int index, uint scale) { return int(uint(index) & ~(scale - 1U)); }
 
 /// Return the level-1 cell count implied by a complete power-of-two mipmap.
 ///
@@ -566,30 +566,30 @@ inline float tile_exit_distance(
     float tile_y_min,
     float cell_size,
     uint cell_count,
-    float2 direction,
+    float4 direction,
     float entry_distance
 ) {
   float tile_exit = INFINITY;
   const float x_max = tile_x_min + float(cell_count) * cell_size;
   const float y_max = tile_y_min + float(cell_count) * cell_size;
   if (direction.x > 0.0F) {
-    const float candidate = x_max / direction.x;
+    const float candidate = x_max * direction.z;
     if (candidate > entry_distance) {
       tile_exit = min(tile_exit, candidate);
     }
   } else if (direction.x < 0.0F) {
-    const float candidate = tile_x_min / direction.x;
+    const float candidate = tile_x_min * direction.z;
     if (candidate > entry_distance) {
       tile_exit = min(tile_exit, candidate);
     }
   }
   if (direction.y > 0.0F) {
-    const float candidate = y_max / direction.y;
+    const float candidate = y_max * direction.w;
     if (candidate > entry_distance) {
       tile_exit = min(tile_exit, candidate);
     }
   } else if (direction.y < 0.0F) {
-    const float candidate = tile_y_min / direction.y;
+    const float candidate = tile_y_min * direction.w;
     if (candidate > entry_distance) {
       tile_exit = min(tile_exit, candidate);
     }
@@ -603,11 +603,12 @@ inline void trace_tile_frontier_impl(
     device const Sample *mipmap,
     device const Sample *vertices,
     int base_decimeters,
-    device const float2 *azimuth_directions,
+    device const float4 *azimuth_directions,
     device const float *polar_slopes,
     TileWorkItem input,
     device const ResidentTile *tiles,
     RaytraceParameters params,
+    uint mipmap_value_count,
     device float *distances,
     device float *elevations,
     device atomic_uint *first_unresolved,
@@ -636,13 +637,17 @@ inline void trace_tile_frontier_impl(
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
-  const float2 direction = azimuth_directions[azimuth_index];
+  const float4 horizontal_direction = azimuth_directions[azimuth_index];
+  const float2 direction = horizontal_direction.xy;
   const int stepx = int(direction.x > 0.0F) - int(direction.x < 0.0F);
   const int stepy = int(direction.y > 0.0F) - int(direction.y < 0.0F);
   const float delta = params.cell_size;
-  const float dtx = stepx == 0 ? INFINITY : fabs(delta / direction.x);
-  const float dty = stepy == 0 ? INFINITY : fabs(delta / direction.y);
+  const float dtx = stepx == 0 ? INFINITY : delta * fabs(horizontal_direction.z);
+  const float dty = stepy == 0 ? INFINITY : delta * fabs(horizontal_direction.w);
   const float dz = polar_slopes[polar_index];
+  const float stationary_distance = params.curvature_coefficient > 0.0F
+                                        ? -dz / (2.0F * params.curvature_coefficient)
+                                        : (dz >= 0.0F ? -INFINITY : INFINITY);
   const float3 ray_origin = {0.0F, 0.0F, params.observer_elevation};
   const float3 ray_direction = {direction.x, direction.y, dz};
   const int n = int(num_cell);
@@ -653,14 +658,10 @@ inline void trace_tile_frontier_impl(
   // are no longer using the CPU-based continuation trick
   uint level = input.start_level;
   uint scale = 1 << (level - 1);
-  // The preceding level areas are N², N²/4, ..., so their geometric-series
-  // sum is 4 * (N² - side²) / 3. Use 64-bit intermediates: each level's
-  // offset remains a uint under the host's atlas-size limits, but N² should
-  // not overflow while the formula is being evaluated.
-  const ulong full_area = ulong(num_cell) * ulong(num_cell);
-  const ulong current_side = ulong(mipmap_level_side(num_cell, level));
-  const ulong current_area = current_side * current_side;
-  uint offset = uint((4UL * (full_area - current_area)) / 3UL);
+  // Host-created items start at either the full level-1 field or the final
+  // one-value level, whose flattened offsets are known without rebuilding the
+  // intervening geometric series in every ray.
+  uint offset = level == 1U ? 0U : mipmap_value_count - 1U;
 
   // The exact near boundary of the active DDA segment. It remains separate
   // from points nudged only to assign deterministic cell ownership.
@@ -679,8 +680,8 @@ inline void trace_tile_frontier_impl(
   int j = clamp(int(floor((x_classify - tile_x_min) / delta)), 0, n - 1);
 
   // align to the correct level boundary
-  i = (i / scale) * scale;
-  j = (j / scale) * scale;
+  i = align_to_level(i, scale);
+  j = align_to_level(j, scale);
 
   // Cell-traversal distances: `tx` and `ty` are the distances to the next
   // vertical and horizontal cell boundary respectively.
@@ -696,8 +697,14 @@ inline void trace_tile_frontier_impl(
   }
 
   const uint vertex_count = num_cell + 1U;
-  const float tile_exit =
-      tile_exit_distance(tile_x_min, tile_y_min, params.cell_size, num_cell, direction, t_start);
+  const float tile_exit = tile_exit_distance(
+      tile_x_min,
+      tile_y_min,
+      params.cell_size,
+      num_cell,
+      horizontal_direction,
+      t_start
+  );
   const float segment_limit = min(tile_exit, params.max_distance);
 
   // Step the ray across the mipmap cell-by-cell until we go off the edge or find an internal
@@ -724,6 +731,7 @@ inline void trace_tile_frontier_impl(
             ray_origin.z,
             dz,
             params.curvature_coefficient,
+            stationary_distance,
             interval_start,
             params.global_maximum_elevation
         )) {
@@ -733,6 +741,7 @@ inline void trace_tile_frontier_impl(
         ray_origin.z,
         dz,
         params.curvature_coefficient,
+        stationary_distance,
         interval_start,
         interval_end
     );
@@ -801,8 +810,8 @@ inline void trace_tile_frontier_impl(
         t_start = cell_entry;
         level -= 1U;
         scale /= 2U;
-        i = (i / int(scale)) * int(scale);
-        j = (j / int(scale)) * int(scale);
+        i = align_to_level(i, scale);
+        j = align_to_level(j, scale);
 
         // The preceding level occupies `child_side` squared entries directly
         // before this one, so move backward without rebuilding the offset.
@@ -837,10 +846,10 @@ inline void trace_tile_frontier_impl(
     // Go up to a coarser level whenever possible
     if (level < params.num_levels) {
       if (ty < tx) {
-        if (at_level_boundary(i, stepy, level)) {
+        if (at_level_boundary(i, stepy, scale)) {
           // Crossing a Y boundary joins two vertically adjacent blocks. The
           // X timer must therefore be adjusted from the X cell's sibling.
-          tx += offset_jump(j, stepx, level, scale, dtx);
+          tx += offset_jump(j, stepx, scale, dtx);
 
           // The current level immediately precedes the coarser level in the
           // flat buffer, so advance by its square element count.
@@ -849,10 +858,10 @@ inline void trace_tile_frontier_impl(
           scale *= 2;
         }
       } else {
-        if (at_level_boundary(j, stepx, level)) {
+        if (at_level_boundary(j, stepx, scale)) {
           // Crossing an X boundary joins two horizontally adjacent blocks.
           // Adjust the Y timer from the Y cell's sibling before coarsening.
-          ty += offset_jump(i, stepy, level, scale, dty);
+          ty += offset_jump(i, stepy, scale, dty);
 
           // The level transition is identical regardless of the stepped axis.
           offset += level_side * level_side;
@@ -882,7 +891,7 @@ inline void trace_tile_frontier_impl(
 kernel void trace_tile_frontier(
     device const float *mipmap_atlas [[buffer(0)]],
     device const float *vertex_atlas [[buffer(1)]],
-    device const float2 *azimuth_directions [[buffer(2)]],
+    device const float4 *azimuth_directions [[buffer(2)]],
     device const float *polar_slopes [[buffer(3)]],
     device const TileWorkItem *work_items [[buffer(4)]],
     device const ResidentTile *tiles [[buffer(5)]],
@@ -908,6 +917,7 @@ kernel void trace_tile_frontier(
       input,
       tiles,
       shared_parameters,
+      mipmap_value_count,
       distances,
       elevations,
       first_unresolved,
@@ -921,7 +931,7 @@ kernel void trace_tile_frontier(
 kernel void trace_tile_frontier_quantized(
     device const ushort *mipmap_atlas [[buffer(0)]],
     device const uchar *vertex_records [[buffer(1)]],
-    device const float2 *azimuth_directions [[buffer(2)]],
+    device const float4 *azimuth_directions [[buffer(2)]],
     device const float *polar_slopes [[buffer(3)]],
     device const TileWorkItem *work_items [[buffer(4)]],
     device const ResidentTile *tiles [[buffer(5)]],
@@ -951,6 +961,7 @@ kernel void trace_tile_frontier_quantized(
       input,
       tiles,
       shared_parameters,
+      mipmap_value_count,
       distances,
       elevations,
       first_unresolved,
@@ -966,7 +977,7 @@ kernel void trace_tile_frontier_quantized(
 kernel void emit_tile_frontier(
     device const TileWorkItem *active_items [[buffer(0)]],
     device const ResidentTile *tiles [[buffer(1)]],
-    device const float2 *azimuth_directions [[buffer(2)]],
+    device const float4 *azimuth_directions [[buffer(2)]],
     device const atomic_uint *first_unresolved [[buffer(3)]],
     constant RaytraceParameters &shared_parameters [[buffer(4)]],
     device const ResidentTileHashEntry *resident_hash [[buffer(5)]],
@@ -989,13 +1000,14 @@ kernel void emit_tile_frontier(
     return;
   }
 
-  const float2 direction = azimuth_directions[active.azimuth];
+  const float4 horizontal_direction = azimuth_directions[active.azimuth];
+  const float2 direction = horizontal_direction.xy;
   const float entry_distance = tile_exit_distance(
       tile_x_min,
       tile_y_min,
       params.cell_size,
       mipmap_finest_side(params.num_levels),
-      direction,
+      horizontal_direction,
       active.entry_distance
   );
   if (entry_distance >= params.max_distance) {
