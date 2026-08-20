@@ -31,6 +31,26 @@ struct ColorStop {
   return static_cast<uint8_t>(std::clamp(value, 0.0F, 255.0F) + 0.5F);
 }
 
+/// Expand one IEEE 754 binary16 bit pattern without relying on a host-specific
+/// half type. Normal trace output is finite, but preserving infinities and NaNs
+/// makes corrupt or future diagnostic data fail visibly.
+[[nodiscard]] float decode_binary16(uint16_t bits) {
+  const bool negative = (bits & 0x8000U) != 0U;
+  const uint32_t exponent = (bits >> 10U) & 0x1fU;
+  const uint32_t significand = bits & 0x03ffU;
+  float value = 0.0F;
+  if (exponent == 0U) {
+    value = std::ldexp(static_cast<float>(significand), -24);
+  } else if (exponent == 0x1fU) {
+    value = significand == 0U ? std::numeric_limits<float>::infinity()
+                              : std::numeric_limits<float>::quiet_NaN();
+  } else {
+    value =
+        std::ldexp(static_cast<float>(0x0400U + significand), static_cast<int>(exponent) - 25);
+  }
+  return negative ? -value : value;
+}
+
 /// Linearly interpolate an sRGB colour from a sorted set of colour stops.
 template <size_t Count>
 [[nodiscard]] Rgb
@@ -205,6 +225,38 @@ void write_colormapped_png(
     rgb[index * 3U] = color.red;
     rgb[index * 3U + 1U] = color.green;
     rgb[index * 3U + 2U] = color.blue;
+  }
+  encode_png(path, rgb, width, height);
+}
+
+void write_surface_normals_png(
+    const std::filesystem::path &path,
+    std::span<const uint32_t> packed_gradients,
+    std::span<const float> distances,
+    uint32_t width,
+    uint32_t height
+) {
+  const size_t pixel_count = checked_pixel_count(width, height);
+  if (packed_gradients.size() != pixel_count || distances.size() != pixel_count) {
+    throw std::invalid_argument("Normal-map input length does not match its declared dimensions");
+  }
+
+  std::vector<uint8_t> rgb(pixel_count * 3U);
+  for (size_t index = 0; index < pixel_count; index++) {
+    if (!(distances[index] > 0.0F) || !std::isfinite(distances[index])) {
+      continue;
+    }
+    const uint32_t packed = packed_gradients[index];
+    const float east_gradient = decode_binary16(static_cast<uint16_t>(packed));
+    const float north_gradient = decode_binary16(static_cast<uint16_t>(packed >> 16U));
+    const float inverse_length =
+        1.0F / std::sqrt(east_gradient * east_gradient + north_gradient * north_gradient + 1.0F);
+    const float normal_east = -east_gradient * inverse_length;
+    const float normal_north = -north_gradient * inverse_length;
+    const float normal_up = inverse_length;
+    rgb[index * 3U] = to_byte((0.5F * normal_east + 0.5F) * 255.0F);
+    rgb[index * 3U + 1U] = to_byte((0.5F * normal_north + 0.5F) * 255.0F);
+    rgb[index * 3U + 2U] = to_byte((0.5F * normal_up + 0.5F) * 255.0F);
   }
   encode_png(path, rgb, width, height);
 }

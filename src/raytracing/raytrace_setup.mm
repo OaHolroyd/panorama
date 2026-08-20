@@ -104,6 +104,16 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
   return {contents, count};
 }
 
+/// Return a non-owning uint32 view of a completed shared Metal buffer.
+[[nodiscard]] std::span<const uint32_t>
+view_uint32_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
+  const auto *contents = static_cast<const uint32_t *>(buffer.contents);
+  if (contents == nullptr) {
+    throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
+  }
+  return {contents, count};
+}
+
 } // namespace
 
 /// Trace a fixed observer's per-pixel ray field through a set of terrain tiles
@@ -211,7 +221,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
     // ray inputs, output images, and reusable frontier storage.
-    GpuRaytraceResources gpu(field.rays, paths, trace_quantized);
+    GpuRaytraceResources gpu(field.rays, paths, trace_quantized, config.compute_normals);
     gpu.initialise_frontier();
 
     // The cache shares the GPU resource owner's device. Preparation workers
@@ -394,9 +404,11 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
     // tracing. Report it as an independent top-level timer so `Total elapsed`
     // remains comparable with future output backends which may omit PNGs.
     Timer png_timer("PNG generation");
+    const std::span<const float> distances =
+        view_float_buffer(gpu.distances(), ray_count, "distance output");
     write_colormapped_png(
         "distances.png",
-        view_float_buffer(gpu.distances(), ray_count, "distance output"),
+        distances,
         field.image.width,
         field.image.height,
         colormaps::viridis
@@ -408,6 +420,15 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
         field.image.height,
         colormaps::viridis
     );
+    if (config.compute_normals) {
+      write_surface_normals_png(
+          "normals.png",
+          view_uint32_buffer(gpu.surface_gradients(), ray_count, "surface gradient output"),
+          distances,
+          field.image.width,
+          field.image.height
+      );
+    }
     png_timer.print();
   }
 }

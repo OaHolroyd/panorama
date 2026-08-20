@@ -35,6 +35,8 @@ struct RaytraceConfig {
   uint32_t max_tile_preparation_workers;
   /// Keep uint16 custom terrain quantized through atlas residency and tracing.
   bool retain_quantized;
+  /// Compute one compact terrain-surface normal parameterization per collision.
+  bool compute_normals;
 };
 
 /// Trace an explicitly supplied per-pixel ray field.

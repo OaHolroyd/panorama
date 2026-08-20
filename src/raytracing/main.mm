@@ -25,6 +25,7 @@ struct EntrypointSettings {
   uint32_t max_tile_count = 0U;
   float max_distance = 600'000.0F;
   bool retain_quantized = false;
+  bool compute_normals = true;
   double easting = 2623452.4;
   double northing = 1100502.2;
   double elevation = 3415.0;
@@ -48,6 +49,7 @@ void print_usage(const char *program) {
   std::printf(
       "General output and observer options:\n"
       "  --retain-quantized    keep uint16 terrain quantized in the GPU atlas\n"
+      "  --no-normals          skip collision-normal computation and normals.png\n"
       "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
       "  --northing M          observer northing in the tile CRS (default: 1100502.2)\n"
       "  --elevation M         observer elevation in metres (default: 3415.0)\n"
@@ -66,6 +68,10 @@ void print_usage(const char *program) {
     }
     if (option == "--retain-quantized") {
       settings.retain_quantized = true;
+      continue;
+    }
+    if (option == "--no-normals") {
+      settings.compute_normals = false;
       continue;
     }
 
@@ -118,6 +124,7 @@ int main(int argc, const char *argv[]) {
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
         settings.retain_quantized,
+        settings.compute_normals,
     };
     const panorama::RayField rays = settings.projection.make_ray_field();
     std::printf(
@@ -137,10 +144,11 @@ int main(int argc, const char *argv[]) {
     );
     settings.projection.print_settings();
     std::printf(
-        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s.\n",
+        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s, normals %s.\n",
         settings.max_distance,
         panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
-        settings.retain_quantized ? "retained" : "disabled"
+        settings.retain_quantized ? "retained" : "disabled",
+        settings.compute_normals ? "enabled" : "disabled"
     );
     panorama::raytrace_tiled_heightmap(config, rays);
     return EXIT_SUCCESS;
