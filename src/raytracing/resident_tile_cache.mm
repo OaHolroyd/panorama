@@ -121,12 +121,6 @@ struct AtlasInstallation {
   double lower_left_y;
 };
 
-/// Resources retained while one synchronous mipmap command is running.
-struct MipmapSubmission {
-  id<MTLBuffer> slot_buffer;
-  id<MTLCommandBuffer> command;
-};
-
 } // namespace
 
 /// Mutable atlas state hidden behind the cache's ownership-oriented interface.
@@ -158,6 +152,7 @@ struct ResidentTileCache::State {
   id<MTLBuffer> mipmap_atlas;
   id<MTLBuffer> vertex_atlas;
   id<MTLBuffer> quantized_staging;
+  id<MTLBuffer> preparation_slots;
   id<MTLBuffer> metadata_buffer;
   id<MTLBuffer> hash_buffer;
   float *mipmaps;
@@ -169,7 +164,10 @@ struct ResidentTileCache::State {
   std::vector<uint64_t> last_used;
 
   /// Submit every maximum-mipmap level for the supplied resident slots.
-  [[nodiscard]] MipmapSubmission submit_mipmaps(std::span<const uint32_t> slots);
+  [[nodiscard]] id<MTLCommandBuffer> submit_mipmaps(std::span<const uint32_t> slots);
+
+  /// Copy one synchronous preparation batch into the reusable GPU slot list.
+  void write_preparation_slots(std::span<const uint32_t> slots);
 
   /// Load custom payloads directly, retaining or expanding fixed-point records.
   void load_custom_vertices(
@@ -211,6 +209,17 @@ struct ResidentTileCache::State {
         tile_width(width), mip_count(mip_values), vertex_count(vertex_values),
         slot_capacity(slot_values), hash_slot_count(hash_values), bytes_copied(initial_bytes) {}
 };
+
+void ResidentTileCache::State::write_preparation_slots(std::span<const uint32_t> slots) {
+  if (slots.empty() || slots.size() > slot_capacity) {
+    throw std::invalid_argument("Terrain-preparation batch exceeds its slot buffer");
+  }
+  auto *destination = static_cast<uint32_t *>(preparation_slots.contents);
+  if (destination == nullptr) {
+    throw std::runtime_error("Could not map terrain-preparation slot buffer");
+  }
+  std::copy(slots.begin(), slots.end(), destination);
+}
 
 void ResidentTileCache::State::load_custom_vertices(
     std::span<const MetalTileBufferLoad> loads,
@@ -290,12 +299,10 @@ void ResidentTileCache::State::load_custom_vertices(
     timer.stop("Metal tile I/O");
 
     const std::span<const uint32_t> wave_slots = slots.subspan(wave_start, wave_size);
-    id<MTLBuffer> slot_buffer = [device newBufferWithBytes:wave_slots.data()
-                                                    length:wave_slots.size_bytes()
-                                                   options:MTLResourceStorageModeShared];
+    write_preparation_slots(wave_slots);
     id<MTLCommandBuffer> command = [mipmap_queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    if (slot_buffer == nil || command == nil || encoder == nil) {
+    if (command == nil || encoder == nil) {
       throw std::runtime_error("Could not create a fixed-point vertex-conversion command");
     }
     command.label = @"Convert fixed-point terrain vertices";
@@ -303,7 +310,7 @@ void ResidentTileCache::State::load_custom_vertices(
     [encoder setComputePipelineState:conversion_pipeline];
     [encoder setBuffer:quantized_staging offset:0U atIndex:0];
     [encoder setBuffer:vertex_atlas offset:0U atIndex:1];
-    [encoder setBuffer:slot_buffer offset:0U atIndex:2];
+    [encoder setBuffer:preparation_slots offset:0U atIndex:2];
     [encoder setBytes:&quantized_record.stride length:sizeof(quantized_record.stride) atIndex:3];
     [encoder setBytes:&quantized_record.vertex_offset
                length:sizeof(quantized_record.vertex_offset)
@@ -331,20 +338,13 @@ void ResidentTileCache::State::load_custom_vertices(
   }
 }
 
-MipmapSubmission ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
-  if (slots.empty()) {
-    throw std::invalid_argument("Cannot submit an empty mipmap-generation batch");
-  }
-  if (slots.size() > slot_capacity) {
-    throw std::logic_error("Mipmap-generation batch exceeds its slot buffer");
-  }
-
-  // The slot list must remain available until this command completes.
-  id<MTLBuffer> slot_buffer = [device newBufferWithBytes:slots.data()
-                                                  length:slots.size_bytes()
-                                                 options:MTLResourceStorageModeShared];
+id<MTLCommandBuffer>
+ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
+  // Mipmap submissions complete synchronously, so the cache-owned slot list
+  // is never rewritten while a preparation command is using it.
+  write_preparation_slots(slots);
   id<MTLCommandBuffer> command = [mipmap_queue commandBuffer];
-  if (slot_buffer == nil || command == nil) {
+  if (command == nil) {
     throw std::runtime_error("Could not create a mipmap-generation command");
   }
   command.label = @"Generate resident tile mipmaps";
@@ -374,7 +374,7 @@ MipmapSubmission ResidentTileCache::State::submit_mipmaps(std::span<const uint32
   uint32_t source_step = 1U;
   [encoder setBytes:&source_side length:sizeof(source_side) atIndex:2];
   [encoder setBytes:&source_step length:sizeof(source_step) atIndex:3];
-  [encoder setBuffer:slot_buffer offset:0U atIndex:4];
+  [encoder setBuffer:preparation_slots offset:0U atIndex:4];
   [encoder setBytes:&source_tile_stride length:sizeof(source_tile_stride) atIndex:5];
   [encoder setBytes:&destination_tile_stride length:sizeof(destination_tile_stride) atIndex:6];
   [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
@@ -409,7 +409,7 @@ MipmapSubmission ResidentTileCache::State::submit_mipmaps(std::span<const uint32
     [encoder setBuffer:mipmap_atlas offset:output_offset * sample_size atIndex:1];
     [encoder setBytes:&source_side length:sizeof(source_side) atIndex:2];
     [encoder setBytes:&source_step length:sizeof(source_step) atIndex:3];
-    [encoder setBuffer:slot_buffer offset:0U atIndex:4];
+    [encoder setBuffer:preparation_slots offset:0U atIndex:4];
     [encoder setBytes:&destination_tile_stride length:sizeof(destination_tile_stride) atIndex:5];
     [encoder setBytes:&destination_tile_stride length:sizeof(destination_tile_stride) atIndex:6];
     [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
@@ -426,21 +426,21 @@ MipmapSubmission ResidentTileCache::State::submit_mipmaps(std::span<const uint32
   }
 
   [command commit];
-  return {slot_buffer, command};
+  return command;
 }
 
 void ResidentTileCache::State::generate_mipmaps(std::span<const uint32_t> slots, Timer &timer) {
   timer.start_wall("GPU mipmap generation");
-  const MipmapSubmission submission = submit_mipmaps(slots);
-  [submission.command waitUntilCompleted];
+  id<MTLCommandBuffer> command = submit_mipmaps(slots);
+  [command waitUntilCompleted];
   timer.stop("GPU mipmap generation");
-  if (submission.command.status == MTLCommandBufferStatusError) {
-    print_error(@"Metal mipmap generation failed", submission.command.error);
+  if (command.status == MTLCommandBufferStatusError) {
+    print_error(@"Metal mipmap generation failed", command.error);
     throw std::runtime_error("Metal mipmap generation failed");
   }
   timer.add_work(
       "GPU mipmap generation",
-      1'000.0 * (submission.command.GPUEndTime - submission.command.GPUStartTime)
+      1'000.0 * (command.GPUEndTime - command.GPUStartTime)
   );
 }
 
@@ -579,6 +579,12 @@ ResidentTileCache::ResidentTileCache(
         return is_metal_tile_path(source.path);
       });
   if (needs_metal_io) {
+    state->preparation_slots = make_buffer(
+        device,
+        checked_buffer_length(slot_capacity, sizeof(uint32_t), "terrain preparation slots"),
+        "terrain preparation slots"
+    );
+    state->preparation_slots.label = @"Terrain preparation slots";
     state->io_queue = make_metal_io_queue(device);
 
     // Custom files contain atlas-ordered vertices. Both representations need
