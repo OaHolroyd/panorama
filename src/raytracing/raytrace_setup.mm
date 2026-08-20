@@ -342,11 +342,11 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
 
         deferred_successor_work += static_cast<uint64_t>(pass.deferred_count);
 
-        // Preserve each required continuation in its GPU-resolved source bucket.
+        // Keep the mapped GPU output alive through atlas publication, then
+        // consume it directly while constructing the next active frontier.
         const std::span<const DeferredRayWork> deferred = gpu.deferred_work(pass.deferred_count);
-        frontier.append_deferred(deferred);
 #if defined(PANORAMA_DEBUG_VALIDATION)
-        frontier.validate_deferred_work();
+        frontier.validate_deferred_work(deferred);
 #endif
 
         timer.start_wall("Frontier bookkeeping");
@@ -354,11 +354,12 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
         // be selected while publishing newly prepared sources.
         frontier.mark_installed(cache.install_prepared(preparer, no_pinned_slots, timer));
 
-        // Append deferred continuations whose terrain became resident during
-        // the synchronous installation above.
+        // Activate continuations whose terrain became resident during the
+        // synchronous installation above.
         active_count =
-            frontier.activate_resident(gpu.active_frontier(), 0U, cache, preparer);
+            frontier.activate_resident(gpu.active_frontier(), 0U, cache, preparer, deferred);
 #if defined(PANORAMA_DEBUG_VALIDATION)
+        frontier.validate_deferred_work();
         frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
         timer.stop("Frontier bookkeeping");
@@ -376,6 +377,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
           active_count =
               frontier.activate_resident(gpu.active_frontier(), active_count, cache, preparer);
 #if defined(PANORAMA_DEBUG_VALIDATION)
+          frontier.validate_deferred_work();
           frontier.validate_frontier(gpu.active_frontier(), active_count, "activated frontier");
 #endif
           timer.stop("Frontier bookkeeping");

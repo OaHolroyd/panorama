@@ -25,18 +25,16 @@ public:
       const RaytraceParameters &parameters
   );
 
-  /// Append GPU-emitted continuations grouped by their next required source.
-  void append_deferred(std::span<const DeferredRayWork> deferred);
-
   /// Clear pending-request state for sources just published by the atlas cache.
   void mark_installed(std::span<const uint32_t> source_indices);
 
-  /// Activate nearby source buckets and request any required nonresident tiles.
+  /// Consume new GPU continuations, activate nearby work, and request sources.
   [[nodiscard]] uint32_t activate_resident(
       id<MTLBuffer> buffer,
       uint32_t count,
       ResidentTileCache &cache,
-      AsyncTilePreparer &preparer
+      AsyncTilePreparer &preparer,
+      std::span<const DeferredRayWork> incoming = {}
   );
 
   /// Return the atlas slots read by a frontier and optionally update their LRU use.
@@ -54,8 +52,8 @@ public:
   /// Check that a GPU frontier contains at most one segment per ray.
   void validate_frontier(id<MTLBuffer> buffer, uint32_t count, const char *name);
 
-  /// Check the same invariant for host-resident deferred continuations.
-  void validate_deferred_work();
+  /// Check the same invariant across host state and new GPU continuations.
+  void validate_deferred_work(std::span<const DeferredRayWork> incoming = {});
 #endif
 
 private:
@@ -77,6 +75,10 @@ private:
   size_t waiting_count_ = 0U;
   /// Sources with preparation already queued, loading, or awaiting installation.
   std::vector<uint8_t> request_outstanding_;
+  /// Scratch state reused while routing one GPU continuation buffer.
+  std::vector<float> request_distances_;
+  std::vector<uint32_t> request_sources_;
+  std::vector<uint32_t> activation_slots_;
 #if defined(PANORAMA_DEBUG_VALIDATION)
   std::vector<uint8_t> claimed_ray_;
 #endif
