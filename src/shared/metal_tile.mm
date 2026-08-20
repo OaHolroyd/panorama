@@ -291,8 +291,7 @@ uint64_t metal_tile_mipmap_value_count(uint32_t cell_count) {
   return count;
 }
 
-QuantizedMetalTileRecordLayout
-quantized_metal_tile_record_layout(const MetalTileHeader &header) {
+QuantizedMetalTileRecordLayout quantized_metal_tile_record_layout(const MetalTileHeader &header) {
   if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
     throw std::invalid_argument("Quantized record layout requires uint16 terrain");
   }
@@ -318,14 +317,14 @@ void validate_metal_tile_header(
     const MetalTileHeader &header,
     MetalTileCompression expected_compression
 ) {
-  const bool float32 =
-      header.magic == kMetalTileFloat32Magic && header.version == kMetalTileFloat32Version &&
-      header.header_size == kMetalTileFloat32HeaderSize &&
-      header.sample_type == MetalTileSampleType::Float32;
-  const bool uint16 =
-      header.magic == kMetalTileUint16Magic && header.version == kMetalTileUint16Version &&
-      header.header_size == kMetalTileUint16HeaderSize &&
-      header.sample_type == MetalTileSampleType::Uint16Decimeters;
+  const bool float32 = header.magic == kMetalTileFloat32Magic &&
+                       header.version == kMetalTileFloat32Version &&
+                       header.header_size == kMetalTileFloat32HeaderSize &&
+                       header.sample_type == MetalTileSampleType::Float32;
+  const bool uint16 = header.magic == kMetalTileUint16Magic &&
+                      header.version == kMetalTileUint16Version &&
+                      header.header_size == kMetalTileUint16HeaderSize &&
+                      header.sample_type == MetalTileSampleType::Uint16Decimeters;
   if (!float32 && !uint16) {
     throw std::runtime_error("Metal tile has an unsupported header or version");
   }
@@ -350,8 +349,7 @@ void validate_metal_tile_header(
   }
 
   if (uint16) {
-    const double minimum_elevation =
-        static_cast<double>(header.elevation_base_decimeters) / 10.0;
+    const double minimum_elevation = static_cast<double>(header.elevation_base_decimeters) / 10.0;
     const double maximum_representable =
         static_cast<double>(header.elevation_base_decimeters) / 10.0 +
         static_cast<double>(std::numeric_limits<uint16_t>::max()) / 10.0;
@@ -443,9 +441,9 @@ MetalTileHeader read_metal_tile_header(const std::filesystem::path &path) {
   MetalTileHeaderBytes header_bytes = {};
   id<MTLIOCommandBuffer> command = [queue commandBuffer];
   [command loadBytes:header_bytes.data()
-                 size:header_bytes.size()
-         sourceHandle:handle
-   sourceHandleOffset:0U];
+                    size:header_bytes.size()
+            sourceHandle:handle
+      sourceHandleOffset:0U];
   complete_io(command, path);
   const MetalTileHeader header = decode_header(header_bytes);
   validate_metal_tile_header(header, compression);
@@ -503,9 +501,8 @@ void load_metal_tiles_into_buffer(
       id<MTLIOCommandBuffer> command = commands[index];
       [command waitUntilCompleted];
       if (command.status != MTLIOStatusComplete) {
-        const char *detail = command.error == nil
-                                 ? "unknown error"
-                                 : command.error.localizedDescription.UTF8String;
+        const char *detail =
+            command.error == nil ? "unknown error" : command.error.localizedDescription.UTF8String;
         throw std::runtime_error(
             "Could not load Metal tile " + loads[wave_start + index].path.string() + ": " + detail
         );

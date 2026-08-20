@@ -207,8 +207,7 @@ struct ResidentTileCache::State {
                 ? quantized_metal_tile_record_layout(header_value)
                 : QuantizedMetalTileRecordLayout{}
         ),
-        retain_quantized(retain_quantized_value),
-        grid_origin_x(origin_x), grid_origin_y(origin_y),
+        retain_quantized(retain_quantized_value), grid_origin_x(origin_x), grid_origin_y(origin_y),
         tile_width(width), mip_count(mip_values), vertex_count(vertex_values),
         slot_capacity(slot_values), hash_slot_count(hash_values), bytes_copied(initial_bytes) {}
 };
@@ -229,9 +228,8 @@ void ResidentTileCache::State::load_custom_vertices(
     const uint64_t source_offset = retain_quantized ? 0U : header_template.vertex_offset;
     const uint64_t load_size =
         retain_quantized ? quantized_record.logical_size : header_template.vertex_byte_count;
-    const NSUInteger destination_stride = retain_quantized
-                                              ? quantized_record.stride
-                                              : header_template.vertex_byte_count;
+    const NSUInteger destination_stride =
+        retain_quantized ? quantized_record.stride : header_template.vertex_byte_count;
     std::vector<MetalTileBufferLoad> direct_loads;
     direct_loads.reserve(loads.size());
     for (size_t index = 0U; index < loads.size(); index++) {
@@ -306,15 +304,13 @@ void ResidentTileCache::State::load_custom_vertices(
     [encoder setBuffer:quantized_staging offset:0U atIndex:0];
     [encoder setBuffer:vertex_atlas offset:0U atIndex:1];
     [encoder setBuffer:slot_buffer offset:0U atIndex:2];
-    [encoder setBytes:&quantized_record.stride
-                length:sizeof(quantized_record.stride)
-               atIndex:3];
+    [encoder setBytes:&quantized_record.stride length:sizeof(quantized_record.stride) atIndex:3];
     [encoder setBytes:&quantized_record.vertex_offset
-                length:sizeof(quantized_record.vertex_offset)
-               atIndex:4];
+               length:sizeof(quantized_record.vertex_offset)
+              atIndex:4];
     [encoder setBytes:&quantized_record.elevation_base_offset
-                length:sizeof(quantized_record.elevation_base_offset)
-               atIndex:5];
+               length:sizeof(quantized_record.elevation_base_offset)
+              atIndex:5];
     [encoder setBytes:&vertex_count length:sizeof(vertex_count) atIndex:6];
     const uint32_t tile_count = static_cast<uint32_t>(wave_size);
     [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
@@ -330,16 +326,12 @@ void ResidentTileCache::State::load_custom_vertices(
       print_error(@"Metal vertex conversion failed", command.error);
       throw std::runtime_error("Metal fixed-point vertex conversion failed");
     }
-    timer.add_work(
-        "GPU vertex conversion",
-        1'000.0 * (command.GPUEndTime - command.GPUStartTime)
-    );
+    timer.add_work("GPU vertex conversion", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
     timer.stop("GPU vertex conversion");
   }
 }
 
-MipmapSubmission
-ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
+MipmapSubmission ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
   if (slots.empty()) {
     throw std::invalid_argument("Cannot submit an empty mipmap-generation batch");
   }
@@ -373,11 +365,10 @@ ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
   }
   encoder.label = fuse_initial_levels ? @"Build initial maximum mipmap levels"
                                       : @"Build maximum mipmap level 1";
-  [encoder setComputePipelineState:fuse_initial_levels ? initial_mipmap_pipeline
-                                                       : mipmap_pipeline];
+  [encoder setComputePipelineState:fuse_initial_levels ? initial_mipmap_pipeline : mipmap_pipeline];
   [encoder setBuffer:vertex_atlas
-               offset:retain_quantized ? quantized_record.vertex_offset : 0U
-              atIndex:0];
+              offset:retain_quantized ? quantized_record.vertex_offset : 0U
+             atIndex:0];
   [encoder setBuffer:mipmap_atlas offset:0U atIndex:1];
   uint32_t source_side = fuse_initial_levels ? cell_count : cell_count + 1U;
   uint32_t source_step = 1U;
@@ -500,29 +491,28 @@ ResidentTileCache::ResidentTileCache(
       origin.lower_left_x - static_cast<double>(origin_key.column) * tile_width;
   const double grid_origin_y =
       origin.lower_left_y + static_cast<double>(origin_key.row + 1) * tile_width;
-  const MetalTileHeader header_template = custom_origin
-                                               ? read_metal_tile_header(sources.front().path)
-                                               : MetalTileHeader{
-                                                     kMetalTileFloat32Magic,
-                                                     kMetalTileFloat32Version,
-                                                     kMetalTileFloat32HeaderSize,
-                                                     MetalTileCompression::None,
-                                                     origin.crs.epsg_code(),
-                                                     origin.size,
-                                                     origin.num_levels,
-                                                     origin.maximum_elevation,
-                                                     MetalTileSampleType::Float32,
-                                                     0,
-                                                     0U,
-                                                     origin_key.row,
-                                                     origin_key.column,
-                                                     origin.lower_left_x,
-                                                     origin.lower_left_y,
-                                                     origin.delta,
-                                                     kMetalTileFloat32HeaderSize,
-                                                     static_cast<uint64_t>(vertex_count) *
-                                                         sizeof(float),
-                                                 };
+  const MetalTileHeader header_template =
+      custom_origin ? read_metal_tile_header(sources.front().path)
+                    : MetalTileHeader{
+                          kMetalTileFloat32Magic,
+                          kMetalTileFloat32Version,
+                          kMetalTileFloat32HeaderSize,
+                          MetalTileCompression::None,
+                          origin.crs.epsg_code(),
+                          origin.size,
+                          origin.num_levels,
+                          origin.maximum_elevation,
+                          MetalTileSampleType::Float32,
+                          0,
+                          0U,
+                          origin_key.row,
+                          origin_key.column,
+                          origin.lower_left_x,
+                          origin.lower_left_y,
+                          origin.delta,
+                          kMetalTileFloat32HeaderSize,
+                          static_cast<uint64_t>(vertex_count) * sizeof(float),
+                      };
   const bool retain_quantized = config.retain_quantized;
   if (retain_quantized &&
       (!custom_origin || header_template.sample_type != MetalTileSampleType::Uint16Decimeters)) {
@@ -601,11 +591,10 @@ ResidentTileCache::ResidentTileCache(
       print_error(@"Could not load the Metal library", error);
       throw std::runtime_error("Could not load Metal library for terrain preparation");
     }
-    NSString *initial_mipmap_name =
-        retain_quantized ? @"build_quantized_initial_maximum_mipmap_levels"
-                         : @"build_initial_maximum_mipmap_levels";
-    id<MTLFunction> initial_mipmap_function =
-        [library newFunctionWithName:initial_mipmap_name];
+    NSString *initial_mipmap_name = retain_quantized
+                                        ? @"build_quantized_initial_maximum_mipmap_levels"
+                                        : @"build_initial_maximum_mipmap_levels";
+    id<MTLFunction> initial_mipmap_function = [library newFunctionWithName:initial_mipmap_name];
     if (initial_mipmap_function == nil) {
       throw std::runtime_error("Metal terrain-preparation kernel is missing");
     }
@@ -616,14 +605,14 @@ ResidentTileCache::ResidentTileCache(
       throw std::runtime_error("Could not create the initial mipmap-generation pipeline");
     }
 
-    NSString *mipmap_name = retain_quantized ? @"build_quantized_maximum_mipmap_level"
-                                             : @"build_maximum_mipmap_level";
+    NSString *mipmap_name =
+        retain_quantized ? @"build_quantized_maximum_mipmap_level" : @"build_maximum_mipmap_level";
     id<MTLFunction> mipmap_function = [library newFunctionWithName:mipmap_name];
     if (mipmap_function == nil) {
       throw std::runtime_error("Metal terrain-preparation kernel is missing");
     }
-    state->mipmap_pipeline =
-        [device newComputePipelineStateWithFunction:mipmap_function error:&error];
+    state->mipmap_pipeline = [device newComputePipelineStateWithFunction:mipmap_function
+                                                                   error:&error];
     if (state->mipmap_pipeline == nil) {
       print_error(@"Could not create the mipmap-generation pipeline", error);
       throw std::runtime_error("Could not create the mipmap-generation pipeline");
@@ -640,8 +629,8 @@ ResidentTileCache::ResidentTileCache(
       if (conversion_function == nil) {
         throw std::runtime_error("Metal vertex-conversion kernel is missing");
       }
-      state->conversion_pipeline =
-          [device newComputePipelineStateWithFunction:conversion_function error:&error];
+      state->conversion_pipeline = [device newComputePipelineStateWithFunction:conversion_function
+                                                                         error:&error];
       if (state->conversion_pipeline == nil) {
         print_error(@"Could not create the vertex-conversion pipeline", error);
         throw std::runtime_error("Could not create the vertex-conversion pipeline");
@@ -683,9 +672,8 @@ ResidentTileCache::ResidentTileCache(
         timer
     );
     state->generate_mipmaps(std::span<const uint32_t>(&slot, 1U), timer);
-    state->bytes_loaded_with_metal_io =
-        retain_quantized ? state->quantized_record.logical_size
-                         : state->header_template.vertex_byte_count;
+    state->bytes_loaded_with_metal_io = retain_quantized ? state->quantized_record.logical_size
+                                                         : state->header_template.vertex_byte_count;
   } else {
     if (origin.mipmap.size() != mip_count || origin.vertices->size() != vertex_count) {
       throw std::logic_error("GeoTIFF origin tile does not match the atlas dimensions");
@@ -832,8 +820,7 @@ std::vector<uint32_t> ResidentTileCache::install_prepared(
     const uint64_t bytes_per_tile = state.retain_quantized
                                         ? state.quantized_record.logical_size
                                         : state.header_template.vertex_byte_count;
-    state.bytes_loaded_with_metal_io +=
-        static_cast<uint64_t>(custom_slots.size()) * bytes_per_tile;
+    state.bytes_loaded_with_metal_io += static_cast<uint64_t>(custom_slots.size()) * bytes_per_tile;
   }
 
   // All payload writes are now complete. Publish slot mappings together so

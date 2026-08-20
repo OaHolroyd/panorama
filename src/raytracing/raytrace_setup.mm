@@ -53,8 +53,7 @@ void validate_configuration(const RaytraceConfig &config) {
 }
 
 /// Build the scalar tracing ABI shared by compatible resident terrain tiles.
-[[nodiscard]] RaytraceParameters
-make_raytrace_parameters(
+[[nodiscard]] RaytraceParameters make_raytrace_parameters(
     const LoadedTile &tile,
     const RaytraceConfig &config,
     const TerrainCatalogue &catalogue
@@ -428,8 +427,8 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config) {
         static_cast<unsigned long long>(resident_successor_work),
         static_cast<unsigned long long>(deferred_successor_work)
     );
-    const uint64_t skipped_tiles = frontier_statistics.locally_skipped_tiles +
-                                   frontier_statistics.globally_skipped_tiles;
+    const uint64_t skipped_tiles =
+        frontier_statistics.locally_skipped_tiles + frontier_statistics.globally_skipped_tiles;
     std::printf(
         "  Tile I/O: %llu requests (%llu unique, %llu duplicate); %llu skips "
         "(%llu local, %llu global; %s).\n",

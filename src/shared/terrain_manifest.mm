@@ -59,8 +59,7 @@ std::filesystem::path terrain_manifest_path(const std::filesystem::path &directo
   return directory / kTerrainManifestFilename;
 }
 
-std::vector<TerrainManifestEntry>
-read_terrain_manifest(const std::filesystem::path &path) {
+std::vector<TerrainManifestEntry> read_terrain_manifest(const std::filesystem::path &path) {
   std::ifstream stream(path, std::ios::binary);
   TerrainManifestHeader header = {};
   if (!stream.read(reinterpret_cast<char *>(&header), sizeof(header)) ||

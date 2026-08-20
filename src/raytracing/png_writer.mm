@@ -24,9 +24,7 @@ struct ColorStop {
 };
 
 /// Clamp a scalar to the range accepted by every public colormap.
-[[nodiscard]] float clamp_unit(float value) {
-  return std::clamp(value, 0.0F, 1.0F);
-}
+[[nodiscard]] float clamp_unit(float value) { return std::clamp(value, 0.0F, 1.0F); }
 
 /// Round a float colour channel to the nearest valid 8-bit value.
 [[nodiscard]] uint8_t to_byte(float value) {
@@ -35,32 +33,29 @@ struct ColorStop {
 
 /// Linearly interpolate an sRGB colour from a sorted set of colour stops.
 template <size_t Count>
-[[nodiscard]] Rgb interpolate_colormap(
-    const std::array<ColorStop, Count> &stops,
-    float normalised_value
-) {
+[[nodiscard]] Rgb
+interpolate_colormap(const std::array<ColorStop, Count> &stops, float normalised_value) {
   const float value = clamp_unit(normalised_value);
   for (size_t index = 1; index < Count; index++) {
     if (value <= stops[index].position) {
       const ColorStop &lower = stops[index - 1];
       const ColorStop &upper = stops[index];
-      const float fraction =
-          (value - lower.position) / (upper.position - lower.position);
-      return {to_byte(
-                  static_cast<float>(lower.color.red) +
-                  fraction * (static_cast<float>(upper.color.red) -
-                              static_cast<float>(lower.color.red))
-              ),
-              to_byte(
-                  static_cast<float>(lower.color.green) +
-                  fraction * (static_cast<float>(upper.color.green) -
-                              static_cast<float>(lower.color.green))
-              ),
-              to_byte(
-                  static_cast<float>(lower.color.blue) +
-                  fraction * (static_cast<float>(upper.color.blue) -
-                              static_cast<float>(lower.color.blue))
-              )};
+      const float fraction = (value - lower.position) / (upper.position - lower.position);
+      return {
+          to_byte(
+              static_cast<float>(lower.color.red) +
+              fraction * (static_cast<float>(upper.color.red) - static_cast<float>(lower.color.red))
+          ),
+          to_byte(
+              static_cast<float>(lower.color.green) +
+              fraction *
+                  (static_cast<float>(upper.color.green) - static_cast<float>(lower.color.green))
+          ),
+          to_byte(
+              static_cast<float>(lower.color.blue) +
+              fraction *
+                  (static_cast<float>(upper.color.blue) - static_cast<float>(lower.color.blue))
+          )};
     }
   }
   return stops.back().color;
@@ -72,16 +67,14 @@ template <size_t Count>
     throw std::invalid_argument("PNG dimensions must both be positive");
   }
   const size_t pixel_count = static_cast<size_t>(width) * height;
-  if (pixel_count / width != height ||
-      pixel_count > std::numeric_limits<size_t>::max() / 4U) {
+  if (pixel_count / width != height || pixel_count > std::numeric_limits<size_t>::max() / 4U) {
     throw std::invalid_argument("PNG dimensions are too large");
   }
   return pixel_count;
 }
 
 /// Find the finite value range used to normalise a diagnostic image.
-[[nodiscard]] std::pair<float, float>
-finite_range(std::span<const float> values) {
+[[nodiscard]] std::pair<float, float> finite_range(std::span<const float> values) {
   float minimum = std::numeric_limits<float>::infinity();
   float maximum = -std::numeric_limits<float>::infinity();
   for (float value : values) {
@@ -104,19 +97,16 @@ void encode_png(
     uint32_t height
 ) {
   @autoreleasepool {
-    NSString *path_string =
-        [NSString stringWithUTF8String:path.string().c_str()];
+    NSString *path_string = [NSString stringWithUTF8String:path.string().c_str()];
     if (path_string == nil) {
       throw std::invalid_argument("PNG path is not valid UTF-8");
     }
     NSURL *url = [NSURL fileURLWithPath:path_string];
     NSData *data = [NSData dataWithBytes:rgb.data() length:rgb.size()];
-    CGDataProviderRef provider =
-        CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
     CGColorSpaceRef color_space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    const CGBitmapInfo bitmap_info =
-        static_cast<CGBitmapInfo>(kCGBitmapByteOrderDefault) |
-        static_cast<CGBitmapInfo>(kCGImageAlphaNone);
+    const CGBitmapInfo bitmap_info = static_cast<CGBitmapInfo>(kCGBitmapByteOrderDefault) |
+                                     static_cast<CGBitmapInfo>(kCGImageAlphaNone);
     CGImageRef image = CGImageCreate(
         width,
         height,
@@ -130,12 +120,8 @@ void encode_png(
         false,
         kCGRenderingIntentDefault
     );
-    CGImageDestinationRef destination = CGImageDestinationCreateWithURL(
-        (__bridge CFURLRef)url,
-        CFSTR("public.png"),
-        1,
-        nullptr
-    );
+    CGImageDestinationRef destination =
+        CGImageDestinationCreateWithURL((__bridge CFURLRef)url, CFSTR("public.png"), 1, nullptr);
 
     if (provider == nullptr || color_space == nullptr || image == nullptr ||
         destination == nullptr) {
@@ -200,9 +186,7 @@ void write_colormapped_png(
 ) {
   const size_t pixel_count = checked_pixel_count(width, height);
   if (values.size() != pixel_count) {
-    throw std::invalid_argument(
-        "PNG input length does not match its declared dimensions"
-    );
+    throw std::invalid_argument("PNG input length does not match its declared dimensions");
   }
   if (colormap == nullptr) {
     throw std::invalid_argument("PNG colormap must not be null");
@@ -215,10 +199,9 @@ void write_colormapped_png(
     const float value = values[index];
     // Black makes absent rays or other non-finite diagnostic values obvious
     // without preventing the finite part of an image from being inspected.
-    const Rgb color =
-        std::isfinite(value)
-            ? colormap(range == 0.0F ? 0.5F : (value - minimum) / range)
-            : Rgb{0, 0, 0};
+    const Rgb color = std::isfinite(value)
+                          ? colormap(range == 0.0F ? 0.5F : (value - minimum) / range)
+                          : Rgb{0, 0, 0};
     rgb[index * 3U] = color.red;
     rgb[index * 3U + 1U] = color.green;
     rgb[index * 3U + 2U] = color.blue;

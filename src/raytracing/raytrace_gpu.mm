@@ -234,9 +234,20 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   auto *first_unresolved = static_cast<uint32_t *>(state.unresolved.contents);
   auto *next_total = static_cast<uint32_t *>(state.next_count.contents);
   auto *deferred_total = static_cast<uint32_t *>(state.deferred_count.contents);
-  if (first_unresolved == nullptr || next_total == nullptr || deferred_total == nullptr) {
-    throw std::runtime_error("Could not map GPU frontier counters");
+  const auto *active_items = static_cast<const TileWorkItem *>(state.active.contents);
+  if (first_unresolved == nullptr || next_total == nullptr || deferred_total == nullptr ||
+      active_items == nullptr) {
+    throw std::runtime_error("Could not map GPU frontier buffers");
   }
+  uint32_t polar_offset = parameters.num_polar;
+  for (uint32_t index = 0U; index < active_count; index++) {
+    polar_offset = std::min(polar_offset, active_items[index].first_polar);
+  }
+  // Every item has already resolved the polar prefix below `first_polar`.
+  // Trim the prefix common to this pass while retaining one rectangular
+  // dispatch, which gives the GPU substantially better occupancy than many
+  // exact but narrow per-suffix dispatches.
+  const uint32_t dispatched_polar_count = parameters.num_polar - polar_offset;
   std::fill_n(first_unresolved, active_count, parameters.num_polar);
   *next_total = 0U;
   *deferred_total = 0U;
@@ -262,11 +273,10 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setBuffer:state.elevation_output offset:0 atIndex:9];
   [encoder setBuffer:state.unresolved offset:0 atIndex:10];
   if (state.trace_quantized) {
-    [encoder setBytes:&cache.quantized_layout
-                length:sizeof(cache.quantized_layout)
-               atIndex:11];
+    [encoder setBytes:&cache.quantized_layout length:sizeof(cache.quantized_layout) atIndex:11];
   }
-  [encoder dispatchThreads:MTLSizeMake(parameters.num_polar, active_count, 1)
+  [encoder setBytes:&polar_offset length:sizeof(polar_offset) atIndex:12];
+  [encoder dispatchThreads:MTLSizeMake(dispatched_polar_count, active_count, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
   [encoder endEncoding];
 

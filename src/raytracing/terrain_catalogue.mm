@@ -210,13 +210,15 @@ TerrainCatalogue TerrainCatalogue::discover(
     try {
       const TileKey key = parse_tile_name(entry.path());
       const auto maximum = maximum_elevation_by_key.find(key);
-      available_sources.push_back({
-          key,
-          entry.path(),
-          !is_metal_tile_path(entry.path()) || maximum == maximum_elevation_by_key.end()
-              ? std::nullopt
-              : std::optional<float>(maximum->second),
-      });
+      available_sources.push_back(
+          {
+              key,
+              entry.path(),
+              !is_metal_tile_path(entry.path()) || maximum == maximum_elevation_by_key.end()
+                  ? std::nullopt
+                  : std::optional<float>(maximum->second),
+          }
+      );
     } catch (const std::invalid_argument &) {
       // Prepared-tile directories may contain unrelated GeoTIFFs.
     }

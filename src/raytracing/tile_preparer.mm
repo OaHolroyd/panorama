@@ -124,16 +124,7 @@ AsyncTilePreparer::AsyncTilePreparer(
     uint32_t configured_workers,
     Timer &timer
 )
-    : state_(
-          std::make_unique<State>(
-              device,
-              sources,
-              origin,
-              grid,
-              prepared_capacity,
-              timer
-          )
-      ) {
+    : state_(std::make_unique<State>(device, sources, origin, grid, prepared_capacity, timer)) {
   if (sources.empty() || prepared_capacity == 0U) {
     throw std::invalid_argument("Tile preparer requires sources and prepared-tile capacity");
   }

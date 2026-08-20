@@ -891,8 +891,11 @@ kernel void trace_tile_frontier(
     device float *distances [[buffer(8)]],
     device float *elevations [[buffer(9)]],
     device atomic_uint *first_unresolved [[buffer(10)]],
+    constant uint &polar_offset [[buffer(12)]],
     uint2 ray_index [[thread_position_in_grid]]
 ) {
+  // The host omits the polar prefix already resolved by every active column.
+  ray_index.x += polar_offset;
   const TileWorkItem input = work_items[ray_index.y];
   const uint num_cell = mipmap_finest_side(shared_parameters.num_levels);
   const uint vertex_value_count = (num_cell + 1U) * (num_cell + 1U);
@@ -928,8 +931,11 @@ kernel void trace_tile_frontier_quantized(
     device float *elevations [[buffer(9)]],
     device atomic_uint *first_unresolved [[buffer(10)]],
     constant QuantizedTerrainLayout &layout [[buffer(11)]],
+    constant uint &polar_offset [[buffer(12)]],
     uint2 ray_index [[thread_position_in_grid]]
 ) {
+  // The host omits the polar prefix already resolved by every active column.
+  ray_index.x += polar_offset;
   const TileWorkItem input = work_items[ray_index.y];
   device const uchar *record = vertex_records + input.slot * layout.record_stride;
   device const int *base =
