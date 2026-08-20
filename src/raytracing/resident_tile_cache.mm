@@ -20,8 +20,7 @@ namespace {
 
 constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
 
-static_assert(sizeof(ResidentTile) == 3U * sizeof(uint64_t));
-static_assert(sizeof(ResidentTileHashEntry) == 3U * sizeof(uint64_t));
+static_assert(sizeof(ResidentTile) == 4U * sizeof(uint64_t));
 static_assert(sizeof(QuantizedTerrainLayout) == 3U * sizeof(uint32_t));
 
 /// Check that a byte count fits Metal's NSUInteger buffer-length argument.
@@ -51,36 +50,6 @@ void print_error(NSString *context, NSError *error) {
   std::fprintf(stderr, "%s: %s\n", context.UTF8String, error.localizedDescription.UTF8String);
 }
 
-/// Mix one unsigned 64-bit value for the resident-tile hash table.
-[[nodiscard]] uint64_t mix_tile_hash(uint64_t value) {
-  value ^= value >> 30U;
-  value *= 0xbf58476d1ce4e5b9ULL;
-  value ^= value >> 27U;
-  value *= 0x94d049bb133111ebULL;
-  value ^= value >> 31U;
-  return value;
-}
-
-/// Return the hash used by host and Metal resident-tile lookup tables.
-[[nodiscard]] uint64_t tile_key_hash(TileKey key) {
-  const uint64_t row = mix_tile_hash(static_cast<uint64_t>(key.row));
-  const uint64_t column = mix_tile_hash(static_cast<uint64_t>(key.column));
-  return mix_tile_hash(row ^ (column + 0x9e3779b97f4a7c15ULL));
-}
-
-/// Return a power-of-two hash capacity at no more than 50% load.
-[[nodiscard]] uint32_t resident_hash_capacity(uint32_t slot_count) {
-  const uint64_t required = 2U * static_cast<uint64_t>(slot_count);
-  uint64_t capacity = 1U;
-  while (capacity < required) {
-    capacity <<= 1U;
-  }
-  if (capacity > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-    throw std::overflow_error("Resident tile hash table exceeds Metal uint range");
-  }
-  return static_cast<uint32_t>(capacity);
-}
-
 /// Build observer-relative metadata for a resident atlas slot.
 [[nodiscard]] ResidentTile
 make_resident_tile(const LoadedTile &tile, TileKey key, const RaytraceConfig &config) {
@@ -92,13 +61,15 @@ make_resident_tile(const LoadedTile &tile, TileKey key, const RaytraceConfig &co
       y > static_cast<double>(std::numeric_limits<float>::max())) {
     throw std::overflow_error("Resident tile origin does not fit float32");
   }
-  return {static_cast<float>(x), static_cast<float>(y), key.row, key.column};
+  return {static_cast<float>(x), static_cast<float>(y), tile.maximum_elevation, 0U, key.row,
+          key.column};
 }
 
 /// Build resident metadata directly from projected tile coordinates.
 [[nodiscard]] ResidentTile make_resident_tile(
     double lower_left_x,
     double lower_left_y,
+    float maximum_elevation,
     TileKey key,
     const RaytraceConfig &config
 ) {
@@ -110,7 +81,7 @@ make_resident_tile(const LoadedTile &tile, TileKey key, const RaytraceConfig &co
       y > static_cast<double>(std::numeric_limits<float>::max())) {
     throw std::overflow_error("Resident tile origin does not fit float32");
   }
-  return {static_cast<float>(x), static_cast<float>(y), key.row, key.column};
+  return {static_cast<float>(x), static_cast<float>(y), maximum_elevation, 0U, key.row, key.column};
 }
 
 /// One prepared source paired with its selected destination atlas slot.
@@ -142,7 +113,6 @@ struct ResidentTileCache::State {
   uint32_t mip_count;
   uint32_t vertex_count;
   uint32_t slot_capacity;
-  uint32_t hash_slot_count;
   uint32_t resident_count = 1U;
   uint64_t next_use_stamp = 2U;
   uint64_t installations = 1U;
@@ -154,11 +124,9 @@ struct ResidentTileCache::State {
   id<MTLBuffer> quantized_staging;
   id<MTLBuffer> preparation_slots;
   id<MTLBuffer> metadata_buffer;
-  id<MTLBuffer> hash_buffer;
   float *mipmaps;
   float *vertices;
   ResidentTile *metadata;
-  ResidentTileHashEntry *hash;
   std::vector<uint32_t> slot_by_source;
   std::vector<uint32_t> source_by_slot;
   std::vector<uint64_t> last_used;
@@ -179,9 +147,6 @@ struct ResidentTileCache::State {
   /// Build mipmaps synchronously where the observer tile requires them now.
   void generate_mipmaps(std::span<const uint32_t> slots, Timer &timer);
 
-  /// Rebuild the GPU key lookup from slots whose payloads are fully resident.
-  void rebuild_hash(Timer *timer);
-
   /// Initialise fixed atlas dimensions before allocating Metal resources.
   State(
       std::span<const TerrainSource> source_values,
@@ -195,7 +160,6 @@ struct ResidentTileCache::State {
       uint32_t mip_values,
       uint32_t vertex_values,
       uint32_t slot_values,
-      uint32_t hash_values,
       uint64_t initial_bytes
   )
       : sources(source_values), config(config_value), device(device_value),
@@ -207,7 +171,7 @@ struct ResidentTileCache::State {
         ),
         retain_quantized(retain_quantized_value), grid_origin_x(origin_x), grid_origin_y(origin_y),
         tile_width(width), mip_count(mip_values), vertex_count(vertex_values),
-        slot_capacity(slot_values), hash_slot_count(hash_values), bytes_copied(initial_bytes) {}
+        slot_capacity(slot_values), bytes_copied(initial_bytes) {}
 };
 
 void ResidentTileCache::State::write_preparation_slots(std::span<const uint32_t> slots) {
@@ -444,30 +408,6 @@ void ResidentTileCache::State::generate_mipmaps(std::span<const uint32_t> slots,
   );
 }
 
-void ResidentTileCache::State::rebuild_hash(Timer *timer) {
-  if (timer != nullptr) {
-    timer->start_wall("Resident hash rebuild");
-  }
-  std::fill_n(hash, hash_slot_count, ResidentTileHashEntry{});
-  const uint32_t mask = hash_slot_count - 1U;
-  for (uint32_t slot = 0U; slot < slot_capacity; slot++) {
-    const uint32_t source = source_by_slot[slot];
-    if (source == sources.size()) {
-      continue;
-    }
-    const TileKey key = sources[source].key;
-    uint32_t index = static_cast<uint32_t>(tile_key_hash(key)) & mask;
-    while (hash[index].occupied != 0U) {
-      // The table is at most half full, keeping linear probes short.
-      index = (index + 1U) & mask;
-    }
-    hash[index] = {key.row, key.column, slot, 1U};
-  }
-  if (timer != nullptr) {
-    timer->stop("Resident hash rebuild");
-  }
-}
-
 ResidentTileCache::ResidentTileCache(
     id<MTLDevice> device,
     std::span<const TerrainSource> sources,
@@ -484,7 +424,6 @@ ResidentTileCache::ResidentTileCache(
   const uint32_t mip_count = static_cast<uint32_t>(metal_tile_mipmap_value_count(origin.size));
   const uint64_t vertex_side = static_cast<uint64_t>(origin.size) + 1U;
   const uint32_t vertex_count = static_cast<uint32_t>(vertex_side * vertex_side);
-  const uint32_t hash_slot_count = resident_hash_capacity(slot_capacity);
   const uint64_t tile_bytes = static_cast<uint64_t>(mip_count + vertex_count) * sizeof(float);
   const double tile_width = static_cast<double>(origin.size) * origin.delta;
   const double grid_origin_x =
@@ -532,7 +471,6 @@ ResidentTileCache::ResidentTileCache(
       mip_count,
       vertex_count,
       slot_capacity,
-      hash_slot_count,
       custom_origin ? 0U : tile_bytes
   );
   // Shared storage supports both CPU GeoTIFF copies and direct Metal I/O.
@@ -568,11 +506,6 @@ ResidentTileCache::ResidentTileCache(
       device,
       checked_buffer_length(slot_capacity, sizeof(ResidentTile), "tile metadata"),
       "tile metadata"
-  );
-  state->hash_buffer = make_buffer(
-      device,
-      checked_buffer_length(hash_slot_count, sizeof(ResidentTileHashEntry), "resident tile hash"),
-      "resident tile hash"
   );
   const bool needs_metal_io =
       std::any_of(sources.begin(), sources.end(), [](const TerrainSource &source) {
@@ -660,9 +593,7 @@ ResidentTileCache::ResidentTileCache(
   state->mipmaps = static_cast<float *>(state->mipmap_atlas.contents);
   state->vertices = static_cast<float *>(state->vertex_atlas.contents);
   state->metadata = static_cast<ResidentTile *>(state->metadata_buffer.contents);
-  state->hash = static_cast<ResidentTileHashEntry *>(state->hash_buffer.contents);
-  if (state->mipmaps == nullptr || state->vertices == nullptr || state->metadata == nullptr ||
-      state->hash == nullptr) {
+  if (state->mipmaps == nullptr || state->vertices == nullptr || state->metadata == nullptr) {
     throw std::runtime_error("Could not map resident terrain atlas");
   }
 
@@ -704,8 +635,6 @@ ResidentTileCache::ResidentTileCache(
   state->last_used[0] = 1U;
   state_ = std::move(state);
 
-  // Slot zero must be visible to the first frontier pass before any workers run.
-  state_->rebuild_hash(nullptr);
 }
 
 ResidentTileCache::~ResidentTileCache() = default;
@@ -811,6 +740,7 @@ std::vector<uint32_t> ResidentTileCache::install_prepared(
       state.metadata[installation.slot] = make_resident_tile(
           installation.lower_left_x,
           installation.lower_left_y,
+          source.maximum_elevation.value_or(std::numeric_limits<float>::infinity()),
           source.key,
           state.config
       );
@@ -829,8 +759,7 @@ std::vector<uint32_t> ResidentTileCache::install_prepared(
     state.bytes_loaded_with_metal_io += static_cast<uint64_t>(custom_slots.size()) * bytes_per_tile;
   }
 
-  // All payload writes are now complete. Publish slot mappings together so
-  // the rebuilt hash cannot expose a partially installed tile.
+  // All payload writes are now complete. Publish the slot mappings together.
   for (const AtlasInstallation &installation : installations) {
     const uint32_t slot = installation.slot;
     const uint32_t source = installation.prepared.source_index;
@@ -850,9 +779,6 @@ std::vector<uint32_t> ResidentTileCache::install_prepared(
     preparer.mark_resident(source);
   }
 
-  if (!installations.empty()) {
-    state.rebuild_hash(&timer);
-  }
   timer.stop("Atlas installation");
 
   std::vector<uint32_t> installed_sources;
@@ -885,8 +811,6 @@ ResidentTileCacheBindings ResidentTileCache::bindings() const {
       state.mipmap_atlas,
       state.vertex_atlas,
       state.metadata_buffer,
-      state.hash_buffer,
-      state.hash_slot_count,
       state.retain_quantized
           ? QuantizedTerrainLayout{
                 state.quantized_record.stride,

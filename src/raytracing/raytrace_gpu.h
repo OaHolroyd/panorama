@@ -1,6 +1,7 @@
 #pragma once
 
 #include "resident_tile_cache.h"
+#include "terrain_catalogue.h"
 
 #import <Metal/Metal.h>
 
@@ -11,14 +12,6 @@
 
 namespace panorama {
 
-/// One horizontal direction and its reciprocals, matching Metal `float4`.
-struct HorizontalDirection {
-  float x;
-  float y;
-  float inverse_x;
-  float inverse_y;
-};
-
 /// Scalar-only tracing ABI shared with the Metal frontier kernels.
 struct RaytraceParameters {
   float cell_size;
@@ -26,31 +19,30 @@ struct RaytraceParameters {
   float curvature_coefficient;
   float global_maximum_elevation;
   uint32_t num_levels;
-  uint32_t num_azimuth;
-  uint32_t num_polar;
+  uint32_t ray_count;
   float max_distance;
 };
 
-/// One unresolved azimuth-column segment in the GPU work frontier.
-struct TileWorkItem {
+/// One unresolved ray segment in a resident terrain tile.
+struct RayWorkItem {
   uint32_t slot;
-  uint32_t azimuth;
-  uint32_t first_polar;
+  uint32_t ray_index;
   uint32_t start_level;
   float entry_distance;
 };
 
 /// One continuation whose successor tile is not resident yet.
-struct DeferredTileWork {
-  uint32_t azimuth;
-  uint32_t first_polar;
+struct DeferredRayWork {
+  uint32_t ray_index;
+  uint32_t source_index;
   float entry_distance;
 };
 
 /// Results produced by one ordered trace-and-emit command buffer.
 struct GpuFrontierPassResult {
-  uint32_t next_count;
   uint32_t deferred_count;
+  uint32_t locally_skipped_tiles;
+  uint32_t globally_skipped_tiles;
   double device_milliseconds;
 };
 
@@ -58,17 +50,15 @@ struct GpuFrontierPassResult {
 ///
 /// This class owns device/pipeline state and buffers whose lifetime spans the
 /// complete render. The scheduler retains policy: it decides which work is
-/// active, when resident terrain is installed, and how deferred successors
-/// are reactivated. One call to `trace_frontier` encodes the two kernels that
-/// trace current segments then emit their successor work items.
+/// active, when resident terrain is installed, and how source-bucketed
+/// successors are reactivated. One call encodes the ordered trace and
+/// continuation-culling kernels.
 class GpuRaytraceResources {
 public:
-  /// Create all reusable Metal resources for a fixed angular output field.
+  /// Create all reusable Metal resources for a fixed per-pixel ray field.
   GpuRaytraceResources(
-      std::span<const HorizontalDirection> directions,
-      std::span<const float> slopes,
-      size_t ray_count,
-      uint32_t frontier_capacity,
+      std::span<const RayDirection> rays,
+      std::span<const TerrainSource> sources,
       bool trace_quantized
   );
 
@@ -78,17 +68,14 @@ public:
   /// Stop an active capture before releasing the owned command queue.
   ~GpuRaytraceResources();
 
-  /// Fill the current frontier with the observer tile's initial columns.
-  void initialise_frontier(uint32_t num_azimuth);
+  /// Fill the current frontier with every ray in the observer tile.
+  void initialise_frontier();
 
   /// Return the Metal device shared with resident terrain atlas allocation.
   [[nodiscard]] id<MTLDevice> device() const;
 
   /// Return the buffer holding the frontier which the next pass will trace.
   [[nodiscard]] id<MTLBuffer> active_frontier() const;
-
-  /// Swap active and successor frontier buffers after a completed pass.
-  void swap_frontiers();
 
   /// Encode, submit, and synchronously complete one trace-and-emit pass.
   [[nodiscard]] GpuFrontierPassResult trace_frontier(
@@ -100,7 +87,7 @@ public:
   );
 
   /// Return completed deferred successor entries from the most recent pass.
-  [[nodiscard]] std::span<const DeferredTileWork> deferred_work(uint32_t count) const;
+  [[nodiscard]] std::span<const DeferredRayWork> deferred_work(uint32_t count) const;
 
   /// Return the shared distance output buffer after tracing completes.
   [[nodiscard]] id<MTLBuffer> distances() const;

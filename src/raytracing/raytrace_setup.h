@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <vector>
 
 namespace panorama {
 
@@ -15,6 +16,26 @@ struct ObserverLocation {
   double easting;
   double northing;
   double elevation;
+};
+
+/// One projected ray direction expressed per unit horizontal distance.
+///
+/// `x` and `y` form a normalized horizontal direction, `slope` is the
+/// corresponding vertical change, and the reciprocals avoid repeated DDA
+/// divisions. This layout is mirrored by Metal's `RayDirection`.
+struct RayDirection {
+  float x;
+  float y;
+  float inverse_x;
+  float inverse_y;
+  float slope;
+};
+
+/// An arbitrary row-major ray field for a rectangular output.
+struct RayField {
+  uint32_t width;
+  uint32_t height;
+  std::vector<RayDirection> rays;
 };
 
 /// Host-only configuration for fixed-observer, level-0 multi-tile tracing.
@@ -46,5 +67,8 @@ struct RaytraceConfig {
 
 /// Trace the fixed angular field through available level-0 terrain tiles.
 void raytrace_tiled_heightmap(const RaytraceConfig &config);
+
+/// Trace an explicitly supplied per-pixel ray field.
+void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &field);
 
 } // namespace panorama
