@@ -104,6 +104,7 @@ void clear_buffer(id<MTLBuffer> buffer, const char *name) {
 struct GpuRaytraceResources::State {
   id<MTLDevice> device;
   id<MTLCommandQueue> queue;
+  id<MTLLibrary> library;
   id<MTLComputePipelineState> trace_pipeline;
   id<MTLComputePipelineState> emit_pipeline;
   id<MTLBuffer> rays;
@@ -150,8 +151,8 @@ GpuRaytraceResources::GpuRaytraceResources(
 
   NSError *error = nil;
   NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:kMetallibPath]];
-  id<MTLLibrary> library = [state->device newLibraryWithURL:url error:&error];
-  if (library == nil) {
+  state->library = [state->device newLibraryWithURL:url error:&error];
+  if (state->library == nil) {
     print_error(@"Could not load the Metal library", error);
     throw std::runtime_error("Could not load Metal library");
   }
@@ -161,8 +162,10 @@ GpuRaytraceResources::GpuRaytraceResources(
   [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
   [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
   id<MTLFunction> trace =
-      [library newFunctionWithName:trace_name constantValues:trace_constants error:&error];
-  id<MTLFunction> emit = [library newFunctionWithName:@"emit_tile_frontier"];
+      [state->library newFunctionWithName:trace_name
+                           constantValues:trace_constants
+                                    error:&error];
+  id<MTLFunction> emit = [state->library newFunctionWithName:@"emit_tile_frontier"];
   if (trace == nil || emit == nil) {
     throw std::runtime_error("GPU-frontier Metal kernels are missing");
   }
@@ -286,6 +289,10 @@ void GpuRaytraceResources::initialise_frontier() {
 }
 
 id<MTLDevice> GpuRaytraceResources::device() const { return state_->device; }
+
+id<MTLCommandQueue> GpuRaytraceResources::command_queue() const { return state_->queue; }
+
+id<MTLLibrary> GpuRaytraceResources::library() const { return state_->library; }
 
 id<MTLBuffer> GpuRaytraceResources::active_frontier() const { return state_->active; }
 

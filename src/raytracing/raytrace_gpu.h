@@ -86,6 +86,12 @@ public:
   /// Return the Metal device shared with resident terrain atlas allocation.
   [[nodiscard]] id<MTLDevice> device() const;
 
+  /// Return the queue shared with post-trace GPU presentation work.
+  [[nodiscard]] id<MTLCommandQueue> command_queue() const;
+
+  /// Return the library containing both tracing and presentation kernels.
+  [[nodiscard]] id<MTLLibrary> library() const;
+
   /// Return the buffer holding the frontier which the next pass will trace.
   [[nodiscard]] id<MTLBuffer> active_frontier() const;
 

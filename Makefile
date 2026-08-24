@@ -103,7 +103,7 @@ $(OBJ_DIR)/raytracing/%.air: $(RAYTRACE_SRC_DIR)/%.metal | $(OBJ_DIR)/raytracing
 
 $(METAL_LIB): $(METAL_AIR)
 	@printf 'Creating %s\n' '$@'
-	$(METALLIB) -o $@ $<
+	$(METALLIB) -o $@ $^
 
 $(OBJ_DIR)/raytracing $(OBJ_DIR)/tile-gen $(OBJ_DIR)/shared:
 	mkdir -p $@

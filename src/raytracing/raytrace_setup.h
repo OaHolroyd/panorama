@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ray_projection.h"
-#include "synthetic_renderer.h"
+#include "synthetic_render_options.h"
 
 #include <cstdint>
 #include <filesystem>

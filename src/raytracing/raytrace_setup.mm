@@ -1,5 +1,6 @@
 #include "raytrace_setup.h"
 
+#include "gpu_image_renderer.h"
 #include "host_frontier.h"
 #include "loaded_tile.h"
 #include "metal_tile.h"
@@ -94,17 +95,6 @@ void validate_configuration(const RaytraceConfig &config) {
   return static_cast<uint32_t>(ray_count);
 }
 
-/// Return a typed, non-owning view of a completed shared Metal buffer.
-template <typename Value>
-[[nodiscard]] std::span<const Value>
-view_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
-  const auto *contents = static_cast<const Value *>(buffer.contents);
-  if (contents == nullptr) {
-    throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
-  }
-  return {contents, count};
-}
-
 /// Validate output choices before starting an otherwise expensive trace.
 void validate_output_configuration(
     const RaytraceConfig &config,
@@ -118,20 +108,20 @@ void validate_output_configuration(
   }
 }
 
-/// Convert and encode one image while aggregating the two costs separately.
-template <typename PixelGenerator>
-void make_and_write_png(
+/// Render one GPU texture, read it back, and encode it for the CLI output path.
+template <typename Render>
+void render_and_write_png(
     Timer &timer,
     const std::filesystem::path &path,
+    GpuImageRenderer &renderer,
     ImageSize image,
-    PixelGenerator &&generate_pixels
+    Render &&render
 ) {
-  timer.start_wall("Pixel conversion");
-  const std::vector<Rgb> pixels = generate_pixels();
-  timer.stop("Pixel conversion");
+  render();
+  const GpuImageReadback readback = renderer.readback(timer);
 
   timer.start_wall("PNG encoding");
-  write_rgb_png(path, pixels, image.width, image.height);
+  write_rgb_png(path, readback.bytes, image.width, image.height, readback.bytes_per_row);
   timer.stop("PNG encoding");
 }
 
@@ -143,67 +133,62 @@ void write_trace_outputs(
     const RaytraceConfig &config,
     const RaytraceOutputConfig &outputs,
     const RayField &field,
-    const GpuRaytraceResources &gpu,
-    uint32_t ray_count
+    const GpuRaytraceResources &gpu
 ) {
   Timer timer("PNG generation");
-  const std::span<const float> distances =
-      view_buffer<float>(gpu.distances(), ray_count, "distance output");
-
-  std::span<const uint32_t> surface_gradients;
-  if (config.compute_normals) {
-    surface_gradients =
-        view_buffer<uint32_t>(gpu.surface_gradients(), ray_count, "surface gradient output");
-  }
+  timer.start_wall("GPU presentation setup");
+  GpuImageRenderer renderer(
+      gpu.device(),
+      gpu.command_queue(),
+      gpu.library(),
+      field.image,
+      {
+          outputs.write_diagnostics,
+          outputs.write_diagnostics && config.compute_normals,
+          outputs.write_synthetic,
+          true,
+      }
+  );
+  timer.stop("GPU presentation setup");
+  const id<MTLBuffer> distances = gpu.distances();
 
   if (outputs.write_diagnostics) {
-    make_and_write_png(
+    render_and_write_png(
         timer,
         "distances.png",
+        renderer,
         field.image,
-        [&] {
-          return make_colormapped_pixels(
-              distances, field.image.width, field.image.height, colormaps::viridis
-          );
-        }
+        [&] { renderer.render_scalar(distances, timer); }
     );
     if (config.compute_elevations) {
-      make_and_write_png(
+      render_and_write_png(
           timer,
           "elevations.png",
+          renderer,
           field.image,
-          [&] {
-            return make_colormapped_pixels(
-                view_buffer<float>(gpu.elevations(), ray_count, "elevation output"),
-                field.image.width,
-                field.image.height,
-                colormaps::viridis
-            );
-          }
+          [&] { renderer.render_scalar(gpu.elevations(), timer); }
       );
     }
     if (config.compute_normals) {
-      make_and_write_png(
+      render_and_write_png(
           timer,
           "normals.png",
+          renderer,
           field.image,
-          [&] {
-            return make_surface_normal_pixels(
-                surface_gradients, distances, field.image.width, field.image.height
-            );
-          }
+          [&] { renderer.render_surface_normals(gpu.surface_gradients(), distances, timer); }
       );
     }
   }
 
   if (outputs.write_synthetic) {
-    make_and_write_png(
+    render_and_write_png(
         timer,
         "synthetic.png",
+        renderer,
         field.image,
         [&] {
-          return render_synthetic_terrain(
-              surface_gradients, distances, field.image, outputs.synthetic_options
+          renderer.render_synthetic(
+              gpu.surface_gradients(), distances, outputs.synthetic_options, timer
           );
         }
     );
@@ -508,7 +493,7 @@ void raytrace_tiled_heightmap(
 
     // Encoding remains outside `Total elapsed`; it is an output backend rather
     // than part of terrain traversal and may be omitted by future consumers.
-    write_trace_outputs(config, outputs, field, gpu, ray_count);
+    write_trace_outputs(config, outputs, field, gpu);
   }
 }
 
