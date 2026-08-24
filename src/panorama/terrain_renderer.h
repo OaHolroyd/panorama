@@ -6,7 +6,10 @@
 
 namespace panorama {
 
-/// Independently selectable image products produced after tracing completes.
+/// Independently selectable products for one trace-and-render operation.
+///
+/// The requirement helpers are the single source of truth for optional trace
+/// fields, ensuring presentation choices cannot allocate unused per-ray data.
 struct TerrainRenderOutputs {
   /// Write distances.png plus enabled elevation and normal diagnostic fields.
   bool write_diagnostics;

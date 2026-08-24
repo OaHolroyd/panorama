@@ -8,6 +8,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace panorama {
 namespace {
@@ -15,7 +16,7 @@ namespace {
 constexpr NSUInteger kReductionThreads = 256U;
 constexpr NSUInteger kPresentationSide = 16U;
 
-/// Print a Foundation error using the command-line renderer's existing style.
+/// Print a Foundation error in the host application's diagnostic style.
 void print_error(NSString *context, NSError *error) {
   const char *detail = error == nil ? "unknown error" : error.localizedDescription.UTF8String;
   std::fprintf(stderr, "%s: %s\n", context.UTF8String, detail);
@@ -44,10 +45,24 @@ void print_error(NSString *context, NSError *error) {
 
 /// Throw after a synchronously awaited presentation or readback command fails.
 void check_command(id<MTLCommandBuffer> command, NSString *context) {
-  if (command.status == MTLCommandBufferStatusError) {
+  if (command.status != MTLCommandBufferStatusCompleted) {
     print_error(context, command.error);
     throw std::runtime_error(std::string(context.UTF8String));
   }
+}
+
+/// Complete one timed GPU operation and record both wall and device work.
+void complete_timed_command(
+    id<MTLCommandBuffer> command,
+    Timer &timer,
+    std::string_view measurement,
+    NSString *failure_context
+) {
+  [command commit];
+  [command waitUntilCompleted];
+  check_command(command, failure_context);
+  timer.add_work(measurement, 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
+  timer.stop(measurement);
 }
 
 /// Dispatch one thread per output pixel in square presentation groups.
@@ -125,21 +140,23 @@ GpuImageRenderer::GpuImageRenderer(
   if (requirements.scalar_diagnostics) {
     state->finite_range = [device newBufferWithLength:2U * sizeof(uint32_t)
                                               options:MTLResourceStorageModeShared];
-  }
-  state->bytes_per_row = static_cast<NSUInteger>(image.width) * 3U;
-  if (image.height > std::numeric_limits<NSUInteger>::max() / state->bytes_per_row) {
-    throw std::overflow_error("GPU image readback is too large");
+    if (state->finite_range == nil) {
+      throw std::runtime_error("Could not allocate diagnostic finite-range buffer");
+    }
+    state->finite_range.label = @"Diagnostic finite range";
   }
   if (requirements.host_readback) {
+    state->bytes_per_row = static_cast<NSUInteger>(image.width) * 3U;
+    if (image.height > std::numeric_limits<NSUInteger>::max() / state->bytes_per_row) {
+      throw std::overflow_error("GPU image readback is too large");
+    }
     state->readback = [device newBufferWithLength:state->bytes_per_row * image.height
                                           options:MTLResourceStorageModeShared];
+    if (state->readback == nil) {
+      throw std::runtime_error("Could not allocate presented-image readback buffer");
+    }
+    state->readback.label = @"Presented image readback";
   }
-  if ((requirements.scalar_diagnostics && state->finite_range == nil) ||
-      (requirements.host_readback && state->readback == nil)) {
-    throw std::runtime_error("Could not allocate GPU presentation staging storage");
-  }
-  state->finite_range.label = @"Diagnostic finite range";
-  state->readback.label = @"Presented image readback";
   state_ = std::move(state);
 }
 
@@ -147,10 +164,10 @@ GpuImageRenderer::~GpuImageRenderer() = default;
 
 void GpuImageRenderer::render_scalar(id<MTLBuffer> values, Timer &timer) {
   State &state = *state_;
-  auto *range = static_cast<uint32_t *>(state.finite_range.contents);
   if (state.scalar == nil || state.reduce_range == nil) {
     throw std::logic_error("Scalar diagnostic presentation was not enabled");
   }
+  auto *range = static_cast<uint32_t *>(state.finite_range.contents);
   if (values == nil || range == nullptr) {
     throw std::invalid_argument("Scalar presentation requires a valid value buffer");
   }
@@ -186,11 +203,7 @@ void GpuImageRenderer::render_scalar(id<MTLBuffer> values, Timer &timer) {
   [encoder setTexture:state.output atIndex:0];
   dispatch_image(encoder, state.scalar, state.image);
   [encoder endEncoding];
-  [command commit];
-  [command waitUntilCompleted];
-  check_command(command, @"GPU scalar presentation failed");
-  timer.add_work("Pixel conversion", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
-  timer.stop("Pixel conversion");
+  complete_timed_command(command, timer, "Pixel conversion", @"GPU scalar presentation failed");
 }
 
 void GpuImageRenderer::render_surface_normals(
@@ -218,11 +231,7 @@ void GpuImageRenderer::render_surface_normals(
   [encoder setTexture:state.output atIndex:0];
   dispatch_image(encoder, state.normals, state.image);
   [encoder endEncoding];
-  [command commit];
-  [command waitUntilCompleted];
-  check_command(command, @"GPU normal presentation failed");
-  timer.add_work("Pixel conversion", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
-  timer.stop("Pixel conversion");
+  complete_timed_command(command, timer, "Pixel conversion", @"GPU normal presentation failed");
 }
 
 void GpuImageRenderer::render_synthetic(
@@ -264,11 +273,7 @@ void GpuImageRenderer::render_synthetic(
   [encoder setTexture:state.output atIndex:0];
   dispatch_image(encoder, state.synthetic, state.image);
   [encoder endEncoding];
-  [command commit];
-  [command waitUntilCompleted];
-  check_command(command, @"GPU synthetic presentation failed");
-  timer.add_work("Pixel conversion", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
-  timer.stop("Pixel conversion");
+  complete_timed_command(command, timer, "Pixel conversion", @"GPU synthetic presentation failed");
 }
 
 id<MTLTexture> GpuImageRenderer::texture() const { return state_->output; }
@@ -290,11 +295,7 @@ GpuImageReadback GpuImageRenderer::readback(Timer &timer) {
   [encoder setBuffer:state.readback offset:0 atIndex:0];
   dispatch_image(encoder, state.pack_rgb, state.image);
   [encoder endEncoding];
-  [command commit];
-  [command waitUntilCompleted];
-  check_command(command, @"GPU image readback failed");
-  timer.add_work("Pixel readback", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
-  timer.stop("Pixel readback");
+  complete_timed_command(command, timer, "Pixel readback", @"GPU image readback failed");
 
   const auto *bytes = static_cast<const uint8_t *>(state.readback.contents);
   if (bytes == nullptr) {

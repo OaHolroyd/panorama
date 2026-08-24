@@ -54,7 +54,7 @@ kernel void reduce_finite_range(
   }
 }
 
-/// Interpolate the same five-stop viridis approximation used by diagnostics.
+/// Interpolate the five-stop viridis approximation used by diagnostics.
 inline float3 viridis(float normalised_value) {
   constexpr float3 colors[] = {
       float3(68.0F, 1.0F, 84.0F),
@@ -110,7 +110,7 @@ inline float3 surface_normal(uint packed_gradients) {
   return float3(-gradients.x * inverse_length, -gradients.y * inverse_length, inverse_length);
 }
 
-/// Match the host renderer's round-to-nearest conversion before texture storage.
+/// Make diagnostic RGB bytes stable across UNorm texture storage and readback.
 inline float3 quantize_unorm8(float3 value) {
   return floor(clamp(value, 0.0F, 1.0F) * 255.0F + 0.5F) / 255.0F;
 }

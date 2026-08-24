@@ -40,7 +40,7 @@ void validate_configuration(const RaytraceConfig &config) {
   }
 }
 
-/// Return a checked byte count for one host-side terrain payload allocation.
+/// Return the checked byte size of one terrain payload.
 [[nodiscard]] size_t checked_byte_count(size_t count, size_t size, const char *name) {
   if (count > std::numeric_limits<size_t>::max() / size) {
     throw std::overflow_error(std::string(name) + " payload is too large");
@@ -123,9 +123,9 @@ void render_and_write_png(
 ///
 /// This stage has its own top-level timer so terrain-tracing measurements stay
 /// comparable when callers select different output products.
-void write_trace_outputs(
+void write_png_outputs(
     const TerrainRenderOutputs &outputs,
-    const RayField &field,
+    ImageSize image,
     const GpuRaytraceResources &gpu
 ) {
   Timer timer("PNG generation");
@@ -134,7 +134,7 @@ void write_trace_outputs(
       gpu.device(),
       gpu.command_queue(),
       gpu.library(),
-      field.image,
+      image,
       {
           outputs.write_diagnostics,
           outputs.write_diagnostics && outputs.write_normal_diagnostic,
@@ -150,7 +150,7 @@ void write_trace_outputs(
         timer,
         "distances.png",
         renderer,
-        field.image,
+        image,
         [&] { renderer.render_scalar(distances, timer); }
     );
     if (outputs.write_elevation_diagnostic) {
@@ -158,7 +158,7 @@ void write_trace_outputs(
           timer,
           "elevations.png",
           renderer,
-          field.image,
+          image,
           [&] { renderer.render_scalar(gpu.elevations(), timer); }
       );
     }
@@ -167,7 +167,7 @@ void write_trace_outputs(
           timer,
           "normals.png",
           renderer,
-          field.image,
+          image,
           [&] { renderer.render_surface_normals(gpu.surface_gradients(), distances, timer); }
       );
     }
@@ -178,7 +178,7 @@ void write_trace_outputs(
         timer,
         "synthetic.png",
         renderer,
-        field.image,
+        image,
         [&] {
           renderer.render_synthetic(
               gpu.surface_gradients(), distances, outputs.synthetic_options, timer
@@ -300,7 +300,7 @@ void render_terrain(
 
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
-    // ray inputs, output images, and reusable frontier storage.
+    // ray inputs, scientific trace outputs, and reusable frontier storage.
     const GpuTraceOutputRequirements gpu_outputs = {
         outputs.requires_elevations(),
         outputs.requires_normals(),
@@ -352,9 +352,6 @@ void render_terrain(
       // exists. Any later failure is caught below, which stops and joins these
       // threads before unwinding their owning vector.
       preparer.start();
-      // The first observer-tile pass reveals which rays leave that tile.
-
-      // Keep going until all rays have completed
       while (active_count != 0U) {
         // Account separately for CPU frontier bookkeeping before the Metal
         // command is created. This includes LRU use stamps and counter reset.
@@ -486,7 +483,7 @@ void render_terrain(
 
     // Encoding remains outside `Total elapsed`; it is an output backend rather
     // than part of terrain traversal and may be omitted by future consumers.
-    write_trace_outputs(outputs, field, gpu);
+    write_png_outputs(outputs, field.image, gpu);
   }
 }
 

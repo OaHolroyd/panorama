@@ -19,7 +19,7 @@ namespace {
 constexpr uint64_t kBytesPerMiB = 1024ULL * 1024ULL;
 constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 
-/// Runtime-selectable settings for one projected terrain dataset.
+/// Runtime-selectable settings for one panorama invocation.
 struct EntrypointSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
@@ -97,7 +97,7 @@ void print_usage(const char *program) {
   );
 }
 
-/// Parse tracing settings and one of the supported output projections.
+/// Parse tracing, projection, and output settings for one invocation.
 [[nodiscard]] EntrypointSettings parse_arguments(int argc, const char *argv[]) {
   EntrypointSettings settings;
   for (int index = 1; index < argc; index++) {

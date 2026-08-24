@@ -78,8 +78,8 @@ RENDERING_METAL_AIR := \
 	$(patsubst $(RENDERING_SRC_DIR)/%.metal,$(OBJ_DIR)/rendering/%.air,$(RENDERING_METAL_SRC))
 METAL_AIR := $(RAYTRACE_METAL_AIR) $(RENDERING_METAL_AIR)
 METAL_LIB := $(OBJ_DIR)/panorama.metallib
-# Tell the host where this configuration's generated metallib is located.
-RAYTRACE_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
+# Tell panorama host code where this configuration's generated metallib lives.
+PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
 DEPS := $(PANORAMA_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) $(SHARED_OBJ:.o=.d)
 
@@ -102,15 +102,15 @@ $(TILE_GEN_EXE): FORCE $(TILE_GEN_OBJ) $(SHARED_OBJ)
 # Compile the application and its two implementation layers independently.
 $(OBJ_DIR)/panorama/%.o: $(PANORAMA_SRC_DIR)/%.mm | $(OBJ_DIR)/panorama
 	@printf 'Compiling %s\n' '$@'
-	$(CXX) $(PANORAMA_INCLUDES) $(CPPFLAGS) $(RAYTRACE_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
+	$(CXX) $(PANORAMA_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/raytracing/%.o: $(RAYTRACE_SRC_DIR)/%.mm | $(OBJ_DIR)/raytracing
 	@printf 'Compiling %s\n' '$@'
-	$(CXX) $(RAYTRACE_INCLUDES) $(CPPFLAGS) $(RAYTRACE_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
+	$(CXX) $(RAYTRACE_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/rendering/%.o: $(RENDERING_SRC_DIR)/%.mm | $(OBJ_DIR)/rendering
 	@printf 'Compiling %s\n' '$@'
-	$(CXX) $(RENDERING_INCLUDES) $(CPPFLAGS) $(RAYTRACE_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
+	$(CXX) $(RENDERING_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/tile-gen/%.o: $(TILE_GEN_SRC_DIR)/%.mm | $(OBJ_DIR)/tile-gen
 	@printf 'Compiling %s\n' '$@'

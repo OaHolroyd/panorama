@@ -64,7 +64,8 @@ static_assert(sizeof(CatalogueTileHashEntry) == 3U * sizeof(uint64_t));
 
 /// Print a Foundation error in the command-line form used by host tools.
 void print_error(NSString *context, NSError *error) {
-  std::fprintf(stderr, "%s: %s\n", context.UTF8String, error.localizedDescription.UTF8String);
+  const char *detail = error == nil ? "unknown error" : error.localizedDescription.UTF8String;
+  std::fprintf(stderr, "%s: %s\n", context.UTF8String, detail);
 }
 
 /// Check that a byte count fits Metal's NSUInteger buffer-length argument.
@@ -180,7 +181,8 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::runtime_error("Could not create continuation pipeline");
   }
 
-  // Static per-pixel directions and output images persist for every pass.
+  // Static per-pixel directions and scientific output buffers persist for
+  // every frontier pass.
   state->rays = make_buffer(
       state->device,
       rays.data(),
@@ -193,6 +195,8 @@ GpuRaytraceResources::GpuRaytraceResources(
       checked_buffer_length(rays.size(), sizeof(float), "distance output"),
       "distance output"
   );
+  // Function-constant specialization removes disabled output work. One-word
+  // placeholders preserve the common kernel ABI without full per-ray buffers.
   state->elevation_output = make_buffer(
       state->device,
       nullptr,
@@ -201,8 +205,6 @@ GpuRaytraceResources::GpuRaytraceResources(
           : sizeof(float),
       "elevation output"
   );
-  // Function-constant specialization removes disabled output work. One-word
-  // placeholders preserve the common kernel ABI without full per-ray images.
   state->surface_gradient_output = make_buffer(
       state->device,
       nullptr,
