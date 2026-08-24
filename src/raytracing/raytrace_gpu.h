@@ -57,10 +57,14 @@ struct GpuFrontierPassResult {
 class GpuRaytraceResources {
 public:
   /// Create all reusable Metal resources for a fixed per-pixel ray field.
+  ///
+  /// `compute_normals` specializes the trace pipeline: disabling it removes
+  /// collision-gradient arithmetic and avoids a full-size gradient buffer.
   GpuRaytraceResources(
       std::span<const RayDirection> rays,
       std::span<const TerrainSource> sources,
-      bool trace_quantized
+      bool trace_quantized,
+      bool compute_normals
   );
 
   GpuRaytraceResources(const GpuRaytraceResources &) = delete;
@@ -95,6 +99,11 @@ public:
 
   /// Return the shared elevation output buffer after tracing completes.
   [[nodiscard]] id<MTLBuffer> elevations() const;
+
+  /// Return packed float16 east/north surface gradients.
+  ///
+  /// Throws if normal computation was disabled when this object was created.
+  [[nodiscard]] id<MTLBuffer> surface_gradients() const;
 
   /// Begin an opt-in queue-scoped Metal capture, if requested by the environment.
   void start_capture_if_requested();

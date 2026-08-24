@@ -4,6 +4,10 @@
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
 
+/// Pipeline specialization selected once per render. When false, the Metal
+/// compiler removes collision-gradient arithmetic and output writes entirely.
+constant bool compute_surface_gradients [[function_constant(0)]];
+
 /// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///
 /// Projected coordinates have already been rebased around the observer.
@@ -558,6 +562,42 @@ inline Collision bilinear_collision(
   );
 }
 
+/// Evaluate the analytical east/north derivatives of a bilinear terrain patch
+/// at a confirmed collision. Reloading the four samples here keeps them and
+/// the derivative temporaries out of the root solver's peak live register set.
+/// The two float16 gradients are sufficient to reconstruct the upward normal
+/// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
+template <typename Sample>
+inline uint packed_surface_gradients(
+    device const Sample *vertices,
+    uint vertex_count,
+    int base_decimeters,
+    float cell_x,
+    float cell_y,
+    float inverse_delta,
+    uint i,
+    uint j,
+    float2 direction,
+    float distance
+) {
+  const uint lower_left = i * vertex_count + j;
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+  const float twist = z11 - z10 - z01 + z00;
+  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+  constexpr float kMaximumHalf = 65504.0F;
+  const float east_gradient = clamp((z01 - z00 + twist * sy) * inverse_delta,
+                                    -kMaximumHalf,
+                                    kMaximumHalf);
+  const float north_gradient = clamp((z10 - z00 + twist * sx) * inverse_delta,
+                                     -kMaximumHalf,
+                                     kMaximumHalf);
+  return as_type<uint>(half2(east_gradient, north_gradient));
+}
+
 /// Return whether the index is a at the boundary of a level+1 block (and would thus be permitted to
 /// go up a level)
 inline bool at_level_boundary(int index, int direction, uint scale) {
@@ -647,7 +687,8 @@ inline float trace_tile_frontier_impl(
     RaytraceParameters params,
     uint mipmap_value_count,
     device float *distances,
-    device float *elevations
+    device float *elevations,
+    device uint *surface_gradients
 ) {
   const ResidentTile resident_tile = tiles[input.slot];
   const float tile_x_min = resident_tile.tile_x_min;
@@ -825,6 +866,20 @@ inline float trace_tile_frontier_impl(
               curvature,
               collision.distance
           );
+          if (compute_surface_gradients) {
+            surface_gradients[output_index] = packed_surface_gradients(
+                vertices,
+                vertex_count,
+                base_decimeters,
+                tile_x_min + float(j) * delta,
+                tile_y_min + float(i) * delta,
+                inverse_delta,
+                uint(i),
+                uint(j),
+                direction,
+                collision.distance
+            );
+          }
           return INFINITY;
         }
       } else {
@@ -948,6 +1003,7 @@ kernel void trace_tile_frontier(
     device float *distances [[buffer(7)]],
     device float *elevations [[buffer(8)]],
     device float *continuations [[buffer(9)]],
+    device uint *surface_gradients [[buffer(11)]],
     uint work_index [[thread_position_in_grid]]
 ) {
   const RayWorkItem input = work_items[work_index];
@@ -963,7 +1019,8 @@ kernel void trace_tile_frontier(
       shared_parameters,
       mipmap_value_count,
       distances,
-      elevations
+      elevations,
+      surface_gradients
   );
 }
 
@@ -980,6 +1037,7 @@ kernel void trace_tile_frontier_quantized(
     device float *elevations [[buffer(8)]],
     device float *continuations [[buffer(9)]],
     constant QuantizedTerrainLayout &layout [[buffer(10)]],
+    device uint *surface_gradients [[buffer(11)]],
     uint work_index [[thread_position_in_grid]]
 ) {
   const RayWorkItem input = work_items[work_index];
@@ -998,7 +1056,8 @@ kernel void trace_tile_frontier_quantized(
       shared_parameters,
       mipmap_value_count,
       distances,
-      elevations
+      elevations,
+      surface_gradients
   );
 }
 

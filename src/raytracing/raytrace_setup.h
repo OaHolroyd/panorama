@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ray_projection.h"
+#include "synthetic_renderer.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -35,9 +36,25 @@ struct RaytraceConfig {
   uint32_t max_tile_preparation_workers;
   /// Keep uint16 custom terrain quantized through atlas residency and tracing.
   bool retain_quantized;
+  /// Compute one compact terrain-surface normal parameterization per collision.
+  bool compute_normals;
+};
+
+/// Independently selectable image products produced after tracing completes.
+struct RaytraceOutputConfig {
+  /// Write distances.png, elevations.png, and normals.png when normals exist.
+  bool write_diagnostics;
+  /// Write synthetic.png using white terrain and normal-based lighting.
+  bool write_synthetic;
+  /// Lighting parameters used only when `write_synthetic` is true.
+  SyntheticRenderOptions synthetic_options;
 };
 
 /// Trace an explicitly supplied per-pixel ray field.
-void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &field);
+void raytrace_tiled_heightmap(
+    const RaytraceConfig &config,
+    const RayField &field,
+    const RaytraceOutputConfig &outputs
+);
 
 } // namespace panorama

@@ -94,14 +94,85 @@ void validate_configuration(const RaytraceConfig &config) {
   return static_cast<uint32_t>(ray_count);
 }
 
-/// Return a non-owning float32 view of a completed shared Metal buffer.
-[[nodiscard]] std::span<const float>
-view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
-  const auto *contents = static_cast<const float *>(buffer.contents);
+/// Return a typed, non-owning view of a completed shared Metal buffer.
+template <typename Value>
+[[nodiscard]] std::span<const Value>
+view_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
+  const auto *contents = static_cast<const Value *>(buffer.contents);
   if (contents == nullptr) {
     throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
   }
   return {contents, count};
+}
+
+/// Validate output choices before starting an otherwise expensive trace.
+void validate_output_configuration(
+    const RaytraceConfig &config,
+    const RaytraceOutputConfig &outputs
+) {
+  if (!outputs.write_diagnostics && !outputs.write_synthetic) {
+    throw std::invalid_argument("At least one raytrace output must be enabled");
+  }
+  if (outputs.write_synthetic && !config.compute_normals) {
+    throw std::invalid_argument("Synthetic output requires collision-normal computation");
+  }
+}
+
+/// Map completed shared buffers and write the independently selected PNGs.
+///
+/// This stage has its own top-level timer so terrain-tracing measurements stay
+/// comparable when callers select different output products.
+void write_trace_outputs(
+    const RaytraceConfig &config,
+    const RaytraceOutputConfig &outputs,
+    const RayField &field,
+    const GpuRaytraceResources &gpu,
+    uint32_t ray_count
+) {
+  Timer timer("PNG generation");
+  const std::span<const float> distances =
+      view_buffer<float>(gpu.distances(), ray_count, "distance output");
+
+  std::span<const uint32_t> surface_gradients;
+  if (config.compute_normals) {
+    surface_gradients =
+        view_buffer<uint32_t>(gpu.surface_gradients(), ray_count, "surface gradient output");
+  }
+
+  if (outputs.write_diagnostics) {
+    const std::span<const float> elevations =
+        view_buffer<float>(gpu.elevations(), ray_count, "elevation output");
+    write_colormapped_png(
+        "distances.png",
+        distances,
+        field.image.width,
+        field.image.height,
+        colormaps::viridis
+    );
+    write_colormapped_png(
+        "elevations.png",
+        elevations,
+        field.image.width,
+        field.image.height,
+        colormaps::viridis
+    );
+    if (config.compute_normals) {
+      write_surface_normals_png(
+          "normals.png",
+          surface_gradients,
+          distances,
+          field.image.width,
+          field.image.height
+      );
+    }
+  }
+
+  if (outputs.write_synthetic) {
+    write_synthetic_terrain_png(
+        "synthetic.png", surface_gradients, distances, field.image, outputs.synthetic_options
+    );
+  }
+  timer.print();
 }
 
 } // namespace
@@ -122,8 +193,13 @@ view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 /// imminent frontier.
 /// The loop ends when every ray has intersected terrain, reached the range
 /// limit, risen above the catalogue, or left available terrain coverage.
-void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &field) {
+void raytrace_tiled_heightmap(
+    const RaytraceConfig &config,
+    const RayField &field,
+    const RaytraceOutputConfig &outputs
+) {
   validate_configuration(config);
+  validate_output_configuration(config, outputs);
   const uint32_t ray_count = validate_ray_field(field);
   // Start a composite timer.
   Timer timer("Total elapsed");
@@ -211,7 +287,7 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
     // ray inputs, output images, and reusable frontier storage.
-    GpuRaytraceResources gpu(field.rays, paths, trace_quantized);
+    GpuRaytraceResources gpu(field.rays, paths, trace_quantized, config.compute_normals);
     gpu.initialise_frontier();
 
     // The cache shares the GPU resource owner's device. Preparation workers
@@ -390,25 +466,9 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
     );
     timer.print();
 
-    // PNG encoding is a placeholder output stage rather than part of terrain
-    // tracing. Report it as an independent top-level timer so `Total elapsed`
-    // remains comparable with future output backends which may omit PNGs.
-    Timer png_timer("PNG generation");
-    write_colormapped_png(
-        "distances.png",
-        view_float_buffer(gpu.distances(), ray_count, "distance output"),
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
-    );
-    write_colormapped_png(
-        "elevations.png",
-        view_float_buffer(gpu.elevations(), ray_count, "elevation output"),
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
-    );
-    png_timer.print();
+    // Encoding remains outside `Total elapsed`; it is an output backend rather
+    // than part of terrain traversal and may be omitted by future consumers.
+    write_trace_outputs(config, outputs, field, gpu, ray_count);
   }
 }
 

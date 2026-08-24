@@ -1,5 +1,7 @@
 #include "png_writer.h"
 
+#include "surface_normal.h"
+
 #import <Foundation/Foundation.h>
 
 #include <CoreGraphics/CoreGraphics.h>
@@ -92,7 +94,7 @@ interpolate_colormap(const std::array<ColorStop, Count> &stops, float normalised
 /// Encode an already-colormapped, tightly packed RGB buffer with ImageIO.
 void encode_png(
     const std::filesystem::path &path,
-    const std::vector<uint8_t> &rgb,
+    std::span<const uint8_t> rgb,
     uint32_t width,
     uint32_t height
 ) {
@@ -177,6 +179,21 @@ Rgb colormaps::jet(float normalised_value) {
   return interpolate_colormap(kStops, normalised_value);
 }
 
+void write_rgb_png(
+    const std::filesystem::path &path,
+    std::span<const Rgb> pixels,
+    uint32_t width,
+    uint32_t height
+) {
+  static_assert(sizeof(Rgb) == 3U * sizeof(uint8_t));
+  const size_t pixel_count = checked_pixel_count(width, height);
+  if (pixels.size() != pixel_count) {
+    throw std::invalid_argument("RGB input length does not match its declared dimensions");
+  }
+  const auto *bytes = reinterpret_cast<const uint8_t *>(pixels.data());
+  encode_png(path, {bytes, pixel_count * sizeof(Rgb)}, width, height);
+}
+
 void write_colormapped_png(
     const std::filesystem::path &path,
     std::span<const float> values,
@@ -194,7 +211,7 @@ void write_colormapped_png(
 
   const auto [minimum, maximum] = finite_range(values);
   const float range = maximum - minimum;
-  std::vector<uint8_t> rgb(pixel_count * 3U);
+  std::vector<Rgb> pixels(pixel_count);
   for (size_t index = 0; index < pixel_count; index++) {
     const float value = values[index];
     // Black makes absent rays or other non-finite diagnostic values obvious
@@ -202,11 +219,36 @@ void write_colormapped_png(
     const Rgb color = std::isfinite(value)
                           ? colormap(range == 0.0F ? 0.5F : (value - minimum) / range)
                           : Rgb{0, 0, 0};
-    rgb[index * 3U] = color.red;
-    rgb[index * 3U + 1U] = color.green;
-    rgb[index * 3U + 2U] = color.blue;
+    pixels[index] = color;
   }
-  encode_png(path, rgb, width, height);
+  write_rgb_png(path, pixels, width, height);
+}
+
+void write_surface_normals_png(
+    const std::filesystem::path &path,
+    std::span<const uint32_t> packed_gradients,
+    std::span<const float> distances,
+    uint32_t width,
+    uint32_t height
+) {
+  const size_t pixel_count = checked_pixel_count(width, height);
+  if (packed_gradients.size() != pixel_count || distances.size() != pixel_count) {
+    throw std::invalid_argument("Normal-map input length does not match its declared dimensions");
+  }
+
+  std::vector<Rgb> pixels(pixel_count);
+  for (size_t index = 0; index < pixel_count; index++) {
+    if (!(distances[index] > 0.0F) || !std::isfinite(distances[index])) {
+      continue;
+    }
+    const SurfaceNormal normal = decode_surface_normal(packed_gradients[index]);
+    pixels[index] = {
+        to_byte((0.5F * normal.east + 0.5F) * 255.0F),
+        to_byte((0.5F * normal.north + 0.5F) * 255.0F),
+        to_byte((0.5F * normal.up + 0.5F) * 255.0F),
+    };
+  }
+  write_rgb_png(path, pixels, width, height);
 }
 
 } // namespace panorama

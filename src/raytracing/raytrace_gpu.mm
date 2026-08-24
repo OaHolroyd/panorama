@@ -109,6 +109,7 @@ struct GpuRaytraceResources::State {
   id<MTLBuffer> rays;
   id<MTLBuffer> distance_output;
   id<MTLBuffer> elevation_output;
+  id<MTLBuffer> surface_gradient_output;
   id<MTLBuffer> active;
   id<MTLBuffer> continuations;
   id<MTLBuffer> deferred_items;
@@ -119,13 +120,15 @@ struct GpuRaytraceResources::State {
   uint32_t frontier_capacity;
   uint32_t catalogue_hash_capacity;
   bool trace_quantized;
+  bool compute_normals;
   bool capture_active = false;
 };
 
 GpuRaytraceResources::GpuRaytraceResources(
     std::span<const RayDirection> rays,
     std::span<const TerrainSource> sources,
-    bool trace_quantized
+    bool trace_quantized,
+    bool compute_normals
 ) {
   if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
       sources.size() > std::numeric_limits<uint32_t>::max()) {
@@ -135,6 +138,7 @@ GpuRaytraceResources::GpuRaytraceResources(
   state->frontier_capacity = static_cast<uint32_t>(rays.size());
   state->catalogue_hash_capacity = catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
+  state->compute_normals = compute_normals;
   state->device = MTLCreateSystemDefaultDevice();
   if (state->device == nil) {
     throw std::runtime_error("No Metal device is available");
@@ -153,7 +157,10 @@ GpuRaytraceResources::GpuRaytraceResources(
   }
   NSString *trace_name =
       trace_quantized ? @"trace_tile_frontier_quantized" : @"trace_tile_frontier";
-  id<MTLFunction> trace = [library newFunctionWithName:trace_name];
+  MTLFunctionConstantValues *trace_constants = [[MTLFunctionConstantValues alloc] init];
+  [trace_constants setConstantValue:&compute_normals type:MTLDataTypeBool atIndex:0];
+  id<MTLFunction> trace =
+      [library newFunctionWithName:trace_name constantValues:trace_constants error:&error];
   id<MTLFunction> emit = [library newFunctionWithName:@"emit_tile_frontier"];
   if (trace == nil || emit == nil) {
     throw std::runtime_error("GPU-frontier Metal kernels are missing");
@@ -188,8 +195,22 @@ GpuRaytraceResources::GpuRaytraceResources(
       checked_buffer_length(rays.size(), sizeof(float), "elevation output"),
       "elevation output"
   );
+  // The function-constant specialization removes all gradient work when
+  // disabled. A one-word placeholder preserves the common kernel ABI without
+  // reserving a full per-ray output image.
+  state->surface_gradient_output = make_buffer(
+      state->device,
+      nullptr,
+      compute_normals
+          ? checked_buffer_length(rays.size(), sizeof(uint32_t), "surface gradient output")
+          : sizeof(uint32_t),
+      "surface gradient output"
+  );
   clear_buffer(state->distance_output, "distance output");
   clear_buffer(state->elevation_output, "elevation output");
+  // Every positive distance is written beside its gradient, and consumers use
+  // distance as the validity mask, so clearing this potentially large buffer
+  // would add setup bandwidth without defining any observable output.
 
   // A command completes before the host replaces this frontier with the next
   // source-bucketed batch, so one shared work buffer is sufficient.
@@ -308,6 +329,7 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   if (state.trace_quantized) {
     [encoder setBytes:&cache.quantized_layout length:sizeof(cache.quantized_layout) atIndex:10];
   }
+  [encoder setBuffer:state.surface_gradient_output offset:0 atIndex:11];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [encoder endEncoding];
@@ -362,6 +384,13 @@ std::span<const DeferredRayWork> GpuRaytraceResources::deferred_work(uint32_t co
 
 id<MTLBuffer> GpuRaytraceResources::distances() const { return state_->distance_output; }
 id<MTLBuffer> GpuRaytraceResources::elevations() const { return state_->elevation_output; }
+
+id<MTLBuffer> GpuRaytraceResources::surface_gradients() const {
+  if (!state_->compute_normals) {
+    throw std::logic_error("Surface gradients were not requested");
+  }
+  return state_->surface_gradient_output;
+}
 
 void GpuRaytraceResources::start_capture_if_requested() {
   const char *value = std::getenv("MTL_CAPTURE_ENABLED");
