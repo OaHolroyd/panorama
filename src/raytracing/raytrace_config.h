@@ -1,8 +1,5 @@
 #pragma once
 
-#include "ray_projection.h"
-#include "synthetic_render_options.h"
-
 #include <cstdint>
 #include <filesystem>
 
@@ -20,7 +17,11 @@ struct ObserverLocation {
   double elevation;
 };
 
-/// Host-only configuration for fixed-observer, level-0 multi-tile tracing.
+/// Host configuration for fixed-observer, level-0 multi-tile tracing.
+///
+/// Output selection deliberately lives outside this type: the tracing engine
+/// describes the scientific fields it must compute, while the application and
+/// rendering layers decide how those fields are presented.
 struct RaytraceConfig {
   /// Directory containing prepared level-0 GeoTIFF or custom terrain tiles.
   std::filesystem::path tile_dir;
@@ -41,22 +42,5 @@ struct RaytraceConfig {
   /// Compute one compact terrain-surface normal parameterization per collision.
   bool compute_normals;
 };
-
-/// Independently selectable image products produced after tracing completes.
-struct RaytraceOutputConfig {
-  /// Write distances.png plus enabled elevation and normal diagnostic fields.
-  bool write_diagnostics;
-  /// Write synthetic.png using white terrain and normal-based lighting.
-  bool write_synthetic;
-  /// Lighting parameters used only when `write_synthetic` is true.
-  SyntheticRenderOptions synthetic_options;
-};
-
-/// Trace an explicitly supplied per-pixel ray field.
-void raytrace_tiled_heightmap(
-    const RaytraceConfig &config,
-    const RayField &field,
-    const RaytraceOutputConfig &outputs
-);
 
 } // namespace panorama

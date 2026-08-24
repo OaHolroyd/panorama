@@ -1,4 +1,4 @@
-#include "raytrace_setup.h"
+#include "terrain_renderer.h"
 
 #include "arguments.h"
 #include "ray_projection_arguments.h"
@@ -60,7 +60,7 @@ void validate_output_settings(const EntrypointSettings &settings) {
   }
 }
 
-/// Print the command-line options accepted by the raytracing executable.
+/// Print the command-line options accepted by the panorama executable.
 void print_usage(const char *program) {
   std::printf(
       "usage: %s [options]\n"
@@ -186,7 +186,7 @@ void print_usage(const char *program) {
 
 } // namespace
 
-/// Generate the selected output rays and trace one prepared terrain dataset.
+/// Generate the selected rays, trace terrain, and render the requested products.
 int main(int argc, const char *argv[]) {
   try {
     const EntrypointSettings settings = parse_arguments(argc, argv);
@@ -203,7 +203,7 @@ int main(int argc, const char *argv[]) {
         settings.compute_normals,
     };
     const panorama::RayField rays = settings.projection.make_ray_field();
-    const panorama::RaytraceOutputConfig outputs = {
+    const panorama::TerrainRenderOutputs outputs = {
         settings.write_diagnostics,
         settings.write_synthetic,
         settings.synthetic,
@@ -244,7 +244,7 @@ int main(int argc, const char *argv[]) {
           settings.synthetic.ambient_light
       );
     }
-    panorama::raytrace_tiled_heightmap(config, rays, outputs);
+    panorama::render_terrain(config, rays, outputs);
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

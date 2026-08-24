@@ -1,6 +1,6 @@
 #pragma once
 
-#include "raytrace_setup.h"
+#include "raytrace_config.h"
 #include "tile_preparer.h"
 
 #import <Metal/Metal.h>

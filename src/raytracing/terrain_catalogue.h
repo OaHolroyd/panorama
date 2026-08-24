@@ -1,6 +1,6 @@
 #pragma once
 
-#include "raytrace_setup.h"
+#include "raytrace_config.h"
 
 #include <cstdint>
 #include <filesystem>

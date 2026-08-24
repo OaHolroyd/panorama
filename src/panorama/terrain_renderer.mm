@@ -1,4 +1,4 @@
-#include "raytrace_setup.h"
+#include "terrain_renderer.h"
 
 #include "gpu_image_renderer.h"
 #include "host_frontier.h"
@@ -98,10 +98,10 @@ void validate_configuration(const RaytraceConfig &config) {
 /// Validate output choices before starting an otherwise expensive trace.
 void validate_output_configuration(
     const RaytraceConfig &config,
-    const RaytraceOutputConfig &outputs
+    const TerrainRenderOutputs &outputs
 ) {
   if (!outputs.write_diagnostics && !outputs.write_synthetic) {
-    throw std::invalid_argument("At least one raytrace output must be enabled");
+    throw std::invalid_argument("At least one render output must be enabled");
   }
   if (outputs.write_synthetic && !config.compute_normals) {
     throw std::invalid_argument("Synthetic output requires collision-normal computation");
@@ -125,13 +125,13 @@ void render_and_write_png(
   timer.stop("PNG encoding");
 }
 
-/// Map completed shared buffers and write the independently selected PNGs.
+/// Present completed GPU trace buffers and write the selected PNG products.
 ///
 /// This stage has its own top-level timer so terrain-tracing measurements stay
 /// comparable when callers select different output products.
 void write_trace_outputs(
     const RaytraceConfig &config,
-    const RaytraceOutputConfig &outputs,
+    const TerrainRenderOutputs &outputs,
     const RayField &field,
     const GpuRaytraceResources &gpu
 ) {
@@ -214,10 +214,10 @@ void write_trace_outputs(
 /// imminent frontier.
 /// The loop ends when every ray has intersected terrain, reached the range
 /// limit, risen above the catalogue, or left available terrain coverage.
-void raytrace_tiled_heightmap(
+void render_terrain(
     const RaytraceConfig &config,
     const RayField &field,
-    const RaytraceOutputConfig &outputs
+    const TerrainRenderOutputs &outputs
 ) {
   validate_configuration(config);
   validate_output_configuration(config, outputs);
