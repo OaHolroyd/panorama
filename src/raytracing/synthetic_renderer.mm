@@ -1,6 +1,5 @@
 #include "synthetic_renderer.h"
 
-#include "png_writer.h"
 #include "surface_normal.h"
 
 #include <algorithm>
@@ -68,8 +67,7 @@ struct SunDirection {
 
 } // namespace
 
-void write_synthetic_terrain_png(
-    const std::filesystem::path &path,
+std::vector<Rgb> render_synthetic_terrain(
     std::span<const uint32_t> packed_gradients,
     std::span<const float> distances,
     ImageSize image,
@@ -97,7 +95,7 @@ void write_synthetic_terrain_png(
     const uint8_t intensity = linear_channel(shade_terrain(normal, sun, options.ambient_light));
     pixels[index] = {intensity, intensity, intensity};
   }
-  write_rgb_png(path, pixels, image.width, image.height);
+  return pixels;
 }
 
 } // namespace panorama

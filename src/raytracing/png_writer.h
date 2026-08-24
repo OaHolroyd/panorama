@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <vector>
 
 namespace panorama {
 
@@ -37,31 +38,27 @@ void write_rgb_png(
     uint32_t height
 );
 
-/// Write a row-major float32 array as an opaque sRGB PNG.
+/// Convert a row-major float32 array into opaque sRGB pixels.
 ///
 /// `values` must contain exactly `width * height` elements; row zero becomes
-/// the top row of the PNG. Finite values are normalised over their own minimum
-/// and maximum before `colormap` is called. NaN and infinite values are
-/// written as black so sparse diagnostic fields remain viewable. Throws
-/// std::invalid_argument for invalid dimensions or data and std::runtime_error
-/// when ImageIO cannot create the PNG.
-void write_colormapped_png(
-    const std::filesystem::path &path,
+/// the top row of the image. Finite values are normalised over their own
+/// minimum and maximum before `colormap` is called. NaN and infinite values
+/// become black so sparse diagnostic fields remain viewable.
+[[nodiscard]] std::vector<Rgb> make_colormapped_pixels(
     std::span<const float> values,
     uint32_t width,
     uint32_t height,
     Colormap colormap = colormaps::viridis
 );
 
-/// Write packed terrain-surface gradients as an RGB normal-map PNG.
+/// Convert packed terrain-surface gradients into RGB normal-map pixels.
 ///
 /// Each uint32 contains east and north gradients as two IEEE float16 values,
 /// matching the Metal trace output. Valid collisions reconstruct the upward
 /// normal `normalize(-dz/deast, -dz/dnorth, 1)` and map its east/north/up
 /// components from [-1, 1] to RGB. Pixels without a positive finite collision
 /// distance are black. All spans must contain exactly `width * height` elements.
-void write_surface_normals_png(
-    const std::filesystem::path &path,
+[[nodiscard]] std::vector<Rgb> make_surface_normal_pixels(
     std::span<const uint32_t> packed_gradients,
     std::span<const float> distances,
     uint32_t width,

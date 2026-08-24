@@ -194,8 +194,7 @@ void write_rgb_png(
   encode_png(path, {bytes, pixel_count * sizeof(Rgb)}, width, height);
 }
 
-void write_colormapped_png(
-    const std::filesystem::path &path,
+std::vector<Rgb> make_colormapped_pixels(
     std::span<const float> values,
     uint32_t width,
     uint32_t height,
@@ -221,11 +220,10 @@ void write_colormapped_png(
                           : Rgb{0, 0, 0};
     pixels[index] = color;
   }
-  write_rgb_png(path, pixels, width, height);
+  return pixels;
 }
 
-void write_surface_normals_png(
-    const std::filesystem::path &path,
+std::vector<Rgb> make_surface_normal_pixels(
     std::span<const uint32_t> packed_gradients,
     std::span<const float> distances,
     uint32_t width,
@@ -248,7 +246,7 @@ void write_surface_normals_png(
         to_byte((0.5F * normal.up + 0.5F) * 255.0F),
     };
   }
-  write_rgb_png(path, pixels, width, height);
+  return pixels;
 }
 
 } // namespace panorama

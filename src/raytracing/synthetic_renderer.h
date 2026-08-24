@@ -1,10 +1,11 @@
 #pragma once
 
+#include "png_writer.h"
 #include "ray_projection.h"
 
 #include <cstdint>
-#include <filesystem>
 #include <span>
+#include <vector>
 
 namespace panorama {
 
@@ -24,8 +25,7 @@ struct SyntheticRenderOptions {
 /// A positive finite distance marks a terrain collision; other rays render as
 /// solid black. Every input span must contain exactly `image.width * image.height`
 /// elements.
-void write_synthetic_terrain_png(
-    const std::filesystem::path &path,
+[[nodiscard]] std::vector<Rgb> render_synthetic_terrain(
     std::span<const uint32_t> packed_gradients,
     std::span<const float> distances,
     ImageSize image,

@@ -118,6 +118,23 @@ void validate_output_configuration(
   }
 }
 
+/// Convert and encode one image while aggregating the two costs separately.
+template <typename PixelGenerator>
+void make_and_write_png(
+    Timer &timer,
+    const std::filesystem::path &path,
+    ImageSize image,
+    PixelGenerator &&generate_pixels
+) {
+  timer.start_wall("Pixel conversion");
+  const std::vector<Rgb> pixels = generate_pixels();
+  timer.stop("Pixel conversion");
+
+  timer.start_wall("PNG encoding");
+  write_rgb_png(path, pixels, image.width, image.height);
+  timer.stop("PNG encoding");
+}
+
 /// Map completed shared buffers and write the independently selected PNGs.
 ///
 /// This stage has its own top-level timer so terrain-tracing measurements stay
@@ -140,36 +157,55 @@ void write_trace_outputs(
   }
 
   if (outputs.write_diagnostics) {
-    write_colormapped_png(
+    make_and_write_png(
+        timer,
         "distances.png",
-        distances,
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
+        field.image,
+        [&] {
+          return make_colormapped_pixels(
+              distances, field.image.width, field.image.height, colormaps::viridis
+          );
+        }
     );
     if (config.compute_elevations) {
-      write_colormapped_png(
+      make_and_write_png(
+          timer,
           "elevations.png",
-          view_buffer<float>(gpu.elevations(), ray_count, "elevation output"),
-          field.image.width,
-          field.image.height,
-          colormaps::viridis
+          field.image,
+          [&] {
+            return make_colormapped_pixels(
+                view_buffer<float>(gpu.elevations(), ray_count, "elevation output"),
+                field.image.width,
+                field.image.height,
+                colormaps::viridis
+            );
+          }
       );
     }
     if (config.compute_normals) {
-      write_surface_normals_png(
+      make_and_write_png(
+          timer,
           "normals.png",
-          surface_gradients,
-          distances,
-          field.image.width,
-          field.image.height
+          field.image,
+          [&] {
+            return make_surface_normal_pixels(
+                surface_gradients, distances, field.image.width, field.image.height
+            );
+          }
       );
     }
   }
 
   if (outputs.write_synthetic) {
-    write_synthetic_terrain_png(
-        "synthetic.png", surface_gradients, distances, field.image, outputs.synthetic_options
+    make_and_write_png(
+        timer,
+        "synthetic.png",
+        field.image,
+        [&] {
+          return render_synthetic_terrain(
+              surface_gradients, distances, field.image, outputs.synthetic_options
+          );
+        }
     );
   }
   timer.print();
