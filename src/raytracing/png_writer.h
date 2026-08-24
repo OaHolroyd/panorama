@@ -57,9 +57,9 @@ void write_colormapped_png(
 ///
 /// Each uint32 contains east and north gradients as two IEEE float16 values,
 /// matching the Metal trace output. Valid collisions reconstruct the upward
-/// normal `normalize(-east, -north, 1)` and map its east/north/up components
-/// from [-1, 1] to RGB. Pixels without a positive finite collision distance
-/// are black. All spans must contain exactly `width * height` elements.
+/// normal `normalize(-dz/deast, -dz/dnorth, 1)` and map its east/north/up
+/// components from [-1, 1] to RGB. Pixels without a positive finite collision
+/// distance are black. All spans must contain exactly `width * height` elements.
 void write_surface_normals_png(
     const std::filesystem::path &path,
     std::span<const uint32_t> packed_gradients,

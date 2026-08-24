@@ -94,24 +94,85 @@ void validate_configuration(const RaytraceConfig &config) {
   return static_cast<uint32_t>(ray_count);
 }
 
-/// Return a non-owning float32 view of a completed shared Metal buffer.
-[[nodiscard]] std::span<const float>
-view_float_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
-  const auto *contents = static_cast<const float *>(buffer.contents);
+/// Return a typed, non-owning view of a completed shared Metal buffer.
+template <typename Value>
+[[nodiscard]] std::span<const Value>
+view_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
+  const auto *contents = static_cast<const Value *>(buffer.contents);
   if (contents == nullptr) {
     throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
   }
   return {contents, count};
 }
 
-/// Return a non-owning uint32 view of a completed shared Metal buffer.
-[[nodiscard]] std::span<const uint32_t>
-view_uint32_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
-  const auto *contents = static_cast<const uint32_t *>(buffer.contents);
-  if (contents == nullptr) {
-    throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
+/// Validate output choices before starting an otherwise expensive trace.
+void validate_output_configuration(
+    const RaytraceConfig &config,
+    const RaytraceOutputConfig &outputs
+) {
+  if (!outputs.write_diagnostics && !outputs.write_synthetic) {
+    throw std::invalid_argument("At least one raytrace output must be enabled");
   }
-  return {contents, count};
+  if (outputs.write_synthetic && !config.compute_normals) {
+    throw std::invalid_argument("Synthetic output requires collision-normal computation");
+  }
+}
+
+/// Map completed shared buffers and write the independently selected PNGs.
+///
+/// This stage has its own top-level timer so terrain-tracing measurements stay
+/// comparable when callers select different output products.
+void write_trace_outputs(
+    const RaytraceConfig &config,
+    const RaytraceOutputConfig &outputs,
+    const RayField &field,
+    const GpuRaytraceResources &gpu,
+    uint32_t ray_count
+) {
+  Timer timer("PNG generation");
+  const std::span<const float> distances =
+      view_buffer<float>(gpu.distances(), ray_count, "distance output");
+
+  std::span<const uint32_t> surface_gradients;
+  if (config.compute_normals) {
+    surface_gradients =
+        view_buffer<uint32_t>(gpu.surface_gradients(), ray_count, "surface gradient output");
+  }
+
+  if (outputs.write_diagnostics) {
+    const std::span<const float> elevations =
+        view_buffer<float>(gpu.elevations(), ray_count, "elevation output");
+    write_colormapped_png(
+        "distances.png",
+        distances,
+        field.image.width,
+        field.image.height,
+        colormaps::viridis
+    );
+    write_colormapped_png(
+        "elevations.png",
+        elevations,
+        field.image.width,
+        field.image.height,
+        colormaps::viridis
+    );
+    if (config.compute_normals) {
+      write_surface_normals_png(
+          "normals.png",
+          surface_gradients,
+          distances,
+          field.image.width,
+          field.image.height
+      );
+    }
+  }
+
+  if (outputs.write_synthetic) {
+    write_synthetic_terrain_png(
+        "synthetic.png", surface_gradients, distances, field.image, outputs.synthetic_options
+    );
+  }
+  timer.print();
 }
 
 } // namespace
@@ -138,10 +199,7 @@ void raytrace_tiled_heightmap(
     const RaytraceOutputConfig &outputs
 ) {
   validate_configuration(config);
-  if ((!outputs.write_diagnostics && !outputs.write_synthetic) ||
-      (outputs.write_synthetic && !config.compute_normals)) {
-    throw std::invalid_argument("Raytrace output configuration is inconsistent");
-  }
+  validate_output_configuration(config, outputs);
   const uint32_t ray_count = validate_ray_field(field);
   // Start a composite timer.
   Timer timer("Total elapsed");
@@ -408,53 +466,9 @@ void raytrace_tiled_heightmap(
     );
     timer.print();
 
-    // Output generation is deliberately outside terrain tracing. Report it as
-    // an independent timer so tracing remains comparable across output modes.
-    Timer png_timer("PNG generation");
-    const std::span<const float> distances =
-        view_float_buffer(gpu.distances(), ray_count, "distance output");
-    const std::span<const float> elevations =
-        view_float_buffer(gpu.elevations(), ray_count, "elevation output");
-    std::span<const uint32_t> surface_gradients;
-    if (config.compute_normals) {
-      surface_gradients =
-          view_uint32_buffer(gpu.surface_gradients(), ray_count, "surface gradient output");
-    }
-    if (outputs.write_diagnostics) {
-      write_colormapped_png(
-          "distances.png",
-          distances,
-          field.image.width,
-          field.image.height,
-          colormaps::viridis
-      );
-      write_colormapped_png(
-          "elevations.png",
-          elevations,
-          field.image.width,
-          field.image.height,
-          colormaps::viridis
-      );
-      if (config.compute_normals) {
-        write_surface_normals_png(
-            "normals.png",
-            surface_gradients,
-            distances,
-            field.image.width,
-            field.image.height
-        );
-      }
-    }
-    if (outputs.write_synthetic) {
-      write_synthetic_terrain_png(
-          "synthetic.png",
-          surface_gradients,
-          distances,
-          field.image,
-          outputs.synthetic_options
-      );
-    }
-    png_timer.print();
+    // Encoding remains outside `Total elapsed`; it is an output backend rather
+    // than part of terrain traversal and may be omitted by future consumers.
+    write_trace_outputs(config, outputs, field, gpu, ray_count);
   }
 }
 

@@ -211,7 +211,7 @@ void write_colormapped_png(
 
   const auto [minimum, maximum] = finite_range(values);
   const float range = maximum - minimum;
-  std::vector<uint8_t> rgb(pixel_count * 3U);
+  std::vector<Rgb> pixels(pixel_count);
   for (size_t index = 0; index < pixel_count; index++) {
     const float value = values[index];
     // Black makes absent rays or other non-finite diagnostic values obvious
@@ -219,11 +219,9 @@ void write_colormapped_png(
     const Rgb color = std::isfinite(value)
                           ? colormap(range == 0.0F ? 0.5F : (value - minimum) / range)
                           : Rgb{0, 0, 0};
-    rgb[index * 3U] = color.red;
-    rgb[index * 3U + 1U] = color.green;
-    rgb[index * 3U + 2U] = color.blue;
+    pixels[index] = color;
   }
-  encode_png(path, rgb, width, height);
+  write_rgb_png(path, pixels, width, height);
 }
 
 void write_surface_normals_png(
@@ -238,17 +236,19 @@ void write_surface_normals_png(
     throw std::invalid_argument("Normal-map input length does not match its declared dimensions");
   }
 
-  std::vector<uint8_t> rgb(pixel_count * 3U);
+  std::vector<Rgb> pixels(pixel_count);
   for (size_t index = 0; index < pixel_count; index++) {
     if (!(distances[index] > 0.0F) || !std::isfinite(distances[index])) {
       continue;
     }
     const SurfaceNormal normal = decode_surface_normal(packed_gradients[index]);
-    rgb[index * 3U] = to_byte((0.5F * normal.east + 0.5F) * 255.0F);
-    rgb[index * 3U + 1U] = to_byte((0.5F * normal.north + 0.5F) * 255.0F);
-    rgb[index * 3U + 2U] = to_byte((0.5F * normal.up + 0.5F) * 255.0F);
+    pixels[index] = {
+        to_byte((0.5F * normal.east + 0.5F) * 255.0F),
+        to_byte((0.5F * normal.north + 0.5F) * 255.0F),
+        to_byte((0.5F * normal.up + 0.5F) * 255.0F),
+    };
   }
-  encode_png(path, rgb, width, height);
+  write_rgb_png(path, pixels, width, height);
 }
 
 } // namespace panorama

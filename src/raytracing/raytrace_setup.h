@@ -46,6 +46,7 @@ struct RaytraceOutputConfig {
   bool write_diagnostics;
   /// Write synthetic.png using white terrain and normal-based lighting.
   bool write_synthetic;
+  /// Lighting parameters used only when `write_synthetic` is true.
   SyntheticRenderOptions synthetic_options;
 };
 

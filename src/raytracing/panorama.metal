@@ -565,8 +565,8 @@ inline Collision bilinear_collision(
 /// Evaluate the analytical east/north derivatives of a bilinear terrain patch
 /// at a confirmed collision. Reloading the four samples here keeps them and
 /// the derivative temporaries out of the root solver's peak live register set.
-/// The two float16 slopes are sufficient to reconstruct the upward normal as
-/// normalize(float3(-east_gradient, -north_gradient, 1)).
+/// The two float16 gradients are sufficient to reconstruct the upward normal
+/// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
 template <typename Sample>
 inline uint packed_surface_gradients(
     device const Sample *vertices,

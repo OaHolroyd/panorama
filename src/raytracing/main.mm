@@ -30,7 +30,7 @@ struct EntrypointSettings {
   bool compute_normals = true;
   bool write_diagnostics = true;
   bool write_synthetic = false;
-  bool synthetic_option_seen = false;
+  bool synthetic_setting_seen = false;
   panorama::SyntheticRenderOptions synthetic = {
       225.0 * kDegreesToRadians,
       35.0 * kDegreesToRadians,
@@ -41,6 +41,23 @@ struct EntrypointSettings {
   double elevation = 3415.0;
   panorama::RayProjectionArguments projection;
 };
+
+/// Validate combinations whose meaning spans more than one CLI switch.
+void validate_output_settings(const EntrypointSettings &settings) {
+  if (!settings.write_diagnostics && !settings.write_synthetic) {
+    throw std::invalid_argument("At least one output type must be enabled");
+  }
+  // Rendering requires collision gradients, whereas diagnostic distance and
+  // elevation fields remain usable when their computation is disabled.
+  if (settings.write_synthetic && !settings.compute_normals) {
+    throw std::invalid_argument("--synthetic-output cannot be combined with --no-normals");
+  }
+  // Treat lighting controls as configuration for an explicitly selected
+  // product; silently creating another output would make scripted runs unclear.
+  if (settings.synthetic_setting_seen && !settings.write_synthetic) {
+    throw std::invalid_argument("Synthetic image options require --synthetic-output");
+  }
+}
 
 /// Print the command-line options accepted by the raytracing executable.
 void print_usage(const char *program) {
@@ -137,35 +154,27 @@ void print_usage(const char *program) {
     } else if (option == "--sun-azimuth") {
       settings.synthetic.sun_azimuth =
           panorama::arguments::parse_finite_double(value, option) * kDegreesToRadians;
-      settings.synthetic_option_seen = true;
+      settings.synthetic_setting_seen = true;
     } else if (option == "--sun-elevation") {
       const double degrees = panorama::arguments::parse_finite_double(value, option);
       if (degrees < -90.0 || degrees > 90.0) {
         throw std::out_of_range("Sun elevation must be between -90 and 90 degrees");
       }
       settings.synthetic.sun_elevation = degrees * kDegreesToRadians;
-      settings.synthetic_option_seen = true;
+      settings.synthetic_setting_seen = true;
     } else if (option == "--ambient-light") {
       const double parsed = panorama::arguments::parse_finite_double(value, option);
       if (parsed < 0.0 || parsed > 1.0) {
         throw std::out_of_range("Ambient light must be between zero and one");
       }
       settings.synthetic.ambient_light = static_cast<float>(parsed);
-      settings.synthetic_option_seen = true;
+      settings.synthetic_setting_seen = true;
     } else if (!settings.projection.parse_option(option, value)) {
       throw std::invalid_argument("Unknown option: " + std::string(option));
     }
   }
   settings.projection.validate();
-  if (!settings.write_diagnostics && !settings.write_synthetic) {
-    throw std::invalid_argument("At least one output type must be enabled");
-  }
-  if (settings.synthetic_option_seen && !settings.write_synthetic) {
-    throw std::invalid_argument("Synthetic image options require --synthetic-output");
-  }
-  if (settings.write_synthetic && !settings.compute_normals) {
-    throw std::invalid_argument("--synthetic-output cannot be combined with --no-normals");
-  }
+  validate_output_settings(settings);
   return settings;
 }
 

@@ -12,13 +12,8 @@
 namespace panorama {
 namespace {
 
-struct LinearRgb {
-  float red;
-  float green;
-  float blue;
-};
-
-struct Direction3 {
+/// Unit light direction in the same east/north/up basis as `SurfaceNormal`.
+struct SunDirection {
   float east;
   float north;
   float up;
@@ -26,6 +21,7 @@ struct Direction3 {
 
 [[nodiscard]] float clamp_unit(float value) { return std::clamp(value, 0.0F, 1.0F); }
 
+/// Encode one linear-light channel with the standard sRGB transfer function.
 [[nodiscard]] uint8_t linear_channel(float value) {
   const float linear = std::max(value, 0.0F);
   const float srgb = linear <= 0.0031308F
@@ -34,11 +30,8 @@ struct Direction3 {
   return static_cast<uint8_t>(255.0F * clamp_unit(srgb) + 0.5F);
 }
 
-[[nodiscard]] Rgb to_srgb(LinearRgb color) {
-  return {linear_channel(color.red), linear_channel(color.green), linear_channel(color.blue)};
-}
-
-[[nodiscard]] Direction3 sun_direction(const SyntheticRenderOptions &options) {
+/// Convert compass bearing and elevation into an east/north/up unit vector.
+[[nodiscard]] SunDirection sun_direction(const SyntheticRenderOptions &options) {
   const float azimuth = static_cast<float>(options.sun_azimuth);
   const float elevation = static_cast<float>(options.sun_elevation);
   const float horizontal = std::cos(elevation);
@@ -49,18 +42,19 @@ struct Direction3 {
   };
 }
 
-[[nodiscard]] LinearRgb shade_terrain(
+/// Return linear grayscale intensity for a white Lambertian surface.
+[[nodiscard]] float shade_terrain(
     SurfaceNormal normal,
-    Direction3 sun,
+    SunDirection sun,
     float ambient_light
 ) {
   const float diffuse = std::max(
       0.0F, normal.east * sun.east + normal.north * sun.north + normal.up * sun.up
   );
-  const float intensity = ambient_light + (1.0F - ambient_light) * diffuse;
-  return {intensity, intensity, intensity};
+  return ambient_light + (1.0F - ambient_light) * diffuse;
 }
 
+/// Validate dimensions before allocating the row-major output image.
 [[nodiscard]] size_t checked_pixel_count(ImageSize image) {
   if (image.width == 0U || image.height == 0U) {
     throw std::invalid_argument("Synthetic image dimensions must be positive");
@@ -91,7 +85,7 @@ void write_synthetic_terrain_png(
     throw std::invalid_argument("Synthetic render options are invalid");
   }
 
-  const Direction3 sun = sun_direction(options);
+  const SunDirection sun = sun_direction(options);
   std::vector<Rgb> pixels(pixel_count);
   for (size_t index = 0; index < pixel_count; index++) {
     if (!(distances[index] > 0.0F) || !std::isfinite(distances[index])) {
@@ -100,7 +94,8 @@ void write_synthetic_terrain_png(
     }
 
     const SurfaceNormal normal = decode_surface_normal(packed_gradients[index]);
-    pixels[index] = to_srgb(shade_terrain(normal, sun, options.ambient_light));
+    const uint8_t intensity = linear_channel(shade_terrain(normal, sun, options.ambient_light));
+    pixels[index] = {intensity, intensity, intensity};
   }
   write_rgb_png(path, pixels, image.width, image.height);
 }
