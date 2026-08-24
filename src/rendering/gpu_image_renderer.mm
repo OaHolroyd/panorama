@@ -91,7 +91,8 @@ GpuImageRenderer::GpuImageRenderer(
     id<MTLCommandQueue> queue,
     id<MTLLibrary> library,
     ImageSize image,
-    GpuPresentationRequirements requirements
+    GpuPresentationRequirements requirements,
+    MTLPixelFormat output_pixel_format
 ) {
   const uint64_t pixel_count = static_cast<uint64_t>(image.width) * image.height;
   if (device == nil || queue == nil || library == nil || pixel_count == 0U ||
@@ -119,8 +120,12 @@ GpuImageRenderer::GpuImageRenderer(
     state->pack_rgb = make_pipeline(device, library, @"pack_presented_rgb");
   }
 
+  if (output_pixel_format != MTLPixelFormatRGBA8Unorm &&
+      output_pixel_format != MTLPixelFormatBGRA8Unorm) {
+    throw std::invalid_argument("GPU image renderer requires an RGBA8 or BGRA8 target");
+  }
   MTLTextureDescriptor *texture_descriptor =
-      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:output_pixel_format
                                                          width:image.width
                                                         height:image.height
                                                      mipmapped:NO];

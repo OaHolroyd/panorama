@@ -1,5 +1,6 @@
 # Build products
 /panorama
+/panorama-app
 /panorama-tile-gen
 /obj/
 /compile_commands.json

@@ -277,14 +277,35 @@ GpuRaytraceResources::GpuRaytraceResources(
 
 GpuRaytraceResources::~GpuRaytraceResources() { stop_capture(); }
 
-void GpuRaytraceResources::initialise_frontier() {
+void GpuRaytraceResources::update_rays(std::span<const RayDirection> rays) {
+  State &state = *state_;
+  if (rays.size() != state.frontier_capacity) {
+    throw std::invalid_argument("Updated ray field has the wrong size");
+  }
+  void *ray_contents = state.rays.contents;
+  void *distance_contents = state.distance_output.contents;
+  if (ray_contents == nullptr || distance_contents == nullptr) {
+    throw std::runtime_error("Could not map reusable raytrace buffers");
+  }
+  std::memcpy(ray_contents, rays.data(), rays.size_bytes());
+  std::memset(distance_contents, 0, state.distance_output.length);
+  if (state.outputs.elevations) {
+    void *elevation_contents = state.elevation_output.contents;
+    if (elevation_contents == nullptr) {
+      throw std::runtime_error("Could not map reusable elevation output");
+    }
+    std::memset(elevation_contents, 0, state.elevation_output.length);
+  }
+}
+
+void GpuRaytraceResources::initialise_frontier(uint32_t observer_slot) {
   State &state = *state_;
   auto *items = static_cast<RayWorkItem *>(state.active.contents);
   if (items == nullptr) {
     throw std::runtime_error("Could not map active frontier buffer");
   }
   for (uint32_t ray = 0U; ray < state.frontier_capacity; ray++) {
-    items[ray] = {0U, ray, 1U, 0.0F};
+    items[ray] = {observer_slot, ray, 1U, 0.0F};
   }
 }
 

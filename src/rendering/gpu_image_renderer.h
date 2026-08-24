@@ -40,10 +40,10 @@ struct GpuPresentationRequirements {
 
 /// Reusable post-trace GPU presentation resources for one output image size.
 ///
-/// Each render method converts scientific trace buffers into the same RGBA8
-/// Metal texture. The CLI reads that texture back for PNG encoding; a future
-/// interactive renderer can instead sample or blit `texture()` directly and
-/// omit all host readback and ImageIO work.
+/// Each render method converts scientific trace buffers into the same 8-bit
+/// four-channel Metal texture. The CLI reads that texture back for PNG
+/// encoding, while the interactive viewer blits `texture()` directly and
+/// omits host readback and ImageIO work.
 class GpuImageRenderer {
 public:
   GpuImageRenderer(
@@ -51,7 +51,8 @@ public:
       id<MTLCommandQueue> queue,
       id<MTLLibrary> library,
       ImageSize image,
-      GpuPresentationRequirements requirements
+      GpuPresentationRequirements requirements,
+      MTLPixelFormat output_pixel_format = MTLPixelFormatRGBA8Unorm
   );
 
   GpuImageRenderer(const GpuImageRenderer &) = delete;

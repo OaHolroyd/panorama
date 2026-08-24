@@ -80,8 +80,11 @@ public:
   /// Stop an active capture before releasing the owned command queue.
   ~GpuRaytraceResources();
 
-  /// Fill the current frontier with every ray in the observer tile.
-  void initialise_frontier();
+  /// Replace the fixed-size ray field and clear outputs from the preceding frame.
+  void update_rays(std::span<const RayDirection> rays);
+
+  /// Fill the current frontier with every ray in the observer tile's current slot.
+  void initialise_frontier(uint32_t observer_slot);
 
   /// Return the Metal device shared with resident terrain atlas allocation.
   [[nodiscard]] id<MTLDevice> device() const;

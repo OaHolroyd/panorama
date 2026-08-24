@@ -15,3 +15,15 @@ The pre-commit hook formats staged C, C++, Objective-C, Objective-C++, and Metal
 source files with `.clang-format`, then stages the formatting changes before
 the commit is created. It refuses partially staged source files to avoid
 including unstaged work accidentally.
+
+## Interactive viewer
+
+Build the project, then launch the basic fixed-position viewer with:
+
+```sh
+make
+./panorama-app --tile-dir data/swissalti3d-10-level-0-metal-u16-none --retain-quantized
+```
+
+Drag with the mouse or use the arrow/WASD keys to change heading and pitch. Run
+`./panorama-app --help` for observer, image-size, and field-of-view options.
