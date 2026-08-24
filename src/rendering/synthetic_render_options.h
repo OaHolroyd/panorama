@@ -11,7 +11,7 @@ enum class TerrainColourSource : uint32_t {
   Elevation = 2U,
 };
 
-/// Built-in perceptual colourmaps available to GPU presentation kernels.
+/// Built-in colourmaps available to GPU presentation kernels.
 enum class PresetColourmap : uint32_t {
   Viridis = 0U,
   Plasma = 1U,
@@ -21,6 +21,13 @@ enum class PresetColourmap : uint32_t {
   Turbo = 5U,
 };
 
+/// Fixed scalar interval mapped onto the full span of a preset colourmap.
+struct ScalarColourRange {
+  float minimum;
+  float maximum;
+};
+static_assert(sizeof(ScalarColourRange) == 2U * sizeof(float));
+
 /// Base-colour and lighting controls for synthetic terrain presentation.
 struct SyntheticRenderOptions {
   /// Sun bearing in radians, clockwise from projected grid north.
@@ -29,7 +36,7 @@ struct SyntheticRenderOptions {
   double sun_elevation;
   /// Direction-independent light fraction in the inclusive range [0, 1].
   float ambient_light;
-  /// White terrain, or a hit-only auto-normalised collision field.
+  /// White terrain, or a collision field normalised over a fixed range.
   TerrainColourSource colour_source = TerrainColourSource::White;
   /// Preset applied when `colour_source` selects a scalar field.
   PresetColourmap colourmap = PresetColourmap::Viridis;

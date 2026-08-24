@@ -32,7 +32,7 @@ struct GpuPresentationRequirements {
   bool scalar_diagnostics;
   bool normal_diagnostics;
   bool synthetic;
-  /// Allocate scalar-range resources for distance/elevation terrain colour.
+  /// Select the distance/elevation rather than white synthetic pipeline.
   bool synthetic_scalar_colour;
   /// Allocate the packing pipeline and shared buffer used by CLI image files.
   bool host_readback;
@@ -58,8 +58,8 @@ public:
   GpuImageRenderer &operator=(const GpuImageRenderer &) = delete;
   ~GpuImageRenderer();
 
-  /// Render a self-normalised scalar diagnostic using the viridis palette.
-  void render_scalar(id<MTLBuffer> values, Timer &timer);
+  /// Render a scalar diagnostic using viridis over a fixed value range.
+  void render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer);
 
   /// Render packed east/north gradients as a conventional RGB normal map.
   void
@@ -71,6 +71,7 @@ public:
       id<MTLBuffer> distances,
       id<MTLBuffer> colour_values,
       const SyntheticRenderOptions &options,
+      ScalarColourRange range,
       Timer &timer
   );
 

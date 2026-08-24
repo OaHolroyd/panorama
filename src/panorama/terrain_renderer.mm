@@ -100,6 +100,11 @@ void validate_output_configuration(const TerrainRenderOutputs &outputs) {
   if (!outputs.write_diagnostics && !outputs.write_synthetic) {
     throw std::invalid_argument("At least one render output must be enabled");
   }
+  if (!std::isfinite(outputs.scalar_colour_range.minimum) ||
+      !std::isfinite(outputs.scalar_colour_range.maximum) ||
+      outputs.scalar_colour_range.maximum <= outputs.scalar_colour_range.minimum) {
+    throw std::invalid_argument("Scalar colour range must be finite and increasing");
+  }
   if (!outputs.write_synthetic) {
     return;
   }
@@ -161,11 +166,11 @@ void write_png_outputs(
 
   if (outputs.write_diagnostics) {
     render_and_write_png(timer, "distances.png", renderer, image, [&] {
-      renderer.render_scalar(distances, timer);
+      renderer.render_scalar(distances, outputs.scalar_colour_range, timer);
     });
     if (outputs.write_elevation_diagnostic) {
       render_and_write_png(timer, "elevations.png", renderer, image, [&] {
-        renderer.render_scalar(gpu.elevations(), timer);
+        renderer.render_scalar(gpu.elevations(), outputs.scalar_colour_range, timer);
       });
     }
     if (outputs.write_normal_diagnostic) {
@@ -185,6 +190,7 @@ void write_png_outputs(
           distances,
           colour_values,
           outputs.synthetic_options,
+          outputs.scalar_colour_range,
           timer
       );
     });

@@ -21,6 +21,8 @@ struct TerrainRenderOutputs {
   bool write_synthetic;
   /// Lighting parameters used only when `write_synthetic` is true.
   SyntheticRenderOptions synthetic_options;
+  /// Fixed interval used by every scalar diagnostic or terrain colourmap.
+  ScalarColourRange scalar_colour_range;
 
   /// Return whether any selected output consumes per-collision elevations.
   [[nodiscard]] bool requires_elevations() const {

@@ -2,13 +2,7 @@
 
 using namespace metal;
 
-/// Atomic ordered-float endpoints produced by the diagnostic range reduction.
-struct FiniteRange {
-  atomic_uint minimum;
-  atomic_uint maximum;
-};
-
-/// Five-stop approximations of the CLI's built-in perceptual colourmaps.
+/// Five-stop approximations of the CLI's built-in colourmaps.
 constant float3 preset_colourmaps[6][5] = {
     {
         float3(68.0F, 1.0F, 84.0F),
@@ -54,58 +48,6 @@ constant float3 preset_colourmaps[6][5] = {
     },
 };
 
-/// Map float32 bits to unsigned integers whose ordering matches the floats.
-inline uint ordered_float(float value) {
-  const uint bits = as_type<uint>(value);
-  return bits ^ ((bits & 0x80000000U) != 0U ? 0xffffffffU : 0x80000000U);
-}
-
-/// Reverse `ordered_float` after the atomic reduction completes.
-inline float decode_ordered_float(uint value) {
-  const uint bits = (value & 0x80000000U) != 0U ? value ^ 0x80000000U : ~value;
-  return as_type<float>(bits);
-}
-
-/// Reduce finite scalar values to one min/max pair without host-side scanning.
-///
-/// The host always dispatches complete 256-thread groups, allowing this fixed
-/// threadgroup reduction even when the final group extends beyond `count`.
-/// Synthetic colouring enables `collisions_only` so zero-filled miss pixels do
-/// not distort the distance or elevation range.
-kernel void reduce_finite_range(
-    device const float *values [[buffer(0)]],
-    device const float *distances [[buffer(1)]],
-    device FiniteRange *range [[buffer(2)]],
-    constant uint &count [[buffer(3)]],
-    constant uint &collisions_only [[buffer(4)]],
-    uint index [[thread_position_in_grid]],
-    uint local_index [[thread_index_in_threadgroup]]
-) {
-  threadgroup uint local_minima[256];
-  threadgroup uint local_maxima[256];
-  const bool valid =
-      index < count && isfinite(values[index]) &&
-      (collisions_only == 0U || (distances[index] > 0.0F && isfinite(distances[index])));
-  const uint ordered = valid ? ordered_float(values[index]) : 0U;
-  local_minima[local_index] = valid ? ordered : 0xffffffffU;
-  local_maxima[local_index] = ordered;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  for (uint offset = 128U; offset != 0U; offset >>= 1U) {
-    if (local_index < offset) {
-      local_minima[local_index] =
-          min(local_minima[local_index], local_minima[local_index + offset]);
-      local_maxima[local_index] =
-          max(local_maxima[local_index], local_maxima[local_index + offset]);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-  }
-  if (local_index == 0U && local_minima[0] != 0xffffffffU) {
-    atomic_fetch_min_explicit(&range->minimum, local_minima[0], memory_order_relaxed);
-    atomic_fetch_max_explicit(&range->maximum, local_maxima[0], memory_order_relaxed);
-  }
-}
-
 /// Interpolate one of the five-stop preset colourmap approximations.
 inline float3 preset_colourmap(float normalised_value, uint colourmap) {
   constexpr float positions[] = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
@@ -123,19 +65,15 @@ inline float3 preset_colourmap(float normalised_value, uint colourmap) {
   return floor(clamp(interpolated, 0.0F, 255.0F) + 0.5F) / 255.0F;
 }
 
-/// Normalise a finite scalar using a completed atomic range reduction.
-inline float normalised_value(float value, device const FiniteRange *range) {
-  const float minimum =
-      decode_ordered_float(atomic_load_explicit(&range->minimum, memory_order_relaxed));
-  const float maximum =
-      decode_ordered_float(atomic_load_explicit(&range->maximum, memory_order_relaxed));
-  return maximum == minimum ? 0.5F : (value - minimum) / (maximum - minimum);
+/// Normalise a scalar over a caller-selected fixed interval.
+inline float normalised_value(float value, float2 range) {
+  return (value - range.x) / (range.y - range.x);
 }
 
 /// Convert a finite scalar field to the diagnostic viridis image.
 kernel void present_scalar_viridis(
     device const float *values [[buffer(0)]],
-    device const FiniteRange *range [[buffer(1)]],
+    constant float2 &range [[buffer(1)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
@@ -144,8 +82,7 @@ kernel void present_scalar_viridis(
   }
   const uint index = position.y * output.get_width() + position.x;
   const float value = values[index];
-  const uint ordered_minimum = atomic_load_explicit(&range->minimum, memory_order_relaxed);
-  if (!isfinite(value) || ordered_minimum == 0xffffffffU) {
+  if (!isfinite(value)) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
@@ -232,7 +169,7 @@ kernel void present_colourmapped_synthetic_terrain(
     device const float *distances [[buffer(1)]],
     constant float4 &sun_and_ambient [[buffer(2)]],
     device const float *colour_values [[buffer(3)]],
-    device const FiniteRange *range [[buffer(4)]],
+    constant float2 &range [[buffer(4)]],
     constant uint &colourmap [[buffer(5)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
