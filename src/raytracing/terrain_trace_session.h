@@ -14,9 +14,9 @@ namespace panorama {
 ///
 /// Catalogue discovery, Metal pipelines, preparation workers, and the
 /// resident terrain/mipmap atlas live for the complete session. Each call to
-/// `trace` replaces only the fixed-size ray field and transient frontier,
-/// allowing turns to reuse cached terrain. Future movement support can update
-/// observer-specific state without making atlas lifetime frame-specific.
+/// `trace` replaces only the ray field and transient frontier, allowing turns
+/// and resolution changes to reuse cached terrain. Future movement support can
+/// update observer-specific state without making atlas lifetime frame-specific.
 class TerrainTraceSession {
 public:
   TerrainTraceSession(
@@ -29,7 +29,7 @@ public:
   TerrainTraceSession &operator=(const TerrainTraceSession &) = delete;
   ~TerrainTraceSession();
 
-  /// Trace a new view with the dimensions fixed at session construction.
+  /// Trace a new view, resizing only ray-dependent GPU buffers when necessary.
   void trace(const RayField &field);
 
   [[nodiscard]] ImageSize image() const;

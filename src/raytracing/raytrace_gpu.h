@@ -63,7 +63,7 @@ struct GpuTraceOutputRequirements {
 /// continuation-culling kernels.
 class GpuRaytraceResources {
 public:
-  /// Create all reusable Metal resources for a fixed per-pixel ray field.
+  /// Create all reusable Metal resources for an initial per-pixel ray field.
   ///
   /// Optional outputs specialize the trace pipeline, removing their collision
   /// arithmetic, buffer writes, and full-size allocations when disabled.
@@ -82,6 +82,9 @@ public:
 
   /// Replace the fixed-size ray field and clear outputs from the preceding frame.
   void update_rays(std::span<const RayDirection> rays);
+
+  /// Reallocate ray-dependent buffers for a differently sized output image.
+  void resize_rays(std::span<const RayDirection> rays);
 
   /// Fill the current frontier with every ray in the observer tile's current slot.
   void initialise_frontier(uint32_t observer_slot);

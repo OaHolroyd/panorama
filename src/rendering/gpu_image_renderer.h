@@ -60,6 +60,9 @@ public:
   GpuImageRenderer &operator=(const GpuImageRenderer &) = delete;
   ~GpuImageRenderer();
 
+  /// Reallocate only image-sized targets while retaining compiled pipelines.
+  void resize(ImageSize image);
+
   /// Render a scalar diagnostic using viridis over a fixed value range.
   void render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer);
 

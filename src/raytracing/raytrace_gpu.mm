@@ -122,6 +122,63 @@ struct GpuRaytraceResources::State {
   bool trace_quantized;
   GpuTraceOutputRequirements outputs;
   bool capture_active = false;
+
+  void replace_ray_buffers(std::span<const RayDirection> next_rays) {
+    if (next_rays.empty() || next_rays.size() > std::numeric_limits<uint32_t>::max()) {
+      throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
+    }
+    frontier_capacity = static_cast<uint32_t>(next_rays.size());
+    rays = make_buffer(
+        device,
+        next_rays.data(),
+        checked_buffer_length(next_rays.size(), sizeof(RayDirection), "ray directions"),
+        "ray directions"
+    );
+    distance_output = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(float), "distance output"),
+        "distance output"
+    );
+    elevation_output = make_buffer(
+        device,
+        nullptr,
+        outputs.elevations
+            ? checked_buffer_length(next_rays.size(), sizeof(float), "elevation output")
+            : sizeof(float),
+        "elevation output"
+    );
+    surface_gradient_output = make_buffer(
+        device,
+        nullptr,
+        outputs.surface_gradients
+            ? checked_buffer_length(next_rays.size(), sizeof(uint32_t), "surface gradient output")
+            : sizeof(uint32_t),
+        "surface gradient output"
+    );
+    active = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(RayWorkItem), "active frontier"),
+        "active frontier"
+    );
+    continuations = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(float), "ray continuations"),
+        "ray continuations"
+    );
+    deferred_items = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(DeferredRayWork), "deferred frontier"),
+        "deferred frontier"
+    );
+    clear_buffer(distance_output, "distance output");
+    if (outputs.elevations) {
+      clear_buffer(elevation_output, "elevation output");
+    }
+  }
 };
 
 GpuRaytraceResources::GpuRaytraceResources(
@@ -135,7 +192,6 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
   }
   auto state = std::make_unique<State>();
-  state->frontier_capacity = static_cast<uint32_t>(rays.size());
   state->catalogue_hash_capacity = catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
   state->outputs = outputs;
@@ -178,65 +234,15 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::runtime_error("Could not create continuation pipeline");
   }
 
-  // Static per-pixel directions and scientific output buffers persist for
-  // every frontier pass.
-  state->rays = make_buffer(
-      state->device,
-      rays.data(),
-      checked_buffer_length(rays.size(), sizeof(RayDirection), "ray directions"),
-      "ray directions"
-  );
-  state->distance_output = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(float), "distance output"),
-      "distance output"
-  );
   // Function-constant specialization removes disabled output work. One-word
   // placeholders preserve the common kernel ABI without full per-ray buffers.
-  state->elevation_output = make_buffer(
-      state->device,
-      nullptr,
-      outputs.elevations ? checked_buffer_length(rays.size(), sizeof(float), "elevation output")
-                         : sizeof(float),
-      "elevation output"
-  );
-  state->surface_gradient_output = make_buffer(
-      state->device,
-      nullptr,
-      outputs.surface_gradients
-          ? checked_buffer_length(rays.size(), sizeof(uint32_t), "surface gradient output")
-          : sizeof(uint32_t),
-      "surface gradient output"
-  );
-  clear_buffer(state->distance_output, "distance output");
-  if (outputs.elevations) {
-    clear_buffer(state->elevation_output, "elevation output");
-  }
+  state->replace_ray_buffers(rays);
   // Every positive distance is written beside its gradient, and consumers use
   // distance as the validity mask, so clearing this potentially large buffer
   // would add setup bandwidth without defining any observable output.
 
   // A command completes before the host replaces this frontier with the next
   // source-bucketed batch, so one shared work buffer is sufficient.
-  state->active = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(RayWorkItem), "active frontier"),
-      "active frontier"
-  );
-  state->continuations = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(float), "ray continuations"),
-      "ray continuations"
-  );
-  state->deferred_items = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(DeferredRayWork), "deferred frontier"),
-      "deferred frontier"
-  );
   state->deferred_count =
       make_buffer(state->device, nullptr, sizeof(uint32_t), "deferred frontier count");
   std::vector<CatalogueTileHashEntry> catalogue_entries(
@@ -296,6 +302,15 @@ void GpuRaytraceResources::update_rays(std::span<const RayDirection> rays) {
     }
     std::memset(elevation_contents, 0, state.elevation_output.length);
   }
+}
+
+void GpuRaytraceResources::resize_rays(std::span<const RayDirection> rays) {
+  State &state = *state_;
+  if (rays.size() == state.frontier_capacity) {
+    update_rays(rays);
+    return;
+  }
+  state.replace_ray_buffers(rays);
 }
 
 void GpuRaytraceResources::initialise_frontier(uint32_t observer_slot) {

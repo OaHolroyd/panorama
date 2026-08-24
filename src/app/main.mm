@@ -38,7 +38,7 @@ namespace {
 constexpr uint64_t kBytesPerMiB = 1024ULL * 1024ULL;
 constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
-constexpr double kDefaultHorizontalFieldOfView = 70.0 * kDegreesToRadians;
+constexpr double kDefaultVerticalFieldOfView = 70.0 * kDegreesToRadians;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
@@ -48,7 +48,7 @@ struct ViewerSettings {
   bool retain_quantized = false;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
   ImageSize image = {960U, 540U};
-  double horizontal_field_of_view = kDefaultHorizontalFieldOfView;
+  double vertical_field_of_view = kDefaultVerticalFieldOfView;
   CameraOrientation orientation = {0.0, 0.0, 0.0};
   TerrainPresentationSettings presentation = {
       {
@@ -92,6 +92,24 @@ struct ViewerSettings {
   return value;
 }
 
+/// Parse a positive image dimension with optional thousands separators.
+[[nodiscard]] std::optional<uint32_t> parse_image_dimension(NSString *input) {
+  NSString *normalised = [[input stringByReplacingOccurrencesOfString:@"," withString:@""]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  const char *characters = normalised.UTF8String;
+  if (characters == nullptr || characters[0] == '\0') {
+    return std::nullopt;
+  }
+
+  const std::string_view text(characters);
+  uint32_t value = 0U;
+  const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+  if (error != std::errc() || end != text.data() + text.size() || value == 0U) {
+    return std::nullopt;
+  }
+  return value;
+}
+
 /// Avoid populating the editor through NSTextField.doubleValue, whose
 /// formatting follows the user's locale and may use commas as decimal marks.
 [[nodiscard]] NSString *format_range_value(double value) {
@@ -111,7 +129,7 @@ void print_usage(const char *program) {
       "  --elevation M         fixed observer elevation (default: 3415)\n"
       "  --image-width N       internal render width (default: 960)\n"
       "  --image-height N      internal render height (default: 540)\n"
-      "  --horizontal-fov D    camera field of view in degrees (default: 70)\n"
+      "  --vertical-fov D      vertical camera field of view in degrees (default: 70)\n"
       "  --heading D           initial heading clockwise from north (default: 0)\n"
       "  --pitch D             initial pitch above the horizon (default: 0)\n"
       "  --help                show this message\n"
@@ -156,12 +174,12 @@ void print_usage(const char *program) {
       settings.image.width = arguments::parse_uint32(value, option, false);
     } else if (option == "--image-height") {
       settings.image.height = arguments::parse_uint32(value, option, false);
-    } else if (option == "--horizontal-fov") {
+    } else if (option == "--vertical-fov") {
       const double degrees = arguments::parse_finite_double(value, option);
       if (degrees <= 0.0 || degrees >= 180.0) {
-        throw std::out_of_range("Horizontal field of view must be between 0 and 180 degrees");
+        throw std::out_of_range("Vertical field of view must be between 0 and 180 degrees");
       }
-      settings.horizontal_field_of_view = degrees * kDegreesToRadians;
+      settings.vertical_field_of_view = degrees * kDegreesToRadians;
     } else if (option == "--heading") {
       settings.orientation.heading =
           arguments::parse_finite_double(value, option) * kDegreesToRadians;
@@ -184,16 +202,13 @@ void print_usage(const char *program) {
   return settings;
 }
 
-[[nodiscard]] RayField make_view(
-    const ViewerSettings &settings,
-    CameraOrientation orientation,
-    double horizontal_field_of_view
-) {
+[[nodiscard]] RayField
+make_view(ImageSize image, CameraOrientation orientation, double vertical_field_of_view) {
   return make_camera_ray_field(
-      settings.image,
+      image,
       {
           orientation,
-          CameraIntrinsics::from_horizontal_field_of_view(settings.image, horizontal_field_of_view),
+          CameraIntrinsics::from_vertical_field_of_view(image, vertical_field_of_view),
           NoDistortion{},
       }
   );
@@ -236,7 +251,7 @@ struct LockedPointProjection {
     const PointInspection &point,
     ObserverLocation observer,
     ImageSize image,
-    double horizontal_field_of_view,
+    double vertical_field_of_view,
     CameraOrientation orientation
 ) {
   const double east = point.easting - observer.easting;
@@ -268,7 +283,7 @@ struct LockedPointProjection {
   const double right = east * right_east + north * right_north + up * right_up;
   const double down = -(east * camera_up_east + north * camera_up_north + up * camera_up_up);
   const CameraIntrinsics intrinsics =
-      CameraIntrinsics::from_horizontal_field_of_view(image, horizontal_field_of_view);
+      CameraIntrinsics::from_vertical_field_of_view(image, vertical_field_of_view);
 
   double pixel_x = intrinsics.principal_x;
   double pixel_y = intrinsics.principal_y;
@@ -303,8 +318,9 @@ struct LockedPointProjection {
 
 struct PresentedFrame {
   id<MTLTexture> texture;
+  ImageSize image;
   CameraOrientation orientation;
-  double horizontal_field_of_view;
+  double vertical_field_of_view;
   uint64_t revision;
   double milliseconds;
   std::string error;
@@ -327,11 +343,12 @@ class ViewerRenderer {
 public:
   explicit ViewerRenderer(ViewerSettings settings)
       : settings_(std::move(settings)), requested_orientation_(settings_.orientation),
-        requested_horizontal_field_of_view_(settings_.horizontal_field_of_view),
-        requested_presentation_(settings_.presentation),
-        presented_horizontal_field_of_view_(settings_.horizontal_field_of_view) {
+        requested_vertical_field_of_view_(settings_.vertical_field_of_view),
+        requested_image_(settings_.image), requested_presentation_(settings_.presentation),
+        presented_vertical_field_of_view_(settings_.vertical_field_of_view),
+        presented_image_(settings_.image) {
     RayField initial_field =
-        make_view(settings_, settings_.orientation, settings_.horizontal_field_of_view);
+        make_view(settings_.image, settings_.orientation, settings_.vertical_field_of_view);
     const RaytraceConfig config = {
         settings_.tile_dir,
         settings_.observer,
@@ -356,7 +373,7 @@ public:
     );
     current_field_ = std::move(initial_field);
     worker_ = std::thread([this] { render_loop(); });
-    request_view(settings_.orientation, settings_.horizontal_field_of_view);
+    request_view(settings_.orientation, settings_.vertical_field_of_view, settings_.image);
   }
 
   ViewerRenderer(const ViewerRenderer &) = delete;
@@ -374,11 +391,12 @@ public:
   }
 
   /// Request a new camera trace; intermediate input events are coalesced.
-  void request_view(CameraOrientation orientation, double horizontal_field_of_view) {
+  void request_view(CameraOrientation orientation, double vertical_field_of_view, ImageSize image) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       requested_orientation_ = orientation;
-      requested_horizontal_field_of_view_ = horizontal_field_of_view;
+      requested_vertical_field_of_view_ = vertical_field_of_view;
+      requested_image_ = image;
       requested_revision_++;
       trace_pending_ = true;
       presentation_pending_ = true;
@@ -416,8 +434,9 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     return {
         presented_texture_,
+        presented_image_,
         presented_orientation_,
-        presented_horizontal_field_of_view_,
+        presented_vertical_field_of_view_,
         presented_revision_,
         frame_ms_,
         error_,
@@ -431,8 +450,8 @@ public:
   [[nodiscard]] id<MTLCommandQueue> command_queue() const { return trace_->command_queue(); }
   [[nodiscard]] ImageSize image() const { return settings_.image; }
   [[nodiscard]] ObserverLocation observer() const { return settings_.observer; }
-  [[nodiscard]] double initial_horizontal_field_of_view() const {
-    return settings_.horizontal_field_of_view;
+  [[nodiscard]] double initial_vertical_field_of_view() const {
+    return settings_.vertical_field_of_view;
   }
   [[nodiscard]] float max_distance() const { return settings_.max_distance; }
   [[nodiscard]] CameraOrientation initial_orientation() const { return settings_.orientation; }
@@ -442,11 +461,11 @@ public:
 
 private:
   [[nodiscard]] PointInspection inspect_pixel(InspectionPixel pixel, uint64_t revision) const {
-    if (pixel.x >= settings_.image.width || pixel.y >= settings_.image.height) {
+    if (pixel.x >= current_field_.image.width || pixel.y >= current_field_.image.height) {
       throw std::out_of_range("Inspection pixel lies outside the ray image");
     }
     const size_t index =
-        static_cast<size_t>(pixel.y) * static_cast<size_t>(settings_.image.width) + pixel.x;
+        static_cast<size_t>(pixel.y) * static_cast<size_t>(current_field_.image.width) + pixel.x;
     const auto *distances = static_cast<const float *>(trace_->distances().contents);
     const auto *elevations = static_cast<const float *>(trace_->elevations().contents);
     const auto *gradients = static_cast<const uint32_t *>(trace_->surface_gradients().contents);
@@ -487,7 +506,8 @@ private:
   void render_loop() {
     while (true) {
       CameraOrientation orientation = {};
-      double horizontal_field_of_view = 0.0;
+      double vertical_field_of_view = 0.0;
+      ImageSize image = {};
       TerrainPresentationSettings presentation = {};
       uint64_t revision = 0U;
       bool trace_requested = false;
@@ -504,7 +524,8 @@ private:
           return;
         }
         orientation = requested_orientation_;
-        horizontal_field_of_view = requested_horizontal_field_of_view_;
+        vertical_field_of_view = requested_vertical_field_of_view_;
+        image = requested_image_;
         presentation = requested_presentation_;
         revision = requested_revision_;
         trace_requested = trace_pending_;
@@ -521,13 +542,14 @@ private:
         @autoreleasepool {
           const auto started = std::chrono::steady_clock::now();
           if (trace_requested) {
-            RayField field = make_view(settings_, orientation, horizontal_field_of_view);
+            RayField field = make_view(image, orientation, vertical_field_of_view);
             trace_->trace(field);
             current_field_ = std::move(field);
           }
 
           if (presentation_requested) {
             Timer timer("GPU presentation");
+            presentation_->resize(current_field_.image);
             const id<MTLBuffer> colour_values =
                 presentation.appearance.colour_source == TerrainColourSource::Elevation
                     ? trace_->elevations()
@@ -555,8 +577,9 @@ private:
           std::lock_guard<std::mutex> lock(mutex_);
           if (presentation_requested) {
             presented_texture_ = presentation_->texture();
+            presented_image_ = current_field_.image;
             presented_orientation_ = orientation;
-            presented_horizontal_field_of_view_ = horizontal_field_of_view;
+            presented_vertical_field_of_view_ = vertical_field_of_view;
             presented_revision_ = revision;
             // The title reports camera-update throughput. A cheap appearance-only
             // pass should not replace it with a misleadingly high frame rate.
@@ -586,11 +609,13 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   CameraOrientation requested_orientation_ = {};
-  double requested_horizontal_field_of_view_ = 0.0;
+  double requested_vertical_field_of_view_ = 0.0;
+  ImageSize requested_image_ = {};
   TerrainPresentationSettings requested_presentation_ = {};
   std::optional<InspectionPixel> requested_inspection_;
   CameraOrientation presented_orientation_ = {};
-  double presented_horizontal_field_of_view_ = 0.0;
+  double presented_vertical_field_of_view_ = 0.0;
+  ImageSize presented_image_ = {};
   std::optional<PointInspection> presented_inspection_;
   id<MTLTexture> presented_texture_;
   uint64_t requested_revision_ = 0U;
@@ -611,6 +636,7 @@ private:
 
 @class PanoramaController;
 @class ViewerOverlayView;
+@class AspectFitContainerView;
 
 /// Non-interactive symbol layered over the Metal view for a locked point.
 @interface LockedPointMarkerView : NSImageView
@@ -641,20 +667,31 @@ private:
 - (void)setLockedPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection;
 @end
 
-@interface PanoramaController : NSObject <MTKViewDelegate> {
+@interface PanoramaController : NSObject <MTKViewDelegate, NSTextFieldDelegate> {
 @private
   panorama::app::ViewerRenderer *_renderer;
   __weak NSWindow *_window;
   __weak PanoramaView *_panoramaView;
   __weak ViewerOverlayView *_overlayView;
+  __weak AspectFitContainerView *_aspectFitView;
   panorama::CameraOrientation _orientation;
-  double _horizontalFieldOfView;
+  double _verticalFieldOfView;
+  panorama::ImageSize _image;
   panorama::TerrainPresentationSettings _presentation;
   std::optional<panorama::app::PointInspection> _lockedPoint;
   NSPopUpButton *_colourSourceControl;
   NSPopUpButton *_colourmapControl;
   NSTextField *_minimumControl;
   NSTextField *_maximumControl;
+  NSSlider *_zoomControl;
+  NSTextField *_zoomValueLabel;
+  NSSlider *_panningSensitivityControl;
+  NSTextField *_panningSensitivityLabel;
+  NSTextField *_imageWidthControl;
+  NSTextField *_imageHeightControl;
+  NSButton *_aspectLockControl;
+  NSButton *_matchWindowControl;
+  NSButton *_invertMousePanningControl;
   NSButton *_normalLightingControl;
   NSTextField *_debugInfoLabel;
   NSTextField *_pointInfoHeading;
@@ -662,17 +699,23 @@ private:
   uint64_t _displayedRevision;
   uint64_t _displayedInspectionSequence;
   uint64_t _pointLockRequestToken;
+  double _lockedAspectRatio;
+  double _panningSensitivity;
   bool _pointInspectionEnabled;
   bool _pointInspectionLocked;
   bool _pointLockPending;
+  bool _invertMousePanning;
+  bool _updatingResolutionControls;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
                           window:(NSWindow *)window;
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
+- (void)panForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (void)zoomWithScrollDelta:(double)delta precise:(bool)precise;
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
-               overlayView:(ViewerOverlayView *)overlayView;
+               overlayView:(ViewerOverlayView *)overlayView
+             aspectFitView:(AspectFitContainerView *)aspectFitView;
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)clearPointInspection;
@@ -815,7 +858,7 @@ private:
   [self.window invalidateCursorRectsForView:self];
 }
 
-/// Convert an AppKit event location into the fixed, top-left-origin ray image.
+/// Convert an AppKit event location into the current top-left-origin ray image.
 - (BOOL)inspectionPixelForEvent:(NSEvent *)event x:(uint32_t *)x y:(uint32_t *)y {
   const NSRect bounds = self.bounds;
   const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
@@ -883,7 +926,7 @@ private:
   const double heading = (location.x - _lastMouseLocation.x) * 0.003;
   const double pitch = (location.y - _lastMouseLocation.y) * 0.003;
   _lastMouseLocation = location;
-  [self.panoramaController rotateForCurrentZoomHeading:heading pitch:pitch];
+  [self.panoramaController panForCurrentZoomHeading:heading pitch:pitch];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
@@ -926,9 +969,10 @@ private:
 
 @end
 
-/// Letterbox one fixed-aspect render view without imposing a fitting size on
-/// its parent. The parent can therefore resize freely without distorting the
-/// Metal output or acquiring a preferred size from the render aspect ratio.
+/// Letterbox the render view at its current output aspect ratio without
+/// imposing a fitting size on its parent. The parent can therefore resize
+/// freely, and a resolution change can update the ratio without distorting the
+/// Metal output.
 @interface AspectFitContainerView : NSView {
 @private
   NSView *_renderView;
@@ -937,6 +981,7 @@ private:
 - (instancetype)initWithFrame:(NSRect)frame
                    renderView:(NSView *)renderView
                   aspectRatio:(CGFloat)aspectRatio;
+- (void)setAspectRatio:(CGFloat)aspectRatio;
 @end
 
 @implementation AspectFitContainerView
@@ -953,6 +998,14 @@ private:
     [self addSubview:_renderView];
   }
   return self;
+}
+
+- (void)setAspectRatio:(CGFloat)aspectRatio {
+  if (aspectRatio <= 0.0 || std::abs(aspectRatio - _aspectRatio) <= 1e-9) {
+    return;
+  }
+  _aspectRatio = aspectRatio;
+  [self setNeedsLayout:YES];
 }
 
 - (void)layout {
@@ -1157,7 +1210,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _renderer = renderer;
     _window = window;
     _orientation = renderer->initial_orientation();
-    _horizontalFieldOfView = renderer->initial_horizontal_field_of_view();
+    _verticalFieldOfView = renderer->initial_vertical_field_of_view();
+    _image = renderer->image();
+    _lockedAspectRatio = static_cast<double>(_image.width) / _image.height;
+    _panningSensitivity = 8.0;
     _presentation = renderer->initial_presentation();
   }
   return self;
@@ -1168,15 +1224,145 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       std::remainder(_orientation.heading + headingDelta, 2.0 * std::numbers::pi);
   constexpr double kPitchLimit = 85.0 * std::numbers::pi / 180.0;
   _orientation.pitch = std::clamp(_orientation.pitch + pitchDelta, -kPitchLimit, kPitchLimit);
-  _renderer->request_view(_orientation, _horizontalFieldOfView);
+  _renderer->request_view(_orientation, _verticalFieldOfView, _image);
 }
 
 - (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta {
   // Mouse and keyboard deltas define their desired feel at the default FOV.
   // Scaling by the current angular extent preserves that behaviour while
   // providing proportionally finer control over a magnified view.
-  const double zoom_scale = _horizontalFieldOfView / panorama::app::kDefaultHorizontalFieldOfView;
-  [self rotateHeading:headingDelta * zoom_scale pitch:pitchDelta * zoom_scale];
+  const double zoom_scale = _verticalFieldOfView / panorama::app::kDefaultVerticalFieldOfView;
+  constexpr double kExistingSensitivity = 8.0;
+  const double sensitivity_scale = _panningSensitivity / kExistingSensitivity;
+  const double scale = zoom_scale * sensitivity_scale;
+  [self rotateHeading:headingDelta * scale pitch:pitchDelta * scale];
+}
+
+- (void)panForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta {
+  const double direction = _invertMousePanning ? -1.0 : 1.0;
+  [self rotateForCurrentZoomHeading:headingDelta * direction pitch:pitchDelta * direction];
+}
+
+- (void)updateZoomControls {
+  const double degrees = _verticalFieldOfView * panorama::app::kRadiansToDegrees;
+  if (_zoomControl != nil) {
+    _zoomControl.doubleValue = degrees;
+  }
+  if (_zoomValueLabel != nil) {
+    _zoomValueLabel.stringValue = [NSString stringWithFormat:@"%.1f°", degrees];
+  }
+}
+
+- (void)setVerticalFieldOfViewDegrees:(double)degrees {
+  constexpr double kMinimumDegrees = 5.0;
+  constexpr double kMaximumDegrees = 140.0;
+  const double next =
+      std::clamp(degrees, kMinimumDegrees, kMaximumDegrees) * panorama::app::kDegreesToRadians;
+  if (std::abs(next - _verticalFieldOfView) <= 1e-12) {
+    [self updateZoomControls];
+    return;
+  }
+  _verticalFieldOfView = next;
+  [self updateZoomControls];
+  _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+}
+
+- (void)zoomControlChanged:(NSSlider *)sender {
+  double degrees = sender.doubleValue;
+  // A small detent makes the original 70-degree view easy to recover while
+  // leaving the remainder of the slider continuously adjustable.
+  constexpr double kDefaultDetentDegrees = 70.0;
+  constexpr double kDetentRadiusDegrees = 2.0;
+  if (std::abs(degrees - kDefaultDetentDegrees) <= kDetentRadiusDegrees) {
+    degrees = kDefaultDetentDegrees;
+  }
+  [self setVerticalFieldOfViewDegrees:degrees];
+}
+
+- (void)invertMousePanningChanged:(NSButton *)sender {
+  _invertMousePanning = sender.state == NSControlStateValueOn;
+}
+
+- (void)panningSensitivityChanged:(NSSlider *)sender {
+  _panningSensitivity = std::round(sender.doubleValue);
+  sender.doubleValue = _panningSensitivity;
+  _panningSensitivityLabel.stringValue = [NSString stringWithFormat:@"%.0f", _panningSensitivity];
+}
+
+- (void)updateAspectLockAppearance {
+  const BOOL locked = _aspectLockControl.state == NSControlStateValueOn;
+  _aspectLockControl.image = [NSImage
+      imageWithSystemSymbolName:locked ? @"lock.fill" : @"lock.open"
+       accessibilityDescription:locked ? @"Aspect ratio locked" : @"Aspect ratio unlocked"];
+}
+
+- (void)aspectLockChanged:(NSButton *)sender {
+  if (sender.state == NSControlStateValueOn) {
+    const std::optional<uint32_t> width =
+        panorama::app::parse_image_dimension(_imageWidthControl.stringValue);
+    const std::optional<uint32_t> height =
+        panorama::app::parse_image_dimension(_imageHeightControl.stringValue);
+    if (width.has_value() && height.has_value()) {
+      _lockedAspectRatio = static_cast<double>(*width) / *height;
+    }
+  }
+  [self updateAspectLockAppearance];
+}
+
+/// Maintain the captured aspect ratio while either dimension is edited. The
+/// paired field changes immediately, but GPU resources are resized only when
+/// the user applies the completed settings.
+- (void)controlTextDidChange:(NSNotification *)notification {
+  if (_updatingResolutionControls || _aspectLockControl.state != NSControlStateValueOn) {
+    return;
+  }
+  NSTextField *changed = notification.object;
+  if (changed != _imageWidthControl && changed != _imageHeightControl) {
+    return;
+  }
+  const std::optional<uint32_t> value = panorama::app::parse_image_dimension(changed.stringValue);
+  if (!value.has_value() || !std::isfinite(_lockedAspectRatio) || _lockedAspectRatio <= 0.0) {
+    return;
+  }
+
+  const double paired_value = changed == _imageWidthControl
+                                  ? static_cast<double>(*value) / _lockedAspectRatio
+                                  : static_cast<double>(*value) * _lockedAspectRatio;
+  if (paired_value < 1.0 || paired_value > std::numeric_limits<uint32_t>::max()) {
+    return;
+  }
+  _updatingResolutionControls = true;
+  NSTextField *paired = changed == _imageWidthControl ? _imageHeightControl : _imageWidthControl;
+  paired.stringValue =
+      [NSString stringWithFormat:@"%u", static_cast<uint32_t>(std::llround(paired_value))];
+  _updatingResolutionControls = false;
+}
+
+/// Match the render aspect to the available window content by changing only
+/// its horizontal pixel count. Vertical resolution and vertical FOV remain
+/// untouched.
+- (void)matchWindowResolution:(id)sender {
+  (void)sender;
+  const NSSize available = _aspectFitView.bounds.size;
+  const std::optional<uint32_t> height =
+      panorama::app::parse_image_dimension(_imageHeightControl.stringValue);
+  if (!height.has_value() || available.width <= 0.0 || available.height <= 0.0) {
+    NSBeep();
+    return;
+  }
+  const double width = static_cast<double>(*height) * available.width / available.height;
+  if (!std::isfinite(width) || width < 1.0 || width > std::numeric_limits<uint32_t>::max()) {
+    NSBeep();
+    return;
+  }
+  const uint32_t rounded_width = static_cast<uint32_t>(std::llround(width));
+  _updatingResolutionControls = true;
+  _imageWidthControl.stringValue = [NSString stringWithFormat:@"%u", rounded_width];
+  _updatingResolutionControls = false;
+  if (_aspectLockControl.state == NSControlStateValueOn) {
+    _lockedAspectRatio = static_cast<double>(rounded_width) / *height;
+  }
+  [self applyViewerSettings:nil];
 }
 
 - (void)zoomWithScrollDelta:(double)delta precise:(bool)precise {
@@ -1187,21 +1373,22 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   constexpr double kMinimumFieldOfView = 5.0 * std::numbers::pi / 180.0;
   constexpr double kMaximumFieldOfView = 140.0 * std::numbers::pi / 180.0;
   const double next = std::clamp(
-      _horizontalFieldOfView * std::exp(-delta * sensitivity),
+      _verticalFieldOfView * std::exp(-delta * sensitivity),
       kMinimumFieldOfView,
       kMaximumFieldOfView
   );
-  if (std::abs(next - _horizontalFieldOfView) <= 1e-12) {
+  if (std::abs(next - _verticalFieldOfView) <= 1e-12) {
     return;
   }
-  _horizontalFieldOfView = next;
-  _renderer->request_view(_orientation, _horizontalFieldOfView);
+  [self setVerticalFieldOfViewDegrees:next * panorama::app::kRadiansToDegrees];
 }
 
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
-               overlayView:(ViewerOverlayView *)overlayView {
+               overlayView:(ViewerOverlayView *)overlayView
+             aspectFitView:(AspectFitContainerView *)aspectFitView {
   _panoramaView = panoramaView;
   _overlayView = overlayView;
+  _aspectFitView = aspectFitView;
 }
 
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
@@ -1264,8 +1451,93 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 300.0, 400.0)];
   viewController.view = content;
 
-  NSTextField *heading = [NSTextField labelWithString:@"Render Settings"];
+  NSTextField *heading = [NSTextField labelWithString:@"Viewer Settings"];
   heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+
+  _zoomControl = [NSSlider sliderWithValue:_verticalFieldOfView * panorama::app::kRadiansToDegrees
+                                  minValue:0.0
+                                  maxValue:140.0
+                                    target:self
+                                    action:@selector(zoomControlChanged:)];
+  _zoomControl.continuous = YES;
+  _zoomControl.numberOfTickMarks = 3;
+  _zoomControl.allowsTickMarkValuesOnly = NO;
+  _zoomValueLabel = [NSTextField labelWithString:@""];
+  _zoomValueLabel.alignment = NSTextAlignmentRight;
+  [_zoomValueLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *zoomSetting = [NSStackView stackViewWithViews:@[ _zoomControl, _zoomValueLabel ]];
+  zoomSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  zoomSetting.alignment = NSLayoutAttributeCenterY;
+  zoomSetting.spacing = 6.0;
+  [self updateZoomControls];
+
+  _panningSensitivityControl = [NSSlider sliderWithValue:_panningSensitivity
+                                                minValue:1.0
+                                                maxValue:10.0
+                                                  target:self
+                                                  action:@selector(panningSensitivityChanged:)];
+  _panningSensitivityControl.continuous = YES;
+  _panningSensitivityControl.numberOfTickMarks = 10;
+  _panningSensitivityControl.allowsTickMarkValuesOnly = YES;
+  _panningSensitivityControl.toolTip = @"Mouse and keyboard panning sensitivity";
+  _panningSensitivityLabel = [NSTextField labelWithString:@"8"];
+  _panningSensitivityLabel.alignment = NSTextAlignmentRight;
+  [_panningSensitivityLabel.widthAnchor constraintEqualToConstant:18.0].active = YES;
+  NSStackView *panningSensitivitySetting =
+      [NSStackView stackViewWithViews:@[ _panningSensitivityControl, _panningSensitivityLabel ]];
+  panningSensitivitySetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  panningSensitivitySetting.alignment = NSLayoutAttributeCenterY;
+  panningSensitivitySetting.spacing = 6.0;
+
+  _imageWidthControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _imageWidthControl.stringValue = [NSString stringWithFormat:@"%u", _image.width];
+  _imageWidthControl.delegate = self;
+  _imageHeightControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _imageHeightControl.stringValue = [NSString stringWithFormat:@"%u", _image.height];
+  _imageHeightControl.delegate = self;
+  [_imageWidthControl.widthAnchor constraintEqualToConstant:42.0].active = YES;
+  [_imageHeightControl.widthAnchor constraintEqualToConstant:42.0].active = YES;
+  NSTextField *resolutionSeparator = [NSTextField labelWithString:@"×"];
+
+  _aspectLockControl = [[NSButton alloc] initWithFrame:NSZeroRect];
+  _aspectLockControl.buttonType = NSButtonTypeToggle;
+  _aspectLockControl.state = NSControlStateValueOn;
+  _aspectLockControl.title = @"";
+  _aspectLockControl.bordered = NO;
+  _aspectLockControl.imagePosition = NSImageOnly;
+  _aspectLockControl.target = self;
+  _aspectLockControl.action = @selector(aspectLockChanged:);
+  _aspectLockControl.toolTip = @"Keep width and height at the current aspect ratio";
+  [_aspectLockControl setAccessibilityLabel:@"Lock aspect ratio"];
+  [_aspectLockControl.widthAnchor constraintEqualToConstant:20.0].active = YES;
+  [self updateAspectLockAppearance];
+
+  NSStackView *resolutionSetting = [NSStackView stackViewWithViews:@[
+    _imageWidthControl,
+    resolutionSeparator,
+    _imageHeightControl,
+    _aspectLockControl,
+  ]];
+  resolutionSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  resolutionSetting.alignment = NSLayoutAttributeCenterY;
+  resolutionSetting.spacing = 4.0;
+
+  _matchWindowControl = [NSButton buttonWithTitle:@"Match Window"
+                                           target:self
+                                           action:@selector(matchWindowResolution:)];
+  _matchWindowControl.image =
+      [NSImage imageWithSystemSymbolName:@"arrow.left.and.right"
+                accessibilityDescription:@"Match horizontal resolution to window"];
+  _matchWindowControl.imagePosition = NSImageLeading;
+  _matchWindowControl.toolTip =
+      @"Change horizontal resolution to match the window; keep vertical resolution fixed";
+
+  _invertMousePanningControl = [[NSButton alloc] initWithFrame:NSZeroRect];
+  _invertMousePanningControl.buttonType = NSButtonTypeSwitch;
+  _invertMousePanningControl.title = @"Invert click-and-drag panning";
+  _invertMousePanningControl.state = NSControlStateValueOff;
+  _invertMousePanningControl.target = self;
+  _invertMousePanningControl.action = @selector(invertMousePanningChanged:);
 
   _colourSourceControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   [_colourSourceControl addItemsWithTitles:@[ @"None (white)", @"Distance", @"Elevation" ]];
@@ -1296,7 +1568,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   apply.bezelStyle = NSBezelStyleRounded;
   apply.keyEquivalent = @"\r";
   apply.target = self;
-  apply.action = @selector(applyRenderSettings:);
+  apply.action = @selector(applyViewerSettings:);
   _colourSourceControl.target = self;
   _colourSourceControl.action = @selector(renderModeChanged:);
 
@@ -1316,6 +1588,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   NSStackView *settings = [NSStackView stackViewWithViews:@[
     heading,
+    make_row(@"Zoom (V. FOV)", zoomSetting),
+    make_row(@"Pan sensitivity", panningSensitivitySetting),
+    make_row(@"Resolution", resolutionSetting),
+    _matchWindowControl,
+    _invertMousePanningControl,
     make_row(@"Colour by", _colourSourceControl),
     make_row(@"Colourmap", _colourmapControl),
     make_row(@"Range minimum", _minimumControl),
@@ -1369,14 +1646,16 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   ]];
 
   [self updateDebugInfoWithOrientation:_orientation
-                 horizontalFieldOfView:_horizontalFieldOfView
+                   verticalFieldOfView:_verticalFieldOfView
+                                 image:_image
                           milliseconds:0.0
                               revision:0U];
   return viewController;
 }
 
 - (void)updateDebugInfoWithOrientation:(panorama::CameraOrientation)orientation
-                 horizontalFieldOfView:(double)horizontalFieldOfView
+                   verticalFieldOfView:(double)verticalFieldOfView
+                                 image:(panorama::ImageSize)image
                           milliseconds:(double)milliseconds
                               revision:(uint64_t)revision {
   if (_debugInfoLabel == nil) {
@@ -1384,7 +1663,6 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
 
   const panorama::ObserverLocation observer = _renderer->observer();
-  const panorama::ImageSize image = _renderer->image();
   double heading = std::fmod(orientation.heading * panorama::app::kRadiansToDegrees, 360.0);
   if (heading < 0.0) {
     heading += 360.0;
@@ -1399,7 +1677,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       stringWithFormat:@"%@\nRevision     %8llu\n\n"
                         "Easting    %11.2f m\nNorthing   %11.2f m\nElevation  %11.2f m\n\n"
                         "Heading      %8.2f°\nPitch        %8.2f°\nRoll         %8.2f°\n"
-                        "H. FOV       %8.2f°\n\nResolution   %4u × %4u\nMax range  %10.0f m",
+                        "V. FOV       %8.2f°\n\nResolution   %4u × %4u\nMax range  %10.0f m",
                        performance,
                        static_cast<unsigned long long>(revision),
                        observer.easting,
@@ -1408,7 +1686,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                        heading,
                        orientation.pitch * panorama::app::kRadiansToDegrees,
                        orientation.roll * panorama::app::kRadiansToDegrees,
-                       horizontalFieldOfView * panorama::app::kRadiansToDegrees,
+                       verticalFieldOfView * panorama::app::kRadiansToDegrees,
                        image.width,
                        image.height,
                        _renderer->max_distance()];
@@ -1479,7 +1757,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// The off-screen state is represented both by an edge arrow and in text, so
 /// the lock remains unambiguous even if another overlay obscures the marker.
 - (void)updateLockedPointIndicatorWithOrientation:(panorama::CameraOrientation)orientation
-                            horizontalFieldOfView:(double)horizontalFieldOfView {
+                              verticalFieldOfView:(double)verticalFieldOfView
+                                            image:(panorama::ImageSize)image {
   if (!_pointInspectionLocked || !_lockedPoint.has_value()) {
     [_panoramaView setLockedPointIndicator:std::nullopt];
     return;
@@ -1487,8 +1766,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const panorama::app::LockedPointProjection projection = panorama::app::project_locked_point(
       *_lockedPoint,
       _renderer->observer(),
-      _renderer->image(),
-      horizontalFieldOfView,
+      image,
+      verticalFieldOfView,
       orientation
   );
   [_panoramaView setLockedPointIndicator:projection];
@@ -1510,8 +1789,26 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 /// Validate and publish one coherent settings snapshot to the render worker.
-- (void)applyRenderSettings:(id)sender {
+- (void)applyViewerSettings:(id)sender {
   (void)sender;
+  const std::optional<uint32_t> width =
+      panorama::app::parse_image_dimension(_imageWidthControl.stringValue);
+  const std::optional<uint32_t> height =
+      panorama::app::parse_image_dimension(_imageHeightControl.stringValue);
+  const uint64_t pixel_count =
+      width.has_value() && height.has_value() ? static_cast<uint64_t>(*width) * *height : 0U;
+  if (!width.has_value() || !height.has_value() ||
+      pixel_count > std::numeric_limits<uint32_t>::max()) {
+    NSBeep();
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Invalid render resolution";
+    alert.informativeText =
+        @"Width and height must be positive whole numbers, and their product must fit in the "
+         "Metal ray-index range.";
+    [alert beginSheetModalForWindow:_window completionHandler:nil];
+    return;
+  }
+
   const std::optional<double> minimum =
       panorama::app::parse_range_value(_minimumControl.stringValue);
   const std::optional<double> maximum =
@@ -1539,10 +1836,23 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   };
   _presentation.use_surface_normals = _normalLightingControl.state == NSControlStateValueOn;
   _renderer->request_presentation(_presentation);
+
+  const panorama::ImageSize next_image = {*width, *height};
+  if (next_image.width != _image.width || next_image.height != _image.height) {
+    _image = next_image;
+    _renderer->request_inspection(std::nullopt);
+    _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+  }
 }
 
 - (void)drawInMTKView:(MTKView *)view {
   const panorama::app::PresentedFrame frame = _renderer->presented_frame();
+  if (frame.texture != nil && (view.drawableSize.width != frame.image.width ||
+                               view.drawableSize.height != frame.image.height)) {
+    view.drawableSize = CGSizeMake(frame.image.width, frame.image.height);
+    [_aspectFitView setAspectRatio:static_cast<CGFloat>(frame.image.width) /
+                                   static_cast<CGFloat>(frame.image.height)];
+  }
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (drawable == nil) {
     return;
@@ -1587,7 +1897,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         _pointInspectionLocked = true;
         _lockedPoint = frame.inspection;
         [self updateLockedPointIndicatorWithOrientation:frame.orientation
-                                  horizontalFieldOfView:frame.horizontal_field_of_view];
+                                    verticalFieldOfView:frame.vertical_field_of_view
+                                                  image:frame.image];
         // The label now owns the immutable sampled values. Stop the renderer
         // resampling this screen pixel as subsequent camera views complete.
         _renderer->request_inspection(std::nullopt);
@@ -1605,11 +1916,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _displayedRevision = frame.revision;
     const double fps = frame.milliseconds > 0.0 ? 1'000.0 / frame.milliseconds : 0.0;
     [self updateDebugInfoWithOrientation:frame.orientation
-                   horizontalFieldOfView:frame.horizontal_field_of_view
+                     verticalFieldOfView:frame.vertical_field_of_view
+                                   image:frame.image
                             milliseconds:frame.milliseconds
                                 revision:frame.revision];
     [self updateLockedPointIndicatorWithOrientation:frame.orientation
-                              horizontalFieldOfView:frame.horizontal_field_of_view];
+                                verticalFieldOfView:frame.vertical_field_of_view
+                                              image:frame.image];
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",
                          frame.orientation.heading * panorama::app::kRadiansToDegrees,
@@ -1744,14 +2057,15 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   view.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
   _controller = [[PanoramaController alloc] initWithRenderer:_renderer.get() window:_window];
 
-  // The traced ray field and Metal drawable have a fixed aspect ratio. Keep
-  // that ratio when the inspector or window changes the content-pane shape;
-  // otherwise AppKit scales the drawable non-uniformly and distorts terrain.
+  // Keep the traced ray field and Metal drawable at the same aspect ratio when
+  // the inspector, window, or requested resolution changes; otherwise AppKit
+  // scales the drawable non-uniformly and distorts terrain.
   const CGFloat imageAspect =
       static_cast<CGFloat>(image.width) / static_cast<CGFloat>(image.height);
-  NSView *imageContainer = [[AspectFitContainerView alloc] initWithFrame:imageFrame
-                                                              renderView:view
-                                                             aspectRatio:imageAspect];
+  AspectFitContainerView *imageContainer =
+      [[AspectFitContainerView alloc] initWithFrame:imageFrame
+                                         renderView:view
+                                        aspectRatio:imageAspect];
 
   NSViewController *settingsController = [_controller makeSettingsViewController];
   NSViewController *debugController = [_controller makeDebugViewController];
@@ -1764,7 +2078,7 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
                                                 debugSize:kDebugSize
                                             pointInfoView:pointInfoController.view
                                             pointInfoSize:kPointInfoSize];
-  [_controller attachPanoramaView:view overlayView:_overlayView];
+  [_controller attachPanoramaView:view overlayView:_overlayView aspectFitView:imageContainer];
 
   NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"panorama.toolbar"];
   toolbar.delegate = self;

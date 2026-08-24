@@ -233,13 +233,19 @@ TerrainTraceSession::~TerrainTraceSession() = default;
 void TerrainTraceSession::trace(const RayField &field) {
   State &state = *state_;
   const uint32_t ray_count = validate_ray_field(field);
-  if (field.image.width != state.image.width || field.image.height != state.image.height ||
-      ray_count != state.ray_count) {
-    throw std::invalid_argument("Terrain trace session cannot change image dimensions");
-  }
+  const bool dimensions_changed = field.image.width != state.image.width ||
+                                  field.image.height != state.image.height ||
+                                  ray_count != state.ray_count;
 
   const uint32_t observer_slot = state.ensure_observer_resident();
-  state.gpu->update_rays(field.rays);
+  if (dimensions_changed) {
+    state.gpu->resize_rays(field.rays);
+    state.image = field.image;
+    state.ray_count = ray_count;
+    state.parameters.ray_count = ray_count;
+  } else {
+    state.gpu->update_rays(field.rays);
+  }
   state.gpu->initialise_frontier(observer_slot);
 
   HostFrontier frontier(

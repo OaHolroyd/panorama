@@ -74,6 +74,7 @@ void dispatch_image(
 } // namespace
 
 struct GpuImageRenderer::State {
+  id<MTLDevice> device;
   id<MTLCommandQueue> queue;
   id<MTLComputePipelineState> scalar;
   id<MTLComputePipelineState> normals;
@@ -84,6 +85,51 @@ struct GpuImageRenderer::State {
   id<MTLBuffer> readback;
   ImageSize image;
   NSUInteger bytes_per_row;
+  MTLPixelFormat output_pixel_format;
+  bool host_readback;
+
+  void resize(ImageSize next_image) {
+    const uint64_t pixel_count = static_cast<uint64_t>(next_image.width) * next_image.height;
+    if (pixel_count == 0U || pixel_count > std::numeric_limits<uint32_t>::max()) {
+      throw std::invalid_argument("GPU image dimensions are invalid");
+    }
+    if (output != nil && image.width == next_image.width && image.height == next_image.height) {
+      return;
+    }
+
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:output_pixel_format
+                                                           width:next_image.width
+                                                          height:next_image.height
+                                                       mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModePrivate;
+    texture_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> next_output = [device newTextureWithDescriptor:texture_descriptor];
+    if (next_output == nil) {
+      throw std::runtime_error("Could not allocate GPU presentation texture");
+    }
+    next_output.label = @"Presented image";
+
+    id<MTLBuffer> next_readback = nil;
+    NSUInteger next_bytes_per_row = 0U;
+    if (host_readback) {
+      next_bytes_per_row = static_cast<NSUInteger>(next_image.width) * 3U;
+      if (next_image.height > std::numeric_limits<NSUInteger>::max() / next_bytes_per_row) {
+        throw std::overflow_error("GPU image readback is too large");
+      }
+      next_readback = [device newBufferWithLength:next_bytes_per_row * next_image.height
+                                          options:MTLResourceStorageModeShared];
+      if (next_readback == nil) {
+        throw std::runtime_error("Could not allocate presented-image readback buffer");
+      }
+      next_readback.label = @"Presented image readback";
+    }
+
+    image = next_image;
+    output = next_output;
+    readback = next_readback;
+    bytes_per_row = next_bytes_per_row;
+  }
 };
 
 GpuImageRenderer::GpuImageRenderer(
@@ -101,8 +147,10 @@ GpuImageRenderer::GpuImageRenderer(
   }
 
   auto state = std::make_unique<State>();
+  state->device = device;
   state->queue = queue;
-  state->image = image;
+  state->output_pixel_format = output_pixel_format;
+  state->host_readback = requirements.host_readback;
   if (requirements.scalar_diagnostics) {
     state->scalar = make_pipeline(device, library, @"present_scalar_viridis");
   }
@@ -124,35 +172,13 @@ GpuImageRenderer::GpuImageRenderer(
       output_pixel_format != MTLPixelFormatBGRA8Unorm) {
     throw std::invalid_argument("GPU image renderer requires an RGBA8 or BGRA8 target");
   }
-  MTLTextureDescriptor *texture_descriptor =
-      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:output_pixel_format
-                                                         width:image.width
-                                                        height:image.height
-                                                     mipmapped:NO];
-  texture_descriptor.storageMode = MTLStorageModePrivate;
-  texture_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-  state->output = [device newTextureWithDescriptor:texture_descriptor];
-  if (state->output == nil) {
-    throw std::runtime_error("Could not allocate GPU presentation texture");
-  }
-  state->output.label = @"Presented image";
-
-  if (requirements.host_readback) {
-    state->bytes_per_row = static_cast<NSUInteger>(image.width) * 3U;
-    if (image.height > std::numeric_limits<NSUInteger>::max() / state->bytes_per_row) {
-      throw std::overflow_error("GPU image readback is too large");
-    }
-    state->readback = [device newBufferWithLength:state->bytes_per_row * image.height
-                                          options:MTLResourceStorageModeShared];
-    if (state->readback == nil) {
-      throw std::runtime_error("Could not allocate presented-image readback buffer");
-    }
-    state->readback.label = @"Presented image readback";
-  }
+  state->resize(image);
   state_ = std::move(state);
 }
 
 GpuImageRenderer::~GpuImageRenderer() = default;
+
+void GpuImageRenderer::resize(ImageSize image) { state_->resize(image); }
 
 void GpuImageRenderer::render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer) {
   State &state = *state_;
