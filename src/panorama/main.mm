@@ -27,8 +27,8 @@ struct EntrypointSettings {
   uint32_t max_tile_count = 0U;
   float max_distance = 600'000.0F;
   bool retain_quantized = false;
-  bool compute_elevations = true;
-  bool compute_normals = true;
+  bool elevations_enabled = true;
+  bool normals_enabled = true;
   bool write_diagnostics = true;
   bool write_synthetic = false;
   bool synthetic_setting_seen = false;
@@ -50,7 +50,7 @@ void validate_output_settings(const EntrypointSettings &settings) {
   }
   // Rendering requires collision gradients, whereas mandatory distances and
   // optional elevation diagnostics remain usable without them.
-  if (settings.write_synthetic && !settings.compute_normals) {
+  if (settings.write_synthetic && !settings.normals_enabled) {
     throw std::invalid_argument("--synthetic-output cannot be combined with --no-normals");
   }
   // Treat lighting controls as configuration for an explicitly selected
@@ -111,11 +111,11 @@ void print_usage(const char *program) {
       continue;
     }
     if (option == "--no-normals") {
-      settings.compute_normals = false;
+      settings.normals_enabled = false;
       continue;
     }
     if (option == "--no-elevations") {
-      settings.compute_elevations = false;
+      settings.elevations_enabled = false;
       continue;
     }
     if (option == "--diagnostic-output") {
@@ -199,12 +199,12 @@ int main(int argc, const char *argv[]) {
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
         settings.retain_quantized,
-        settings.compute_elevations,
-        settings.compute_normals,
     };
     const panorama::RayField rays = settings.projection.make_ray_field();
     const panorama::TerrainRenderOutputs outputs = {
         settings.write_diagnostics,
+        settings.elevations_enabled,
+        settings.normals_enabled,
         settings.write_synthetic,
         settings.synthetic,
     };
@@ -230,8 +230,8 @@ int main(int argc, const char *argv[]) {
         settings.max_distance,
         panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
         settings.retain_quantized ? "retained" : "disabled",
-        settings.compute_elevations ? "enabled" : "disabled",
-        settings.compute_normals ? "enabled" : "disabled",
+        outputs.requires_elevations() ? "enabled" : "disabled",
+        outputs.requires_normals() ? "enabled" : "disabled",
         settings.write_diagnostics
             ? (settings.write_synthetic ? "diagnostic+synthetic" : "diagnostic")
             : "synthetic"

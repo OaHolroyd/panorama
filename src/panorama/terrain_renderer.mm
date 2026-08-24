@@ -96,15 +96,9 @@ void validate_configuration(const RaytraceConfig &config) {
 }
 
 /// Validate output choices before starting an otherwise expensive trace.
-void validate_output_configuration(
-    const RaytraceConfig &config,
-    const TerrainRenderOutputs &outputs
-) {
+void validate_output_configuration(const TerrainRenderOutputs &outputs) {
   if (!outputs.write_diagnostics && !outputs.write_synthetic) {
     throw std::invalid_argument("At least one render output must be enabled");
-  }
-  if (outputs.write_synthetic && !config.compute_normals) {
-    throw std::invalid_argument("Synthetic output requires collision-normal computation");
   }
 }
 
@@ -130,7 +124,6 @@ void render_and_write_png(
 /// This stage has its own top-level timer so terrain-tracing measurements stay
 /// comparable when callers select different output products.
 void write_trace_outputs(
-    const RaytraceConfig &config,
     const TerrainRenderOutputs &outputs,
     const RayField &field,
     const GpuRaytraceResources &gpu
@@ -144,7 +137,7 @@ void write_trace_outputs(
       field.image,
       {
           outputs.write_diagnostics,
-          outputs.write_diagnostics && config.compute_normals,
+          outputs.write_diagnostics && outputs.write_normal_diagnostic,
           outputs.write_synthetic,
           true,
       }
@@ -160,7 +153,7 @@ void write_trace_outputs(
         field.image,
         [&] { renderer.render_scalar(distances, timer); }
     );
-    if (config.compute_elevations) {
+    if (outputs.write_elevation_diagnostic) {
       render_and_write_png(
           timer,
           "elevations.png",
@@ -169,7 +162,7 @@ void write_trace_outputs(
           [&] { renderer.render_scalar(gpu.elevations(), timer); }
       );
     }
-    if (config.compute_normals) {
+    if (outputs.write_normal_diagnostic) {
       render_and_write_png(
           timer,
           "normals.png",
@@ -220,7 +213,7 @@ void render_terrain(
     const TerrainRenderOutputs &outputs
 ) {
   validate_configuration(config);
-  validate_output_configuration(config, outputs);
+  validate_output_configuration(outputs);
   const uint32_t ray_count = validate_ray_field(field);
   // Start a composite timer.
   Timer timer("Total elapsed");
@@ -309,8 +302,8 @@ void render_terrain(
     // GPU resources own the device, reusable command/pipeline state, static
     // ray inputs, output images, and reusable frontier storage.
     const GpuTraceOutputRequirements gpu_outputs = {
-        config.compute_elevations,
-        config.compute_normals,
+        outputs.requires_elevations(),
+        outputs.requires_normals(),
     };
     GpuRaytraceResources gpu(field.rays, paths, trace_quantized, gpu_outputs);
     gpu.initialise_frontier();
@@ -493,7 +486,7 @@ void render_terrain(
 
     // Encoding remains outside `Total elapsed`; it is an output backend rather
     // than part of terrain traversal and may be omitted by future consumers.
-    write_trace_outputs(config, outputs, field, gpu);
+    write_trace_outputs(outputs, field, gpu);
   }
 }
 

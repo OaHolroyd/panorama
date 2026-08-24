@@ -10,10 +10,24 @@ namespace panorama {
 struct TerrainRenderOutputs {
   /// Write distances.png plus enabled elevation and normal diagnostic fields.
   bool write_diagnostics;
+  /// Include elevations.png when diagnostic outputs are enabled.
+  bool write_elevation_diagnostic;
+  /// Include normals.png when diagnostic outputs are enabled.
+  bool write_normal_diagnostic;
   /// Write synthetic.png using white terrain and normal-based lighting.
   bool write_synthetic;
   /// Lighting parameters used only when `write_synthetic` is true.
   SyntheticRenderOptions synthetic_options;
+
+  /// Return whether any selected output consumes per-collision elevations.
+  [[nodiscard]] bool requires_elevations() const {
+    return write_diagnostics && write_elevation_diagnostic;
+  }
+
+  /// Return whether any selected output consumes per-collision gradients.
+  [[nodiscard]] bool requires_normals() const {
+    return write_synthetic || (write_diagnostics && write_normal_diagnostic);
+  }
 };
 
 /// Trace an explicitly supplied per-pixel ray field and render selected outputs.

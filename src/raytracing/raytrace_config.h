@@ -19,9 +19,9 @@ struct ObserverLocation {
 
 /// Host configuration for fixed-observer, level-0 multi-tile tracing.
 ///
-/// Output selection deliberately lives outside this type: the tracing engine
-/// describes the scientific fields it must compute, while the application and
-/// rendering layers decide how those fields are presented.
+/// Output selection deliberately lives outside this type. The application
+/// derives optional trace fields from its selected render products, preventing
+/// unused collision buffers or shader work from being requested here.
 struct RaytraceConfig {
   /// Directory containing prepared level-0 GeoTIFF or custom terrain tiles.
   std::filesystem::path tile_dir;
@@ -37,10 +37,6 @@ struct RaytraceConfig {
   uint32_t max_tile_preparation_workers;
   /// Keep uint16 custom terrain quantized through atlas residency and tracing.
   bool retain_quantized;
-  /// Store the collision elevation for each ray that hits terrain.
-  bool compute_elevations;
-  /// Compute one compact terrain-surface normal parameterization per collision.
-  bool compute_normals;
 };
 
 } // namespace panorama
