@@ -253,6 +253,11 @@ public:
   [[nodiscard]] id<MTLDevice> device() const { return trace_->device(); }
   [[nodiscard]] id<MTLCommandQueue> command_queue() const { return trace_->command_queue(); }
   [[nodiscard]] ImageSize image() const { return settings_.image; }
+  [[nodiscard]] ObserverLocation observer() const { return settings_.observer; }
+  [[nodiscard]] double horizontal_field_of_view() const {
+    return settings_.horizontal_field_of_view;
+  }
+  [[nodiscard]] float max_distance() const { return settings_.max_distance; }
   [[nodiscard]] CameraOrientation initial_orientation() const { return settings_.orientation; }
   [[nodiscard]] TerrainPresentationSettings initial_presentation() const {
     return settings_.presentation;
@@ -367,12 +372,14 @@ private:
   NSTextField *_minimumControl;
   NSTextField *_maximumControl;
   NSButton *_normalLightingControl;
+  NSTextField *_debugInfoLabel;
   uint64_t _displayedRevision;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
                           window:(NSWindow *)window;
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (NSViewController *)makeSettingsViewController;
+- (NSViewController *)makeDebugViewController;
 @end
 
 @implementation PanoramaView
@@ -476,62 +483,84 @@ private:
 
 @end
 
-/// Keep the render at the full window size and position the inspector above its
-/// trailing edge. Frame-based layout is deliberate: overlapping children do
-/// not define a useful Auto Layout fitting size for an NSWindow content view.
-@interface InspectorOverlayView : NSView {
+/// Wrap custom overlay content in the current platform's native translucent
+/// material. The returned view owns `contentView` through either the modern
+/// Liquid Glass API or the pre-macOS 26 visual-effect fallback.
+static NSView *makeOverlayPanel(NSView *contentView) {
+  NSView *panel = nil;
+  if (@available(macOS 26.0, *)) {
+    NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:NSZeroRect];
+    glass.style = NSGlassEffectViewStyleRegular;
+    glass.cornerRadius = 18.0;
+    glass.contentView = contentView;
+    panel = glass;
+  } else {
+    NSVisualEffectView *material = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    material.material = NSVisualEffectMaterialSidebar;
+    material.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    material.state = NSVisualEffectStateActive;
+    material.wantsLayer = YES;
+    material.layer.cornerRadius = 18.0;
+    material.layer.masksToBounds = YES;
+    [material addSubview:contentView];
+    panel = material;
+  }
+  contentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  return panel;
+}
+
+/// Keep the render at the full window size and position auxiliary panels above
+/// it. Frame-based layout is deliberate: overlapping children do not define a
+/// useful Auto Layout fitting size for an NSWindow content view.
+@interface ViewerOverlayView : NSView {
 @private
   NSView *_contentView;
   NSView *_inspectorView;
   NSView *_settingsView;
+  NSView *_debugView;
+  NSView *_debugContentView;
   CGFloat _inspectorWidth;
-  CGFloat _inspectorMargin;
+  NSSize _debugSize;
+  CGFloat _panelMargin;
   bool _inspectorVisible;
+  bool _debugVisible;
 }
 - (instancetype)initWithFrame:(NSRect)frame
                   contentView:(NSView *)contentView
                  settingsView:(NSView *)settingsView
-               inspectorWidth:(CGFloat)inspectorWidth;
+               inspectorWidth:(CGFloat)inspectorWidth
+                    debugView:(NSView *)debugView
+                    debugSize:(NSSize)debugSize;
 - (void)toggleInspector:(id)sender;
+- (void)toggleDebugOverlay:(id)sender;
 @end
 
-@implementation InspectorOverlayView
+@implementation ViewerOverlayView
 
 - (instancetype)initWithFrame:(NSRect)frame
                   contentView:(NSView *)contentView
                  settingsView:(NSView *)settingsView
-               inspectorWidth:(CGFloat)inspectorWidth {
+               inspectorWidth:(CGFloat)inspectorWidth
+                    debugView:(NSView *)debugView
+                    debugSize:(NSSize)debugSize {
   self = [super initWithFrame:frame];
   if (self != nil) {
     _contentView = contentView;
     _settingsView = settingsView;
+    _debugContentView = debugView;
     _inspectorWidth = inspectorWidth;
-    _inspectorMargin = 12.0;
+    _debugSize = debugSize;
+    _panelMargin = 12.0;
     _inspectorVisible = true;
+    _debugVisible = false;
     self.wantsLayer = YES;
     self.layer.masksToBounds = YES;
     [self addSubview:_contentView];
 
-    if (@available(macOS 26.0, *)) {
-      NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:NSZeroRect];
-      glass.style = NSGlassEffectViewStyleRegular;
-      glass.cornerRadius = 18.0;
-      glass.contentView = _settingsView;
-      _inspectorView = glass;
-    } else {
-      NSVisualEffectView *material = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
-      material.material = NSVisualEffectMaterialSidebar;
-      material.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-      material.state = NSVisualEffectStateActive;
-      material.wantsLayer = YES;
-      material.layer.cornerRadius = 18.0;
-      material.layer.masksToBounds = YES;
-      [material addSubview:_settingsView];
-      _inspectorView = material;
-    }
+    _inspectorView = makeOverlayPanel(_settingsView);
+    _debugView = makeOverlayPanel(_debugContentView);
     [self addSubview:_inspectorView];
-
-    _settingsView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [self addSubview:_debugView];
   }
   return self;
 }
@@ -543,12 +572,24 @@ private:
   // clear of the toolbar and window controls, while allowing the terrain view
   // itself to fill the window.
   const NSEdgeInsets safeArea = self.safeAreaInsets;
-  const CGFloat x = visible ? NSMaxX(bounds) - safeArea.right - _inspectorWidth - _inspectorMargin
-                            : NSMaxX(bounds) + _inspectorMargin;
-  const CGFloat bottom = safeArea.bottom + _inspectorMargin;
-  const CGFloat top = safeArea.top + _inspectorMargin;
+  const CGFloat x = visible ? NSMaxX(bounds) - safeArea.right - _inspectorWidth - _panelMargin
+                            : NSMaxX(bounds) + _panelMargin;
+  const CGFloat bottom = safeArea.bottom + _panelMargin;
+  const CGFloat top = safeArea.top + _panelMargin;
   const CGFloat height = std::max(0.0, bounds.size.height - bottom - top);
   return NSMakeRect(x, bounds.origin.y + bottom, _inspectorWidth, height);
+}
+
+- (NSRect)debugFrameForVisible:(bool)visible {
+  const NSRect bounds = self.bounds;
+  const NSEdgeInsets safeArea = self.safeAreaInsets;
+  const CGFloat availableHeight =
+      std::max(0.0, bounds.size.height - safeArea.top - safeArea.bottom - 2.0 * _panelMargin);
+  const CGFloat height = std::min(_debugSize.height, availableHeight);
+  const CGFloat x = visible ? NSMinX(bounds) + safeArea.left + _panelMargin
+                            : NSMinX(bounds) - _debugSize.width - _panelMargin;
+  const CGFloat y = NSMaxY(bounds) - safeArea.top - _panelMargin - height;
+  return NSMakeRect(x, y, _debugSize.width, height);
 }
 
 - (void)layout {
@@ -556,6 +597,8 @@ private:
   _contentView.frame = self.bounds;
   _inspectorView.frame = [self inspectorFrameForVisible:_inspectorVisible];
   _settingsView.frame = _inspectorView.bounds;
+  _debugView.frame = [self debugFrameForVisible:_debugVisible];
+  _debugContentView.frame = _debugView.bounds;
 }
 
 - (void)toggleInspector:(id)sender {
@@ -564,6 +607,15 @@ private:
   [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
     context.duration = 0.25;
     _inspectorView.animator.frame = [self inspectorFrameForVisible:_inspectorVisible];
+  }];
+}
+
+- (void)toggleDebugOverlay:(id)sender {
+  (void)sender;
+  _debugVisible = !_debugVisible;
+  [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+    context.duration = 0.25;
+    _debugView.animator.frame = [self debugFrameForVisible:_debugVisible];
   }];
 }
 
@@ -634,7 +686,10 @@ private:
   auto make_row = [](NSString *title, NSView *control) {
     NSTextField *label = [NSTextField labelWithString:title];
     [label.widthAnchor constraintEqualToConstant:105.0].active = YES;
-    [control.widthAnchor constraintGreaterThanOrEqualToConstant:145.0].active = YES;
+    // The 270-point panel has 238 points inside its horizontal margins.
+    // Keep each row within that width instead of allowing controls to crowd
+    // the trailing glass edge.
+    [control.widthAnchor constraintGreaterThanOrEqualToConstant:125.0].active = YES;
     NSStackView *row = [NSStackView stackViewWithViews:@[ label, control ]];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.alignment = NSLayoutAttributeCenterY;
@@ -665,6 +720,77 @@ private:
 
   [self updateSettingsControlAvailability];
   return viewController;
+}
+
+/// Build the read-only diagnostics displayed over the leading side of the
+/// rendered scene. Values are refreshed only when a completed revision becomes
+/// visible, avoiding work on unchanged MetalKit redraws.
+- (NSViewController *)makeDebugViewController {
+  NSViewController *viewController = [[NSViewController alloc] init];
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 220.0, 282.0)];
+  viewController.view = content;
+
+  NSTextField *heading = [NSTextField labelWithString:@"Viewer Debug Info"];
+  heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+
+  _debugInfoLabel = [NSTextField labelWithString:@""];
+  _debugInfoLabel.font = [NSFont monospacedSystemFontOfSize:12.0 weight:NSFontWeightRegular];
+  _debugInfoLabel.maximumNumberOfLines = 0;
+  _debugInfoLabel.lineBreakMode = NSLineBreakByClipping;
+
+  NSStackView *debugInfo = [NSStackView stackViewWithViews:@[ heading, _debugInfoLabel ]];
+  debugInfo.orientation = NSUserInterfaceLayoutOrientationVertical;
+  debugInfo.alignment = NSLayoutAttributeLeading;
+  debugInfo.spacing = 12.0;
+  debugInfo.translatesAutoresizingMaskIntoConstraints = NO;
+  [content addSubview:debugInfo];
+  [NSLayoutConstraint activateConstraints:@[
+    [debugInfo.topAnchor constraintEqualToAnchor:content.topAnchor constant:16.0],
+    [debugInfo.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16.0],
+    [debugInfo.trailingAnchor constraintLessThanOrEqualToAnchor:content.trailingAnchor
+                                                       constant:-16.0],
+  ]];
+
+  [self updateDebugInfoWithOrientation:_orientation milliseconds:0.0 revision:0U];
+  return viewController;
+}
+
+- (void)updateDebugInfoWithOrientation:(panorama::CameraOrientation)orientation
+                          milliseconds:(double)milliseconds
+                              revision:(uint64_t)revision {
+  if (_debugInfoLabel == nil) {
+    return;
+  }
+
+  const panorama::ObserverLocation observer = _renderer->observer();
+  const panorama::ImageSize image = _renderer->image();
+  double heading = std::fmod(orientation.heading * panorama::app::kRadiansToDegrees, 360.0);
+  if (heading < 0.0) {
+    heading += 360.0;
+  }
+  const double fps = milliseconds > 0.0 ? 1'000.0 / milliseconds : 0.0;
+  NSString *performance =
+      milliseconds > 0.0
+          ? [NSString
+                stringWithFormat:@"FPS          %8.2f\nFrame time   %8.2f ms", fps, milliseconds]
+          : @"FPS                 —\nFrame time          —";
+  _debugInfoLabel.stringValue = [NSString
+      stringWithFormat:@"%@\nRevision     %8llu\n\n"
+                        "Easting    %11.2f m\nNorthing   %11.2f m\nElevation  %11.2f m\n\n"
+                        "Heading      %8.2f°\nPitch        %8.2f°\nRoll         %8.2f°\n"
+                        "H. FOV       %8.2f°\n\nResolution   %4u × %4u\nMax range  %10.0f m",
+                       performance,
+                       static_cast<unsigned long long>(revision),
+                       observer.easting,
+                       observer.northing,
+                       observer.elevation,
+                       heading,
+                       orientation.pitch * panorama::app::kRadiansToDegrees,
+                       orientation.roll * panorama::app::kRadiansToDegrees,
+                       _renderer->horizontal_field_of_view() * panorama::app::kRadiansToDegrees,
+                       image.width,
+                       image.height,
+                       _renderer->max_distance()];
 }
 
 /// Palette and range controls have no effect on the uncoloured white mode.
@@ -746,6 +872,9 @@ private:
   } else if (frame.revision != 0U && frame.revision != _displayedRevision) {
     _displayedRevision = frame.revision;
     const double fps = frame.milliseconds > 0.0 ? 1'000.0 / frame.milliseconds : 0.0;
+    [self updateDebugInfoWithOrientation:frame.orientation
+                            milliseconds:frame.milliseconds
+                                revision:frame.revision];
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",
                          frame.orientation.heading * panorama::app::kRadiansToDegrees,
@@ -762,12 +891,14 @@ private:
 
 @end
 
+static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.debug-info";
+
 @interface PanoramaAppDelegate : NSObject <NSApplicationDelegate, NSToolbarDelegate> {
 @private
   std::unique_ptr<panorama::app::ViewerRenderer> _renderer;
   NSWindow *_window;
   PanoramaController *_controller;
-  InspectorOverlayView *_overlayView;
+  ViewerOverlayView *_overlayView;
 }
 - (instancetype)initWithSettings:(panorama::app::ViewerSettings)settings;
 @end
@@ -782,10 +913,14 @@ private:
   return self;
 }
 
-/// Put the inspector control at the trailing edge, matching native macOS apps.
+/// Put the overlay controls at the trailing edge, matching native macOS apps.
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
   (void)toolbar;
-  return @[ NSToolbarFlexibleSpaceItemIdentifier, NSToolbarToggleInspectorItemIdentifier ];
+  return @[
+    NSToolbarFlexibleSpaceItemIdentifier,
+    kDebugToolbarItemIdentifier,
+    NSToolbarToggleInspectorItemIdentifier,
+  ];
 }
 
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
@@ -793,6 +928,7 @@ private:
   return @[
     NSToolbarFlexibleSpaceItemIdentifier,
     NSToolbarSpaceItemIdentifier,
+    kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
   ];
 }
@@ -802,23 +938,33 @@ private:
     willBeInsertedIntoToolbar:(BOOL)willBeInserted {
   (void)toolbar;
   (void)willBeInserted;
-  if (![itemIdentifier isEqualToString:NSToolbarToggleInspectorItemIdentifier]) {
+  const BOOL isInspector = [itemIdentifier isEqualToString:NSToolbarToggleInspectorItemIdentifier];
+  const BOOL isDebug = [itemIdentifier isEqualToString:kDebugToolbarItemIdentifier];
+  if (!isInspector && !isDebug) {
     return nil;
   }
 
-  // Using the standard identifier preserves AppKit's inspector semantics,
-  // while supplying the item here is necessary for this delegate-managed
-  // toolbar to instantiate it. A viewless bordered item receives the native
-  // toolbar appearance, including Liquid Glass on supported macOS releases.
+  // Viewless bordered items receive the native toolbar appearance, including
+  // Liquid Glass on supported macOS releases. The inspector also uses AppKit's
+  // standard semantic identifier even though this delegate instantiates it.
   NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier];
-  item.label = @"Inspector";
-  item.paletteLabel = @"Inspector";
-  item.toolTip = @"Show or hide the render settings inspector";
-  item.image = [NSImage imageWithSystemSymbolName:@"sidebar.right"
-                         accessibilityDescription:@"Toggle Inspector"];
   item.bordered = YES;
   item.target = _overlayView;
-  item.action = @selector(toggleInspector:);
+  if (isInspector) {
+    item.label = @"Inspector";
+    item.paletteLabel = @"Inspector";
+    item.toolTip = @"Show or hide the render settings inspector";
+    item.image = [NSImage imageWithSystemSymbolName:@"sidebar.right"
+                           accessibilityDescription:@"Toggle Inspector"];
+    item.action = @selector(toggleInspector:);
+  } else {
+    item.label = @"Debug Info";
+    item.paletteLabel = @"Debug Info";
+    item.toolTip = @"Show or hide viewer debugging information";
+    item.image = [NSImage imageWithSystemSymbolName:@"info.circle"
+                           accessibilityDescription:@"Toggle Debug Info"];
+    item.action = @selector(toggleDebugOverlay:);
+  }
   return item;
 }
 
@@ -826,6 +972,7 @@ private:
   (void)notification;
   const panorama::ImageSize image = _renderer->image();
   constexpr CGFloat kInspectorWidth = 270.0;
+  constexpr NSSize kDebugSize = {220.0, 282.0};
   const NSRect windowFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   const NSRect imageFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   _window = [[NSWindow alloc]
@@ -856,10 +1003,13 @@ private:
                                                              aspectRatio:imageAspect];
 
   NSViewController *settingsController = [_controller makeSettingsViewController];
-  _overlayView = [[InspectorOverlayView alloc] initWithFrame:imageFrame
-                                                 contentView:imageContainer
-                                                settingsView:settingsController.view
-                                              inspectorWidth:kInspectorWidth];
+  NSViewController *debugController = [_controller makeDebugViewController];
+  _overlayView = [[ViewerOverlayView alloc] initWithFrame:imageFrame
+                                              contentView:imageContainer
+                                             settingsView:settingsController.view
+                                           inspectorWidth:kInspectorWidth
+                                                debugView:debugController.view
+                                                debugSize:kDebugSize];
 
   NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"panorama.toolbar"];
   toolbar.delegate = self;
