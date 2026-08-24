@@ -1037,6 +1037,19 @@ private:
 
 @end
 
+/// A flipped document view keeps the first inspector section at the top when
+/// its intrinsic height grows beyond the scroll view's visible area.
+@interface InspectorDocumentView : NSView
+@end
+
+@implementation InspectorDocumentView
+
+- (BOOL)isFlipped {
+  return YES;
+}
+
+@end
+
 /// Wrap custom overlay content in the current platform's native translucent
 /// material. The returned view owns `contentView` through either the modern
 /// Liquid Glass API or the pre-macOS 26 visual-effect fallback.
@@ -1505,8 +1518,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Build the controls shown in the trailing render-settings inspector.
 - (NSViewController *)makeSettingsViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
-  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 300.0, 400.0)];
-  viewController.view = content;
+  NSScrollView *scrollView =
+      [[NSScrollView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 270.0, 400.0)];
+  scrollView.borderType = NSNoBorder;
+  scrollView.drawsBackground = NO;
+  scrollView.hasHorizontalScroller = NO;
+  scrollView.hasVerticalScroller = YES;
+  scrollView.autohidesScrollers = YES;
+  scrollView.scrollerStyle = NSScrollerStyleOverlay;
+  viewController.view = scrollView;
 
   NSTextField *heading = [NSTextField labelWithString:@"Viewer Settings"];
   heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
@@ -1705,33 +1725,72 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return row;
   };
 
-  NSStackView *settings = [NSStackView stackViewWithViews:@[
-    heading,
+  auto make_section = [](NSString *title, NSArray<NSView *> *controls) {
+    NSTextField *sectionHeading = [NSTextField labelWithString:title];
+    sectionHeading.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize
+                                            weight:NSFontWeightSemibold];
+    sectionHeading.textColor = NSColor.secondaryLabelColor;
+    NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObject:sectionHeading];
+    [views addObjectsFromArray:controls];
+    NSStackView *section = [NSStackView stackViewWithViews:views];
+    section.orientation = NSUserInterfaceLayoutOrientationVertical;
+    section.alignment = NSLayoutAttributeLeading;
+    section.spacing = 8.0;
+    [section setCustomSpacing:10.0 afterView:sectionHeading];
+    return section;
+  };
+
+  NSStackView *cameraSection = make_section(@"Camera", @[
     make_row(@"Zoom (V. FOV)", zoomSetting),
-    make_row(@"Pan sensitivity", panningSensitivitySetting),
     make_row(@"Resolution", resolutionSetting),
     _matchWindowControl,
+  ]);
+  NSStackView *navigationSection = make_section(@"Navigation", @[
+    make_row(@"Pan sensitivity", panningSensitivitySetting),
     _invertMousePanningControl,
+  ]);
+  NSStackView *terrainSection = make_section(@"Terrain Appearance", @[
     make_row(@"Colour by", _colourSourceControl),
     make_row(@"Colourmap", _colourmapControl),
     make_row(@"Range minimum", _minimumControl),
     make_row(@"Range maximum", _maximumControl),
+  ]);
+  NSStackView *lightingSection = make_section(@"Lighting", @[
     _normalLightingControl,
     make_row(@"Sun azimuth", sunAzimuthSetting),
     make_row(@"Sun polar angle", sunPolarAngleSetting),
     make_row(@"Diffusivity", diffusivitySetting),
-    apply,
-  ]];
+  ]);
+
+  NSStackView *settings = [[NSStackView alloc] initWithFrame:NSZeroRect];
+  for (NSView *view in
+       @[ heading, cameraSection, navigationSection, terrainSection, lightingSection, apply ]) {
+    [settings addArrangedSubview:view];
+  }
   settings.orientation = NSUserInterfaceLayoutOrientationVertical;
   settings.alignment = NSLayoutAttributeLeading;
-  settings.spacing = 12.0;
+  settings.spacing = 18.0;
+  settings.edgeInsets = NSEdgeInsetsMake(20.0, 16.0, 20.0, 16.0);
   settings.translatesAutoresizingMaskIntoConstraints = NO;
-  [content addSubview:settings];
+  InspectorDocumentView *document = [[InspectorDocumentView alloc] initWithFrame:NSZeroRect];
+  document.translatesAutoresizingMaskIntoConstraints = NO;
+  [document addSubview:settings];
+  scrollView.documentView = document;
+  NSLayoutConstraint *viewportHeight =
+      [document.heightAnchor constraintEqualToAnchor:scrollView.contentView.heightAnchor];
+  // Prefer a viewport-height document when the controls are short. Its lower
+  // priority lets the settings grow the document and enable scrolling in a
+  // shorter window.
+  viewportHeight.priority = NSLayoutPriorityDefaultLow;
   [NSLayoutConstraint activateConstraints:@[
-    [settings.topAnchor constraintEqualToAnchor:content.topAnchor constant:20.0],
-    [settings.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16.0],
-    [settings.trailingAnchor constraintLessThanOrEqualToAnchor:content.trailingAnchor
-                                                      constant:-16.0],
+    [document.widthAnchor constraintEqualToAnchor:scrollView.contentView.widthAnchor],
+    [document.heightAnchor
+        constraintGreaterThanOrEqualToAnchor:scrollView.contentView.heightAnchor],
+    viewportHeight,
+    [settings.topAnchor constraintEqualToAnchor:document.topAnchor],
+    [settings.leadingAnchor constraintEqualToAnchor:document.leadingAnchor],
+    [settings.trailingAnchor constraintEqualToAnchor:document.trailingAnchor],
+    [settings.bottomAnchor constraintLessThanOrEqualToAnchor:document.bottomAnchor],
   ]];
 
   [self updateSettingsControlAvailability];
