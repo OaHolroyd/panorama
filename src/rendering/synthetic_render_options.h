@@ -36,6 +36,8 @@ struct SyntheticRenderOptions {
   double sun_elevation;
   /// Direction-independent light fraction in the inclusive range [0, 1].
   float ambient_light;
+  /// Strength of the directional Lambertian term in the inclusive range [0, 1].
+  float diffusivity = 1.0F;
   /// White terrain, or a collision field normalised over a fixed range.
   TerrainColourSource colour_source = TerrainColourSource::White;
   /// Preset applied when `colour_source` selects a scalar field.

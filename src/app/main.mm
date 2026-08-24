@@ -39,6 +39,9 @@ constexpr uint64_t kBytesPerMiB = 1024ULL * 1024ULL;
 constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
 constexpr double kDefaultVerticalFieldOfView = 70.0 * kDegreesToRadians;
+constexpr double kDefaultSunAzimuthDegrees = 225.0;
+constexpr double kDefaultSunPolarAngleDegrees = 55.0;
+constexpr float kDefaultDiffusivity = 1.0F;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
@@ -52,9 +55,10 @@ struct ViewerSettings {
   CameraOrientation orientation = {0.0, 0.0, 0.0};
   TerrainPresentationSettings presentation = {
       {
-          225.0 * kDegreesToRadians,
-          35.0 * kDegreesToRadians,
+          kDefaultSunAzimuthDegrees * kDegreesToRadians,
+          (90.0 - kDefaultSunPolarAngleDegrees) * kDegreesToRadians,
           0.28F,
+          kDefaultDiffusivity,
           TerrainColourSource::White,
           PresetColourmap::Viridis,
       },
@@ -693,6 +697,12 @@ private:
   NSButton *_matchWindowControl;
   NSButton *_invertMousePanningControl;
   NSButton *_normalLightingControl;
+  NSSlider *_sunAzimuthControl;
+  NSTextField *_sunAzimuthLabel;
+  NSSlider *_sunPolarAngleControl;
+  NSTextField *_sunPolarAngleLabel;
+  NSSlider *_diffusivityControl;
+  NSTextField *_diffusivityLabel;
   NSTextField *_debugInfoLabel;
   NSTextField *_pointInfoHeading;
   NSTextField *_pointInfoLabel;
@@ -1289,6 +1299,53 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _panningSensitivityLabel.stringValue = [NSString stringWithFormat:@"%.0f", _panningSensitivity];
 }
 
+/// Publish lighting-only changes without retracing the terrain. Polar angle is
+/// measured down from the zenith, while the renderer stores elevation above
+/// the horizon.
+- (void)publishLightingControls {
+  _presentation.appearance.sun_azimuth =
+      _sunAzimuthControl.doubleValue * panorama::app::kDegreesToRadians;
+  _presentation.appearance.sun_elevation =
+      (90.0 - _sunPolarAngleControl.doubleValue) * panorama::app::kDegreesToRadians;
+  _presentation.appearance.diffusivity = static_cast<float>(_diffusivityControl.doubleValue);
+  _renderer->request_presentation(_presentation);
+}
+
+- (void)sunAzimuthChanged:(NSSlider *)sender {
+  constexpr double kDetentRadiusDegrees = 3.0;
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultSunAzimuthDegrees) <=
+      kDetentRadiusDegrees) {
+    sender.doubleValue = panorama::app::kDefaultSunAzimuthDegrees;
+  }
+  _sunAzimuthLabel.stringValue = [NSString stringWithFormat:@"%.0f°", sender.doubleValue];
+  [self publishLightingControls];
+}
+
+- (void)sunPolarAngleChanged:(NSSlider *)sender {
+  constexpr double kDetentRadiusDegrees = 2.0;
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultSunPolarAngleDegrees) <=
+      kDetentRadiusDegrees) {
+    sender.doubleValue = panorama::app::kDefaultSunPolarAngleDegrees;
+  }
+  _sunPolarAngleLabel.stringValue = [NSString stringWithFormat:@"%.0f°", sender.doubleValue];
+  [self publishLightingControls];
+}
+
+- (void)diffusivityChanged:(NSSlider *)sender {
+  constexpr double kDetentRadius = 0.02;
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultDiffusivity) <= kDetentRadius) {
+    sender.doubleValue = panorama::app::kDefaultDiffusivity;
+  }
+  _diffusivityLabel.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+  [self publishLightingControls];
+}
+
+- (void)normalLightingChanged:(NSButton *)sender {
+  _presentation.use_surface_normals = sender.state == NSControlStateValueOn;
+  [self updateSettingsControlAvailability];
+  _renderer->request_presentation(_presentation);
+}
+
 - (void)updateAspectLockAppearance {
   const BOOL locked = _aspectLockControl.state == NSControlStateValueOn;
   _aspectLockControl.image = [NSImage
@@ -1562,6 +1619,68 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _normalLightingControl.title = @"Shade using surface normals";
   _normalLightingControl.state =
       _presentation.use_surface_normals ? NSControlStateValueOn : NSControlStateValueOff;
+  _normalLightingControl.target = self;
+  _normalLightingControl.action = @selector(normalLightingChanged:);
+
+  _sunAzimuthControl = [NSSlider
+      sliderWithValue:_presentation.appearance.sun_azimuth * panorama::app::kRadiansToDegrees
+             minValue:0.0
+             maxValue:360.0
+               target:self
+               action:@selector(sunAzimuthChanged:)];
+  _sunAzimuthControl.continuous = YES;
+  _sunAzimuthControl.numberOfTickMarks = 9;
+  _sunAzimuthControl.allowsTickMarkValuesOnly = NO;
+  _sunAzimuthControl.toolTip = @"Clockwise from grid north";
+  _sunAzimuthLabel = [NSTextField
+      labelWithString:[NSString stringWithFormat:@"%.0f°", _sunAzimuthControl.doubleValue]];
+  _sunAzimuthLabel.alignment = NSTextAlignmentRight;
+  [_sunAzimuthLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *sunAzimuthSetting =
+      [NSStackView stackViewWithViews:@[ _sunAzimuthControl, _sunAzimuthLabel ]];
+  sunAzimuthSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  sunAzimuthSetting.alignment = NSLayoutAttributeCenterY;
+  sunAzimuthSetting.spacing = 6.0;
+
+  const double initialPolarAngle =
+      90.0 - _presentation.appearance.sun_elevation * panorama::app::kRadiansToDegrees;
+  _sunPolarAngleControl = [NSSlider sliderWithValue:initialPolarAngle
+                                           minValue:0.0
+                                           maxValue:180.0
+                                             target:self
+                                             action:@selector(sunPolarAngleChanged:)];
+  _sunPolarAngleControl.continuous = YES;
+  _sunPolarAngleControl.numberOfTickMarks = 7;
+  _sunPolarAngleControl.allowsTickMarkValuesOnly = NO;
+  _sunPolarAngleControl.toolTip = @"0° overhead, 90° at the horizon";
+  _sunPolarAngleLabel =
+      [NSTextField labelWithString:[NSString stringWithFormat:@"%.0f°", initialPolarAngle]];
+  _sunPolarAngleLabel.alignment = NSTextAlignmentRight;
+  [_sunPolarAngleLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *sunPolarAngleSetting =
+      [NSStackView stackViewWithViews:@[ _sunPolarAngleControl, _sunPolarAngleLabel ]];
+  sunPolarAngleSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  sunPolarAngleSetting.alignment = NSLayoutAttributeCenterY;
+  sunPolarAngleSetting.spacing = 6.0;
+
+  _diffusivityControl = [NSSlider sliderWithValue:_presentation.appearance.diffusivity
+                                         minValue:0.0
+                                         maxValue:1.0
+                                           target:self
+                                           action:@selector(diffusivityChanged:)];
+  _diffusivityControl.continuous = YES;
+  _diffusivityControl.numberOfTickMarks = 11;
+  _diffusivityControl.allowsTickMarkValuesOnly = NO;
+  _diffusivityControl.toolTip = @"Strength of directional diffuse lighting";
+  _diffusivityLabel = [NSTextField
+      labelWithString:[NSString stringWithFormat:@"%.2f", _diffusivityControl.doubleValue]];
+  _diffusivityLabel.alignment = NSTextAlignmentRight;
+  [_diffusivityLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *diffusivitySetting =
+      [NSStackView stackViewWithViews:@[ _diffusivityControl, _diffusivityLabel ]];
+  diffusivitySetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  diffusivitySetting.alignment = NSLayoutAttributeCenterY;
+  diffusivitySetting.spacing = 6.0;
 
   NSButton *apply = [[NSButton alloc] initWithFrame:NSZeroRect];
   apply.title = @"Apply";
@@ -1598,6 +1717,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     make_row(@"Range minimum", _minimumControl),
     make_row(@"Range maximum", _maximumControl),
     _normalLightingControl,
+    make_row(@"Sun azimuth", sunAzimuthSetting),
+    make_row(@"Sun polar angle", sunPolarAngleSetting),
+    make_row(@"Diffusivity", diffusivitySetting),
     apply,
   ]];
   settings.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -1781,6 +1903,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _colourmapControl.enabled = scalarColour;
   _minimumControl.enabled = scalarColour;
   _maximumControl.enabled = scalarColour;
+  const BOOL normalLighting = _normalLightingControl.state == NSControlStateValueOn;
+  _sunAzimuthControl.enabled = normalLighting;
+  _sunPolarAngleControl.enabled = normalLighting;
+  _diffusivityControl.enabled = normalLighting;
 }
 
 - (void)renderModeChanged:(id)sender {
@@ -1835,6 +1961,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       static_cast<float>(*maximum),
   };
   _presentation.use_surface_normals = _normalLightingControl.state == NSControlStateValueOn;
+  _presentation.appearance.sun_azimuth =
+      _sunAzimuthControl.doubleValue * panorama::app::kDegreesToRadians;
+  _presentation.appearance.sun_elevation =
+      (90.0 - _sunPolarAngleControl.doubleValue) * panorama::app::kDegreesToRadians;
+  _presentation.appearance.diffusivity = static_cast<float>(_diffusivityControl.doubleValue);
   _renderer->request_presentation(_presentation);
 
   const panorama::ImageSize next_image = {*width, *height};

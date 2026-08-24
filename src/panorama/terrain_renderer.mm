@@ -28,7 +28,8 @@ void validate_output_configuration(const TerrainRenderOutputs &outputs) {
   const SyntheticRenderOptions &synthetic = outputs.synthetic_options;
   if (!std::isfinite(synthetic.sun_azimuth) || !std::isfinite(synthetic.sun_elevation) ||
       !std::isfinite(synthetic.ambient_light) || synthetic.ambient_light < 0.0F ||
-      synthetic.ambient_light > 1.0F ||
+      synthetic.ambient_light > 1.0F || !std::isfinite(synthetic.diffusivity) ||
+      synthetic.diffusivity < 0.0F || synthetic.diffusivity > 1.0F ||
       static_cast<uint32_t>(synthetic.colour_source) >
           static_cast<uint32_t>(TerrainColourSource::Elevation) ||
       static_cast<uint32_t>(synthetic.colourmap) > static_cast<uint32_t>(PresetColourmap::Turbo)) {

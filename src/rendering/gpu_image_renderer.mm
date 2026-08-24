@@ -251,8 +251,9 @@ void GpuImageRenderer::render_synthetic(
       (scalar_colour && colour_values == nil) || !std::isfinite(options.sun_azimuth) ||
       !std::isfinite(options.sun_elevation) || !std::isfinite(options.ambient_light) ||
       options.ambient_light < 0.0F || options.ambient_light > 1.0F ||
-      !std::isfinite(range.minimum) || !std::isfinite(range.maximum) ||
-      range.maximum <= range.minimum ||
+      !std::isfinite(options.diffusivity) || options.diffusivity < 0.0F ||
+      options.diffusivity > 1.0F || !std::isfinite(range.minimum) ||
+      !std::isfinite(range.maximum) || range.maximum <= range.minimum ||
       colour_source > static_cast<uint32_t>(TerrainColourSource::Elevation) ||
       colourmap > static_cast<uint32_t>(PresetColourmap::Turbo)) {
     throw std::invalid_argument("Synthetic presentation inputs are invalid");
@@ -290,8 +291,10 @@ void GpuImageRenderer::render_synthetic(
     [encoder setBytes:&range length:sizeof(range) atIndex:4];
     [encoder setBytes:&colourmap length:sizeof(colourmap) atIndex:5];
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:6];
+    [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:7];
   } else {
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:3];
+    [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:4];
   }
   [encoder setTexture:state.output atIndex:0];
   dispatch_image(encoder, pipeline, state.image);

@@ -140,6 +140,7 @@ kernel void present_synthetic_terrain(
     device const float *distances [[buffer(1)]],
     constant float4 &sun_and_ambient [[buffer(2)]],
     constant uint &use_surface_normals [[buffer(3)]],
+    constant float &diffusivity [[buffer(4)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
@@ -159,7 +160,7 @@ kernel void present_synthetic_terrain(
 
   const float diffuse =
       max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
-  const float linear = sun_and_ambient.w + (1.0F - sun_and_ambient.w) * diffuse;
+  const float linear = sun_and_ambient.w + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
   const float srgb =
       linear <= 0.0031308F ? 12.92F * linear : 1.055F * pow(linear, 1.0F / 2.4F) - 0.055F;
   output.write(float4(srgb, srgb, srgb, 1.0F), position);
@@ -177,6 +178,7 @@ kernel void present_colourmapped_synthetic_terrain(
     constant float2 &range [[buffer(4)]],
     constant uint &colourmap [[buffer(5)]],
     constant uint &use_surface_normals [[buffer(6)]],
+    constant float &diffusivity [[buffer(7)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
@@ -198,7 +200,7 @@ kernel void present_colourmapped_synthetic_terrain(
   }
   const float diffuse =
       max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
-  const float illumination = sun_and_ambient.w + (1.0F - sun_and_ambient.w) * diffuse;
+  const float illumination = sun_and_ambient.w + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
   output.write(float4(linear_to_srgb(srgb_to_linear(base_srgb) * illumination), 1.0F), position);
 }
 

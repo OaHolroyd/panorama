@@ -45,6 +45,7 @@ struct EntrypointSettings {
       225.0 * kDegreesToRadians,
       35.0 * kDegreesToRadians,
       0.28F,
+      1.0F,
   };
   double easting = 2623452.4;
   double northing = 1100502.2;
@@ -187,6 +188,7 @@ void print_usage(const char *program) {
       "  --sun-azimuth D       clockwise from grid north (default: 225)\n"
       "  --sun-elevation D     above the horizon (default: 35)\n"
       "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
+      "  --diffusivity V       directional diffuse-light strength, 0 to 1 (default: 1)\n"
       "  --terrain-colour MODE white, distance, or elevation (default: white)\n"
       "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, or turbo\n"
       "                        (default: viridis)\n"
@@ -277,6 +279,13 @@ void print_usage(const char *program) {
       }
       settings.synthetic.ambient_light = static_cast<float>(parsed);
       settings.synthetic_setting_seen = true;
+    } else if (option == "--diffusivity") {
+      const double parsed = panorama::arguments::parse_finite_double(value, option);
+      if (parsed < 0.0 || parsed > 1.0) {
+        throw std::out_of_range("Diffusivity must be between zero and one");
+      }
+      settings.synthetic.diffusivity = static_cast<float>(parsed);
+      settings.synthetic_setting_seen = true;
     } else if (option == "--colour-min") {
       settings.colour_minimum = parse_float32(value, option);
       settings.colour_range_setting_seen = true;
@@ -362,10 +371,11 @@ int main(int argc, const char *argv[]) {
     if (settings.write_synthetic) {
       std::printf(
           "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f, "
-          "terrain colour %s",
+          "diffusivity %.3f, terrain colour %s",
           settings.synthetic.sun_azimuth / kDegreesToRadians,
           settings.synthetic.sun_elevation / kDegreesToRadians,
           settings.synthetic.ambient_light,
+          settings.synthetic.diffusivity,
           choice_name(settings.synthetic.colour_source, kTerrainColours)
       );
       if (settings.synthetic.colour_source != panorama::TerrainColourSource::White) {
