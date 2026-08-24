@@ -216,6 +216,89 @@ struct PointInspection {
   float aspect_degrees;
 };
 
+/// Screen-space position of a locked world point in the current camera view.
+/// Off-screen projections retain a direction from the image centre so the UI
+/// can place a directional marker at the nearest edge.
+struct LockedPointProjection {
+  bool onscreen;
+  double pixel_x;
+  double pixel_y;
+  double direction_x;
+  double direction_y;
+};
+
+/// Reproject a sampled terrain location through the viewer's ideal pinhole
+/// camera. The curvature adjustment reconstructs the apparent vertical ray
+/// displacement used when the original terrain collision was recorded.
+[[nodiscard]] LockedPointProjection project_locked_point(
+    const PointInspection &point,
+    ObserverLocation observer,
+    ImageSize image,
+    double horizontal_field_of_view,
+    CameraOrientation orientation
+) {
+  const double east = point.easting - observer.easting;
+  const double north = point.northing - observer.northing;
+  const double horizontal_distance = std::hypot(east, north);
+  const double up = point.elevation - observer.elevation -
+                    kCurvatureCoefficient * horizontal_distance * horizontal_distance;
+
+  const double sin_heading = std::sin(orientation.heading);
+  const double cos_heading = std::cos(orientation.heading);
+  const double sin_pitch = std::sin(orientation.pitch);
+  const double cos_pitch = std::cos(orientation.pitch);
+  const double sin_roll = std::sin(orientation.roll);
+  const double cos_roll = std::cos(orientation.roll);
+
+  const double forward_east = cos_pitch * sin_heading;
+  const double forward_north = cos_pitch * cos_heading;
+  const double forward_up = sin_pitch;
+  const double pitched_up_east = -sin_pitch * sin_heading;
+  const double pitched_up_north = -sin_pitch * cos_heading;
+  const double right_east = cos_roll * cos_heading + sin_roll * pitched_up_east;
+  const double right_north = -cos_roll * sin_heading + sin_roll * pitched_up_north;
+  const double right_up = sin_roll * cos_pitch;
+  const double camera_up_east = -sin_roll * cos_heading + cos_roll * pitched_up_east;
+  const double camera_up_north = sin_roll * sin_heading + cos_roll * pitched_up_north;
+  const double camera_up_up = cos_roll * cos_pitch;
+
+  const double forward = east * forward_east + north * forward_north + up * forward_up;
+  const double right = east * right_east + north * right_north + up * right_up;
+  const double down = -(east * camera_up_east + north * camera_up_north + up * camera_up_up);
+  const CameraIntrinsics intrinsics =
+      CameraIntrinsics::from_horizontal_field_of_view(image, horizontal_field_of_view);
+
+  double pixel_x = intrinsics.principal_x;
+  double pixel_y = intrinsics.principal_y;
+  if (forward > 1e-9) {
+    pixel_x += intrinsics.focal_x * right / forward;
+    pixel_y += intrinsics.focal_y * down / forward;
+  }
+  const bool finite = std::isfinite(pixel_x) && std::isfinite(pixel_y);
+  const bool onscreen = finite && forward > 0.0 && pixel_x >= 0.0 && pixel_y >= 0.0 &&
+                        pixel_x < image.width && pixel_y < image.height;
+  if (forward > 1e-9 && finite) {
+    return {
+        onscreen,
+        pixel_x,
+        pixel_y,
+        pixel_x - intrinsics.principal_x,
+        pixel_y - intrinsics.principal_y,
+    };
+  }
+
+  // A point behind the image plane has no finite pinhole coordinate. Camera
+  // right/down components still give a useful direction in which to turn.
+  double direction_x = right;
+  double direction_y = down;
+  if (!std::isfinite(direction_x) || !std::isfinite(direction_y) ||
+      std::hypot(direction_x, direction_y) < 1e-12) {
+    direction_x = 1.0;
+    direction_y = 0.0;
+  }
+  return {false, pixel_x, pixel_y, direction_x, direction_y};
+}
+
 struct PresentedFrame {
   id<MTLTexture> texture;
   CameraOrientation orientation;
@@ -224,6 +307,7 @@ struct PresentedFrame {
   std::string error;
   std::optional<PointInspection> inspection;
   uint64_t inspection_sequence;
+  uint64_t inspection_request_token;
 };
 
 /// Decode one IEEE float16 value emitted by Metal without depending on a SIMD
@@ -308,13 +392,17 @@ public:
 
   /// Coalesce hover events to the latest output pixel. A missing pixel clears
   /// the published sample when inspection is disabled or leaves the image.
-  void request_inspection(std::optional<InspectionPixel> pixel) {
+  uint64_t request_inspection(std::optional<InspectionPixel> pixel) {
+    uint64_t token = 0U;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       requested_inspection_ = pixel;
+      requested_inspection_token_++;
+      token = requested_inspection_token_;
       inspection_pending_ = true;
     }
     changed_.notify_one();
+    return token;
   }
 
   [[nodiscard]] PresentedFrame presented_frame() const {
@@ -327,6 +415,7 @@ public:
         error_,
         presented_inspection_,
         presented_inspection_sequence_,
+        presented_inspection_token_,
     };
   }
 
@@ -396,6 +485,7 @@ private:
       bool presentation_requested = false;
       bool inspection_requested = false;
       std::optional<InspectionPixel> inspection_pixel;
+      uint64_t inspection_token = 0U;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock, [this] {
@@ -411,6 +501,7 @@ private:
         presentation_requested = presentation_pending_;
         inspection_requested = inspection_pending_;
         inspection_pixel = requested_inspection_;
+        inspection_token = requested_inspection_token_;
         trace_pending_ = false;
         presentation_pending_ = false;
         inspection_pending_ = false;
@@ -465,6 +556,7 @@ private:
           if (publish_inspection) {
             presented_inspection_ = inspection;
             presented_inspection_sequence_++;
+            presented_inspection_token_ = inspection_token;
           }
         }
       } catch (const std::exception &exception) {
@@ -489,8 +581,10 @@ private:
   std::optional<PointInspection> presented_inspection_;
   id<MTLTexture> presented_texture_;
   uint64_t requested_revision_ = 0U;
+  uint64_t requested_inspection_token_ = 0U;
   uint64_t presented_revision_ = 0U;
   uint64_t presented_inspection_sequence_ = 0U;
+  uint64_t presented_inspection_token_ = 0U;
   double frame_ms_ = 0.0;
   std::string error_;
   bool trace_pending_ = false;
@@ -505,14 +599,33 @@ private:
 @class PanoramaController;
 @class ViewerOverlayView;
 
+/// Non-interactive symbol layered over the Metal view for a locked point.
+@interface LockedPointMarkerView : NSImageView
+@end
+
+@implementation LockedPointMarkerView
+- (NSView *)hitTest:(NSPoint)point {
+  (void)point;
+  return nil;
+}
+@end
+
 @interface PanoramaView : MTKView {
 @private
   NSPoint _lastMouseLocation;
   NSTrackingArea *_inspectionTrackingArea;
+  LockedPointMarkerView *_lockedPointMarker;
+  double _lockedPointPixelX;
+  double _lockedPointPixelY;
+  double _lockedPointDirectionX;
+  double _lockedPointDirectionY;
   bool _pointInspectionEnabled;
+  bool _lockedPointIndicatorActive;
+  bool _lockedPointOnscreen;
 }
 @property(nonatomic, weak) PanoramaController *panoramaController;
 - (void)setPointInspectionEnabled:(bool)enabled;
+- (void)setLockedPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection;
 @end
 
 @interface PanoramaController : NSObject <MTKViewDelegate> {
@@ -523,16 +636,21 @@ private:
   __weak ViewerOverlayView *_overlayView;
   panorama::CameraOrientation _orientation;
   panorama::TerrainPresentationSettings _presentation;
+  std::optional<panorama::app::PointInspection> _lockedPoint;
   NSPopUpButton *_colourSourceControl;
   NSPopUpButton *_colourmapControl;
   NSTextField *_minimumControl;
   NSTextField *_maximumControl;
   NSButton *_normalLightingControl;
   NSTextField *_debugInfoLabel;
+  NSTextField *_pointInfoHeading;
   NSTextField *_pointInfoLabel;
   uint64_t _displayedRevision;
   uint64_t _displayedInspectionSequence;
+  uint64_t _pointLockRequestToken;
   bool _pointInspectionEnabled;
+  bool _pointInspectionLocked;
+  bool _pointLockPending;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
                           window:(NSWindow *)window;
@@ -540,6 +658,7 @@ private:
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView;
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y;
+- (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)clearPointInspection;
 - (void)togglePointInspection:(id)sender;
 - (NSViewController *)makeSettingsViewController;
@@ -548,6 +667,105 @@ private:
 @end
 
 @implementation PanoramaView
+
+/// Position the marker using the current displayed view bounds. Keeping the
+/// projection in image coordinates lets ordinary AppKit layout handle window
+/// resizing without retracing or resampling the locked point.
+- (void)layoutLockedPointIndicator {
+  if (!_lockedPointIndicatorActive || _lockedPointMarker == nil) {
+    _lockedPointMarker.hidden = YES;
+    return;
+  }
+  const NSRect bounds = self.bounds;
+  const double image_width = self.drawableSize.width;
+  const double image_height = self.drawableSize.height;
+  constexpr CGFloat kMarkerSize = 26.0;
+  constexpr CGFloat kEdgeInset = 18.0;
+  if (bounds.size.width <= kMarkerSize || bounds.size.height <= kMarkerSize || image_width <= 0.0 ||
+      image_height <= 0.0) {
+    _lockedPointMarker.hidden = YES;
+    return;
+  }
+
+  NSPoint centre = {};
+  if (_lockedPointOnscreen) {
+    centre.x =
+        NSMinX(bounds) + static_cast<CGFloat>(_lockedPointPixelX / image_width) * bounds.size.width;
+    centre.y = NSMaxY(bounds) -
+               static_cast<CGFloat>(_lockedPointPixelY / image_height) * bounds.size.height;
+    _lockedPointMarker.image = [NSImage imageWithSystemSymbolName:@"scope"
+                                         accessibilityDescription:@"Locked terrain point"];
+    [_lockedPointMarker.layer setAffineTransform:CGAffineTransformIdentity];
+    _lockedPointMarker.toolTip = @"Locked terrain point";
+  } else {
+    // Convert the image's downward-positive direction to AppKit's upward-
+    // positive coordinates, then intersect it with an inset view rectangle.
+    double direction_x = _lockedPointDirectionX;
+    double direction_y = -_lockedPointDirectionY;
+    const double length = std::hypot(direction_x, direction_y);
+    if (!std::isfinite(length) || length < 1e-12) {
+      direction_x = 1.0;
+      direction_y = 0.0;
+    }
+    const CGFloat half_width = std::max(0.0, bounds.size.width * 0.5 - kEdgeInset);
+    const CGFloat half_height = std::max(0.0, bounds.size.height * 0.5 - kEdgeInset);
+    const double horizontal_scale = std::abs(direction_x) > 1e-12
+                                        ? half_width / std::abs(direction_x)
+                                        : std::numeric_limits<double>::infinity();
+    const double vertical_scale = std::abs(direction_y) > 1e-12
+                                      ? half_height / std::abs(direction_y)
+                                      : std::numeric_limits<double>::infinity();
+    const double scale = std::min(horizontal_scale, vertical_scale);
+    centre = NSMakePoint(
+        NSMidX(bounds) + static_cast<CGFloat>(direction_x * scale),
+        NSMidY(bounds) + static_cast<CGFloat>(direction_y * scale)
+    );
+    _lockedPointMarker.image =
+        [NSImage imageWithSystemSymbolName:@"arrow.up.circle.fill"
+                  accessibilityDescription:@"Locked terrain point is outside the view"];
+    const CGFloat rotation = static_cast<CGFloat>(std::atan2(-direction_x, direction_y));
+    [_lockedPointMarker.layer setAffineTransform:CGAffineTransformMakeRotation(rotation)];
+    _lockedPointMarker.toolTip = @"Locked terrain point is outside the view";
+  }
+
+  _lockedPointMarker.frame = NSMakeRect(
+      centre.x - kMarkerSize * 0.5,
+      centre.y - kMarkerSize * 0.5,
+      kMarkerSize,
+      kMarkerSize
+  );
+  _lockedPointMarker.hidden = NO;
+}
+
+- (void)setLockedPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection {
+  _lockedPointIndicatorActive = projection.has_value();
+  if (!_lockedPointIndicatorActive) {
+    _lockedPointMarker.hidden = YES;
+    return;
+  }
+  if (_lockedPointMarker == nil) {
+    _lockedPointMarker = [[LockedPointMarkerView alloc] initWithFrame:NSZeroRect];
+    _lockedPointMarker.imageScaling = NSImageScaleProportionallyUpOrDown;
+    _lockedPointMarker.contentTintColor = NSColor.systemOrangeColor;
+    _lockedPointMarker.wantsLayer = YES;
+    _lockedPointMarker.layer.shadowColor = NSColor.blackColor.CGColor;
+    _lockedPointMarker.layer.shadowOpacity = 0.9F;
+    _lockedPointMarker.layer.shadowRadius = 2.0;
+    _lockedPointMarker.layer.shadowOffset = CGSizeZero;
+    [self addSubview:_lockedPointMarker];
+  }
+  _lockedPointOnscreen = projection->onscreen;
+  _lockedPointPixelX = projection->pixel_x;
+  _lockedPointPixelY = projection->pixel_y;
+  _lockedPointDirectionX = projection->direction_x;
+  _lockedPointDirectionY = projection->direction_y;
+  [self layoutLockedPointIndicator];
+}
+
+- (void)layout {
+  [super layout];
+  [self layoutLockedPointIndicator];
+}
 
 - (void)updateTrackingAreas {
   [super updateTrackingAreas];
@@ -581,17 +799,14 @@ private:
   [self.window invalidateCursorRectsForView:self];
 }
 
-- (void)mouseMoved:(NSEvent *)event {
-  if (!_pointInspectionEnabled) {
-    [super mouseMoved:event];
-    return;
-  }
+/// Convert an AppKit event location into the fixed, top-left-origin ray image.
+- (BOOL)inspectionPixelForEvent:(NSEvent *)event x:(uint32_t *)x y:(uint32_t *)y {
   const NSRect bounds = self.bounds;
   const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
   const uint32_t width = static_cast<uint32_t>(self.drawableSize.width);
   const uint32_t height = static_cast<uint32_t>(self.drawableSize.height);
   if (bounds.size.width <= 0.0 || bounds.size.height <= 0.0 || width == 0U || height == 0U) {
-    return;
+    return NO;
   }
 
   // AppKit view coordinates rise from the bottom-left, whereas RayField rows
@@ -600,11 +815,36 @@ private:
       std::clamp((location.x - NSMinX(bounds)) / bounds.size.width, 0.0, 1.0);
   const double normalised_y =
       std::clamp((NSMaxY(bounds) - location.y) / bounds.size.height, 0.0, 1.0);
-  const uint32_t x =
-      std::min(width - 1U, static_cast<uint32_t>(normalised_x * static_cast<double>(width)));
-  const uint32_t y =
-      std::min(height - 1U, static_cast<uint32_t>(normalised_y * static_cast<double>(height)));
+  *x = std::min(width - 1U, static_cast<uint32_t>(normalised_x * static_cast<double>(width)));
+  *y = std::min(height - 1U, static_cast<uint32_t>(normalised_y * static_cast<double>(height)));
+  return YES;
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+  if (!_pointInspectionEnabled) {
+    [super mouseMoved:event];
+    return;
+  }
+  uint32_t x = 0U;
+  uint32_t y = 0U;
+  if (![self inspectionPixelForEvent:event x:&x y:&y]) {
+    return;
+  }
   [self.panoramaController inspectPixelX:x y:y];
+}
+
+/// Right-click locks the current terrain sample without consuming the
+/// left-button drag gesture used to rotate the camera.
+- (void)rightMouseDown:(NSEvent *)event {
+  if (!_pointInspectionEnabled) {
+    [super rightMouseDown:event];
+    return;
+  }
+  uint32_t x = 0U;
+  uint32_t y = 0U;
+  if ([self inspectionPixelForEvent:event x:&x y:&y]) {
+    [self.panoramaController togglePointLockAtPixelX:x y:y];
+  }
 }
 
 - (void)mouseExited:(NSEvent *)event {
@@ -916,21 +1156,49 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
-  if (_pointInspectionEnabled) {
+  if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending) {
     _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
   }
 }
 
+- (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y {
+  if (!_pointInspectionEnabled) {
+    return;
+  }
+  if (_pointInspectionLocked || _pointLockPending) {
+    _pointInspectionLocked = false;
+    _pointLockPending = false;
+    _lockedPoint.reset();
+    [_panoramaView setLockedPointIndicator:std::nullopt];
+    _pointInfoHeading.stringValue = @"Point Info";
+    _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+    return;
+  }
+
+  _pointLockPending = true;
+  _pointInfoHeading.stringValue = @"Point Info — Locking…";
+  _pointLockRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+}
+
 - (void)clearPointInspection {
-  _renderer->request_inspection(std::nullopt);
+  if (!_pointInspectionLocked && !_pointLockPending) {
+    _renderer->request_inspection(std::nullopt);
+  }
 }
 
 - (void)togglePointInspection:(id)sender {
   _pointInspectionEnabled = !_pointInspectionEnabled;
+  _pointInspectionLocked = false;
+  _pointLockPending = false;
+  _lockedPoint.reset();
+  [_panoramaView setLockedPointIndicator:std::nullopt];
   [_panoramaView setPointInspectionEnabled:_pointInspectionEnabled];
   [_overlayView setPointInfoVisible:_pointInspectionEnabled];
+  _pointInfoHeading.stringValue = @"Point Info";
   if (!_pointInspectionEnabled) {
     [self clearPointInspection];
+  } else {
+    [self updatePointInfo:std::nullopt];
   }
 
   if ([sender isKindOfClass:NSToolbarItem.class]) {
@@ -1099,14 +1367,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 174.0)];
   viewController.view = content;
 
-  NSTextField *heading = [NSTextField labelWithString:@"Point Info"];
-  heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-  _pointInfoLabel = [NSTextField labelWithString:@"Move the pointer over the rendered terrain."];
+  _pointInfoHeading = [NSTextField labelWithString:@"Point Info"];
+  _pointInfoHeading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+  _pointInfoLabel = [NSTextField labelWithString:@"Move the pointer over the rendered terrain.\n"
+                                                  "Right-click to lock a point."];
   _pointInfoLabel.font = [NSFont monospacedSystemFontOfSize:12.0 weight:NSFontWeightRegular];
   _pointInfoLabel.maximumNumberOfLines = 0;
   _pointInfoLabel.lineBreakMode = NSLineBreakByWordWrapping;
 
-  NSStackView *pointInfo = [NSStackView stackViewWithViews:@[ heading, _pointInfoLabel ]];
+  NSStackView *pointInfo = [NSStackView stackViewWithViews:@[ _pointInfoHeading, _pointInfoLabel ]];
   pointInfo.orientation = NSUserInterfaceLayoutOrientationVertical;
   pointInfo.alignment = NSLayoutAttributeLeading;
   pointInfo.spacing = 10.0;
@@ -1126,7 +1395,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   if (!inspection.has_value()) {
-    _pointInfoLabel.stringValue = @"Move the pointer over the rendered terrain.";
+    _pointInfoLabel.stringValue = @"Move the pointer over the rendered terrain.\n"
+                                   "Right-click to lock a point.";
     return;
   }
   const panorama::app::PointInspection &point = *inspection;
@@ -1150,6 +1420,26 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                  point.northing,
                                  point.slope_degrees,
                                  point.aspect_degrees];
+}
+
+/// Keep a locked world point aligned with the latest completed camera view.
+/// The off-screen state is represented both by an edge arrow and in text, so
+/// the lock remains unambiguous even if another overlay obscures the marker.
+- (void)updateLockedPointIndicatorWithOrientation:(panorama::CameraOrientation)orientation {
+  if (!_pointInspectionLocked || !_lockedPoint.has_value()) {
+    [_panoramaView setLockedPointIndicator:std::nullopt];
+    return;
+  }
+  const panorama::app::LockedPointProjection projection = panorama::app::project_locked_point(
+      *_lockedPoint,
+      _renderer->observer(),
+      _renderer->image(),
+      _renderer->horizontal_field_of_view(),
+      orientation
+  );
+  [_panoramaView setLockedPointIndicator:projection];
+  _pointInfoHeading.stringValue =
+      projection.onscreen ? @"Point Info — Locked" : @"Point Info — Locked (Off-screen)";
 }
 
 /// Palette and range controls have no effect on the uncoloured white mode.
@@ -1235,7 +1525,23 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _displayedInspectionSequence = frame.inspection_sequence;
     const bool matches_visible_frame =
         !frame.inspection.has_value() || frame.inspection->revision == frame.revision;
-    [self updatePointInfo:matches_visible_frame ? frame.inspection : std::nullopt];
+    if (_pointLockPending && frame.inspection_request_token == _pointLockRequestToken &&
+        matches_visible_frame && frame.inspection.has_value()) {
+      _pointLockPending = false;
+      [self updatePointInfo:frame.inspection];
+      if (frame.inspection->hit) {
+        _pointInspectionLocked = true;
+        _lockedPoint = frame.inspection;
+        [self updateLockedPointIndicatorWithOrientation:frame.orientation];
+        // The label now owns the immutable sampled values. Stop the renderer
+        // resampling this screen pixel as subsequent camera views complete.
+        _renderer->request_inspection(std::nullopt);
+      } else {
+        _pointInfoHeading.stringValue = @"Point Info";
+      }
+    } else if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending) {
+      [self updatePointInfo:matches_visible_frame ? frame.inspection : std::nullopt];
+    }
   }
 
   if (!frame.error.empty()) {
@@ -1246,6 +1552,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [self updateDebugInfoWithOrientation:frame.orientation
                             milliseconds:frame.milliseconds
                                 revision:frame.revision];
+    [self updateLockedPointIndicatorWithOrientation:frame.orientation];
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",
                          frame.orientation.heading * panorama::app::kRadiansToDegrees,
@@ -1345,7 +1652,7 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   } else {
     item.label = @"Inspect Point";
     item.paletteLabel = @"Inspect Point";
-    item.toolTip = @"Inspect terrain beneath the pointer";
+    item.toolTip = @"Inspect terrain beneath the pointer; right-click to lock a point";
     item.image = [NSImage imageWithSystemSymbolName:@"scope"
                            accessibilityDescription:@"Toggle Point Inspection"];
     item.target = _controller;
