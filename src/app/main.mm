@@ -482,8 +482,10 @@ private:
 @interface InspectorOverlayView : NSView {
 @private
   NSView *_contentView;
-  NSVisualEffectView *_inspectorView;
+  NSView *_inspectorView;
+  NSView *_settingsView;
   CGFloat _inspectorWidth;
+  CGFloat _inspectorMargin;
   bool _inspectorVisible;
 }
 - (instancetype)initWithFrame:(NSRect)frame
@@ -502,39 +504,58 @@ private:
   self = [super initWithFrame:frame];
   if (self != nil) {
     _contentView = contentView;
+    _settingsView = settingsView;
     _inspectorWidth = inspectorWidth;
+    _inspectorMargin = 12.0;
     _inspectorVisible = true;
     self.wantsLayer = YES;
     self.layer.masksToBounds = YES;
     [self addSubview:_contentView];
 
-    _inspectorView = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
-    _inspectorView.material = NSVisualEffectMaterialSidebar;
-    _inspectorView.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    _inspectorView.state = NSVisualEffectStateActive;
+    if (@available(macOS 26.0, *)) {
+      NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:NSZeroRect];
+      glass.style = NSGlassEffectViewStyleRegular;
+      glass.cornerRadius = 18.0;
+      glass.contentView = _settingsView;
+      _inspectorView = glass;
+    } else {
+      NSVisualEffectView *material = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+      material.material = NSVisualEffectMaterialSidebar;
+      material.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+      material.state = NSVisualEffectStateActive;
+      material.wantsLayer = YES;
+      material.layer.cornerRadius = 18.0;
+      material.layer.masksToBounds = YES;
+      [material addSubview:_settingsView];
+      _inspectorView = material;
+    }
     [self addSubview:_inspectorView];
 
-    settingsView.frame = _inspectorView.bounds;
-    settingsView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [_inspectorView addSubview:settingsView];
-    NSBox *separator = [[NSBox alloc] initWithFrame:NSMakeRect(0.0, 0.0, 1.0, frame.size.height)];
-    separator.boxType = NSBoxSeparator;
-    separator.autoresizingMask = NSViewHeightSizable;
-    [_inspectorView addSubview:separator];
+    _settingsView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   }
   return self;
 }
 
 - (NSRect)inspectorFrameForVisible:(bool)visible {
   const NSRect bounds = self.bounds;
-  const CGFloat x = NSMaxX(bounds) - (visible ? _inspectorWidth : 0.0);
-  return NSMakeRect(x, bounds.origin.y, _inspectorWidth, bounds.size.height);
+  // Full-size window content extends beneath the titlebar so the native
+  // toolbar can float over it. Keep the inspector inside AppKit's safe area,
+  // clear of the toolbar and window controls, while allowing the terrain view
+  // itself to fill the window.
+  const NSEdgeInsets safeArea = self.safeAreaInsets;
+  const CGFloat x = visible ? NSMaxX(bounds) - safeArea.right - _inspectorWidth - _inspectorMargin
+                            : NSMaxX(bounds) + _inspectorMargin;
+  const CGFloat bottom = safeArea.bottom + _inspectorMargin;
+  const CGFloat top = safeArea.top + _inspectorMargin;
+  const CGFloat height = std::max(0.0, bounds.size.height - bottom - top);
+  return NSMakeRect(x, bounds.origin.y + bottom, _inspectorWidth, height);
 }
 
 - (void)layout {
   [super layout];
   _contentView.frame = self.bounds;
   _inspectorView.frame = [self inspectorFrameForVisible:_inspectorVisible];
+  _settingsView.frame = _inspectorView.bounds;
 }
 
 - (void)toggleInspector:(id)sender {
@@ -741,8 +762,6 @@ private:
 
 @end
 
-static NSString *const kInspectorToolbarItemIdentifier = @"panorama.inspector";
-
 @interface PanoramaAppDelegate : NSObject <NSApplicationDelegate, NSToolbarDelegate> {
 @private
   std::unique_ptr<panorama::app::ViewerRenderer> _renderer;
@@ -766,7 +785,7 @@ static NSString *const kInspectorToolbarItemIdentifier = @"panorama.inspector";
 /// Put the inspector control at the trailing edge, matching native macOS apps.
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
   (void)toolbar;
-  return @[ NSToolbarFlexibleSpaceItemIdentifier, kInspectorToolbarItemIdentifier ];
+  return @[ NSToolbarFlexibleSpaceItemIdentifier, NSToolbarToggleInspectorItemIdentifier ];
 }
 
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
@@ -774,7 +793,7 @@ static NSString *const kInspectorToolbarItemIdentifier = @"panorama.inspector";
   return @[
     NSToolbarFlexibleSpaceItemIdentifier,
     NSToolbarSpaceItemIdentifier,
-    kInspectorToolbarItemIdentifier,
+    NSToolbarToggleInspectorItemIdentifier,
   ];
 }
 
@@ -783,15 +802,21 @@ static NSString *const kInspectorToolbarItemIdentifier = @"panorama.inspector";
     willBeInsertedIntoToolbar:(BOOL)willBeInserted {
   (void)toolbar;
   (void)willBeInserted;
-  if (![itemIdentifier isEqualToString:kInspectorToolbarItemIdentifier]) {
+  if (![itemIdentifier isEqualToString:NSToolbarToggleInspectorItemIdentifier]) {
     return nil;
   }
+
+  // Using the standard identifier preserves AppKit's inspector semantics,
+  // while supplying the item here is necessary for this delegate-managed
+  // toolbar to instantiate it. A viewless bordered item receives the native
+  // toolbar appearance, including Liquid Glass on supported macOS releases.
   NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier];
   item.label = @"Inspector";
   item.paletteLabel = @"Inspector";
   item.toolTip = @"Show or hide the render settings inspector";
   item.image = [NSImage imageWithSystemSymbolName:@"sidebar.right"
                          accessibilityDescription:@"Toggle Inspector"];
+  item.bordered = YES;
   item.target = _overlayView;
   item.action = @selector(toggleInspector:);
   return item;
@@ -806,7 +831,8 @@ static NSString *const kInspectorToolbarItemIdentifier = @"panorama.inspector";
   _window = [[NSWindow alloc]
       initWithContentRect:windowFrame
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                          NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                          NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+                          NSWindowStyleMaskFullSizeContentView
                   backing:NSBackingStoreBuffered
                     defer:NO];
   _window.title = @"panorama-app — drag or use WASD/arrow keys to look around";
@@ -840,8 +866,13 @@ static NSString *const kInspectorToolbarItemIdentifier = @"panorama.inspector";
   toolbar.displayMode = NSToolbarDisplayModeIconOnly;
   toolbar.allowsUserCustomization = NO;
   _window.toolbar = toolbar;
-  _window.toolbarStyle = NSWindowToolbarStyleUnified;
+  // Standard AppKit chrome adopts Liquid Glass on current macOS releases.
+  // Let the terrain extend beneath it instead of drawing an opaque titlebar
+  // background that visually separates the toolbar from the scene.
+  _window.toolbarStyle = NSWindowToolbarStyleAutomatic;
   _window.titleVisibility = NSWindowTitleHidden;
+  _window.titlebarAppearsTransparent = YES;
+  _window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
 
   // This source-only AppKit application has no nib to supply its main menu.
   NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
