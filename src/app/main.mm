@@ -11,18 +11,21 @@
 #import <MetalKit/MetalKit.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <numbers>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -65,6 +68,33 @@ struct ViewerSettings {
     throw std::out_of_range(std::string(option) + " must be a positive float32 value");
   }
   return static_cast<float>(parsed);
+}
+
+/// Parse an inspector range using a stable, locale-independent syntax.
+/// Commas are treated purely as digit-group separators, so "10,000" and
+/// "10000" have the same value; a period is the only decimal separator.
+[[nodiscard]] std::optional<double> parse_range_value(NSString *input) {
+  NSString *normalised = [[input stringByReplacingOccurrencesOfString:@"," withString:@""]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  const char *characters = normalised.UTF8String;
+  if (characters == nullptr || characters[0] == '\0') {
+    return std::nullopt;
+  }
+
+  const std::string_view text(characters);
+  double value = 0.0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), value, std::chars_format::general);
+  if (error != std::errc() || end != text.data() + text.size() || !std::isfinite(value)) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+/// Avoid populating the editor through NSTextField.doubleValue, whose
+/// formatting follows the user's locale and may use commas as decimal marks.
+[[nodiscard]] NSString *format_range_value(double value) {
+  return [NSString stringWithFormat:@"%.9g", value];
 }
 
 void print_usage(const char *program) {
@@ -167,13 +197,43 @@ void print_usage(const char *program) {
   );
 }
 
+/// One output pixel selected in the top-left-origin ray image.
+struct InspectionPixel {
+  uint32_t x;
+  uint32_t y;
+};
+
+/// Immutable values sampled from one completed raytrace revision.
+struct PointInspection {
+  InspectionPixel pixel;
+  uint64_t revision;
+  bool hit;
+  float distance;
+  float elevation;
+  double easting;
+  double northing;
+  float slope_degrees;
+  float aspect_degrees;
+};
+
 struct PresentedFrame {
   id<MTLTexture> texture;
   CameraOrientation orientation;
   uint64_t revision;
   double milliseconds;
   std::string error;
+  std::optional<PointInspection> inspection;
+  uint64_t inspection_sequence;
 };
+
+/// Decode one IEEE float16 value emitted by Metal without depending on a SIMD
+/// vector ABI shared between C++ and Metal.
+[[nodiscard]] float float_from_half_bits(uint16_t bits) {
+  _Float16 value = 0.0F;
+  static_assert(sizeof(value) == sizeof(bits));
+  std::memcpy(&value, &bits, sizeof(value));
+  return static_cast<float>(value);
+}
 
 /// Serial background renderer which coalesces input to the latest camera view.
 class ViewerRenderer {
@@ -181,7 +241,7 @@ public:
   explicit ViewerRenderer(ViewerSettings settings)
       : settings_(std::move(settings)), requested_orientation_(settings_.orientation),
         requested_presentation_(settings_.presentation) {
-    const RayField initial_field = make_view(settings_, settings_.orientation);
+    RayField initial_field = make_view(settings_, settings_.orientation);
     const RaytraceConfig config = {
         settings_.tile_dir,
         settings_.observer,
@@ -204,6 +264,7 @@ public:
         GpuPresentationRequirements{false, false, true, true, false},
         MTLPixelFormatBGRA8Unorm
     );
+    current_field_ = std::move(initial_field);
     worker_ = std::thread([this] { render_loop(); });
     request_view(settings_.orientation);
   }
@@ -245,9 +306,28 @@ public:
     changed_.notify_one();
   }
 
+  /// Coalesce hover events to the latest output pixel. A missing pixel clears
+  /// the published sample when inspection is disabled or leaves the image.
+  void request_inspection(std::optional<InspectionPixel> pixel) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requested_inspection_ = pixel;
+      inspection_pending_ = true;
+    }
+    changed_.notify_one();
+  }
+
   [[nodiscard]] PresentedFrame presented_frame() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return {presented_texture_, presented_orientation_, presented_revision_, frame_ms_, error_};
+    return {
+        presented_texture_,
+        presented_orientation_,
+        presented_revision_,
+        frame_ms_,
+        error_,
+        presented_inspection_,
+        presented_inspection_sequence_,
+    };
   }
 
   [[nodiscard]] id<MTLDevice> device() const { return trace_->device(); }
@@ -264,16 +344,62 @@ public:
   }
 
 private:
+  [[nodiscard]] PointInspection inspect_pixel(InspectionPixel pixel, uint64_t revision) const {
+    if (pixel.x >= settings_.image.width || pixel.y >= settings_.image.height) {
+      throw std::out_of_range("Inspection pixel lies outside the ray image");
+    }
+    const size_t index =
+        static_cast<size_t>(pixel.y) * static_cast<size_t>(settings_.image.width) + pixel.x;
+    const auto *distances = static_cast<const float *>(trace_->distances().contents);
+    const auto *elevations = static_cast<const float *>(trace_->elevations().contents);
+    const auto *gradients = static_cast<const uint32_t *>(trace_->surface_gradients().contents);
+    if (distances == nullptr || elevations == nullptr || gradients == nullptr ||
+        index >= current_field_.rays.size()) {
+      throw std::runtime_error("Could not map point-inspection buffers");
+    }
+
+    PointInspection result = {pixel, revision, false, 0.0F, 0.0F, 0.0, 0.0, 0.0F, 0.0F};
+    const float distance = distances[index];
+    if (!(distance > 0.0F) || !std::isfinite(distance)) {
+      return result;
+    }
+
+    const RayDirection &ray = current_field_.rays[index];
+    const uint32_t packed_gradients = gradients[index];
+    const float east_gradient =
+        float_from_half_bits(static_cast<uint16_t>(packed_gradients & 0xffffU));
+    const float north_gradient =
+        float_from_half_bits(static_cast<uint16_t>(packed_gradients >> 16U));
+    const float slope = std::atan(std::hypot(east_gradient, north_gradient));
+    double aspect = std::atan2(-east_gradient, -north_gradient) * kRadiansToDegrees;
+    if (aspect < 0.0) {
+      aspect += 360.0;
+    }
+    result.hit = true;
+    result.distance = distance;
+    result.elevation = elevations[index];
+    result.easting =
+        settings_.observer.easting + static_cast<double>(distance) * static_cast<double>(ray.x);
+    result.northing =
+        settings_.observer.northing + static_cast<double>(distance) * static_cast<double>(ray.y);
+    result.slope_degrees = slope * static_cast<float>(kRadiansToDegrees);
+    result.aspect_degrees = static_cast<float>(aspect);
+    return result;
+  }
+
   void render_loop() {
     while (true) {
       CameraOrientation orientation = {};
       TerrainPresentationSettings presentation = {};
       uint64_t revision = 0U;
       bool trace_requested = false;
+      bool presentation_requested = false;
+      bool inspection_requested = false;
+      std::optional<InspectionPixel> inspection_pixel;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock, [this] {
-          return stopping_ || trace_pending_ || presentation_pending_;
+          return stopping_ || trace_pending_ || presentation_pending_ || inspection_pending_;
         });
         if (stopping_) {
           return;
@@ -282,44 +408,63 @@ private:
         presentation = requested_presentation_;
         revision = requested_revision_;
         trace_requested = trace_pending_;
+        presentation_requested = presentation_pending_;
+        inspection_requested = inspection_pending_;
+        inspection_pixel = requested_inspection_;
         trace_pending_ = false;
         presentation_pending_ = false;
+        inspection_pending_ = false;
       }
 
       try {
         @autoreleasepool {
           const auto started = std::chrono::steady_clock::now();
           if (trace_requested) {
-            const RayField field = make_view(settings_, orientation);
+            RayField field = make_view(settings_, orientation);
             trace_->trace(field);
+            current_field_ = std::move(field);
           }
 
-          Timer timer("GPU presentation");
-          const id<MTLBuffer> colour_values =
-              presentation.appearance.colour_source == TerrainColourSource::Elevation
-                  ? trace_->elevations()
-                  : trace_->distances();
-          presentation_->render_synthetic(
-              trace_->surface_gradients(),
-              trace_->distances(),
-              colour_values,
-              presentation.appearance,
-              presentation.colour_range,
-              presentation.use_surface_normals,
-              timer
-          );
+          if (presentation_requested) {
+            Timer timer("GPU presentation");
+            const id<MTLBuffer> colour_values =
+                presentation.appearance.colour_source == TerrainColourSource::Elevation
+                    ? trace_->elevations()
+                    : trace_->distances();
+            presentation_->render_synthetic(
+                trace_->surface_gradients(),
+                trace_->distances(),
+                colour_values,
+                presentation.appearance,
+                presentation.colour_range,
+                presentation.use_surface_normals,
+                timer
+            );
+          }
           const double milliseconds =
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                   .count();
+          const bool publish_inspection =
+              inspection_requested || (inspection_pixel.has_value() && presentation_requested);
+          std::optional<PointInspection> inspection;
+          if (publish_inspection && inspection_pixel.has_value()) {
+            inspection = inspect_pixel(*inspection_pixel, revision);
+          }
 
           std::lock_guard<std::mutex> lock(mutex_);
-          presented_texture_ = presentation_->texture();
-          presented_orientation_ = orientation;
-          presented_revision_ = revision;
-          // The title reports camera-update throughput. A cheap appearance-only
-          // pass should not replace it with a misleadingly high frame rate.
-          if (trace_requested) {
-            frame_ms_ = milliseconds;
+          if (presentation_requested) {
+            presented_texture_ = presentation_->texture();
+            presented_orientation_ = orientation;
+            presented_revision_ = revision;
+            // The title reports camera-update throughput. A cheap appearance-only
+            // pass should not replace it with a misleadingly high frame rate.
+            if (trace_requested) {
+              frame_ms_ = milliseconds;
+            }
+          }
+          if (publish_inspection) {
+            presented_inspection_ = inspection;
+            presented_inspection_sequence_++;
           }
         }
       } catch (const std::exception &exception) {
@@ -333,19 +478,24 @@ private:
   ViewerSettings settings_;
   std::unique_ptr<TerrainTraceSession> trace_;
   std::unique_ptr<GpuImageRenderer> presentation_;
+  RayField current_field_;
   std::thread worker_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   CameraOrientation requested_orientation_ = {};
   TerrainPresentationSettings requested_presentation_ = {};
+  std::optional<InspectionPixel> requested_inspection_;
   CameraOrientation presented_orientation_ = {};
+  std::optional<PointInspection> presented_inspection_;
   id<MTLTexture> presented_texture_;
   uint64_t requested_revision_ = 0U;
   uint64_t presented_revision_ = 0U;
+  uint64_t presented_inspection_sequence_ = 0U;
   double frame_ms_ = 0.0;
   std::string error_;
   bool trace_pending_ = false;
   bool presentation_pending_ = false;
+  bool inspection_pending_ = false;
   bool stopping_ = false;
 };
 
@@ -353,18 +503,24 @@ private:
 } // namespace panorama::app
 
 @class PanoramaController;
+@class ViewerOverlayView;
 
 @interface PanoramaView : MTKView {
 @private
   NSPoint _lastMouseLocation;
+  NSTrackingArea *_inspectionTrackingArea;
+  bool _pointInspectionEnabled;
 }
 @property(nonatomic, weak) PanoramaController *panoramaController;
+- (void)setPointInspectionEnabled:(bool)enabled;
 @end
 
 @interface PanoramaController : NSObject <MTKViewDelegate> {
 @private
   panorama::app::ViewerRenderer *_renderer;
   __weak NSWindow *_window;
+  __weak PanoramaView *_panoramaView;
+  __weak ViewerOverlayView *_overlayView;
   panorama::CameraOrientation _orientation;
   panorama::TerrainPresentationSettings _presentation;
   NSPopUpButton *_colourSourceControl;
@@ -373,16 +529,90 @@ private:
   NSTextField *_maximumControl;
   NSButton *_normalLightingControl;
   NSTextField *_debugInfoLabel;
+  NSTextField *_pointInfoLabel;
   uint64_t _displayedRevision;
+  uint64_t _displayedInspectionSequence;
+  bool _pointInspectionEnabled;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
                           window:(NSWindow *)window;
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta;
+- (void)attachPanoramaView:(PanoramaView *)panoramaView
+               overlayView:(ViewerOverlayView *)overlayView;
+- (void)inspectPixelX:(uint32_t)x y:(uint32_t)y;
+- (void)clearPointInspection;
+- (void)togglePointInspection:(id)sender;
 - (NSViewController *)makeSettingsViewController;
 - (NSViewController *)makeDebugViewController;
+- (NSViewController *)makePointInfoViewController;
 @end
 
 @implementation PanoramaView
+
+- (void)updateTrackingAreas {
+  [super updateTrackingAreas];
+  if (_inspectionTrackingArea != nil) {
+    [self removeTrackingArea:_inspectionTrackingArea];
+    _inspectionTrackingArea = nil;
+  }
+  if (!_pointInspectionEnabled) {
+    return;
+  }
+  _inspectionTrackingArea =
+      [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                   options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                                           NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
+                                     owner:self
+                                  userInfo:nil];
+  [self addTrackingArea:_inspectionTrackingArea];
+}
+
+- (void)resetCursorRects {
+  [super resetCursorRects];
+  if (_pointInspectionEnabled) {
+    [self addCursorRect:self.bounds cursor:NSCursor.crosshairCursor];
+  }
+}
+
+- (void)setPointInspectionEnabled:(bool)enabled {
+  _pointInspectionEnabled = enabled;
+  self.window.acceptsMouseMovedEvents = enabled;
+  [self updateTrackingAreas];
+  [self.window invalidateCursorRectsForView:self];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+  if (!_pointInspectionEnabled) {
+    [super mouseMoved:event];
+    return;
+  }
+  const NSRect bounds = self.bounds;
+  const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
+  const uint32_t width = static_cast<uint32_t>(self.drawableSize.width);
+  const uint32_t height = static_cast<uint32_t>(self.drawableSize.height);
+  if (bounds.size.width <= 0.0 || bounds.size.height <= 0.0 || width == 0U || height == 0U) {
+    return;
+  }
+
+  // AppKit view coordinates rise from the bottom-left, whereas RayField rows
+  // use image coordinates from the top-left.
+  const double normalised_x =
+      std::clamp((location.x - NSMinX(bounds)) / bounds.size.width, 0.0, 1.0);
+  const double normalised_y =
+      std::clamp((NSMaxY(bounds) - location.y) / bounds.size.height, 0.0, 1.0);
+  const uint32_t x =
+      std::min(width - 1U, static_cast<uint32_t>(normalised_x * static_cast<double>(width)));
+  const uint32_t y =
+      std::min(height - 1U, static_cast<uint32_t>(normalised_y * static_cast<double>(height)));
+  [self.panoramaController inspectPixelX:x y:y];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+  (void)event;
+  if (_pointInspectionEnabled) {
+    [self.panoramaController clearPointInspection];
+  }
+}
 
 - (BOOL)acceptsFirstResponder {
   return YES;
@@ -519,20 +749,27 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSView *_settingsView;
   NSView *_debugView;
   NSView *_debugContentView;
+  NSView *_pointInfoView;
+  NSView *_pointInfoContentView;
   CGFloat _inspectorWidth;
   NSSize _debugSize;
+  NSSize _pointInfoSize;
   CGFloat _panelMargin;
   bool _inspectorVisible;
   bool _debugVisible;
+  bool _pointInfoVisible;
 }
 - (instancetype)initWithFrame:(NSRect)frame
                   contentView:(NSView *)contentView
                  settingsView:(NSView *)settingsView
                inspectorWidth:(CGFloat)inspectorWidth
                     debugView:(NSView *)debugView
-                    debugSize:(NSSize)debugSize;
+                    debugSize:(NSSize)debugSize
+                pointInfoView:(NSView *)pointInfoView
+                pointInfoSize:(NSSize)pointInfoSize;
 - (void)toggleInspector:(id)sender;
 - (void)toggleDebugOverlay:(id)sender;
+- (void)setPointInfoVisible:(bool)visible;
 @end
 
 @implementation ViewerOverlayView
@@ -542,25 +779,32 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                  settingsView:(NSView *)settingsView
                inspectorWidth:(CGFloat)inspectorWidth
                     debugView:(NSView *)debugView
-                    debugSize:(NSSize)debugSize {
+                    debugSize:(NSSize)debugSize
+                pointInfoView:(NSView *)pointInfoView
+                pointInfoSize:(NSSize)pointInfoSize {
   self = [super initWithFrame:frame];
   if (self != nil) {
     _contentView = contentView;
     _settingsView = settingsView;
     _debugContentView = debugView;
+    _pointInfoContentView = pointInfoView;
     _inspectorWidth = inspectorWidth;
     _debugSize = debugSize;
+    _pointInfoSize = pointInfoSize;
     _panelMargin = 12.0;
     _inspectorVisible = true;
     _debugVisible = false;
+    _pointInfoVisible = false;
     self.wantsLayer = YES;
     self.layer.masksToBounds = YES;
     [self addSubview:_contentView];
 
     _inspectorView = makeOverlayPanel(_settingsView);
     _debugView = makeOverlayPanel(_debugContentView);
+    _pointInfoView = makeOverlayPanel(_pointInfoContentView);
     [self addSubview:_inspectorView];
     [self addSubview:_debugView];
+    [self addSubview:_pointInfoView];
   }
   return self;
 }
@@ -592,6 +836,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   return NSMakeRect(x, y, _debugSize.width, height);
 }
 
+- (NSRect)pointInfoFrameForVisible:(bool)visible {
+  const NSRect bounds = self.bounds;
+  const NSEdgeInsets safeArea = self.safeAreaInsets;
+  const CGFloat x = visible ? NSMinX(bounds) + safeArea.left + _panelMargin
+                            : NSMinX(bounds) - _pointInfoSize.width - _panelMargin;
+  const CGFloat y = NSMinY(bounds) + safeArea.bottom + _panelMargin;
+  return NSMakeRect(x, y, _pointInfoSize.width, _pointInfoSize.height);
+}
+
 - (void)layout {
   [super layout];
   _contentView.frame = self.bounds;
@@ -599,6 +852,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _settingsView.frame = _inspectorView.bounds;
   _debugView.frame = [self debugFrameForVisible:_debugVisible];
   _debugContentView.frame = _debugView.bounds;
+  _pointInfoView.frame = [self pointInfoFrameForVisible:_pointInfoVisible];
+  _pointInfoContentView.frame = _pointInfoView.bounds;
 }
 
 - (void)toggleInspector:(id)sender {
@@ -616,6 +871,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
     context.duration = 0.25;
     _debugView.animator.frame = [self debugFrameForVisible:_debugVisible];
+  }];
+}
+
+- (void)setPointInfoVisible:(bool)visible {
+  if (_pointInfoVisible == visible) {
+    return;
+  }
+  _pointInfoVisible = visible;
+  [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+    context.duration = 0.25;
+    _pointInfoView.animator.frame = [self pointInfoFrameForVisible:_pointInfoVisible];
   }];
 }
 
@@ -643,6 +909,38 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _renderer->request_view(_orientation);
 }
 
+- (void)attachPanoramaView:(PanoramaView *)panoramaView
+               overlayView:(ViewerOverlayView *)overlayView {
+  _panoramaView = panoramaView;
+  _overlayView = overlayView;
+}
+
+- (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
+  if (_pointInspectionEnabled) {
+    _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+  }
+}
+
+- (void)clearPointInspection {
+  _renderer->request_inspection(std::nullopt);
+}
+
+- (void)togglePointInspection:(id)sender {
+  _pointInspectionEnabled = !_pointInspectionEnabled;
+  [_panoramaView setPointInspectionEnabled:_pointInspectionEnabled];
+  [_overlayView setPointInfoVisible:_pointInspectionEnabled];
+  if (!_pointInspectionEnabled) {
+    [self clearPointInspection];
+  }
+
+  if ([sender isKindOfClass:NSToolbarItem.class]) {
+    NSToolbarItem *item = sender;
+    if (@available(macOS 26.0, *)) {
+      item.style = _pointInspectionEnabled ? NSToolbarItemStyleProminent : NSToolbarItemStylePlain;
+    }
+  }
+}
+
 /// Build the controls shown in the trailing render-settings inspector.
 - (NSViewController *)makeSettingsViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
@@ -663,10 +961,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_colourmapControl selectItemAtIndex:static_cast<NSInteger>(_presentation.appearance.colourmap)];
 
   _minimumControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
-  _minimumControl.doubleValue = _presentation.colour_range.minimum;
+  _minimumControl.stringValue =
+      panorama::app::format_range_value(_presentation.colour_range.minimum);
 
   _maximumControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
-  _maximumControl.doubleValue = _presentation.colour_range.maximum;
+  _maximumControl.stringValue =
+      panorama::app::format_range_value(_presentation.colour_range.maximum);
 
   _normalLightingControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _normalLightingControl.buttonType = NSButtonTypeSwitch;
@@ -793,6 +1093,65 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                        _renderer->max_distance()];
 }
 
+/// Build the compact hover readout shown while point inspection is enabled.
+- (NSViewController *)makePointInfoViewController {
+  NSViewController *viewController = [[NSViewController alloc] init];
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 174.0)];
+  viewController.view = content;
+
+  NSTextField *heading = [NSTextField labelWithString:@"Point Info"];
+  heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+  _pointInfoLabel = [NSTextField labelWithString:@"Move the pointer over the rendered terrain."];
+  _pointInfoLabel.font = [NSFont monospacedSystemFontOfSize:12.0 weight:NSFontWeightRegular];
+  _pointInfoLabel.maximumNumberOfLines = 0;
+  _pointInfoLabel.lineBreakMode = NSLineBreakByWordWrapping;
+
+  NSStackView *pointInfo = [NSStackView stackViewWithViews:@[ heading, _pointInfoLabel ]];
+  pointInfo.orientation = NSUserInterfaceLayoutOrientationVertical;
+  pointInfo.alignment = NSLayoutAttributeLeading;
+  pointInfo.spacing = 10.0;
+  pointInfo.translatesAutoresizingMaskIntoConstraints = NO;
+  [content addSubview:pointInfo];
+  [NSLayoutConstraint activateConstraints:@[
+    [pointInfo.topAnchor constraintEqualToAnchor:content.topAnchor constant:14.0],
+    [pointInfo.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
+    [pointInfo.trailingAnchor constraintLessThanOrEqualToAnchor:content.trailingAnchor
+                                                       constant:-14.0],
+  ]];
+  return viewController;
+}
+
+- (void)updatePointInfo:(std::optional<panorama::app::PointInspection>)inspection {
+  if (_pointInfoLabel == nil) {
+    return;
+  }
+  if (!inspection.has_value()) {
+    _pointInfoLabel.stringValue = @"Move the pointer over the rendered terrain.";
+    return;
+  }
+  const panorama::app::PointInspection &point = *inspection;
+  if (!point.hit) {
+    _pointInfoLabel.stringValue =
+        [NSString stringWithFormat:@"Pixel      %4u, %4u\n\nNo terrain intersection",
+                                   point.pixel.x,
+                                   point.pixel.y];
+    return;
+  }
+  _pointInfoLabel.stringValue =
+      [NSString stringWithFormat:@"Pixel      %4u, %4u\n"
+                                  "Distance   %10.1f m\nElevation  %10.1f m\n"
+                                  "Easting    %10.1f m\nNorthing   %10.1f m\n"
+                                  "Slope      %10.1f°\nAspect     %10.1f°",
+                                 point.pixel.x,
+                                 point.pixel.y,
+                                 point.distance,
+                                 point.elevation,
+                                 point.easting,
+                                 point.northing,
+                                 point.slope_degrees,
+                                 point.aspect_degrees];
+}
+
 /// Palette and range controls have no effect on the uncoloured white mode.
 - (void)updateSettingsControlAvailability {
   const BOOL scalarColour = _colourSourceControl.indexOfSelectedItem != 0;
@@ -809,14 +1168,19 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Validate and publish one coherent settings snapshot to the render worker.
 - (void)applyRenderSettings:(id)sender {
   (void)sender;
-  const double minimum = _minimumControl.doubleValue;
-  const double maximum = _maximumControl.doubleValue;
-  if (!std::isfinite(minimum) || !std::isfinite(maximum) || maximum <= minimum ||
-      minimum < -std::numeric_limits<float>::max() || maximum > std::numeric_limits<float>::max()) {
+  const std::optional<double> minimum =
+      panorama::app::parse_range_value(_minimumControl.stringValue);
+  const std::optional<double> maximum =
+      panorama::app::parse_range_value(_maximumControl.stringValue);
+  if (!minimum.has_value() || !maximum.has_value() || *maximum <= *minimum ||
+      *minimum < -std::numeric_limits<float>::max() ||
+      *maximum > std::numeric_limits<float>::max()) {
     NSBeep();
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Invalid colour range";
-    alert.informativeText = @"The maximum must be a finite value greater than the minimum.";
+    alert.informativeText =
+        @"Use commas only as optional thousands separators and a period as the decimal "
+         "separator. The maximum must be a finite value greater than the minimum.";
     [alert beginSheetModalForWindow:_window completionHandler:nil];
     return;
   }
@@ -826,8 +1190,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _presentation.appearance.colourmap =
       static_cast<panorama::PresetColourmap>(_colourmapControl.indexOfSelectedItem);
   _presentation.colour_range = {
-      static_cast<float>(minimum),
-      static_cast<float>(maximum),
+      static_cast<float>(*minimum),
+      static_cast<float>(*maximum),
   };
   _presentation.use_surface_normals = _normalLightingControl.state == NSControlStateValueOn;
   _renderer->request_presentation(_presentation);
@@ -867,6 +1231,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [command presentDrawable:drawable];
   [command commit];
 
+  if (frame.inspection_sequence != _displayedInspectionSequence) {
+    _displayedInspectionSequence = frame.inspection_sequence;
+    const bool matches_visible_frame =
+        !frame.inspection.has_value() || frame.inspection->revision == frame.revision;
+    [self updatePointInfo:matches_visible_frame ? frame.inspection : std::nullopt];
+  }
+
   if (!frame.error.empty()) {
     _window.title = [NSString stringWithFormat:@"panorama-app — error: %s", frame.error.c_str()];
   } else if (frame.revision != 0U && frame.revision != _displayedRevision) {
@@ -892,6 +1263,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 @end
 
 static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.debug-info";
+static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
+    @"panorama.point-inspector";
 
 @interface PanoramaAppDelegate : NSObject <NSApplicationDelegate, NSToolbarDelegate> {
 @private
@@ -918,6 +1291,7 @@ static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.de
   (void)toolbar;
   return @[
     NSToolbarFlexibleSpaceItemIdentifier,
+    kPointInspectorToolbarItemIdentifier,
     kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
   ];
@@ -928,6 +1302,7 @@ static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.de
   return @[
     NSToolbarFlexibleSpaceItemIdentifier,
     NSToolbarSpaceItemIdentifier,
+    kPointInspectorToolbarItemIdentifier,
     kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
   ];
@@ -940,7 +1315,9 @@ static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.de
   (void)willBeInserted;
   const BOOL isInspector = [itemIdentifier isEqualToString:NSToolbarToggleInspectorItemIdentifier];
   const BOOL isDebug = [itemIdentifier isEqualToString:kDebugToolbarItemIdentifier];
-  if (!isInspector && !isDebug) {
+  const BOOL isPointInspector =
+      [itemIdentifier isEqualToString:kPointInspectorToolbarItemIdentifier];
+  if (!isInspector && !isDebug && !isPointInspector) {
     return nil;
   }
 
@@ -949,21 +1326,30 @@ static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.de
   // standard semantic identifier even though this delegate instantiates it.
   NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier];
   item.bordered = YES;
-  item.target = _overlayView;
   if (isInspector) {
+    item.target = _overlayView;
     item.label = @"Inspector";
     item.paletteLabel = @"Inspector";
     item.toolTip = @"Show or hide the render settings inspector";
     item.image = [NSImage imageWithSystemSymbolName:@"sidebar.right"
                            accessibilityDescription:@"Toggle Inspector"];
     item.action = @selector(toggleInspector:);
-  } else {
+  } else if (isDebug) {
+    item.target = _overlayView;
     item.label = @"Debug Info";
     item.paletteLabel = @"Debug Info";
     item.toolTip = @"Show or hide viewer debugging information";
     item.image = [NSImage imageWithSystemSymbolName:@"info.circle"
                            accessibilityDescription:@"Toggle Debug Info"];
     item.action = @selector(toggleDebugOverlay:);
+  } else {
+    item.label = @"Inspect Point";
+    item.paletteLabel = @"Inspect Point";
+    item.toolTip = @"Inspect terrain beneath the pointer";
+    item.image = [NSImage imageWithSystemSymbolName:@"scope"
+                           accessibilityDescription:@"Toggle Point Inspection"];
+    item.target = _controller;
+    item.action = @selector(togglePointInspection:);
   }
   return item;
 }
@@ -973,6 +1359,7 @@ static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.de
   const panorama::ImageSize image = _renderer->image();
   constexpr CGFloat kInspectorWidth = 270.0;
   constexpr NSSize kDebugSize = {220.0, 282.0};
+  constexpr NSSize kPointInfoSize = {230.0, 174.0};
   const NSRect windowFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   const NSRect imageFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   _window = [[NSWindow alloc]
@@ -1004,12 +1391,16 @@ static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.de
 
   NSViewController *settingsController = [_controller makeSettingsViewController];
   NSViewController *debugController = [_controller makeDebugViewController];
+  NSViewController *pointInfoController = [_controller makePointInfoViewController];
   _overlayView = [[ViewerOverlayView alloc] initWithFrame:imageFrame
                                               contentView:imageContainer
                                              settingsView:settingsController.view
                                            inspectorWidth:kInspectorWidth
                                                 debugView:debugController.view
-                                                debugSize:kDebugSize];
+                                                debugSize:kDebugSize
+                                            pointInfoView:pointInfoController.view
+                                            pointInfoSize:kPointInfoSize];
+  [_controller attachPanoramaView:view overlayView:_overlayView];
 
   NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"panorama.toolbar"];
   toolbar.delegate = self;
