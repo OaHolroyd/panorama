@@ -120,7 +120,7 @@ struct GpuRaytraceResources::State {
   uint32_t frontier_capacity;
   uint32_t catalogue_hash_capacity;
   bool trace_quantized;
-  bool compute_normals;
+  GpuTraceOutputRequirements outputs;
   bool capture_active = false;
 };
 
@@ -128,7 +128,7 @@ GpuRaytraceResources::GpuRaytraceResources(
     std::span<const RayDirection> rays,
     std::span<const TerrainSource> sources,
     bool trace_quantized,
-    bool compute_normals
+    GpuTraceOutputRequirements outputs
 ) {
   if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
       sources.size() > std::numeric_limits<uint32_t>::max()) {
@@ -138,7 +138,7 @@ GpuRaytraceResources::GpuRaytraceResources(
   state->frontier_capacity = static_cast<uint32_t>(rays.size());
   state->catalogue_hash_capacity = catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
-  state->compute_normals = compute_normals;
+  state->outputs = outputs;
   state->device = MTLCreateSystemDefaultDevice();
   if (state->device == nil) {
     throw std::runtime_error("No Metal device is available");
@@ -158,7 +158,8 @@ GpuRaytraceResources::GpuRaytraceResources(
   NSString *trace_name =
       trace_quantized ? @"trace_tile_frontier_quantized" : @"trace_tile_frontier";
   MTLFunctionConstantValues *trace_constants = [[MTLFunctionConstantValues alloc] init];
-  [trace_constants setConstantValue:&compute_normals type:MTLDataTypeBool atIndex:0];
+  [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
+  [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
   id<MTLFunction> trace =
       [library newFunctionWithName:trace_name constantValues:trace_constants error:&error];
   id<MTLFunction> emit = [library newFunctionWithName:@"emit_tile_frontier"];
@@ -192,22 +193,25 @@ GpuRaytraceResources::GpuRaytraceResources(
   state->elevation_output = make_buffer(
       state->device,
       nullptr,
-      checked_buffer_length(rays.size(), sizeof(float), "elevation output"),
+      outputs.elevations
+          ? checked_buffer_length(rays.size(), sizeof(float), "elevation output")
+          : sizeof(float),
       "elevation output"
   );
-  // The function-constant specialization removes all gradient work when
-  // disabled. A one-word placeholder preserves the common kernel ABI without
-  // reserving a full per-ray output image.
+  // Function-constant specialization removes disabled output work. One-word
+  // placeholders preserve the common kernel ABI without full per-ray images.
   state->surface_gradient_output = make_buffer(
       state->device,
       nullptr,
-      compute_normals
+      outputs.surface_gradients
           ? checked_buffer_length(rays.size(), sizeof(uint32_t), "surface gradient output")
           : sizeof(uint32_t),
       "surface gradient output"
   );
   clear_buffer(state->distance_output, "distance output");
-  clear_buffer(state->elevation_output, "elevation output");
+  if (outputs.elevations) {
+    clear_buffer(state->elevation_output, "elevation output");
+  }
   // Every positive distance is written beside its gradient, and consumers use
   // distance as the validity mask, so clearing this potentially large buffer
   // would add setup bandwidth without defining any observable output.
@@ -383,10 +387,15 @@ std::span<const DeferredRayWork> GpuRaytraceResources::deferred_work(uint32_t co
 }
 
 id<MTLBuffer> GpuRaytraceResources::distances() const { return state_->distance_output; }
-id<MTLBuffer> GpuRaytraceResources::elevations() const { return state_->elevation_output; }
+id<MTLBuffer> GpuRaytraceResources::elevations() const {
+  if (!state_->outputs.elevations) {
+    throw std::logic_error("Elevations were not requested");
+  }
+  return state_->elevation_output;
+}
 
 id<MTLBuffer> GpuRaytraceResources::surface_gradients() const {
-  if (!state_->compute_normals) {
+  if (!state_->outputs.surface_gradients) {
     throw std::logic_error("Surface gradients were not requested");
   }
   return state_->surface_gradient_output;

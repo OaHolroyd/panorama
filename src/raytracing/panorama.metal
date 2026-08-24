@@ -4,9 +4,10 @@
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
 
-/// Pipeline specialization selected once per render. When false, the Metal
-/// compiler removes collision-gradient arithmetic and output writes entirely.
+/// Pipeline specializations selected once per render. False options let Metal
+/// remove the associated collision arithmetic and output writes entirely.
 constant bool compute_surface_gradients [[function_constant(0)]];
+constant bool store_collision_elevations [[function_constant(1)]];
 
 /// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///
@@ -860,12 +861,14 @@ inline float trace_tile_frontier_impl(
         // Exit only after the exact patch test confirms a hit.
         if (collision.hit) {
           distances[output_index] = collision.distance;
-          elevations[output_index] = curved_ray_elevation(
-              observer_elevation,
-              dz,
-              curvature,
-              collision.distance
-          );
+          if (store_collision_elevations) {
+            elevations[output_index] = curved_ray_elevation(
+                observer_elevation,
+                dz,
+                curvature,
+                collision.distance
+            );
+          }
           if (compute_surface_gradients) {
             surface_gradients[output_index] = packed_surface_gradients(
                 vertices,

@@ -140,8 +140,6 @@ void write_trace_outputs(
   }
 
   if (outputs.write_diagnostics) {
-    const std::span<const float> elevations =
-        view_buffer<float>(gpu.elevations(), ray_count, "elevation output");
     write_colormapped_png(
         "distances.png",
         distances,
@@ -149,13 +147,15 @@ void write_trace_outputs(
         field.image.height,
         colormaps::viridis
     );
-    write_colormapped_png(
-        "elevations.png",
-        elevations,
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
-    );
+    if (config.compute_elevations) {
+      write_colormapped_png(
+          "elevations.png",
+          view_buffer<float>(gpu.elevations(), ray_count, "elevation output"),
+          field.image.width,
+          field.image.height,
+          colormaps::viridis
+      );
+    }
     if (config.compute_normals) {
       write_surface_normals_png(
           "normals.png",
@@ -287,7 +287,11 @@ void raytrace_tiled_heightmap(
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
     // ray inputs, output images, and reusable frontier storage.
-    GpuRaytraceResources gpu(field.rays, paths, trace_quantized, config.compute_normals);
+    const GpuTraceOutputRequirements gpu_outputs = {
+        config.compute_elevations,
+        config.compute_normals,
+    };
+    GpuRaytraceResources gpu(field.rays, paths, trace_quantized, gpu_outputs);
     gpu.initialise_frontier();
 
     // The cache shares the GPU resource owner's device. Preparation workers

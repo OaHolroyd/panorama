@@ -27,6 +27,7 @@ struct EntrypointSettings {
   uint32_t max_tile_count = 0U;
   float max_distance = 600'000.0F;
   bool retain_quantized = false;
+  bool compute_elevations = true;
   bool compute_normals = true;
   bool write_diagnostics = true;
   bool write_synthetic = false;
@@ -47,8 +48,8 @@ void validate_output_settings(const EntrypointSettings &settings) {
   if (!settings.write_diagnostics && !settings.write_synthetic) {
     throw std::invalid_argument("At least one output type must be enabled");
   }
-  // Rendering requires collision gradients, whereas diagnostic distance and
-  // elevation fields remain usable when their computation is disabled.
+  // Rendering requires collision gradients, whereas mandatory distances and
+  // optional elevation diagnostics remain usable without them.
   if (settings.write_synthetic && !settings.compute_normals) {
     throw std::invalid_argument("--synthetic-output cannot be combined with --no-normals");
   }
@@ -80,6 +81,7 @@ void print_usage(const char *program) {
       "                        skip diagnostic field PNGs\n"
       "  --synthetic-output    write a shaded synthetic.png (default: disabled)\n"
       "  --retain-quantized    keep uint16 terrain quantized in the GPU atlas\n"
+      "  --no-elevations       skip collision-elevation storage and elevations.png\n"
       "  --no-normals          skip collision-normal computation and normals.png\n"
       "\n"
       "Synthetic image options (angles are degrees):\n"
@@ -110,6 +112,10 @@ void print_usage(const char *program) {
     }
     if (option == "--no-normals") {
       settings.compute_normals = false;
+      continue;
+    }
+    if (option == "--no-elevations") {
+      settings.compute_elevations = false;
       continue;
     }
     if (option == "--diagnostic-output") {
@@ -193,6 +199,7 @@ int main(int argc, const char *argv[]) {
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
         settings.retain_quantized,
+        settings.compute_elevations,
         settings.compute_normals,
     };
     const panorama::RayField rays = settings.projection.make_ray_field();
@@ -218,11 +225,12 @@ int main(int argc, const char *argv[]) {
     );
     settings.projection.print_settings();
     std::printf(
-        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s, normals %s, "
-        "outputs %s.\n",
+        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s, "
+        "elevations %s, normals %s, outputs %s.\n",
         settings.max_distance,
         panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
         settings.retain_quantized ? "retained" : "disabled",
+        settings.compute_elevations ? "enabled" : "disabled",
         settings.compute_normals ? "enabled" : "disabled",
         settings.write_diagnostics
             ? (settings.write_synthetic ? "diagnostic+synthetic" : "diagnostic")

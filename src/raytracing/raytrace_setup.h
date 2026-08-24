@@ -36,13 +36,15 @@ struct RaytraceConfig {
   uint32_t max_tile_preparation_workers;
   /// Keep uint16 custom terrain quantized through atlas residency and tracing.
   bool retain_quantized;
+  /// Store the collision elevation for each ray that hits terrain.
+  bool compute_elevations;
   /// Compute one compact terrain-surface normal parameterization per collision.
   bool compute_normals;
 };
 
 /// Independently selectable image products produced after tracing completes.
 struct RaytraceOutputConfig {
-  /// Write distances.png, elevations.png, and normals.png when normals exist.
+  /// Write distances.png plus enabled elevation and normal diagnostic fields.
   bool write_diagnostics;
   /// Write synthetic.png using white terrain and normal-based lighting.
   bool write_synthetic;
