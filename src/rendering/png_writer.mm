@@ -23,9 +23,8 @@ void write_rgb_png(
   }
   const size_t active_row_bytes = static_cast<size_t>(width) * 3U;
   if (bytes_per_row < active_row_bytes ||
-      (height > 1U && bytes_per_row >
-                            (std::numeric_limits<size_t>::max() - active_row_bytes) /
-                                (static_cast<size_t>(height) - 1U))) {
+      (height > 1U && bytes_per_row > (std::numeric_limits<size_t>::max() - active_row_bytes) /
+                                          (static_cast<size_t>(height) - 1U))) {
     throw std::invalid_argument("PNG row stride is invalid");
   }
   const size_t required_bytes =

@@ -62,11 +62,8 @@ public:
   void render_scalar(id<MTLBuffer> values, Timer &timer);
 
   /// Render packed east/north gradients as a conventional RGB normal map.
-  void render_surface_normals(
-      id<MTLBuffer> packed_gradients,
-      id<MTLBuffer> distances,
-      Timer &timer
-  );
+  void
+  render_surface_normals(id<MTLBuffer> packed_gradients, id<MTLBuffer> distances, Timer &timer);
 
   /// Render lit terrain on black using white or colourmapped scalar values.
   void render_synthetic(

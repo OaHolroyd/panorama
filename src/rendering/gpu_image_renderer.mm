@@ -23,19 +23,15 @@ void print_error(NSString *context, NSError *error) {
 }
 
 /// Build one required presentation pipeline from the shared application library.
-[[nodiscard]] id<MTLComputePipelineState> make_pipeline(
-    id<MTLDevice> device,
-    id<MTLLibrary> library,
-    NSString *name
-) {
+[[nodiscard]] id<MTLComputePipelineState>
+make_pipeline(id<MTLDevice> device, id<MTLLibrary> library, NSString *name) {
   id<MTLFunction> function = [library newFunctionWithName:name];
   if (function == nil) {
-    throw std::runtime_error("Missing Metal presentation kernel " +
-                             std::string(name.UTF8String));
+    throw std::runtime_error("Missing Metal presentation kernel " + std::string(name.UTF8String));
   }
   NSError *error = nil;
-  id<MTLComputePipelineState> pipeline =
-      [device newComputePipelineStateWithFunction:function error:&error];
+  id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function
+                                                                               error:&error];
   if (pipeline == nil) {
     print_error(@"Could not create GPU presentation pipeline", error);
     throw std::runtime_error("Could not create GPU presentation pipeline");
@@ -95,8 +91,7 @@ void encode_range_reduction(
   const uint32_t collision_flag = collisions_only ? 1U : 0U;
   [encoder setBytes:&collision_flag length:sizeof(collision_flag) atIndex:4];
   const NSUInteger group_count =
-      (static_cast<NSUInteger>(pixel_count) + kReductionThreads - 1U) /
-      kReductionThreads;
+      (static_cast<NSUInteger>(pixel_count) + kReductionThreads - 1U) / kReductionThreads;
   [encoder dispatchThreadgroups:MTLSizeMake(group_count, 1U, 1U)
           threadsPerThreadgroup:MTLSizeMake(kReductionThreads, 1U, 1U)];
 }
@@ -336,8 +331,8 @@ void GpuImageRenderer::render_synthetic(
       throw std::runtime_error("Could not create synthetic colourmap encoder");
     }
   }
-  encoder.label = scalar_colour ? @"present_colourmapped_synthetic_terrain"
-                                : @"present_synthetic_terrain";
+  encoder.label =
+      scalar_colour ? @"present_colourmapped_synthetic_terrain" : @"present_synthetic_terrain";
   [encoder setBuffer:packed_gradients offset:0 atIndex:0];
   [encoder setBuffer:distances offset:0 atIndex:1];
   [encoder setBytes:sun_and_ambient length:sizeof(sun_and_ambient) atIndex:2];

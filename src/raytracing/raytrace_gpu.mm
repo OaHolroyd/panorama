@@ -57,9 +57,7 @@ static_assert(sizeof(CatalogueTileHashEntry) == 3U * sizeof(uint64_t));
 [[nodiscard]] uint32_t tile_hash(TileKey key, uint32_t mask) {
   const uint64_t row = mix_tile_hash(static_cast<uint64_t>(key.row));
   const uint64_t column = mix_tile_hash(static_cast<uint64_t>(key.column));
-  return static_cast<uint32_t>(
-      mix_tile_hash(row ^ (column + 0x9e3779b97f4a7c15ULL)) & mask
-  );
+  return static_cast<uint32_t>(mix_tile_hash(row ^ (column + 0x9e3779b97f4a7c15ULL)) & mask);
 }
 
 /// Print a Foundation error in the command-line form used by host tools.
@@ -162,10 +160,9 @@ GpuRaytraceResources::GpuRaytraceResources(
   MTLFunctionConstantValues *trace_constants = [[MTLFunctionConstantValues alloc] init];
   [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
   [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
-  id<MTLFunction> trace =
-      [state->library newFunctionWithName:trace_name
-                           constantValues:trace_constants
-                                    error:&error];
+  id<MTLFunction> trace = [state->library newFunctionWithName:trace_name
+                                               constantValues:trace_constants
+                                                        error:&error];
   id<MTLFunction> emit = [state->library newFunctionWithName:@"emit_tile_frontier"];
   if (trace == nil || emit == nil) {
     throw std::runtime_error("GPU-frontier Metal kernels are missing");
@@ -200,9 +197,8 @@ GpuRaytraceResources::GpuRaytraceResources(
   state->elevation_output = make_buffer(
       state->device,
       nullptr,
-      outputs.elevations
-          ? checked_buffer_length(rays.size(), sizeof(float), "elevation output")
-          : sizeof(float),
+      outputs.elevations ? checked_buffer_length(rays.size(), sizeof(float), "elevation output")
+                         : sizeof(float),
       "elevation output"
   );
   state->surface_gradient_output = make_buffer(
@@ -266,7 +262,9 @@ GpuRaytraceResources::GpuRaytraceResources(
       state->device,
       catalogue_entries.data(),
       checked_buffer_length(
-          catalogue_entries.size(), sizeof(CatalogueTileHashEntry), "catalogue hash"
+          catalogue_entries.size(),
+          sizeof(CatalogueTileHashEntry),
+          "catalogue hash"
       ),
       "catalogue hash"
   );
@@ -363,8 +361,8 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setBuffer:state.deferred_count offset:0 atIndex:7];
   [encoder setBuffer:state.catalogue_hash offset:0 atIndex:8];
   [encoder setBytes:&state.catalogue_hash_capacity
-              length:sizeof(state.catalogue_hash_capacity)
-             atIndex:9];
+             length:sizeof(state.catalogue_hash_capacity)
+            atIndex:9];
   [encoder setBuffer:state.local_skip_count offset:0 atIndex:10];
   [encoder setBuffer:state.global_skip_count offset:0 atIndex:11];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)

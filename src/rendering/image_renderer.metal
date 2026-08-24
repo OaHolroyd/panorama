@@ -83,9 +83,9 @@ kernel void reduce_finite_range(
 ) {
   threadgroup uint local_minima[256];
   threadgroup uint local_maxima[256];
-  const bool valid = index < count && isfinite(values[index]) &&
-                     (collisions_only == 0U ||
-                      (distances[index] > 0.0F && isfinite(distances[index])));
+  const bool valid =
+      index < count && isfinite(values[index]) &&
+      (collisions_only == 0U || (distances[index] > 0.0F && isfinite(distances[index])));
   const uint ordered = valid ? ordered_float(values[index]) : 0U;
   local_minima[local_index] = valid ? ordered : 0xffffffffU;
   local_maxima[local_index] = ordered;
@@ -93,10 +93,10 @@ kernel void reduce_finite_range(
 
   for (uint offset = 128U; offset != 0U; offset >>= 1U) {
     if (local_index < offset) {
-      local_minima[local_index] = min(local_minima[local_index],
-                                      local_minima[local_index + offset]);
-      local_maxima[local_index] = max(local_maxima[local_index],
-                                      local_maxima[local_index + offset]);
+      local_minima[local_index] =
+          min(local_minima[local_index], local_minima[local_index + offset]);
+      local_maxima[local_index] =
+          max(local_maxima[local_index], local_maxima[local_index + offset]);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
@@ -116,8 +116,7 @@ inline float3 preset_colourmap(float normalised_value, uint colourmap) {
     upper++;
   }
   const uint lower = upper - 1U;
-  const float fraction =
-      (value - positions[lower]) / (positions[upper] - positions[lower]);
+  const float fraction = (value - positions[lower]) / (positions[upper] - positions[lower]);
   const float3 interpolated =
       preset_colourmaps[map_index][lower] +
       fraction * (preset_colourmaps[map_index][upper] - preset_colourmaps[map_index][lower]);
@@ -126,12 +125,10 @@ inline float3 preset_colourmap(float normalised_value, uint colourmap) {
 
 /// Normalise a finite scalar using a completed atomic range reduction.
 inline float normalised_value(float value, device const FiniteRange *range) {
-  const float minimum = decode_ordered_float(
-      atomic_load_explicit(&range->minimum, memory_order_relaxed)
-  );
-  const float maximum = decode_ordered_float(
-      atomic_load_explicit(&range->maximum, memory_order_relaxed)
-  );
+  const float minimum =
+      decode_ordered_float(atomic_load_explicit(&range->minimum, memory_order_relaxed));
+  const float maximum =
+      decode_ordered_float(atomic_load_explicit(&range->maximum, memory_order_relaxed));
   return maximum == minimum ? 0.5F : (value - minimum) / (maximum - minimum);
 }
 
@@ -181,20 +178,14 @@ kernel void present_surface_normals(
   const uint index = position.y * output.get_width() + position.x;
   const float distance = distances[index];
   const float3 color = distance > 0.0F && isfinite(distance)
-                           ? quantize_unorm8(
-                                 0.5F * surface_normal(packed_gradients[index]) + 0.5F
-                             )
+                           ? quantize_unorm8(0.5F * surface_normal(packed_gradients[index]) + 0.5F)
                            : float3(0.0F);
   output.write(float4(color, 1.0F), position);
 }
 
 /// Convert an sRGB colour to the linear-light domain used for illumination.
 inline float3 srgb_to_linear(float3 value) {
-  return select(
-      value / 12.92F,
-      pow((value + 0.055F) / 1.055F, float3(2.4F)),
-      value > 0.04045F
-  );
+  return select(value / 12.92F, pow((value + 0.055F) / 1.055F, float3(2.4F)), value > 0.04045F);
 }
 
 /// Convert a shaded linear-light colour back to sRGB for the output texture.
@@ -224,12 +215,11 @@ kernel void present_synthetic_terrain(
     return;
   }
 
-  const float diffuse = max(0.0F, dot(surface_normal(packed_gradients[index]),
-                                      sun_and_ambient.xyz));
+  const float diffuse =
+      max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
   const float linear = sun_and_ambient.w + (1.0F - sun_and_ambient.w) * diffuse;
-  const float srgb = linear <= 0.0031308F
-                         ? 12.92F * linear
-                         : 1.055F * pow(linear, 1.0F / 2.4F) - 0.055F;
+  const float srgb =
+      linear <= 0.0031308F ? 12.92F * linear : 1.055F * pow(linear, 1.0F / 2.4F) - 0.055F;
   output.write(float4(srgb, srgb, srgb, 1.0F), position);
 }
 
@@ -257,14 +247,12 @@ kernel void present_colourmapped_synthetic_terrain(
     return;
   }
 
-  const float diffuse = max(0.0F, dot(surface_normal(packed_gradients[index]),
-                                      sun_and_ambient.xyz));
+  const float diffuse =
+      max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
   const float illumination = sun_and_ambient.w + (1.0F - sun_and_ambient.w) * diffuse;
 
-  const float3 base_srgb = preset_colourmap(
-      normalised_value(colour_values[index], range),
-      colourmap
-  );
+  const float3 base_srgb =
+      preset_colourmap(normalised_value(colour_values[index], range), colourmap);
   output.write(float4(linear_to_srgb(srgb_to_linear(base_srgb) * illumination), 1.0F), position);
 }
 
@@ -281,7 +269,6 @@ kernel void pack_presented_rgb(
     return;
   }
   const uint index = position.y * input.get_width() + position.x;
-  output[index] = packed_uchar3(
-      uchar3(floor(clamp(input.read(position).rgb, 0.0F, 1.0F) * 255.0F + 0.5F))
-  );
+  output[index] =
+      packed_uchar3(uchar3(floor(clamp(input.read(position).rgb, 0.0F, 1.0F) * 255.0F + 0.5F)));
 }

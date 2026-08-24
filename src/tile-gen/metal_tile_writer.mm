@@ -132,8 +132,7 @@ float write_metal_tile_chunk(
   std::vector<uint16_t> quantized_vertices;
   quantized_vertices.reserve(vertices.size());
   for (float elevation : vertices) {
-    const int64_t code =
-        static_cast<int64_t>(elevation_decimeters(elevation)) - minimum_decimeters;
+    const int64_t code = static_cast<int64_t>(elevation_decimeters(elevation)) - minimum_decimeters;
     quantized_vertices.push_back(static_cast<uint16_t>(code));
   }
   const float maximum = static_cast<float>(static_cast<double>(maximum_decimeters) / 10.0);

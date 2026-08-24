@@ -109,8 +109,7 @@ void validate_output_configuration(const TerrainRenderOutputs &outputs) {
       synthetic.ambient_light > 1.0F ||
       static_cast<uint32_t>(synthetic.colour_source) >
           static_cast<uint32_t>(TerrainColourSource::Elevation) ||
-      static_cast<uint32_t>(synthetic.colourmap) >
-          static_cast<uint32_t>(PresetColourmap::Turbo)) {
+      static_cast<uint32_t>(synthetic.colourmap) > static_cast<uint32_t>(PresetColourmap::Turbo)) {
     throw std::invalid_argument("Synthetic render options are invalid");
   }
 }
@@ -161,53 +160,34 @@ void write_png_outputs(
   const id<MTLBuffer> distances = gpu.distances();
 
   if (outputs.write_diagnostics) {
-    render_and_write_png(
-        timer,
-        "distances.png",
-        renderer,
-        image,
-        [&] { renderer.render_scalar(distances, timer); }
-    );
+    render_and_write_png(timer, "distances.png", renderer, image, [&] {
+      renderer.render_scalar(distances, timer);
+    });
     if (outputs.write_elevation_diagnostic) {
-      render_and_write_png(
-          timer,
-          "elevations.png",
-          renderer,
-          image,
-          [&] { renderer.render_scalar(gpu.elevations(), timer); }
-      );
+      render_and_write_png(timer, "elevations.png", renderer, image, [&] {
+        renderer.render_scalar(gpu.elevations(), timer);
+      });
     }
     if (outputs.write_normal_diagnostic) {
-      render_and_write_png(
-          timer,
-          "normals.png",
-          renderer,
-          image,
-          [&] { renderer.render_surface_normals(gpu.surface_gradients(), distances, timer); }
-      );
+      render_and_write_png(timer, "normals.png", renderer, image, [&] {
+        renderer.render_surface_normals(gpu.surface_gradients(), distances, timer);
+      });
     }
   }
 
   if (outputs.write_synthetic) {
     const id<MTLBuffer> colour_values =
-        outputs.synthetic_options.colour_source == TerrainColourSource::Elevation
-            ? gpu.elevations()
-            : distances;
-    render_and_write_png(
-        timer,
-        "synthetic.png",
-        renderer,
-        image,
-        [&] {
-          renderer.render_synthetic(
-              gpu.surface_gradients(),
-              distances,
-              colour_values,
-              outputs.synthetic_options,
-              timer
-          );
-        }
-    );
+        outputs.synthetic_options.colour_source == TerrainColourSource::Elevation ? gpu.elevations()
+                                                                                  : distances;
+    render_and_write_png(timer, "synthetic.png", renderer, image, [&] {
+      renderer.render_synthetic(
+          gpu.surface_gradients(),
+          distances,
+          colour_values,
+          outputs.synthetic_options,
+          timer
+      );
+    });
   }
   timer.print();
 }

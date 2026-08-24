@@ -25,8 +25,7 @@ struct TerrainRenderOutputs {
   /// Return whether any selected output consumes per-collision elevations.
   [[nodiscard]] bool requires_elevations() const {
     return (write_diagnostics && write_elevation_diagnostic) ||
-           (write_synthetic &&
-            synthetic_options.colour_source == TerrainColourSource::Elevation);
+           (write_synthetic && synthetic_options.colour_source == TerrainColourSource::Elevation);
   }
 
   /// Return whether any selected output consumes per-collision gradients.

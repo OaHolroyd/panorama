@@ -14,10 +14,7 @@ HostFrontier::HostFrontier(
     uint32_t resident_slot_capacity
 )
     : catalogue_(catalogue), rays_(rays), parameters_(parameters),
-      source_buckets_(
-          catalogue.sources().size(),
-          {{}, {}, std::numeric_limits<float>::infinity()}
-      ),
+      source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
       source_is_pending_(catalogue.sources().size(), 0U),
       request_outstanding_(catalogue.sources().size(), 0U),
       request_distances_(catalogue.sources().size(), std::numeric_limits<float>::infinity()),
@@ -71,9 +68,7 @@ uint32_t HostFrontier::activate_resident(
   }
   float nearest_entry = std::numeric_limits<float>::infinity();
   for (uint32_t source_index : pending_sources_) {
-    nearest_entry = std::min(
-        nearest_entry, source_buckets_[source_index].minimum_pending_distance
-    );
+    nearest_entry = std::min(nearest_entry, source_buckets_[source_index].minimum_pending_distance);
   }
   for (const DeferredRayWork &work : incoming) {
     if (work.ray_index >= rays_.size() || work.source_index >= source_buckets_.size()) {
@@ -216,7 +211,9 @@ void HostFrontier::record_active_slot_use(ResidentTileCache &cache) const {
   cache.record_slot_use(active_slots_);
 }
 
-bool HostFrontier::has_deferred_work() const { return pending_count_ != 0U || waiting_count_ != 0U; }
+bool HostFrontier::has_deferred_work() const {
+  return pending_count_ != 0U || waiting_count_ != 0U;
+}
 
 #if defined(PANORAMA_DEBUG_VALIDATION)
 void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const char *name) {

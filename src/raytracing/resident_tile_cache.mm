@@ -61,7 +61,11 @@ make_resident_tile(const LoadedTile &tile, TileKey key, const RaytraceConfig &co
       y > static_cast<double>(std::numeric_limits<float>::max())) {
     throw std::overflow_error("Resident tile origin does not fit float32");
   }
-  return {static_cast<float>(x), static_cast<float>(y), tile.maximum_elevation, 0U, key.row,
+  return {static_cast<float>(x),
+          static_cast<float>(y),
+          tile.maximum_elevation,
+          0U,
+          key.row,
           key.column};
 }
 
@@ -302,8 +306,7 @@ void ResidentTileCache::State::load_custom_vertices(
   }
 }
 
-id<MTLCommandBuffer>
-ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
+id<MTLCommandBuffer> ResidentTileCache::State::submit_mipmaps(std::span<const uint32_t> slots) {
   // Mipmap submissions complete synchronously, so the cache-owned slot list
   // is never rewritten while a preparation command is using it.
   write_preparation_slots(slots);
@@ -402,10 +405,7 @@ void ResidentTileCache::State::generate_mipmaps(std::span<const uint32_t> slots,
     print_error(@"Metal mipmap generation failed", command.error);
     throw std::runtime_error("Metal mipmap generation failed");
   }
-  timer.add_work(
-      "GPU mipmap generation",
-      1'000.0 * (command.GPUEndTime - command.GPUStartTime)
-  );
+  timer.add_work("GPU mipmap generation", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
 }
 
 ResidentTileCache::ResidentTileCache(
@@ -634,7 +634,6 @@ ResidentTileCache::ResidentTileCache(
   state->last_used.assign(slot_capacity, 0U);
   state->last_used[0] = 1U;
   state_ = std::move(state);
-
 }
 
 ResidentTileCache::~ResidentTileCache() = default;

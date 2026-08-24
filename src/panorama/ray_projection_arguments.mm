@@ -25,8 +25,7 @@ bool RayProjectionArguments::parse_option(std::string_view option, std::string_v
       mode_ = Mode::Camera;
     } else {
       throw std::invalid_argument(
-          "Invalid value for --projection: " + std::string(value) +
-          " (expected angular or camera)"
+          "Invalid value for --projection: " + std::string(value) + " (expected angular or camera)"
       );
     }
   } else if (option == "--azimuth-count") {
@@ -84,9 +83,7 @@ void RayProjectionArguments::validate() const {
     throw std::invalid_argument("Camera options require --projection camera");
   }
   if (mode_ == Mode::Camera && angular_dimensions_specified_) {
-    throw std::invalid_argument(
-        "--azimuth-count and --polar-count require --projection angular"
-    );
+    throw std::invalid_argument("--azimuth-count and --polar-count require --projection angular");
   }
   if (mode_ == Mode::Camera &&
       (horizontal_field_of_view_ <= 0.0 || horizontal_field_of_view_ >= 180.0)) {
