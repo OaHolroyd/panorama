@@ -139,6 +139,7 @@ kernel void present_synthetic_terrain(
     device const uint *packed_gradients [[buffer(0)]],
     device const float *distances [[buffer(1)]],
     constant float4 &sun_and_ambient [[buffer(2)]],
+    constant uint &use_surface_normals [[buffer(3)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
@@ -149,6 +150,10 @@ kernel void present_synthetic_terrain(
   const float distance = distances[index];
   if (!(distance > 0.0F) || !isfinite(distance)) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
+    return;
+  }
+  if (use_surface_normals == 0U) {
+    output.write(float4(1.0F), position);
     return;
   }
 
@@ -171,6 +176,7 @@ kernel void present_colourmapped_synthetic_terrain(
     device const float *colour_values [[buffer(3)]],
     constant float2 &range [[buffer(4)]],
     constant uint &colourmap [[buffer(5)]],
+    constant uint &use_surface_normals [[buffer(6)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
@@ -184,12 +190,15 @@ kernel void present_colourmapped_synthetic_terrain(
     return;
   }
 
+  const float3 base_srgb =
+      preset_colourmap(normalised_value(colour_values[index], range), colourmap);
+  if (use_surface_normals == 0U) {
+    output.write(float4(base_srgb, 1.0F), position);
+    return;
+  }
   const float diffuse =
       max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
   const float illumination = sun_and_ambient.w + (1.0F - sun_and_ambient.w) * diffuse;
-
-  const float3 base_srgb =
-      preset_colourmap(normalised_value(colour_values[index], range), colourmap);
   output.write(float4(linear_to_srgb(srgb_to_linear(base_srgb) * illumination), 1.0F), position);
 }
 

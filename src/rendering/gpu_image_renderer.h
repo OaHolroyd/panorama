@@ -31,8 +31,9 @@ struct GpuImageReadback {
 struct GpuPresentationRequirements {
   bool scalar_diagnostics;
   bool normal_diagnostics;
-  bool synthetic;
-  /// Select the distance/elevation rather than white synthetic pipeline.
+  /// Enable uncoloured (white base) synthetic terrain presentation.
+  bool white_synthetic;
+  /// Enable distance/elevation colourmapped synthetic presentation.
   bool synthetic_scalar_colour;
   /// Allocate the packing pipeline and shared buffer used by CLI image files.
   bool host_readback;
@@ -66,13 +67,18 @@ public:
   void
   render_surface_normals(id<MTLBuffer> packed_gradients, id<MTLBuffer> distances, Timer &timer);
 
-  /// Render lit terrain on black using white or colourmapped scalar values.
+  /// Render terrain on black using white or colourmapped scalar values.
+  ///
+  /// `packed_gradients` may be nil when normal lighting is disabled. Callers
+  /// which switch lighting at runtime should retain it so enabling lighting
+  /// remains a presentation-only operation.
   void render_synthetic(
       id<MTLBuffer> packed_gradients,
       id<MTLBuffer> distances,
       id<MTLBuffer> colour_values,
       const SyntheticRenderOptions &options,
       ScalarColourRange range,
+      bool use_surface_normals,
       Timer &timer
   );
 

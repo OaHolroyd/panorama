@@ -66,7 +66,8 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
       {
           outputs.write_diagnostics,
           outputs.write_diagnostics && outputs.write_normal_diagnostic,
-          outputs.write_synthetic,
+          outputs.write_synthetic &&
+              outputs.synthetic_options.colour_source == TerrainColourSource::White,
           outputs.write_synthetic &&
               outputs.synthetic_options.colour_source != TerrainColourSource::White,
           true,
@@ -103,6 +104,7 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
           colour_values,
           outputs.synthetic_options,
           outputs.scalar_colour_range,
+          true,
           timer
       );
     });

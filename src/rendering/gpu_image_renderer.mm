@@ -77,13 +77,13 @@ struct GpuImageRenderer::State {
   id<MTLCommandQueue> queue;
   id<MTLComputePipelineState> scalar;
   id<MTLComputePipelineState> normals;
-  id<MTLComputePipelineState> synthetic;
+  id<MTLComputePipelineState> white_synthetic;
+  id<MTLComputePipelineState> colourmapped_synthetic;
   id<MTLComputePipelineState> pack_rgb;
   id<MTLTexture> output;
   id<MTLBuffer> readback;
   ImageSize image;
   NSUInteger bytes_per_row;
-  bool synthetic_scalar_colour;
 };
 
 GpuImageRenderer::GpuImageRenderer(
@@ -103,18 +103,18 @@ GpuImageRenderer::GpuImageRenderer(
   auto state = std::make_unique<State>();
   state->queue = queue;
   state->image = image;
-  state->synthetic_scalar_colour = requirements.synthetic_scalar_colour;
   if (requirements.scalar_diagnostics) {
     state->scalar = make_pipeline(device, library, @"present_scalar_viridis");
   }
   if (requirements.normal_diagnostics) {
     state->normals = make_pipeline(device, library, @"present_surface_normals");
   }
-  if (requirements.synthetic) {
-    NSString *name = requirements.synthetic_scalar_colour
-                         ? @"present_colourmapped_synthetic_terrain"
-                         : @"present_synthetic_terrain";
-    state->synthetic = make_pipeline(device, library, name);
+  if (requirements.white_synthetic) {
+    state->white_synthetic = make_pipeline(device, library, @"present_synthetic_terrain");
+  }
+  if (requirements.synthetic_scalar_colour) {
+    state->colourmapped_synthetic =
+        make_pipeline(device, library, @"present_colourmapped_synthetic_terrain");
   }
   if (requirements.host_readback) {
     state->pack_rgb = make_pipeline(device, library, @"pack_presented_rgb");
@@ -214,27 +214,29 @@ void GpuImageRenderer::render_synthetic(
     id<MTLBuffer> colour_values,
     const SyntheticRenderOptions &options,
     ScalarColourRange range,
+    bool use_surface_normals,
     Timer &timer
 ) {
   State &state = *state_;
-  if (state.synthetic == nil) {
-    throw std::logic_error("Synthetic presentation was not enabled");
-  }
   const uint32_t colour_source = static_cast<uint32_t>(options.colour_source);
   const uint32_t colourmap = static_cast<uint32_t>(options.colourmap);
-  if (packed_gradients == nil || distances == nil || colour_values == nil ||
-      !std::isfinite(options.sun_azimuth) || !std::isfinite(options.sun_elevation) ||
-      !std::isfinite(options.ambient_light) || options.ambient_light < 0.0F ||
-      options.ambient_light > 1.0F || !std::isfinite(range.minimum) ||
-      !std::isfinite(range.maximum) || range.maximum <= range.minimum ||
+  const bool scalar_colour = options.colour_source != TerrainColourSource::White;
+  if ((use_surface_normals && packed_gradients == nil) || distances == nil ||
+      (scalar_colour && colour_values == nil) || !std::isfinite(options.sun_azimuth) ||
+      !std::isfinite(options.sun_elevation) || !std::isfinite(options.ambient_light) ||
+      options.ambient_light < 0.0F || options.ambient_light > 1.0F ||
+      !std::isfinite(range.minimum) || !std::isfinite(range.maximum) ||
+      range.maximum <= range.minimum ||
       colour_source > static_cast<uint32_t>(TerrainColourSource::Elevation) ||
       colourmap > static_cast<uint32_t>(PresetColourmap::Turbo)) {
     throw std::invalid_argument("Synthetic presentation inputs are invalid");
   }
-  const bool scalar_colour = options.colour_source != TerrainColourSource::White;
-  if (scalar_colour != state.synthetic_scalar_colour) {
-    throw std::logic_error("Synthetic presentation pipeline does not match its colour source");
+  id<MTLComputePipelineState> pipeline =
+      scalar_colour ? state.colourmapped_synthetic : state.white_synthetic;
+  if (pipeline == nil) {
+    throw std::logic_error("Selected synthetic presentation pipeline was not enabled");
   }
+  const uint32_t normal_lighting = use_surface_normals ? 1U : 0U;
   const float azimuth = static_cast<float>(options.sun_azimuth);
   const float elevation = static_cast<float>(options.sun_elevation);
   const float horizontal = std::cos(elevation);
@@ -261,9 +263,12 @@ void GpuImageRenderer::render_synthetic(
     [encoder setBuffer:colour_values offset:0 atIndex:3];
     [encoder setBytes:&range length:sizeof(range) atIndex:4];
     [encoder setBytes:&colourmap length:sizeof(colourmap) atIndex:5];
+    [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:6];
+  } else {
+    [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:3];
   }
   [encoder setTexture:state.output atIndex:0];
-  dispatch_image(encoder, state.synthetic, state.image);
+  dispatch_image(encoder, pipeline, state.image);
   [encoder endEncoding];
   complete_timed_command(command, timer, "Pixel conversion", @"GPU synthetic presentation failed");
 }

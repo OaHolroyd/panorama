@@ -25,5 +25,9 @@ make
 ./panorama-app --tile-dir data/swissalti3d-10-level-0-metal-u16-none --retain-quantized
 ```
 
-Drag with the mouse or use the arrow/WASD keys to change heading and pitch. Run
-`./panorama-app --help` for observer, image-size, and field-of-view options.
+Drag with the mouse or use the arrow/WASD keys to change heading and pitch.
+Use the trailing Render Settings inspector to switch between white,
+distance-coloured, and elevation-coloured terrain; select a colourmap and fixed
+range; or disable surface-normal lighting. Collapse or reveal the inspector by
+clicking the `sidebar.right` button at the trailing edge of the window toolbar.
+Run `./panorama-app --help` for observer, image-size, and field-of-view options.
