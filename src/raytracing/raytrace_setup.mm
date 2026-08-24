@@ -132,8 +132,16 @@ view_uint32_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
 /// imminent frontier.
 /// The loop ends when every ray has intersected terrain, reached the range
 /// limit, risen above the catalogue, or left available terrain coverage.
-void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &field) {
+void raytrace_tiled_heightmap(
+    const RaytraceConfig &config,
+    const RayField &field,
+    const RaytraceOutputConfig &outputs
+) {
   validate_configuration(config);
+  if ((!outputs.write_diagnostics && !outputs.write_synthetic) ||
+      (outputs.write_synthetic && !config.compute_normals)) {
+    throw std::invalid_argument("Raytrace output configuration is inconsistent");
+  }
   const uint32_t ray_count = validate_ray_field(field);
   // Start a composite timer.
   Timer timer("Total elapsed");
@@ -400,33 +408,50 @@ void raytrace_tiled_heightmap(const RaytraceConfig &config, const RayField &fiel
     );
     timer.print();
 
-    // PNG encoding is a placeholder output stage rather than part of terrain
-    // tracing. Report it as an independent top-level timer so `Total elapsed`
-    // remains comparable with future output backends which may omit PNGs.
+    // Output generation is deliberately outside terrain tracing. Report it as
+    // an independent timer so tracing remains comparable across output modes.
     Timer png_timer("PNG generation");
     const std::span<const float> distances =
         view_float_buffer(gpu.distances(), ray_count, "distance output");
-    write_colormapped_png(
-        "distances.png",
-        distances,
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
-    );
-    write_colormapped_png(
-        "elevations.png",
-        view_float_buffer(gpu.elevations(), ray_count, "elevation output"),
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
-    );
+    const std::span<const float> elevations =
+        view_float_buffer(gpu.elevations(), ray_count, "elevation output");
+    std::span<const uint32_t> surface_gradients;
     if (config.compute_normals) {
-      write_surface_normals_png(
-          "normals.png",
-          view_uint32_buffer(gpu.surface_gradients(), ray_count, "surface gradient output"),
+      surface_gradients =
+          view_uint32_buffer(gpu.surface_gradients(), ray_count, "surface gradient output");
+    }
+    if (outputs.write_diagnostics) {
+      write_colormapped_png(
+          "distances.png",
           distances,
           field.image.width,
-          field.image.height
+          field.image.height,
+          colormaps::viridis
+      );
+      write_colormapped_png(
+          "elevations.png",
+          elevations,
+          field.image.width,
+          field.image.height,
+          colormaps::viridis
+      );
+      if (config.compute_normals) {
+        write_surface_normals_png(
+            "normals.png",
+            surface_gradients,
+            distances,
+            field.image.width,
+            field.image.height
+        );
+      }
+    }
+    if (outputs.write_synthetic) {
+      write_synthetic_terrain_png(
+          "synthetic.png",
+          surface_gradients,
+          distances,
+          field.image,
+          outputs.synthetic_options
       );
     }
     png_timer.print();

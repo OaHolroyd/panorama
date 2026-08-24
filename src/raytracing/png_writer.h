@@ -29,6 +29,14 @@ namespace colormaps {
 
 } // namespace colormaps
 
+/// Write an already-coloured row-major RGB image as an opaque sRGB PNG.
+void write_rgb_png(
+    const std::filesystem::path &path,
+    std::span<const Rgb> pixels,
+    uint32_t width,
+    uint32_t height
+);
+
 /// Write a row-major float32 array as an opaque sRGB PNG.
 ///
 /// `values` must contain exactly `width * height` elements; row zero becomes
