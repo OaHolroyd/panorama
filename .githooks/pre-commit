@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Format complete staged source files and update the index before the commit is
+# created. Partially staged files are rejected so re-staging cannot accidentally
+# include changes that the developer deliberately left out of the commit.
+set -uo pipefail
+
+if ! command -v clang-format >/dev/null 2>&1; then
+  printf '%s\n' "pre-commit: clang-format is required but was not found in PATH." >&2
+  exit 1
+fi
+
+files=()
+file_count=0
+while IFS= read -r -d '' file; do
+  files+=("$file")
+  file_count=$((file_count + 1))
+done < <(
+  git diff --cached --name-only --diff-filter=ACMR -z -- \
+    '*.c' '*.cc' '*.cpp' '*.cxx' \
+    '*.h' '*.hh' '*.hpp' '*.hxx' \
+    '*.m' '*.mm' '*.metal'
+)
+
+if ((file_count == 0)); then
+  exit 0
+fi
+
+partially_staged=0
+for file in "${files[@]}"; do
+  if ! git diff --quiet -- "$file"; then
+    printf 'pre-commit: %s has unstaged changes.\n' "$file" >&2
+    partially_staged=1
+  fi
+done
+
+if ((partially_staged != 0)); then
+  printf '%s\n' 'Commit stopped to avoid staging the changes listed above.' >&2
+  exit 1
+fi
+
+if ! clang-format -i "${files[@]}"; then
+  printf '%s\n' 'pre-commit: clang-format failed.' >&2
+  exit 1
+fi
+if ! git add -- "${files[@]}"; then
+  printf '%s\n' 'pre-commit: could not stage the formatted files.' >&2
+  exit 1
+fi

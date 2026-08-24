@@ -4,9 +4,10 @@
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
 
-/// Pipeline specialization selected once per render. When false, the Metal
-/// compiler removes collision-gradient arithmetic and output writes entirely.
+/// Pipeline specializations selected once per render. False options let Metal
+/// remove the associated collision arithmetic and output writes entirely.
 constant bool compute_surface_gradients [[function_constant(0)]];
+constant bool store_collision_elevations [[function_constant(1)]];
 
 /// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///
@@ -478,7 +479,12 @@ inline Collision bilinear_collision(
   if (fabs(a) < kPolynomialEpsilon) {
     if (fabs(b) < kPolynomialEpsilon) {
       return conservative_boundary_collision(
-          observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+          observer_elevation,
+          slope,
+          curvature,
+          t_entry,
+          t_exit,
+          minimum_vertex
       );
     }
     local_t = -c / b;
@@ -496,7 +502,12 @@ inline Collision bilinear_collision(
       return {true, t_entry + local_t};
     }
     return conservative_boundary_collision(
-        observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+        observer_elevation,
+        slope,
+        curvature,
+        t_entry,
+        t_exit,
+        minimum_vertex
     );
   }
 
@@ -506,7 +517,12 @@ inline Collision bilinear_collision(
       discriminant = 0.0F;
     } else {
       return conservative_boundary_collision(
-          observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+          observer_elevation,
+          slope,
+          curvature,
+          t_entry,
+          t_exit,
+          minimum_vertex
       );
     }
   }
@@ -558,7 +574,12 @@ inline Collision bilinear_collision(
     return {true, t_entry + local_t};
   }
   return conservative_boundary_collision(
-      observer_elevation, slope, curvature, t_entry, t_exit, minimum_vertex
+      observer_elevation,
+      slope,
+      curvature,
+      t_entry,
+      t_exit,
+      minimum_vertex
   );
 }
 
@@ -589,12 +610,10 @@ inline uint packed_surface_gradients(
   const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
   const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
   constexpr float kMaximumHalf = 65504.0F;
-  const float east_gradient = clamp((z01 - z00 + twist * sy) * inverse_delta,
-                                    -kMaximumHalf,
-                                    kMaximumHalf);
-  const float north_gradient = clamp((z10 - z00 + twist * sx) * inverse_delta,
-                                     -kMaximumHalf,
-                                     kMaximumHalf);
+  const float east_gradient =
+      clamp((z01 - z00 + twist * sy) * inverse_delta, -kMaximumHalf, kMaximumHalf);
+  const float north_gradient =
+      clamp((z10 - z00 + twist * sx) * inverse_delta, -kMaximumHalf, kMaximumHalf);
   return as_type<uint>(half2(east_gradient, north_gradient));
 }
 
@@ -714,9 +733,8 @@ inline float trace_tile_frontier_impl(
   const float dz = ray.slope;
   const float observer_elevation = params.observer_elevation;
   const float curvature = params.curvature_coefficient;
-  const float stationary_distance = curvature > 0.0F
-                                        ? -dz / (2.0F * curvature)
-                                        : (dz >= 0.0F ? -INFINITY : INFINITY);
+  const float stationary_distance =
+      curvature > 0.0F ? -dz / (2.0F * curvature) : (dz >= 0.0F ? -INFINITY : INFINITY);
   const int n = int(num_cell);
 
   // The observer tile begins at level 1; incoming tiles begin at their
@@ -750,12 +768,10 @@ inline float trace_tile_frontier_impl(
 
   // Cell-traversal distances: `tx` and `ty` are the distances to the next
   // vertical and horizontal cell boundary respectively.
-  float ty = stepy == 0
-                 ? INFINITY
-                 : stepy * (tile_y_min * inverse_delta + i + (stepy > 0) * scale) * dty;
-  float tx = stepx == 0
-                 ? INFINITY
-                 : stepx * (tile_x_min * inverse_delta + j + (stepx > 0) * scale) * dtx;
+  float ty =
+      stepy == 0 ? INFINITY : stepy * (tile_y_min * inverse_delta + i + (stepy > 0) * scale) * dty;
+  float tx =
+      stepx == 0 ? INFINITY : stepx * (tile_x_min * inverse_delta + j + (stepx > 0) * scale) * dtx;
   // A coarse incoming segment can begin inside the other axis's aligned
   // block. Reposition both so neither moves behind the true hand-off.
   if (stepy != 0) {
@@ -860,12 +876,10 @@ inline float trace_tile_frontier_impl(
         // Exit only after the exact patch test confirms a hit.
         if (collision.hit) {
           distances[output_index] = collision.distance;
-          elevations[output_index] = curved_ray_elevation(
-              observer_elevation,
-              dz,
-              curvature,
-              collision.distance
-          );
+          if (store_collision_elevations) {
+            elevations[output_index] =
+                curved_ray_elevation(observer_elevation, dz, curvature, collision.distance);
+          }
           if (compute_surface_gradients) {
             surface_gradients[output_index] = packed_surface_gradients(
                 vertices,
@@ -916,12 +930,10 @@ inline float trace_tile_frontier_impl(
         // before this one, so move backward without rebuilding the offset.
         const uint child_side = mipmap_level_side(num_cell, level);
         offset -= child_side * child_side;
-        ty = stepy == 0
-                 ? INFINITY
-                 : stepy * (tile_y_min * inverse_delta + i + (stepy > 0) * scale) * dty;
-        tx = stepx == 0
-                 ? INFINITY
-                 : stepx * (tile_x_min * inverse_delta + j + (stepx > 0) * scale) * dtx;
+        ty = stepy == 0 ? INFINITY
+                        : stepy * (tile_y_min * inverse_delta + i + (stepy > 0) * scale) * dty;
+        tx = stepx == 0 ? INFINITY
+                        : stepx * (tile_x_min * inverse_delta + j + (stepx > 0) * scale) * dtx;
 
         // An entry through only one edge of a coarse cell may leave the
         // other axis part-way across the selected child. Advance its timer
@@ -1108,8 +1120,7 @@ kernel void emit_tile_frontier(
       y += copysign(nudge, direction.y);
     }
     const long row_offset = y < tile_y_min ? 1L : y >= tile_y_min + tile_width ? -1L : 0L;
-    const long column_offset =
-        x < tile_x_min ? -1L : x >= tile_x_min + tile_width ? 1L : 0L;
+    const long column_offset = x < tile_x_min ? -1L : x >= tile_x_min + tile_width ? 1L : 0L;
     if (row_offset == 0L && column_offset == 0L) {
       break;
     }
@@ -1118,9 +1129,8 @@ kernel void emit_tile_frontier(
     tile_x_min += float(column_offset) * tile_width;
     tile_y_min -= float(row_offset) * tile_width;
 
-    device const CatalogueTileHashEntry *source = lookup_catalogue_tile(
-        catalogue_hash, catalogue_hash_capacity, tile_row, tile_column
-    );
+    device const CatalogueTileHashEntry *source =
+        lookup_catalogue_tile(catalogue_hash, catalogue_hash_capacity, tile_row, tile_column);
     if (source == nullptr) {
       break;
     }

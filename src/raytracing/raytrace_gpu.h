@@ -47,6 +47,13 @@ struct GpuFrontierPassResult {
   double device_milliseconds;
 };
 
+/// Per-collision GPU products that may be compiled out of the trace pipeline.
+/// Distance is intentionally absent because it is always produced.
+struct GpuTraceOutputRequirements {
+  bool elevations;
+  bool surface_gradients;
+};
+
 /// Long-lived Metal resources for repeated multi-tile frontier passes.
 ///
 /// This class owns device/pipeline state and buffers whose lifetime spans the
@@ -58,13 +65,13 @@ class GpuRaytraceResources {
 public:
   /// Create all reusable Metal resources for a fixed per-pixel ray field.
   ///
-  /// `compute_normals` specializes the trace pipeline: disabling it removes
-  /// collision-gradient arithmetic and avoids a full-size gradient buffer.
+  /// Optional outputs specialize the trace pipeline, removing their collision
+  /// arithmetic, buffer writes, and full-size allocations when disabled.
   GpuRaytraceResources(
       std::span<const RayDirection> rays,
       std::span<const TerrainSource> sources,
       bool trace_quantized,
-      bool compute_normals
+      GpuTraceOutputRequirements outputs
   );
 
   GpuRaytraceResources(const GpuRaytraceResources &) = delete;
@@ -78,6 +85,12 @@ public:
 
   /// Return the Metal device shared with resident terrain atlas allocation.
   [[nodiscard]] id<MTLDevice> device() const;
+
+  /// Return the queue shared with post-trace GPU presentation work.
+  [[nodiscard]] id<MTLCommandQueue> command_queue() const;
+
+  /// Return the library containing both tracing and presentation kernels.
+  [[nodiscard]] id<MTLLibrary> library() const;
 
   /// Return the buffer holding the frontier which the next pass will trace.
   [[nodiscard]] id<MTLBuffer> active_frontier() const;
@@ -98,6 +111,8 @@ public:
   [[nodiscard]] id<MTLBuffer> distances() const;
 
   /// Return the shared elevation output buffer after tracing completes.
+  ///
+  /// Throws if elevation output was disabled when this object was created.
   [[nodiscard]] id<MTLBuffer> elevations() const;
 
   /// Return packed float16 east/north surface gradients.

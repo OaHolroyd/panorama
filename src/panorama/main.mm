@@ -1,8 +1,11 @@
-#include "raytrace_setup.h"
+#include "terrain_renderer.h"
 
 #include "arguments.h"
 #include "ray_projection_arguments.h"
 
+#include <array>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -10,16 +13,18 @@
 #include <filesystem>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
 constexpr uint64_t kBytesPerMiB = 1024ULL * 1024ULL;
 constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 
-/// Runtime-selectable settings for one projected terrain dataset.
+/// Runtime-selectable settings for one panorama invocation.
 struct EntrypointSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
@@ -27,10 +32,15 @@ struct EntrypointSettings {
   uint32_t max_tile_count = 0U;
   float max_distance = 600'000.0F;
   bool retain_quantized = false;
-  bool compute_normals = true;
+  bool elevations_enabled = true;
+  bool normals_enabled = true;
   bool write_diagnostics = true;
   bool write_synthetic = false;
   bool synthetic_setting_seen = false;
+  bool colourmap_setting_seen = false;
+  bool colour_range_setting_seen = false;
+  float colour_minimum = 0.0F;
+  std::optional<float> colour_maximum;
   panorama::SyntheticRenderOptions synthetic = {
       225.0 * kDegreesToRadians,
       35.0 * kDegreesToRadians,
@@ -42,24 +52,109 @@ struct EntrypointSettings {
   panorama::RayProjectionArguments projection;
 };
 
+/// Parse a finite command-line value representable as float32.
+[[nodiscard]] float parse_float32(std::string_view value, std::string_view option) {
+  const double parsed = panorama::arguments::parse_finite_double(value, option);
+  if (parsed < static_cast<double>(std::numeric_limits<float>::lowest()) ||
+      parsed > static_cast<double>(std::numeric_limits<float>::max())) {
+    throw std::out_of_range(std::string(option) + " is outside the float32 range");
+  }
+  return static_cast<float>(parsed);
+}
+
+/// Resolve the range after parsing so its default follows `--max-distance`
+/// regardless of command-line option order.
+[[nodiscard]] panorama::ScalarColourRange scalar_colour_range(const EntrypointSettings &settings) {
+  return {settings.colour_minimum, settings.colour_maximum.value_or(settings.max_distance)};
+}
+
+constexpr std::array kTerrainColours = {
+    std::pair{"white", panorama::TerrainColourSource::White},
+    std::pair{"distance", panorama::TerrainColourSource::Distance},
+    std::pair{"elevation", panorama::TerrainColourSource::Elevation},
+};
+
+constexpr std::array kColourmaps = {
+    std::pair{"viridis", panorama::PresetColourmap::Viridis},
+    std::pair{"plasma", panorama::PresetColourmap::Plasma},
+    std::pair{"inferno", panorama::PresetColourmap::Inferno},
+    std::pair{"magma", panorama::PresetColourmap::Magma},
+    std::pair{"cividis", panorama::PresetColourmap::Cividis},
+    std::pair{"turbo", panorama::PresetColourmap::Turbo},
+};
+
+/// Parse and print small named enums from one canonical choice table.
+template <typename Enum, size_t Count>
+[[nodiscard]] Enum parse_choice(
+    std::string_view value,
+    const std::array<std::pair<const char *, Enum>, Count> &choices,
+    std::string_view description,
+    std::string_view expected
+) {
+  for (const auto &[name, choice] : choices) {
+    if (value == name) {
+      return choice;
+    }
+  }
+  throw std::invalid_argument(
+      "Invalid " + std::string(description) + ": " + std::string(value) + " (expected " +
+      std::string(expected) + ")"
+  );
+}
+
+template <typename Enum, size_t Count>
+[[nodiscard]] const char *
+choice_name(Enum value, const std::array<std::pair<const char *, Enum>, Count> &choices) {
+  for (const auto &[name, choice] : choices) {
+    if (value == choice) {
+      return name;
+    }
+  }
+  return "unknown";
+}
+
 /// Validate combinations whose meaning spans more than one CLI switch.
 void validate_output_settings(const EntrypointSettings &settings) {
   if (!settings.write_diagnostics && !settings.write_synthetic) {
     throw std::invalid_argument("At least one output type must be enabled");
   }
-  // Rendering requires collision gradients, whereas diagnostic distance and
-  // elevation fields remain usable when their computation is disabled.
-  if (settings.write_synthetic && !settings.compute_normals) {
+  // Rendering requires collision gradients, whereas mandatory distances and
+  // optional elevation diagnostics remain usable without them.
+  if (settings.write_synthetic && !settings.normals_enabled) {
     throw std::invalid_argument("--synthetic-output cannot be combined with --no-normals");
+  }
+  if (settings.write_synthetic &&
+      settings.synthetic.colour_source == panorama::TerrainColourSource::Elevation &&
+      !settings.elevations_enabled) {
+    throw std::invalid_argument(
+        "--terrain-colour elevation cannot be combined with --no-elevations"
+    );
   }
   // Treat lighting controls as configuration for an explicitly selected
   // product; silently creating another output would make scripted runs unclear.
   if (settings.synthetic_setting_seen && !settings.write_synthetic) {
     throw std::invalid_argument("Synthetic image options require --synthetic-output");
   }
+  if (settings.colourmap_setting_seen &&
+      settings.synthetic.colour_source == panorama::TerrainColourSource::White) {
+    throw std::invalid_argument("--colourmap requires distance or elevation terrain colour");
+  }
+  const panorama::ScalarColourRange range = scalar_colour_range(settings);
+  if (!std::isfinite(range.minimum) || !std::isfinite(range.maximum) ||
+      range.maximum <= range.minimum) {
+    throw std::invalid_argument("--colour-max must be greater than --colour-min");
+  }
+  const bool scalar_output = settings.write_diagnostics ||
+                             (settings.write_synthetic && settings.synthetic.colour_source !=
+                                                              panorama::TerrainColourSource::White);
+  if (settings.colour_range_setting_seen && !scalar_output) {
+    throw std::invalid_argument(
+        "Colour range options require diagnostics or distance/elevation terrain colour"
+    );
+  }
 }
 
-/// Print the command-line options accepted by the raytracing executable.
+/// Print the command-line options accepted by the panorama executable.
 void print_usage(const char *program) {
   std::printf(
       "usage: %s [options]\n"
@@ -80,12 +175,21 @@ void print_usage(const char *program) {
       "                        skip diagnostic field PNGs\n"
       "  --synthetic-output    write a shaded synthetic.png (default: disabled)\n"
       "  --retain-quantized    keep uint16 terrain quantized in the GPU atlas\n"
+      "  --no-elevations       skip collision-elevation storage and elevations.png\n"
       "  --no-normals          skip collision-normal computation and normals.png\n"
+      "\n"
+      "Scalar colour options:\n"
+      "  --colour-min V        value mapped to the first palette colour (default: 0)\n"
+      "  --colour-max V        value mapped to the last palette colour\n"
+      "                        (default: --max-distance)\n"
       "\n"
       "Synthetic image options (angles are degrees):\n"
       "  --sun-azimuth D       clockwise from grid north (default: 225)\n"
       "  --sun-elevation D     above the horizon (default: 35)\n"
       "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
+      "  --terrain-colour MODE white, distance, or elevation (default: white)\n"
+      "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, or turbo\n"
+      "                        (default: viridis)\n"
       "\n"
       "Observer options:\n"
       "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
@@ -95,7 +199,7 @@ void print_usage(const char *program) {
   );
 }
 
-/// Parse tracing settings and one of the supported output projections.
+/// Parse tracing, projection, and output settings for one invocation.
 [[nodiscard]] EntrypointSettings parse_arguments(int argc, const char *argv[]) {
   EntrypointSettings settings;
   for (int index = 1; index < argc; index++) {
@@ -109,7 +213,11 @@ void print_usage(const char *program) {
       continue;
     }
     if (option == "--no-normals") {
-      settings.compute_normals = false;
+      settings.normals_enabled = false;
+      continue;
+    }
+    if (option == "--no-elevations") {
+      settings.elevations_enabled = false;
       continue;
     }
     if (option == "--diagnostic-output") {
@@ -140,11 +248,11 @@ void print_usage(const char *program) {
     } else if (option == "--max-tiles") {
       settings.max_tile_count = panorama::arguments::parse_uint32(value, option, true);
     } else if (option == "--max-distance") {
-      const double parsed = panorama::arguments::parse_finite_double(value, option);
-      if (parsed <= 0.0 || parsed > static_cast<double>(std::numeric_limits<float>::max())) {
+      const float parsed = parse_float32(value, option);
+      if (parsed <= 0.0F) {
         throw std::out_of_range("Maximum distance must be a positive float32 value");
       }
-      settings.max_distance = static_cast<float>(parsed);
+      settings.max_distance = parsed;
     } else if (option == "--easting") {
       settings.easting = panorama::arguments::parse_finite_double(value, option);
     } else if (option == "--northing") {
@@ -169,6 +277,25 @@ void print_usage(const char *program) {
       }
       settings.synthetic.ambient_light = static_cast<float>(parsed);
       settings.synthetic_setting_seen = true;
+    } else if (option == "--colour-min") {
+      settings.colour_minimum = parse_float32(value, option);
+      settings.colour_range_setting_seen = true;
+    } else if (option == "--colour-max") {
+      settings.colour_maximum = parse_float32(value, option);
+      settings.colour_range_setting_seen = true;
+    } else if (option == "--terrain-colour") {
+      settings.synthetic.colour_source =
+          parse_choice(value, kTerrainColours, "terrain colour", "white, distance, or elevation");
+      settings.synthetic_setting_seen = true;
+    } else if (option == "--colourmap") {
+      settings.synthetic.colourmap = parse_choice(
+          value,
+          kColourmaps,
+          "colourmap",
+          "viridis, plasma, inferno, magma, cividis, or turbo"
+      );
+      settings.synthetic_setting_seen = true;
+      settings.colourmap_setting_seen = true;
     } else if (!settings.projection.parse_option(option, value)) {
       throw std::invalid_argument("Unknown option: " + std::string(option));
     }
@@ -180,7 +307,7 @@ void print_usage(const char *program) {
 
 } // namespace
 
-/// Generate the selected output rays and trace one prepared terrain dataset.
+/// Generate the selected rays, trace terrain, and render the requested products.
 int main(int argc, const char *argv[]) {
   try {
     const EntrypointSettings settings = parse_arguments(argc, argv);
@@ -193,13 +320,16 @@ int main(int argc, const char *argv[]) {
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
         settings.retain_quantized,
-        settings.compute_normals,
     };
     const panorama::RayField rays = settings.projection.make_ray_field();
-    const panorama::RaytraceOutputConfig outputs = {
+    const panorama::ScalarColourRange colour_range = scalar_colour_range(settings);
+    const panorama::TerrainRenderOutputs outputs = {
         settings.write_diagnostics,
+        settings.elevations_enabled,
+        settings.normals_enabled,
         settings.write_synthetic,
         settings.synthetic,
+        colour_range,
     };
     std::printf(
         "Tracing terrain in %s from projected coordinate (%.3f, %.3f, %.1f).\n",
@@ -218,25 +348,41 @@ int main(int argc, const char *argv[]) {
     );
     settings.projection.print_settings();
     std::printf(
-        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s, normals %s, "
-        "outputs %s.\n",
+        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s, "
+        "elevations %s, normals %s, outputs %s.\n",
         settings.max_distance,
         panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
         settings.retain_quantized ? "retained" : "disabled",
-        settings.compute_normals ? "enabled" : "disabled",
+        outputs.requires_elevations() ? "enabled" : "disabled",
+        outputs.requires_normals() ? "enabled" : "disabled",
         settings.write_diagnostics
             ? (settings.write_synthetic ? "diagnostic+synthetic" : "diagnostic")
             : "synthetic"
     );
     if (settings.write_synthetic) {
       std::printf(
-          "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f.\n",
+          "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f, "
+          "terrain colour %s",
           settings.synthetic.sun_azimuth / kDegreesToRadians,
           settings.synthetic.sun_elevation / kDegreesToRadians,
-          settings.synthetic.ambient_light
+          settings.synthetic.ambient_light,
+          choice_name(settings.synthetic.colour_source, kTerrainColours)
+      );
+      if (settings.synthetic.colour_source != panorama::TerrainColourSource::White) {
+        std::printf(" (%s)", choice_name(settings.synthetic.colourmap, kColourmaps));
+      }
+      std::printf(".\n");
+    }
+    if (settings.write_diagnostics ||
+        (settings.write_synthetic &&
+         settings.synthetic.colour_source != panorama::TerrainColourSource::White)) {
+      std::printf(
+          "Scalar colour range: %.6g to %.6g.\n",
+          colour_range.minimum,
+          colour_range.maximum
       );
     }
-    panorama::raytrace_tiled_heightmap(config, rays, outputs);
+    panorama::render_terrain(config, rays, outputs);
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

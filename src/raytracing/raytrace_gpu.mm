@@ -57,14 +57,13 @@ static_assert(sizeof(CatalogueTileHashEntry) == 3U * sizeof(uint64_t));
 [[nodiscard]] uint32_t tile_hash(TileKey key, uint32_t mask) {
   const uint64_t row = mix_tile_hash(static_cast<uint64_t>(key.row));
   const uint64_t column = mix_tile_hash(static_cast<uint64_t>(key.column));
-  return static_cast<uint32_t>(
-      mix_tile_hash(row ^ (column + 0x9e3779b97f4a7c15ULL)) & mask
-  );
+  return static_cast<uint32_t>(mix_tile_hash(row ^ (column + 0x9e3779b97f4a7c15ULL)) & mask);
 }
 
 /// Print a Foundation error in the command-line form used by host tools.
 void print_error(NSString *context, NSError *error) {
-  std::fprintf(stderr, "%s: %s\n", context.UTF8String, error.localizedDescription.UTF8String);
+  const char *detail = error == nil ? "unknown error" : error.localizedDescription.UTF8String;
+  std::fprintf(stderr, "%s: %s\n", context.UTF8String, detail);
 }
 
 /// Check that a byte count fits Metal's NSUInteger buffer-length argument.
@@ -104,6 +103,7 @@ void clear_buffer(id<MTLBuffer> buffer, const char *name) {
 struct GpuRaytraceResources::State {
   id<MTLDevice> device;
   id<MTLCommandQueue> queue;
+  id<MTLLibrary> library;
   id<MTLComputePipelineState> trace_pipeline;
   id<MTLComputePipelineState> emit_pipeline;
   id<MTLBuffer> rays;
@@ -120,7 +120,7 @@ struct GpuRaytraceResources::State {
   uint32_t frontier_capacity;
   uint32_t catalogue_hash_capacity;
   bool trace_quantized;
-  bool compute_normals;
+  GpuTraceOutputRequirements outputs;
   bool capture_active = false;
 };
 
@@ -128,7 +128,7 @@ GpuRaytraceResources::GpuRaytraceResources(
     std::span<const RayDirection> rays,
     std::span<const TerrainSource> sources,
     bool trace_quantized,
-    bool compute_normals
+    GpuTraceOutputRequirements outputs
 ) {
   if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
       sources.size() > std::numeric_limits<uint32_t>::max()) {
@@ -138,7 +138,7 @@ GpuRaytraceResources::GpuRaytraceResources(
   state->frontier_capacity = static_cast<uint32_t>(rays.size());
   state->catalogue_hash_capacity = catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
-  state->compute_normals = compute_normals;
+  state->outputs = outputs;
   state->device = MTLCreateSystemDefaultDevice();
   if (state->device == nil) {
     throw std::runtime_error("No Metal device is available");
@@ -150,18 +150,20 @@ GpuRaytraceResources::GpuRaytraceResources(
 
   NSError *error = nil;
   NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:kMetallibPath]];
-  id<MTLLibrary> library = [state->device newLibraryWithURL:url error:&error];
-  if (library == nil) {
+  state->library = [state->device newLibraryWithURL:url error:&error];
+  if (state->library == nil) {
     print_error(@"Could not load the Metal library", error);
     throw std::runtime_error("Could not load Metal library");
   }
   NSString *trace_name =
       trace_quantized ? @"trace_tile_frontier_quantized" : @"trace_tile_frontier";
   MTLFunctionConstantValues *trace_constants = [[MTLFunctionConstantValues alloc] init];
-  [trace_constants setConstantValue:&compute_normals type:MTLDataTypeBool atIndex:0];
-  id<MTLFunction> trace =
-      [library newFunctionWithName:trace_name constantValues:trace_constants error:&error];
-  id<MTLFunction> emit = [library newFunctionWithName:@"emit_tile_frontier"];
+  [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
+  [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
+  id<MTLFunction> trace = [state->library newFunctionWithName:trace_name
+                                               constantValues:trace_constants
+                                                        error:&error];
+  id<MTLFunction> emit = [state->library newFunctionWithName:@"emit_tile_frontier"];
   if (trace == nil || emit == nil) {
     throw std::runtime_error("GPU-frontier Metal kernels are missing");
   }
@@ -176,7 +178,8 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::runtime_error("Could not create continuation pipeline");
   }
 
-  // Static per-pixel directions and output images persist for every pass.
+  // Static per-pixel directions and scientific output buffers persist for
+  // every frontier pass.
   state->rays = make_buffer(
       state->device,
       rays.data(),
@@ -189,25 +192,27 @@ GpuRaytraceResources::GpuRaytraceResources(
       checked_buffer_length(rays.size(), sizeof(float), "distance output"),
       "distance output"
   );
+  // Function-constant specialization removes disabled output work. One-word
+  // placeholders preserve the common kernel ABI without full per-ray buffers.
   state->elevation_output = make_buffer(
       state->device,
       nullptr,
-      checked_buffer_length(rays.size(), sizeof(float), "elevation output"),
+      outputs.elevations ? checked_buffer_length(rays.size(), sizeof(float), "elevation output")
+                         : sizeof(float),
       "elevation output"
   );
-  // The function-constant specialization removes all gradient work when
-  // disabled. A one-word placeholder preserves the common kernel ABI without
-  // reserving a full per-ray output image.
   state->surface_gradient_output = make_buffer(
       state->device,
       nullptr,
-      compute_normals
+      outputs.surface_gradients
           ? checked_buffer_length(rays.size(), sizeof(uint32_t), "surface gradient output")
           : sizeof(uint32_t),
       "surface gradient output"
   );
   clear_buffer(state->distance_output, "distance output");
-  clear_buffer(state->elevation_output, "elevation output");
+  if (outputs.elevations) {
+    clear_buffer(state->elevation_output, "elevation output");
+  }
   // Every positive distance is written beside its gradient, and consumers use
   // distance as the validity mask, so clearing this potentially large buffer
   // would add setup bandwidth without defining any observable output.
@@ -257,7 +262,9 @@ GpuRaytraceResources::GpuRaytraceResources(
       state->device,
       catalogue_entries.data(),
       checked_buffer_length(
-          catalogue_entries.size(), sizeof(CatalogueTileHashEntry), "catalogue hash"
+          catalogue_entries.size(),
+          sizeof(CatalogueTileHashEntry),
+          "catalogue hash"
       ),
       "catalogue hash"
   );
@@ -282,6 +289,10 @@ void GpuRaytraceResources::initialise_frontier() {
 }
 
 id<MTLDevice> GpuRaytraceResources::device() const { return state_->device; }
+
+id<MTLCommandQueue> GpuRaytraceResources::command_queue() const { return state_->queue; }
+
+id<MTLLibrary> GpuRaytraceResources::library() const { return state_->library; }
 
 id<MTLBuffer> GpuRaytraceResources::active_frontier() const { return state_->active; }
 
@@ -350,8 +361,8 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setBuffer:state.deferred_count offset:0 atIndex:7];
   [encoder setBuffer:state.catalogue_hash offset:0 atIndex:8];
   [encoder setBytes:&state.catalogue_hash_capacity
-              length:sizeof(state.catalogue_hash_capacity)
-             atIndex:9];
+             length:sizeof(state.catalogue_hash_capacity)
+            atIndex:9];
   [encoder setBuffer:state.local_skip_count offset:0 atIndex:10];
   [encoder setBuffer:state.global_skip_count offset:0 atIndex:11];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
@@ -383,10 +394,15 @@ std::span<const DeferredRayWork> GpuRaytraceResources::deferred_work(uint32_t co
 }
 
 id<MTLBuffer> GpuRaytraceResources::distances() const { return state_->distance_output; }
-id<MTLBuffer> GpuRaytraceResources::elevations() const { return state_->elevation_output; }
+id<MTLBuffer> GpuRaytraceResources::elevations() const {
+  if (!state_->outputs.elevations) {
+    throw std::logic_error("Elevations were not requested");
+  }
+  return state_->elevation_output;
+}
 
 id<MTLBuffer> GpuRaytraceResources::surface_gradients() const {
-  if (!state_->compute_normals) {
+  if (!state_->outputs.surface_gradients) {
     throw std::logic_error("Surface gradients were not requested");
   }
   return state_->surface_gradient_output;

@@ -123,12 +123,10 @@ struct RayField {
 };
 
 /// Generate the existing equally spaced angular ray field.
-[[nodiscard]] RayField
-make_angular_ray_field(ImageSize image, const AngularProjection &projection);
+[[nodiscard]] RayField make_angular_ray_field(ImageSize image, const AngularProjection &projection);
 
 /// Generate perspective camera rays, including inverse lens distortion.
-[[nodiscard]] RayField
-make_camera_ray_field(ImageSize image, const CameraProjection &projection);
+[[nodiscard]] RayField make_camera_ray_field(ImageSize image, const CameraProjection &projection);
 
 /// Dispatch a runtime-selected projection to its ray-field generator.
 [[nodiscard]] RayField make_ray_field(const RayFieldRequest &request);

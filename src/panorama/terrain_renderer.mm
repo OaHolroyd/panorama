@@ -1,5 +1,6 @@
-#include "raytrace_setup.h"
+#include "terrain_renderer.h"
 
+#include "gpu_image_renderer.h"
 #include "host_frontier.h"
 #include "loaded_tile.h"
 #include "metal_tile.h"
@@ -39,7 +40,7 @@ void validate_configuration(const RaytraceConfig &config) {
   }
 }
 
-/// Return a checked byte count for one host-side terrain payload allocation.
+/// Return the checked byte size of one terrain payload.
 [[nodiscard]] size_t checked_byte_count(size_t count, size_t size, const char *name) {
   if (count > std::numeric_limits<size_t>::max() / size) {
     throw std::overflow_error(std::string(name) + " payload is too large");
@@ -94,83 +95,105 @@ void validate_configuration(const RaytraceConfig &config) {
   return static_cast<uint32_t>(ray_count);
 }
 
-/// Return a typed, non-owning view of a completed shared Metal buffer.
-template <typename Value>
-[[nodiscard]] std::span<const Value>
-view_buffer(id<MTLBuffer> buffer, size_t count, const char *name) {
-  const auto *contents = static_cast<const Value *>(buffer.contents);
-  if (contents == nullptr) {
-    throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
-  }
-  return {contents, count};
-}
-
 /// Validate output choices before starting an otherwise expensive trace.
-void validate_output_configuration(
-    const RaytraceConfig &config,
-    const RaytraceOutputConfig &outputs
-) {
+void validate_output_configuration(const TerrainRenderOutputs &outputs) {
   if (!outputs.write_diagnostics && !outputs.write_synthetic) {
-    throw std::invalid_argument("At least one raytrace output must be enabled");
+    throw std::invalid_argument("At least one render output must be enabled");
   }
-  if (outputs.write_synthetic && !config.compute_normals) {
-    throw std::invalid_argument("Synthetic output requires collision-normal computation");
+  if (!std::isfinite(outputs.scalar_colour_range.minimum) ||
+      !std::isfinite(outputs.scalar_colour_range.maximum) ||
+      outputs.scalar_colour_range.maximum <= outputs.scalar_colour_range.minimum) {
+    throw std::invalid_argument("Scalar colour range must be finite and increasing");
+  }
+  if (!outputs.write_synthetic) {
+    return;
+  }
+  const SyntheticRenderOptions &synthetic = outputs.synthetic_options;
+  if (!std::isfinite(synthetic.sun_azimuth) || !std::isfinite(synthetic.sun_elevation) ||
+      !std::isfinite(synthetic.ambient_light) || synthetic.ambient_light < 0.0F ||
+      synthetic.ambient_light > 1.0F ||
+      static_cast<uint32_t>(synthetic.colour_source) >
+          static_cast<uint32_t>(TerrainColourSource::Elevation) ||
+      static_cast<uint32_t>(synthetic.colourmap) > static_cast<uint32_t>(PresetColourmap::Turbo)) {
+    throw std::invalid_argument("Synthetic render options are invalid");
   }
 }
 
-/// Map completed shared buffers and write the independently selected PNGs.
+/// Render one GPU texture, read it back, and encode it for the CLI output path.
+template <typename Render>
+void render_and_write_png(
+    Timer &timer,
+    const std::filesystem::path &path,
+    GpuImageRenderer &renderer,
+    ImageSize image,
+    Render &&render
+) {
+  render();
+  const GpuImageReadback readback = renderer.readback(timer);
+
+  timer.start_wall("PNG encoding");
+  write_rgb_png(path, readback.bytes, image.width, image.height, readback.bytes_per_row);
+  timer.stop("PNG encoding");
+}
+
+/// Present completed GPU trace buffers and write the selected PNG products.
 ///
 /// This stage has its own top-level timer so terrain-tracing measurements stay
 /// comparable when callers select different output products.
-void write_trace_outputs(
-    const RaytraceConfig &config,
-    const RaytraceOutputConfig &outputs,
-    const RayField &field,
-    const GpuRaytraceResources &gpu,
-    uint32_t ray_count
+void write_png_outputs(
+    const TerrainRenderOutputs &outputs,
+    ImageSize image,
+    const GpuRaytraceResources &gpu
 ) {
   Timer timer("PNG generation");
-  const std::span<const float> distances =
-      view_buffer<float>(gpu.distances(), ray_count, "distance output");
-
-  std::span<const uint32_t> surface_gradients;
-  if (config.compute_normals) {
-    surface_gradients =
-        view_buffer<uint32_t>(gpu.surface_gradients(), ray_count, "surface gradient output");
-  }
+  timer.start_wall("GPU presentation setup");
+  GpuImageRenderer renderer(
+      gpu.device(),
+      gpu.command_queue(),
+      gpu.library(),
+      image,
+      {
+          outputs.write_diagnostics,
+          outputs.write_diagnostics && outputs.write_normal_diagnostic,
+          outputs.write_synthetic,
+          outputs.write_synthetic &&
+              outputs.synthetic_options.colour_source != TerrainColourSource::White,
+          true,
+      }
+  );
+  timer.stop("GPU presentation setup");
+  const id<MTLBuffer> distances = gpu.distances();
 
   if (outputs.write_diagnostics) {
-    const std::span<const float> elevations =
-        view_buffer<float>(gpu.elevations(), ray_count, "elevation output");
-    write_colormapped_png(
-        "distances.png",
-        distances,
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
-    );
-    write_colormapped_png(
-        "elevations.png",
-        elevations,
-        field.image.width,
-        field.image.height,
-        colormaps::viridis
-    );
-    if (config.compute_normals) {
-      write_surface_normals_png(
-          "normals.png",
-          surface_gradients,
-          distances,
-          field.image.width,
-          field.image.height
-      );
+    render_and_write_png(timer, "distances.png", renderer, image, [&] {
+      renderer.render_scalar(distances, outputs.scalar_colour_range, timer);
+    });
+    if (outputs.write_elevation_diagnostic) {
+      render_and_write_png(timer, "elevations.png", renderer, image, [&] {
+        renderer.render_scalar(gpu.elevations(), outputs.scalar_colour_range, timer);
+      });
+    }
+    if (outputs.write_normal_diagnostic) {
+      render_and_write_png(timer, "normals.png", renderer, image, [&] {
+        renderer.render_surface_normals(gpu.surface_gradients(), distances, timer);
+      });
     }
   }
 
   if (outputs.write_synthetic) {
-    write_synthetic_terrain_png(
-        "synthetic.png", surface_gradients, distances, field.image, outputs.synthetic_options
-    );
+    const id<MTLBuffer> colour_values =
+        outputs.synthetic_options.colour_source == TerrainColourSource::Elevation ? gpu.elevations()
+                                                                                  : distances;
+    render_and_write_png(timer, "synthetic.png", renderer, image, [&] {
+      renderer.render_synthetic(
+          gpu.surface_gradients(),
+          distances,
+          colour_values,
+          outputs.synthetic_options,
+          outputs.scalar_colour_range,
+          timer
+      );
+    });
   }
   timer.print();
 }
@@ -193,13 +216,13 @@ void write_trace_outputs(
 /// imminent frontier.
 /// The loop ends when every ray has intersected terrain, reached the range
 /// limit, risen above the catalogue, or left available terrain coverage.
-void raytrace_tiled_heightmap(
+void render_terrain(
     const RaytraceConfig &config,
     const RayField &field,
-    const RaytraceOutputConfig &outputs
+    const TerrainRenderOutputs &outputs
 ) {
   validate_configuration(config);
-  validate_output_configuration(config, outputs);
+  validate_output_configuration(outputs);
   const uint32_t ray_count = validate_ray_field(field);
   // Start a composite timer.
   Timer timer("Total elapsed");
@@ -286,8 +309,12 @@ void raytrace_tiled_heightmap(
 
   @autoreleasepool {
     // GPU resources own the device, reusable command/pipeline state, static
-    // ray inputs, output images, and reusable frontier storage.
-    GpuRaytraceResources gpu(field.rays, paths, trace_quantized, config.compute_normals);
+    // ray inputs, scientific trace outputs, and reusable frontier storage.
+    const GpuTraceOutputRequirements gpu_outputs = {
+        outputs.requires_elevations(),
+        outputs.requires_normals(),
+    };
+    GpuRaytraceResources gpu(field.rays, paths, trace_quantized, gpu_outputs);
     gpu.initialise_frontier();
 
     // The cache shares the GPU resource owner's device. Preparation workers
@@ -334,9 +361,6 @@ void raytrace_tiled_heightmap(
       // exists. Any later failure is caught below, which stops and joins these
       // threads before unwinding their owning vector.
       preparer.start();
-      // The first observer-tile pass reveals which rays leave that tile.
-
-      // Keep going until all rays have completed
       while (active_count != 0U) {
         // Account separately for CPU frontier bookkeeping before the Metal
         // command is created. This includes LRU use stamps and counter reset.
@@ -468,7 +492,7 @@ void raytrace_tiled_heightmap(
 
     // Encoding remains outside `Total elapsed`; it is an output backend rather
     // than part of terrain traversal and may be omitted by future consumers.
-    write_trace_outputs(config, outputs, field, gpu, ray_count);
+    write_png_outputs(outputs, field.image, gpu);
   }
 }
 

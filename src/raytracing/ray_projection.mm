@@ -30,8 +30,7 @@ struct Coordinate2 {
   return static_cast<size_t>(count);
 }
 
-[[nodiscard]] RayDirection
-make_horizontal_ray_direction(float x, float y, float slope) {
+[[nodiscard]] RayDirection make_horizontal_ray_direction(float x, float y, float slope) {
   const float horizontal_length = std::hypot(x, y);
   if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(slope) ||
       !std::isfinite(horizontal_length) || std::abs(horizontal_length - 1.0F) > 1e-4F) {
@@ -50,9 +49,7 @@ make_horizontal_ray_direction(float x, float y, float slope) {
   const double horizontal_length = std::hypot(direction.east, direction.north);
   if (!std::isfinite(horizontal_length) || horizontal_length <= 1e-12 ||
       !std::isfinite(direction.up)) {
-    throw std::invalid_argument(
-        "Camera projection produced a vertical or non-finite terrain ray"
-    );
+    throw std::invalid_argument("Camera projection produced a vertical or non-finite terrain ray");
   }
   const double horizontal_x = direction.east / horizontal_length;
   const double horizontal_y = direction.north / horizontal_length;
@@ -67,18 +64,15 @@ make_horizontal_ray_direction(float x, float y, float slope) {
   );
 }
 
-[[nodiscard]] Coordinate2 distort(
-    Coordinate2 undistorted,
-    const BrownConradyDistortion &distortion
-) {
+[[nodiscard]] Coordinate2
+distort(Coordinate2 undistorted, const BrownConradyDistortion &distortion) {
   const double x2 = undistorted.x * undistorted.x;
   const double y2 = undistorted.y * undistorted.y;
   const double xy = undistorted.x * undistorted.y;
   const double radius2 = x2 + y2;
   const double radial =
-      1.0 + radius2 *
-                (distortion.radial_1 +
-                 radius2 * (distortion.radial_2 + radius2 * distortion.radial_3));
+      1.0 + radius2 * (distortion.radial_1 +
+                       radius2 * (distortion.radial_2 + radius2 * distortion.radial_3));
   return {
       undistorted.x * radial + 2.0 * distortion.tangential_1 * xy +
           distortion.tangential_2 * (radius2 + 2.0 * x2),
@@ -87,10 +81,8 @@ make_horizontal_ray_direction(float x, float y, float slope) {
   };
 }
 
-[[nodiscard]] Coordinate2 undistort(
-    Coordinate2 distorted,
-    const BrownConradyDistortion &distortion
-) {
+[[nodiscard]] Coordinate2
+undistort(Coordinate2 distorted, const BrownConradyDistortion &distortion) {
   Coordinate2 estimate = distorted;
   for (uint32_t iteration = 0U; iteration < 16U; iteration++) {
     const double x2 = estimate.x * estimate.x;
@@ -98,16 +90,15 @@ make_horizontal_ray_direction(float x, float y, float slope) {
     const double xy = estimate.x * estimate.y;
     const double radius2 = x2 + y2;
     const double radial =
-        1.0 + radius2 *
-                  (distortion.radial_1 +
-                   radius2 * (distortion.radial_2 + radius2 * distortion.radial_3));
+        1.0 + radius2 * (distortion.radial_1 +
+                         radius2 * (distortion.radial_2 + radius2 * distortion.radial_3));
     if (!std::isfinite(radial) || std::abs(radial) < 1e-12) {
       throw std::invalid_argument("Lens distortion cannot be inverted for an output pixel");
     }
-    const double tangential_x = 2.0 * distortion.tangential_1 * xy +
-                                distortion.tangential_2 * (radius2 + 2.0 * x2);
-    const double tangential_y = distortion.tangential_1 * (radius2 + 2.0 * y2) +
-                                2.0 * distortion.tangential_2 * xy;
+    const double tangential_x =
+        2.0 * distortion.tangential_1 * xy + distortion.tangential_2 * (radius2 + 2.0 * x2);
+    const double tangential_y =
+        distortion.tangential_1 * (radius2 + 2.0 * y2) + 2.0 * distortion.tangential_2 * xy;
     const Coordinate2 next = {
         (distorted.x - tangential_x) / radial,
         (distorted.y - tangential_y) / radial,
@@ -129,8 +120,7 @@ make_horizontal_ray_direction(float x, float y, float slope) {
   return estimate;
 }
 
-[[nodiscard]] Coordinate2
-undistort(Coordinate2 distorted, const LensDistortion &distortion) {
+[[nodiscard]] Coordinate2 undistort(Coordinate2 distorted, const LensDistortion &distortion) {
   return std::visit(
       [distorted](const auto &model) -> Coordinate2 {
         using Model = std::decay_t<decltype(model)>;
@@ -171,10 +161,8 @@ void validate_camera_projection(const CameraProjection &projection) {
 
 } // namespace
 
-CameraIntrinsics CameraIntrinsics::from_horizontal_field_of_view(
-    ImageSize image,
-    double horizontal_field_of_view
-) {
+CameraIntrinsics
+CameraIntrinsics::from_horizontal_field_of_view(ImageSize image, double horizontal_field_of_view) {
   (void)checked_pixel_count(image);
   if (!std::isfinite(horizontal_field_of_view) || horizontal_field_of_view <= 0.0 ||
       horizontal_field_of_view >= std::numbers::pi_v<double>) {
@@ -197,8 +185,7 @@ RayField make_angular_ray_field(ImageSize image, const AngularProjection &projec
     throw std::invalid_argument("Angular projection ranges must be finite");
   }
   RayField field = {image, std::vector<RayDirection>(ray_count)};
-  const double azimuth_step =
-      (projection.azimuth_end - projection.azimuth_start) / image.width;
+  const double azimuth_step = (projection.azimuth_end - projection.azimuth_start) / image.width;
   const double elevation_step =
       (projection.elevation_end - projection.elevation_start) / image.height;
   for (uint32_t row = 0U; row < image.height; row++) {
@@ -211,12 +198,11 @@ RayField make_angular_ray_field(ImageSize image, const AngularProjection &projec
     for (uint32_t column = 0U; column < image.width; column++) {
       const double azimuth =
           projection.azimuth_start + (static_cast<double>(column) + 0.5) * azimuth_step;
-      field.rays[static_cast<size_t>(row) * image.width + column] =
-          make_horizontal_ray_direction(
-              static_cast<float>(std::sin(azimuth)),
-              static_cast<float>(std::cos(azimuth)),
-              static_cast<float>(slope)
-          );
+      field.rays[static_cast<size_t>(row) * image.width + column] = make_horizontal_ray_direction(
+          static_cast<float>(std::sin(azimuth)),
+          static_cast<float>(std::cos(azimuth)),
+          static_cast<float>(slope)
+      );
     }
   }
   return field;
@@ -270,8 +256,7 @@ RayField make_camera_ray_field(ImageSize image, const CameraProjection &projecti
           pitched_forward.north + camera.x * camera_right.north - camera.y * camera_up.north,
           pitched_forward.up + camera.x * camera_right.up - camera.y * camera_up.up,
       };
-      field.rays[static_cast<size_t>(row) * image.width + column] =
-          make_ray_direction(world);
+      field.rays[static_cast<size_t>(row) * image.width + column] = make_ray_direction(world);
     }
   }
   return field;
