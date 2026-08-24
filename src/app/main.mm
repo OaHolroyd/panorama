@@ -38,6 +38,7 @@ namespace {
 constexpr uint64_t kBytesPerMiB = 1024ULL * 1024ULL;
 constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
+constexpr double kDefaultHorizontalFieldOfView = 70.0 * kDegreesToRadians;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
@@ -47,7 +48,7 @@ struct ViewerSettings {
   bool retain_quantized = false;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
   ImageSize image = {960U, 540U};
-  double horizontal_field_of_view = 70.0 * kDegreesToRadians;
+  double horizontal_field_of_view = kDefaultHorizontalFieldOfView;
   CameraOrientation orientation = {0.0, 0.0, 0.0};
   TerrainPresentationSettings presentation = {
       {
@@ -115,7 +116,7 @@ void print_usage(const char *program) {
       "  --pitch D             initial pitch above the horizon (default: 0)\n"
       "  --help                show this message\n"
       "\n"
-      "Drag with the mouse or use WASD/arrow keys to look around.\n",
+      "Drag with the mouse or use WASD/arrow keys to look around; scroll to zoom.\n",
       program
   );
 }
@@ -183,15 +184,16 @@ void print_usage(const char *program) {
   return settings;
 }
 
-[[nodiscard]] RayField make_view(const ViewerSettings &settings, CameraOrientation orientation) {
+[[nodiscard]] RayField make_view(
+    const ViewerSettings &settings,
+    CameraOrientation orientation,
+    double horizontal_field_of_view
+) {
   return make_camera_ray_field(
       settings.image,
       {
           orientation,
-          CameraIntrinsics::from_horizontal_field_of_view(
-              settings.image,
-              settings.horizontal_field_of_view
-          ),
+          CameraIntrinsics::from_horizontal_field_of_view(settings.image, horizontal_field_of_view),
           NoDistortion{},
       }
   );
@@ -302,6 +304,7 @@ struct LockedPointProjection {
 struct PresentedFrame {
   id<MTLTexture> texture;
   CameraOrientation orientation;
+  double horizontal_field_of_view;
   uint64_t revision;
   double milliseconds;
   std::string error;
@@ -324,8 +327,11 @@ class ViewerRenderer {
 public:
   explicit ViewerRenderer(ViewerSettings settings)
       : settings_(std::move(settings)), requested_orientation_(settings_.orientation),
-        requested_presentation_(settings_.presentation) {
-    RayField initial_field = make_view(settings_, settings_.orientation);
+        requested_horizontal_field_of_view_(settings_.horizontal_field_of_view),
+        requested_presentation_(settings_.presentation),
+        presented_horizontal_field_of_view_(settings_.horizontal_field_of_view) {
+    RayField initial_field =
+        make_view(settings_, settings_.orientation, settings_.horizontal_field_of_view);
     const RaytraceConfig config = {
         settings_.tile_dir,
         settings_.observer,
@@ -350,7 +356,7 @@ public:
     );
     current_field_ = std::move(initial_field);
     worker_ = std::thread([this] { render_loop(); });
-    request_view(settings_.orientation);
+    request_view(settings_.orientation, settings_.horizontal_field_of_view);
   }
 
   ViewerRenderer(const ViewerRenderer &) = delete;
@@ -368,10 +374,11 @@ public:
   }
 
   /// Request a new camera trace; intermediate input events are coalesced.
-  void request_view(CameraOrientation orientation) {
+  void request_view(CameraOrientation orientation, double horizontal_field_of_view) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       requested_orientation_ = orientation;
+      requested_horizontal_field_of_view_ = horizontal_field_of_view;
       requested_revision_++;
       trace_pending_ = true;
       presentation_pending_ = true;
@@ -410,6 +417,7 @@ public:
     return {
         presented_texture_,
         presented_orientation_,
+        presented_horizontal_field_of_view_,
         presented_revision_,
         frame_ms_,
         error_,
@@ -423,7 +431,7 @@ public:
   [[nodiscard]] id<MTLCommandQueue> command_queue() const { return trace_->command_queue(); }
   [[nodiscard]] ImageSize image() const { return settings_.image; }
   [[nodiscard]] ObserverLocation observer() const { return settings_.observer; }
-  [[nodiscard]] double horizontal_field_of_view() const {
+  [[nodiscard]] double initial_horizontal_field_of_view() const {
     return settings_.horizontal_field_of_view;
   }
   [[nodiscard]] float max_distance() const { return settings_.max_distance; }
@@ -479,6 +487,7 @@ private:
   void render_loop() {
     while (true) {
       CameraOrientation orientation = {};
+      double horizontal_field_of_view = 0.0;
       TerrainPresentationSettings presentation = {};
       uint64_t revision = 0U;
       bool trace_requested = false;
@@ -495,6 +504,7 @@ private:
           return;
         }
         orientation = requested_orientation_;
+        horizontal_field_of_view = requested_horizontal_field_of_view_;
         presentation = requested_presentation_;
         revision = requested_revision_;
         trace_requested = trace_pending_;
@@ -511,7 +521,7 @@ private:
         @autoreleasepool {
           const auto started = std::chrono::steady_clock::now();
           if (trace_requested) {
-            RayField field = make_view(settings_, orientation);
+            RayField field = make_view(settings_, orientation, horizontal_field_of_view);
             trace_->trace(field);
             current_field_ = std::move(field);
           }
@@ -546,6 +556,7 @@ private:
           if (presentation_requested) {
             presented_texture_ = presentation_->texture();
             presented_orientation_ = orientation;
+            presented_horizontal_field_of_view_ = horizontal_field_of_view;
             presented_revision_ = revision;
             // The title reports camera-update throughput. A cheap appearance-only
             // pass should not replace it with a misleadingly high frame rate.
@@ -575,9 +586,11 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   CameraOrientation requested_orientation_ = {};
+  double requested_horizontal_field_of_view_ = 0.0;
   TerrainPresentationSettings requested_presentation_ = {};
   std::optional<InspectionPixel> requested_inspection_;
   CameraOrientation presented_orientation_ = {};
+  double presented_horizontal_field_of_view_ = 0.0;
   std::optional<PointInspection> presented_inspection_;
   id<MTLTexture> presented_texture_;
   uint64_t requested_revision_ = 0U;
@@ -635,6 +648,7 @@ private:
   __weak PanoramaView *_panoramaView;
   __weak ViewerOverlayView *_overlayView;
   panorama::CameraOrientation _orientation;
+  double _horizontalFieldOfView;
   panorama::TerrainPresentationSettings _presentation;
   std::optional<panorama::app::PointInspection> _lockedPoint;
   NSPopUpButton *_colourSourceControl;
@@ -655,6 +669,8 @@ private:
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
                           window:(NSWindow *)window;
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta;
+- (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
+- (void)zoomWithScrollDelta:(double)delta precise:(bool)precise;
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView;
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y;
@@ -867,34 +883,39 @@ private:
   const double heading = (location.x - _lastMouseLocation.x) * 0.003;
   const double pitch = (location.y - _lastMouseLocation.y) * 0.003;
   _lastMouseLocation = location;
-  [self.panoramaController rotateHeading:heading pitch:pitch];
+  [self.panoramaController rotateForCurrentZoomHeading:heading pitch:pitch];
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+  [self.panoramaController zoomWithScrollDelta:event.scrollingDeltaY
+                                       precise:event.hasPreciseScrollingDeltas];
 }
 
 - (void)keyDown:(NSEvent *)event {
   constexpr double kStep = 2.0 * std::numbers::pi / 180.0;
   switch (event.keyCode) {
   case 123: // Left arrow.
-    [self.panoramaController rotateHeading:-kStep pitch:0.0];
+    [self.panoramaController rotateForCurrentZoomHeading:-kStep pitch:0.0];
     break;
   case 124: // Right arrow.
-    [self.panoramaController rotateHeading:kStep pitch:0.0];
+    [self.panoramaController rotateForCurrentZoomHeading:kStep pitch:0.0];
     break;
   case 125: // Down arrow.
-    [self.panoramaController rotateHeading:0.0 pitch:-kStep];
+    [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:-kStep];
     break;
   case 126: // Up arrow.
-    [self.panoramaController rotateHeading:0.0 pitch:kStep];
+    [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:kStep];
     break;
   default: {
     const NSString *characters = event.charactersIgnoringModifiers.lowercaseString;
     if ([characters isEqualToString:@"a"]) {
-      [self.panoramaController rotateHeading:-kStep pitch:0.0];
+      [self.panoramaController rotateForCurrentZoomHeading:-kStep pitch:0.0];
     } else if ([characters isEqualToString:@"d"]) {
-      [self.panoramaController rotateHeading:kStep pitch:0.0];
+      [self.panoramaController rotateForCurrentZoomHeading:kStep pitch:0.0];
     } else if ([characters isEqualToString:@"s"]) {
-      [self.panoramaController rotateHeading:0.0 pitch:-kStep];
+      [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:-kStep];
     } else if ([characters isEqualToString:@"w"]) {
-      [self.panoramaController rotateHeading:0.0 pitch:kStep];
+      [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:kStep];
     } else {
       [super keyDown:event];
     }
@@ -1136,6 +1157,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _renderer = renderer;
     _window = window;
     _orientation = renderer->initial_orientation();
+    _horizontalFieldOfView = renderer->initial_horizontal_field_of_view();
     _presentation = renderer->initial_presentation();
   }
   return self;
@@ -1146,7 +1168,34 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       std::remainder(_orientation.heading + headingDelta, 2.0 * std::numbers::pi);
   constexpr double kPitchLimit = 85.0 * std::numbers::pi / 180.0;
   _orientation.pitch = std::clamp(_orientation.pitch + pitchDelta, -kPitchLimit, kPitchLimit);
-  _renderer->request_view(_orientation);
+  _renderer->request_view(_orientation, _horizontalFieldOfView);
+}
+
+- (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta {
+  // Mouse and keyboard deltas define their desired feel at the default FOV.
+  // Scaling by the current angular extent preserves that behaviour while
+  // providing proportionally finer control over a magnified view.
+  const double zoom_scale = _horizontalFieldOfView / panorama::app::kDefaultHorizontalFieldOfView;
+  [self rotateHeading:headingDelta * zoom_scale pitch:pitchDelta * zoom_scale];
+}
+
+- (void)zoomWithScrollDelta:(double)delta precise:(bool)precise {
+  // Exponential scaling makes equal scroll motion feel proportional at wide
+  // and narrow fields of view. Trackpads report much finer-grained deltas
+  // than traditional mouse wheels and therefore use a gentler coefficient.
+  const double sensitivity = precise ? 0.012 : 0.08;
+  constexpr double kMinimumFieldOfView = 5.0 * std::numbers::pi / 180.0;
+  constexpr double kMaximumFieldOfView = 140.0 * std::numbers::pi / 180.0;
+  const double next = std::clamp(
+      _horizontalFieldOfView * std::exp(-delta * sensitivity),
+      kMinimumFieldOfView,
+      kMaximumFieldOfView
+  );
+  if (std::abs(next - _horizontalFieldOfView) <= 1e-12) {
+    return;
+  }
+  _horizontalFieldOfView = next;
+  _renderer->request_view(_orientation, _horizontalFieldOfView);
 }
 
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
@@ -1319,11 +1368,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                                        constant:-16.0],
   ]];
 
-  [self updateDebugInfoWithOrientation:_orientation milliseconds:0.0 revision:0U];
+  [self updateDebugInfoWithOrientation:_orientation
+                 horizontalFieldOfView:_horizontalFieldOfView
+                          milliseconds:0.0
+                              revision:0U];
   return viewController;
 }
 
 - (void)updateDebugInfoWithOrientation:(panorama::CameraOrientation)orientation
+                 horizontalFieldOfView:(double)horizontalFieldOfView
                           milliseconds:(double)milliseconds
                               revision:(uint64_t)revision {
   if (_debugInfoLabel == nil) {
@@ -1355,7 +1408,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                        heading,
                        orientation.pitch * panorama::app::kRadiansToDegrees,
                        orientation.roll * panorama::app::kRadiansToDegrees,
-                       _renderer->horizontal_field_of_view() * panorama::app::kRadiansToDegrees,
+                       horizontalFieldOfView * panorama::app::kRadiansToDegrees,
                        image.width,
                        image.height,
                        _renderer->max_distance()];
@@ -1425,7 +1478,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Keep a locked world point aligned with the latest completed camera view.
 /// The off-screen state is represented both by an edge arrow and in text, so
 /// the lock remains unambiguous even if another overlay obscures the marker.
-- (void)updateLockedPointIndicatorWithOrientation:(panorama::CameraOrientation)orientation {
+- (void)updateLockedPointIndicatorWithOrientation:(panorama::CameraOrientation)orientation
+                            horizontalFieldOfView:(double)horizontalFieldOfView {
   if (!_pointInspectionLocked || !_lockedPoint.has_value()) {
     [_panoramaView setLockedPointIndicator:std::nullopt];
     return;
@@ -1434,7 +1488,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       *_lockedPoint,
       _renderer->observer(),
       _renderer->image(),
-      _renderer->horizontal_field_of_view(),
+      horizontalFieldOfView,
       orientation
   );
   [_panoramaView setLockedPointIndicator:projection];
@@ -1532,7 +1586,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       if (frame.inspection->hit) {
         _pointInspectionLocked = true;
         _lockedPoint = frame.inspection;
-        [self updateLockedPointIndicatorWithOrientation:frame.orientation];
+        [self updateLockedPointIndicatorWithOrientation:frame.orientation
+                                  horizontalFieldOfView:frame.horizontal_field_of_view];
         // The label now owns the immutable sampled values. Stop the renderer
         // resampling this screen pixel as subsequent camera views complete.
         _renderer->request_inspection(std::nullopt);
@@ -1550,9 +1605,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _displayedRevision = frame.revision;
     const double fps = frame.milliseconds > 0.0 ? 1'000.0 / frame.milliseconds : 0.0;
     [self updateDebugInfoWithOrientation:frame.orientation
+                   horizontalFieldOfView:frame.horizontal_field_of_view
                             milliseconds:frame.milliseconds
                                 revision:frame.revision];
-    [self updateLockedPointIndicatorWithOrientation:frame.orientation];
+    [self updateLockedPointIndicatorWithOrientation:frame.orientation
+                              horizontalFieldOfView:frame.horizontal_field_of_view];
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",
                          frame.orientation.heading * panorama::app::kRadiansToDegrees,
@@ -1676,7 +1733,7 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
                           NSWindowStyleMaskFullSizeContentView
                   backing:NSBackingStoreBuffered
                     defer:NO];
-  _window.title = @"panorama-app — drag or use WASD/arrow keys to look around";
+  _window.title = @"panorama-app — drag or use WASD/arrow keys to look around; scroll to zoom";
 
   PanoramaView *view = [[PanoramaView alloc] initWithFrame:imageFrame device:_renderer->device()];
   view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
