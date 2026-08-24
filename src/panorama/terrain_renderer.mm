@@ -100,6 +100,19 @@ void validate_output_configuration(const TerrainRenderOutputs &outputs) {
   if (!outputs.write_diagnostics && !outputs.write_synthetic) {
     throw std::invalid_argument("At least one render output must be enabled");
   }
+  if (!outputs.write_synthetic) {
+    return;
+  }
+  const SyntheticRenderOptions &synthetic = outputs.synthetic_options;
+  if (!std::isfinite(synthetic.sun_azimuth) || !std::isfinite(synthetic.sun_elevation) ||
+      !std::isfinite(synthetic.ambient_light) || synthetic.ambient_light < 0.0F ||
+      synthetic.ambient_light > 1.0F ||
+      static_cast<uint32_t>(synthetic.colour_source) >
+          static_cast<uint32_t>(TerrainColourSource::Elevation) ||
+      static_cast<uint32_t>(synthetic.colourmap) >
+          static_cast<uint32_t>(PresetColourmap::Turbo)) {
+    throw std::invalid_argument("Synthetic render options are invalid");
+  }
 }
 
 /// Render one GPU texture, read it back, and encode it for the CLI output path.
@@ -139,6 +152,8 @@ void write_png_outputs(
           outputs.write_diagnostics,
           outputs.write_diagnostics && outputs.write_normal_diagnostic,
           outputs.write_synthetic,
+          outputs.write_synthetic &&
+              outputs.synthetic_options.colour_source != TerrainColourSource::White,
           true,
       }
   );
@@ -174,6 +189,10 @@ void write_png_outputs(
   }
 
   if (outputs.write_synthetic) {
+    const id<MTLBuffer> colour_values =
+        outputs.synthetic_options.colour_source == TerrainColourSource::Elevation
+            ? gpu.elevations()
+            : distances;
     render_and_write_png(
         timer,
         "synthetic.png",
@@ -181,7 +200,11 @@ void write_png_outputs(
         image,
         [&] {
           renderer.render_synthetic(
-              gpu.surface_gradients(), distances, outputs.synthetic_options, timer
+              gpu.surface_gradients(),
+              distances,
+              colour_values,
+              outputs.synthetic_options,
+              timer
           );
         }
     );

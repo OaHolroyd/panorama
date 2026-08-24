@@ -76,6 +76,31 @@ void dispatch_image(
       threadsPerThreadgroup:MTLSizeMake(kPresentationSide, kPresentationSide, 1U)];
 }
 
+/// Encode the shared scalar min/max reduction, optionally excluding ray misses.
+void encode_range_reduction(
+    id<MTLComputeCommandEncoder> encoder,
+    id<MTLComputePipelineState> pipeline,
+    id<MTLBuffer> values,
+    id<MTLBuffer> distances,
+    id<MTLBuffer> range,
+    uint32_t pixel_count,
+    bool collisions_only
+) {
+  encoder.label = @"reduce_finite_range";
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:values offset:0 atIndex:0];
+  [encoder setBuffer:distances offset:0 atIndex:1];
+  [encoder setBuffer:range offset:0 atIndex:2];
+  [encoder setBytes:&pixel_count length:sizeof(pixel_count) atIndex:3];
+  const uint32_t collision_flag = collisions_only ? 1U : 0U;
+  [encoder setBytes:&collision_flag length:sizeof(collision_flag) atIndex:4];
+  const NSUInteger group_count =
+      (static_cast<NSUInteger>(pixel_count) + kReductionThreads - 1U) /
+      kReductionThreads;
+  [encoder dispatchThreadgroups:MTLSizeMake(group_count, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(kReductionThreads, 1U, 1U)];
+}
+
 } // namespace
 
 struct GpuImageRenderer::State {
@@ -91,6 +116,7 @@ struct GpuImageRenderer::State {
   ImageSize image;
   uint32_t pixel_count;
   NSUInteger bytes_per_row;
+  bool synthetic_scalar_colour;
 };
 
 GpuImageRenderer::GpuImageRenderer(
@@ -110,15 +136,21 @@ GpuImageRenderer::GpuImageRenderer(
   state->queue = queue;
   state->image = image;
   state->pixel_count = static_cast<uint32_t>(pixel_count);
-  if (requirements.scalar_diagnostics) {
+  state->synthetic_scalar_colour = requirements.synthetic_scalar_colour;
+  if (requirements.scalar_diagnostics || requirements.synthetic_scalar_colour) {
     state->reduce_range = make_pipeline(device, library, @"reduce_finite_range");
+  }
+  if (requirements.scalar_diagnostics) {
     state->scalar = make_pipeline(device, library, @"present_scalar_viridis");
   }
   if (requirements.normal_diagnostics) {
     state->normals = make_pipeline(device, library, @"present_surface_normals");
   }
   if (requirements.synthetic) {
-    state->synthetic = make_pipeline(device, library, @"present_synthetic_terrain");
+    NSString *name = requirements.synthetic_scalar_colour
+                         ? @"present_colourmapped_synthetic_terrain"
+                         : @"present_synthetic_terrain";
+    state->synthetic = make_pipeline(device, library, name);
   }
   if (requirements.host_readback) {
     state->pack_rgb = make_pipeline(device, library, @"pack_presented_rgb");
@@ -137,13 +169,13 @@ GpuImageRenderer::GpuImageRenderer(
   }
   state->output.label = @"Presented image";
 
-  if (requirements.scalar_diagnostics) {
+  if (requirements.scalar_diagnostics || requirements.synthetic_scalar_colour) {
     state->finite_range = [device newBufferWithLength:2U * sizeof(uint32_t)
                                               options:MTLResourceStorageModeShared];
     if (state->finite_range == nil) {
-      throw std::runtime_error("Could not allocate diagnostic finite-range buffer");
+      throw std::runtime_error("Could not allocate presentation finite-range buffer");
     }
-    state->finite_range.label = @"Diagnostic finite range";
+    state->finite_range.label = @"Presentation finite range";
   }
   if (requirements.host_readback) {
     state->bytes_per_row = static_cast<NSUInteger>(image.width) * 3U;
@@ -181,16 +213,15 @@ void GpuImageRenderer::render_scalar(id<MTLBuffer> values, Timer &timer) {
     throw std::runtime_error("Could not create scalar presentation command");
   }
   command.label = @"Present scalar diagnostic";
-  encoder.label = @"reduce_finite_range";
-  [encoder setComputePipelineState:state.reduce_range];
-  [encoder setBuffer:values offset:0 atIndex:0];
-  [encoder setBuffer:state.finite_range offset:0 atIndex:1];
-  [encoder setBytes:&state.pixel_count length:sizeof(state.pixel_count) atIndex:2];
-  const NSUInteger group_count =
-      (static_cast<NSUInteger>(state.pixel_count) + kReductionThreads - 1U) /
-      kReductionThreads;
-  [encoder dispatchThreadgroups:MTLSizeMake(group_count, 1U, 1U)
-          threadsPerThreadgroup:MTLSizeMake(kReductionThreads, 1U, 1U)];
+  encode_range_reduction(
+      encoder,
+      state.reduce_range,
+      values,
+      values,
+      state.finite_range,
+      state.pixel_count,
+      false
+  );
   [encoder endEncoding];
 
   encoder = [command computeCommandEncoder];
@@ -237,6 +268,7 @@ void GpuImageRenderer::render_surface_normals(
 void GpuImageRenderer::render_synthetic(
     id<MTLBuffer> packed_gradients,
     id<MTLBuffer> distances,
+    id<MTLBuffer> colour_values,
     const SyntheticRenderOptions &options,
     Timer &timer
 ) {
@@ -244,10 +276,23 @@ void GpuImageRenderer::render_synthetic(
   if (state.synthetic == nil) {
     throw std::logic_error("Synthetic presentation was not enabled");
   }
-  if (packed_gradients == nil || distances == nil || !std::isfinite(options.sun_azimuth) ||
-      !std::isfinite(options.sun_elevation) || !std::isfinite(options.ambient_light) ||
-      options.ambient_light < 0.0F || options.ambient_light > 1.0F) {
+  const uint32_t colour_source = static_cast<uint32_t>(options.colour_source);
+  const uint32_t colourmap = static_cast<uint32_t>(options.colourmap);
+  if (packed_gradients == nil || distances == nil || colour_values == nil ||
+      !std::isfinite(options.sun_azimuth) || !std::isfinite(options.sun_elevation) ||
+      !std::isfinite(options.ambient_light) || options.ambient_light < 0.0F ||
+      options.ambient_light > 1.0F ||
+      colour_source > static_cast<uint32_t>(TerrainColourSource::Elevation) ||
+      colourmap > static_cast<uint32_t>(PresetColourmap::Turbo)) {
     throw std::invalid_argument("Synthetic presentation inputs are invalid");
+  }
+  if (options.colour_source != TerrainColourSource::White &&
+      (state.reduce_range == nil || state.finite_range == nil)) {
+    throw std::logic_error("Synthetic scalar colouring was not enabled");
+  }
+  const bool scalar_colour = options.colour_source != TerrainColourSource::White;
+  if (scalar_colour != state.synthetic_scalar_colour) {
+    throw std::logic_error("Synthetic presentation pipeline does not match its colour source");
   }
   const float azimuth = static_cast<float>(options.sun_azimuth);
   const float elevation = static_cast<float>(options.sun_elevation);
@@ -259,6 +304,15 @@ void GpuImageRenderer::render_synthetic(
       options.ambient_light,
   };
 
+  if (scalar_colour) {
+    auto *range = static_cast<uint32_t *>(state.finite_range.contents);
+    if (range == nullptr) {
+      throw std::runtime_error("Could not map synthetic finite-range buffer");
+    }
+    range[0] = std::numeric_limits<uint32_t>::max();
+    range[1] = 0U;
+  }
+
   timer.start_wall("Pixel conversion");
   id<MTLCommandBuffer> command = [state.queue commandBuffer];
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -266,10 +320,32 @@ void GpuImageRenderer::render_synthetic(
     throw std::runtime_error("Could not create synthetic presentation command");
   }
   command.label = @"Present synthetic terrain";
-  encoder.label = @"present_synthetic_terrain";
+  if (scalar_colour) {
+    encode_range_reduction(
+        encoder,
+        state.reduce_range,
+        colour_values,
+        distances,
+        state.finite_range,
+        state.pixel_count,
+        true
+    );
+    [encoder endEncoding];
+    encoder = [command computeCommandEncoder];
+    if (encoder == nil) {
+      throw std::runtime_error("Could not create synthetic colourmap encoder");
+    }
+  }
+  encoder.label = scalar_colour ? @"present_colourmapped_synthetic_terrain"
+                                : @"present_synthetic_terrain";
   [encoder setBuffer:packed_gradients offset:0 atIndex:0];
   [encoder setBuffer:distances offset:0 atIndex:1];
   [encoder setBytes:sun_and_ambient length:sizeof(sun_and_ambient) atIndex:2];
+  if (scalar_colour) {
+    [encoder setBuffer:colour_values offset:0 atIndex:3];
+    [encoder setBuffer:state.finite_range offset:0 atIndex:4];
+    [encoder setBytes:&colourmap length:sizeof(colourmap) atIndex:5];
+  }
   [encoder setTexture:state.output atIndex:0];
   dispatch_image(encoder, state.synthetic, state.image);
   [encoder endEncoding];

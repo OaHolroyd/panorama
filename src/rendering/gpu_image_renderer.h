@@ -32,6 +32,8 @@ struct GpuPresentationRequirements {
   bool scalar_diagnostics;
   bool normal_diagnostics;
   bool synthetic;
+  /// Allocate scalar-range resources for distance/elevation terrain colour.
+  bool synthetic_scalar_colour;
   /// Allocate the packing pipeline and shared buffer used by CLI image files.
   bool host_readback;
 };
@@ -66,10 +68,11 @@ public:
       Timer &timer
   );
 
-  /// Render white terrain with directional and ambient lighting on black.
+  /// Render lit terrain on black using white or colourmapped scalar values.
   void render_synthetic(
       id<MTLBuffer> packed_gradients,
       id<MTLBuffer> distances,
+      id<MTLBuffer> colour_values,
       const SyntheticRenderOptions &options,
       Timer &timer
   );

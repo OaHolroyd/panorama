@@ -3,6 +3,8 @@
 #include "arguments.h"
 #include "ray_projection_arguments.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -32,6 +35,7 @@ struct EntrypointSettings {
   bool write_diagnostics = true;
   bool write_synthetic = false;
   bool synthetic_setting_seen = false;
+  bool colourmap_setting_seen = false;
   panorama::SyntheticRenderOptions synthetic = {
       225.0 * kDegreesToRadians,
       35.0 * kDegreesToRadians,
@@ -43,6 +47,53 @@ struct EntrypointSettings {
   panorama::RayProjectionArguments projection;
 };
 
+constexpr std::array kTerrainColours = {
+    std::pair{"white", panorama::TerrainColourSource::White},
+    std::pair{"distance", panorama::TerrainColourSource::Distance},
+    std::pair{"elevation", panorama::TerrainColourSource::Elevation},
+};
+
+constexpr std::array kColourmaps = {
+    std::pair{"viridis", panorama::PresetColourmap::Viridis},
+    std::pair{"plasma", panorama::PresetColourmap::Plasma},
+    std::pair{"inferno", panorama::PresetColourmap::Inferno},
+    std::pair{"magma", panorama::PresetColourmap::Magma},
+    std::pair{"cividis", panorama::PresetColourmap::Cividis},
+    std::pair{"turbo", panorama::PresetColourmap::Turbo},
+};
+
+/// Parse and print small named enums from one canonical choice table.
+template <typename Enum, size_t Count>
+[[nodiscard]] Enum parse_choice(
+    std::string_view value,
+    const std::array<std::pair<const char *, Enum>, Count> &choices,
+    std::string_view description,
+    std::string_view expected
+) {
+  for (const auto &[name, choice] : choices) {
+    if (value == name) {
+      return choice;
+    }
+  }
+  throw std::invalid_argument(
+      "Invalid " + std::string(description) + ": " + std::string(value) +
+      " (expected " + std::string(expected) + ")"
+  );
+}
+
+template <typename Enum, size_t Count>
+[[nodiscard]] const char *choice_name(
+    Enum value,
+    const std::array<std::pair<const char *, Enum>, Count> &choices
+) {
+  for (const auto &[name, choice] : choices) {
+    if (value == choice) {
+      return name;
+    }
+  }
+  return "unknown";
+}
+
 /// Validate combinations whose meaning spans more than one CLI switch.
 void validate_output_settings(const EntrypointSettings &settings) {
   if (!settings.write_diagnostics && !settings.write_synthetic) {
@@ -53,10 +104,21 @@ void validate_output_settings(const EntrypointSettings &settings) {
   if (settings.write_synthetic && !settings.normals_enabled) {
     throw std::invalid_argument("--synthetic-output cannot be combined with --no-normals");
   }
+  if (settings.write_synthetic &&
+      settings.synthetic.colour_source == panorama::TerrainColourSource::Elevation &&
+      !settings.elevations_enabled) {
+    throw std::invalid_argument(
+        "--terrain-colour elevation cannot be combined with --no-elevations"
+    );
+  }
   // Treat lighting controls as configuration for an explicitly selected
   // product; silently creating another output would make scripted runs unclear.
   if (settings.synthetic_setting_seen && !settings.write_synthetic) {
     throw std::invalid_argument("Synthetic image options require --synthetic-output");
+  }
+  if (settings.colourmap_setting_seen &&
+      settings.synthetic.colour_source == panorama::TerrainColourSource::White) {
+    throw std::invalid_argument("--colourmap requires distance or elevation terrain colour");
   }
 }
 
@@ -88,6 +150,9 @@ void print_usage(const char *program) {
       "  --sun-azimuth D       clockwise from grid north (default: 225)\n"
       "  --sun-elevation D     above the horizon (default: 35)\n"
       "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
+      "  --terrain-colour MODE white, distance, or elevation (default: white)\n"
+      "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, or turbo\n"
+      "                        (default: viridis)\n"
       "\n"
       "Observer options:\n"
       "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
@@ -175,6 +240,23 @@ void print_usage(const char *program) {
       }
       settings.synthetic.ambient_light = static_cast<float>(parsed);
       settings.synthetic_setting_seen = true;
+    } else if (option == "--terrain-colour") {
+      settings.synthetic.colour_source = parse_choice(
+          value,
+          kTerrainColours,
+          "terrain colour",
+          "white, distance, or elevation"
+      );
+      settings.synthetic_setting_seen = true;
+    } else if (option == "--colourmap") {
+      settings.synthetic.colourmap = parse_choice(
+          value,
+          kColourmaps,
+          "colourmap",
+          "viridis, plasma, inferno, magma, cividis, or turbo"
+      );
+      settings.synthetic_setting_seen = true;
+      settings.colourmap_setting_seen = true;
     } else if (!settings.projection.parse_option(option, value)) {
       throw std::invalid_argument("Unknown option: " + std::string(option));
     }
@@ -238,11 +320,17 @@ int main(int argc, const char *argv[]) {
     );
     if (settings.write_synthetic) {
       std::printf(
-          "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f.\n",
+          "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f, "
+          "terrain colour %s",
           settings.synthetic.sun_azimuth / kDegreesToRadians,
           settings.synthetic.sun_elevation / kDegreesToRadians,
-          settings.synthetic.ambient_light
+          settings.synthetic.ambient_light,
+          choice_name(settings.synthetic.colour_source, kTerrainColours)
       );
+      if (settings.synthetic.colour_source != panorama::TerrainColourSource::White) {
+        std::printf(" (%s, auto range)", choice_name(settings.synthetic.colourmap, kColourmaps));
+      }
+      std::printf(".\n");
     }
     panorama::render_terrain(config, rays, outputs);
     return EXIT_SUCCESS;

@@ -8,6 +8,52 @@ struct FiniteRange {
   atomic_uint maximum;
 };
 
+/// Five-stop approximations of the CLI's built-in perceptual colourmaps.
+constant float3 preset_colourmaps[6][5] = {
+    {
+        float3(68.0F, 1.0F, 84.0F),
+        float3(59.0F, 82.0F, 139.0F),
+        float3(33.0F, 145.0F, 140.0F),
+        float3(94.0F, 201.0F, 98.0F),
+        float3(253.0F, 231.0F, 37.0F),
+    },
+    {
+        float3(13.0F, 8.0F, 135.0F),
+        float3(126.0F, 3.0F, 168.0F),
+        float3(204.0F, 71.0F, 120.0F),
+        float3(248.0F, 149.0F, 64.0F),
+        float3(240.0F, 249.0F, 33.0F),
+    },
+    {
+        float3(0.0F, 0.0F, 4.0F),
+        float3(87.0F, 15.0F, 109.0F),
+        float3(187.0F, 55.0F, 84.0F),
+        float3(249.0F, 142.0F, 9.0F),
+        float3(252.0F, 255.0F, 164.0F),
+    },
+    {
+        float3(0.0F, 0.0F, 4.0F),
+        float3(81.0F, 18.0F, 124.0F),
+        float3(183.0F, 55.0F, 121.0F),
+        float3(252.0F, 137.0F, 97.0F),
+        float3(252.0F, 253.0F, 191.0F),
+    },
+    {
+        float3(0.0F, 32.0F, 77.0F),
+        float3(65.0F, 77.0F, 108.0F),
+        float3(124.0F, 124.0F, 120.0F),
+        float3(190.0F, 175.0F, 110.0F),
+        float3(255.0F, 233.0F, 69.0F),
+    },
+    {
+        float3(48.0F, 18.0F, 59.0F),
+        float3(40.0F, 188.0F, 235.0F),
+        float3(164.0F, 252.0F, 60.0F),
+        float3(251.0F, 126.0F, 33.0F),
+        float3(122.0F, 4.0F, 3.0F),
+    },
+};
+
 /// Map float32 bits to unsigned integers whose ordering matches the floats.
 inline uint ordered_float(float value) {
   const uint bits = as_type<uint>(value);
@@ -24,16 +70,22 @@ inline float decode_ordered_float(uint value) {
 ///
 /// The host always dispatches complete 256-thread groups, allowing this fixed
 /// threadgroup reduction even when the final group extends beyond `count`.
+/// Synthetic colouring enables `collisions_only` so zero-filled miss pixels do
+/// not distort the distance or elevation range.
 kernel void reduce_finite_range(
     device const float *values [[buffer(0)]],
-    device FiniteRange *range [[buffer(1)]],
-    constant uint &count [[buffer(2)]],
+    device const float *distances [[buffer(1)]],
+    device FiniteRange *range [[buffer(2)]],
+    constant uint &count [[buffer(3)]],
+    constant uint &collisions_only [[buffer(4)]],
     uint index [[thread_position_in_grid]],
     uint local_index [[thread_index_in_threadgroup]]
 ) {
   threadgroup uint local_minima[256];
   threadgroup uint local_maxima[256];
-  const bool valid = index < count && isfinite(values[index]);
+  const bool valid = index < count && isfinite(values[index]) &&
+                     (collisions_only == 0U ||
+                      (distances[index] > 0.0F && isfinite(distances[index])));
   const uint ordered = valid ? ordered_float(values[index]) : 0U;
   local_minima[local_index] = valid ? ordered : 0xffffffffU;
   local_maxima[local_index] = ordered;
@@ -54,17 +106,11 @@ kernel void reduce_finite_range(
   }
 }
 
-/// Interpolate the five-stop viridis approximation used by diagnostics.
-inline float3 viridis(float normalised_value) {
-  constexpr float3 colors[] = {
-      float3(68.0F, 1.0F, 84.0F),
-      float3(59.0F, 82.0F, 139.0F),
-      float3(33.0F, 145.0F, 140.0F),
-      float3(94.0F, 201.0F, 98.0F),
-      float3(253.0F, 231.0F, 37.0F),
-  };
+/// Interpolate one of the five-stop preset colourmap approximations.
+inline float3 preset_colourmap(float normalised_value, uint colourmap) {
   constexpr float positions[] = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
   const float value = clamp(normalised_value, 0.0F, 1.0F);
+  const uint map_index = min(colourmap, 5U);
   uint upper = 1U;
   while (upper < 4U && value > positions[upper]) {
     upper++;
@@ -73,8 +119,20 @@ inline float3 viridis(float normalised_value) {
   const float fraction =
       (value - positions[lower]) / (positions[upper] - positions[lower]);
   const float3 interpolated =
-      colors[lower] + fraction * (colors[upper] - colors[lower]);
+      preset_colourmaps[map_index][lower] +
+      fraction * (preset_colourmaps[map_index][upper] - preset_colourmaps[map_index][lower]);
   return floor(clamp(interpolated, 0.0F, 255.0F) + 0.5F) / 255.0F;
+}
+
+/// Normalise a finite scalar using a completed atomic range reduction.
+inline float normalised_value(float value, device const FiniteRange *range) {
+  const float minimum = decode_ordered_float(
+      atomic_load_explicit(&range->minimum, memory_order_relaxed)
+  );
+  const float maximum = decode_ordered_float(
+      atomic_load_explicit(&range->maximum, memory_order_relaxed)
+  );
+  return maximum == minimum ? 0.5F : (value - minimum) / (maximum - minimum);
 }
 
 /// Convert a finite scalar field to the diagnostic viridis image.
@@ -94,12 +152,7 @@ kernel void present_scalar_viridis(
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
-  const float minimum = decode_ordered_float(ordered_minimum);
-  const float maximum = decode_ordered_float(
-      atomic_load_explicit(&range->maximum, memory_order_relaxed)
-  );
-  const float normalised = maximum == minimum ? 0.5F : (value - minimum) / (maximum - minimum);
-  output.write(float4(viridis(normalised), 1.0F), position);
+  output.write(float4(preset_colourmap(normalised_value(value, range), 0U), 1.0F), position);
 }
 
 /// Reconstruct an upward unit normal from the trace kernel's packed half2.
@@ -135,6 +188,24 @@ kernel void present_surface_normals(
   output.write(float4(color, 1.0F), position);
 }
 
+/// Convert an sRGB colour to the linear-light domain used for illumination.
+inline float3 srgb_to_linear(float3 value) {
+  return select(
+      value / 12.92F,
+      pow((value + 0.055F) / 1.055F, float3(2.4F)),
+      value > 0.04045F
+  );
+}
+
+/// Convert a shaded linear-light colour back to sRGB for the output texture.
+inline float3 linear_to_srgb(float3 value) {
+  return select(
+      12.92F * value,
+      1.055F * pow(value, float3(1.0F / 2.4F)) - 0.055F,
+      value > 0.0031308F
+  );
+}
+
 /// Render white Lambertian terrain under one directional sun and ambient term.
 kernel void present_synthetic_terrain(
     device const uint *packed_gradients [[buffer(0)]],
@@ -160,6 +231,41 @@ kernel void present_synthetic_terrain(
                          ? 12.92F * linear
                          : 1.055F * pow(linear, 1.0F / 2.4F) - 0.055F;
   output.write(float4(srgb, srgb, srgb, 1.0F), position);
+}
+
+/// Render colourmapped Lambertian terrain under sun and ambient light.
+///
+/// Keeping this separate from the white kernel prevents the palette and sRGB
+/// arithmetic from increasing register pressure in the default render path.
+kernel void present_colourmapped_synthetic_terrain(
+    device const uint *packed_gradients [[buffer(0)]],
+    device const float *distances [[buffer(1)]],
+    constant float4 &sun_and_ambient [[buffer(2)]],
+    device const float *colour_values [[buffer(3)]],
+    device const FiniteRange *range [[buffer(4)]],
+    constant uint &colourmap [[buffer(5)]],
+    texture2d<float, access::write> output [[texture(0)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+  if (position.x >= output.get_width() || position.y >= output.get_height()) {
+    return;
+  }
+  const uint index = position.y * output.get_width() + position.x;
+  const float distance = distances[index];
+  if (!(distance > 0.0F) || !isfinite(distance)) {
+    output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
+    return;
+  }
+
+  const float diffuse = max(0.0F, dot(surface_normal(packed_gradients[index]),
+                                      sun_and_ambient.xyz));
+  const float illumination = sun_and_ambient.w + (1.0F - sun_and_ambient.w) * diffuse;
+
+  const float3 base_srgb = preset_colourmap(
+      normalised_value(colour_values[index], range),
+      colourmap
+  );
+  output.write(float4(linear_to_srgb(srgb_to_linear(base_srgb) * illumination), 1.0F), position);
 }
 
 /// Pack the reusable RGBA presentation texture for ImageIO's faster RGB path.

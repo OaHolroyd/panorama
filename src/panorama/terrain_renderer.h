@@ -17,14 +17,16 @@ struct TerrainRenderOutputs {
   bool write_elevation_diagnostic;
   /// Include normals.png when diagnostic outputs are enabled.
   bool write_normal_diagnostic;
-  /// Write synthetic.png using white terrain and normal-based lighting.
+  /// Write synthetic.png using configurable base colour and normal-based lighting.
   bool write_synthetic;
   /// Lighting parameters used only when `write_synthetic` is true.
   SyntheticRenderOptions synthetic_options;
 
   /// Return whether any selected output consumes per-collision elevations.
   [[nodiscard]] bool requires_elevations() const {
-    return write_diagnostics && write_elevation_diagnostic;
+    return (write_diagnostics && write_elevation_diagnostic) ||
+           (write_synthetic &&
+            synthetic_options.colour_source == TerrainColourSource::Elevation);
   }
 
   /// Return whether any selected output consumes per-collision gradients.
