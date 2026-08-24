@@ -76,16 +76,14 @@ template <typename Enum, size_t Count>
     }
   }
   throw std::invalid_argument(
-      "Invalid " + std::string(description) + ": " + std::string(value) +
-      " (expected " + std::string(expected) + ")"
+      "Invalid " + std::string(description) + ": " + std::string(value) + " (expected " +
+      std::string(expected) + ")"
   );
 }
 
 template <typename Enum, size_t Count>
-[[nodiscard]] const char *choice_name(
-    Enum value,
-    const std::array<std::pair<const char *, Enum>, Count> &choices
-) {
+[[nodiscard]] const char *
+choice_name(Enum value, const std::array<std::pair<const char *, Enum>, Count> &choices) {
   for (const auto &[name, choice] : choices) {
     if (value == choice) {
       return name;
@@ -241,12 +239,8 @@ void print_usage(const char *program) {
       settings.synthetic.ambient_light = static_cast<float>(parsed);
       settings.synthetic_setting_seen = true;
     } else if (option == "--terrain-colour") {
-      settings.synthetic.colour_source = parse_choice(
-          value,
-          kTerrainColours,
-          "terrain colour",
-          "white, distance, or elevation"
-      );
+      settings.synthetic.colour_source =
+          parse_choice(value, kTerrainColours, "terrain colour", "white, distance, or elevation");
       settings.synthetic_setting_seen = true;
     } else if (option == "--colourmap") {
       settings.synthetic.colourmap = parse_choice(
