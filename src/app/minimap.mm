@@ -11,8 +11,10 @@
 #include <stdexcept>
 #include <string>
 
-constexpr CGFloat kMapPanelWidth = 300.0;
-constexpr CGFloat kMapSectionHeight = 286.0;
+constexpr CGFloat kCompactMapPanelWidth = 300.0;
+constexpr CGFloat kCompactMapSectionHeight = 286.0;
+constexpr CGFloat kLargeMapPanelWidth = 520.0;
+constexpr CGFloat kLargeMapSectionHeight = 456.0;
 constexpr CGFloat kPointSectionHeight = 82.0;
 constexpr double kInitialMapDistance = 50'000.0;
 constexpr double kMinimumMapDistance = 500.0;
@@ -335,6 +337,7 @@ enum class AnnotationKind : NSInteger {
   VisibilityMapView *_visibilityView;
   CompactMapScaleView *_scaleView;
   NSPopUpButton *_mapStyleControl;
+  NSButton *_mapSizeControl;
   MiniMapAnnotation *_observerAnnotation;
   MiniMapAnnotation *_inspectionAnnotation;
   CLLocationCoordinate2D _eastBasisCoordinate;
@@ -345,13 +348,18 @@ enum class AnnotationKind : NSInteger {
   double _observerNorthing;
   double _maxDistance;
   uint32_t _terrainEpsgCode;
+  __weak id<MiniMapPanelViewSizeDelegate> _sizeDelegate;
   bool _mapVisible;
   bool _pointInfoVisible;
+  bool _largeMap;
 }
 - (void)updateVisibilityTransform;
+- (void)updateMapSizeControl;
 @end
 
 @implementation MiniMapPanelView
+
+@synthesize sizeDelegate = _sizeDelegate;
 
 - (instancetype)initWithObserverEasting:(double)easting
                                northing:(double)northing
@@ -361,7 +369,8 @@ enum class AnnotationKind : NSInteger {
                             metalDevice:(id<MTLDevice>)metalDevice
                            commandQueue:(id<MTLCommandQueue>)commandQueue
                                 library:(id<MTLLibrary>)library {
-  self = [super initWithFrame:NSMakeRect(0.0, 0.0, kMapPanelWidth, kMapSectionHeight)];
+  self =
+      [super initWithFrame:NSMakeRect(0.0, 0.0, kCompactMapPanelWidth, kCompactMapSectionHeight)];
   if (self == nil) {
     return nil;
   }
@@ -387,16 +396,35 @@ enum class AnnotationKind : NSInteger {
   _mapStyleControl.target = self;
   _mapStyleControl.action = @selector(mapStyleChanged:);
 
+  _mapSizeControl = [NSButton
+      buttonWithImage:[NSImage imageWithSystemSymbolName:@"arrow.down.left.and.arrow.up.right"
+                                accessibilityDescription:@"Enlarge minimap"]
+               target:self
+               action:@selector(toggleMapSize:)];
+  _mapSizeControl.title = @"";
+  _mapSizeControl.bordered = NO;
+  _mapSizeControl.imagePosition = NSImageOnly;
+  [_mapSizeControl.widthAnchor constraintEqualToConstant:22.0].active = YES;
+  [_mapSizeControl.heightAnchor constraintEqualToConstant:22.0].active = YES;
+
+  NSView *controlSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
+  [controlSpacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [controlSpacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+
   NSStackView *controls = [NSStackView stackViewWithViews:@[
     heading,
     _mapStyleControl,
+    controlSpacer,
+    _mapSizeControl,
   ]];
   controls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   controls.alignment = NSLayoutAttributeCenterY;
   controls.spacing = 6.0;
   [heading setContentHuggingPriority:NSLayoutPriorityDefaultHigh
                       forOrientation:NSLayoutConstraintOrientationHorizontal];
-  [_mapStyleControl setContentHuggingPriority:NSLayoutPriorityDefaultLow
+  [_mapStyleControl setContentHuggingPriority:NSLayoutPriorityDefaultHigh
                                forOrientation:NSLayoutConstraintOrientationHorizontal];
   controls.translatesAutoresizingMaskIntoConstraints = NO;
   [_mapSection addSubview:controls];
@@ -479,6 +507,8 @@ enum class AnnotationKind : NSInteger {
 
   _mapVisible = false;
   _pointInfoVisible = false;
+  _largeMap = false;
+  [self updateMapSizeControl];
   _mapSection.hidden = YES;
   _pointInfoView.hidden = YES;
   return self;
@@ -518,10 +548,29 @@ enum class AnnotationKind : NSInteger {
 }
 
 - (NSSize)preferredPanelSize {
-  const CGFloat width = _mapVisible ? kMapPanelWidth : 230.0;
+  const CGFloat mapWidth = _largeMap ? kLargeMapPanelWidth : kCompactMapPanelWidth;
+  const CGFloat mapHeight = _largeMap ? kLargeMapSectionHeight : kCompactMapSectionHeight;
+  const CGFloat width = _mapVisible ? mapWidth : 230.0;
   const CGFloat height =
-      (_mapVisible ? kMapSectionHeight : 0.0) + (_pointInfoVisible ? kPointSectionHeight : 0.0);
+      (_mapVisible ? mapHeight : 0.0) + (_pointInfoVisible ? kPointSectionHeight : 0.0);
   return NSMakeSize(width, height);
+}
+
+- (void)updateMapSizeControl {
+  NSString *symbol =
+      _largeMap ? @"arrow.up.right.and.arrow.down.left" : @"arrow.down.left.and.arrow.up.right";
+  NSString *description = _largeMap ? @"Restore compact minimap" : @"Enlarge minimap";
+  _mapSizeControl.image = [NSImage imageWithSystemSymbolName:symbol
+                                    accessibilityDescription:description];
+  _mapSizeControl.toolTip = description;
+  [_mapSizeControl setAccessibilityLabel:description];
+}
+
+- (void)toggleMapSize:(id)sender {
+  (void)sender;
+  _largeMap = !_largeMap;
+  [self updateMapSizeControl];
+  [_sizeDelegate miniMapPanelPreferredSizeDidChange:self];
 }
 
 - (void)mapStyleChanged:(id)sender {

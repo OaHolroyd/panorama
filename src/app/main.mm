@@ -51,7 +51,7 @@ struct ViewerSettings {
   float max_distance = 600'000.0F;
   bool retain_quantized = false;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
-  ImageSize image = {960U, 540U};
+  ImageSize image = {1600U, 900U};
   double vertical_field_of_view = kDefaultVerticalFieldOfView;
   CameraOrientation orientation = {0.0, 0.0, 0.0};
   TerrainPresentationSettings presentation = {
@@ -1183,7 +1183,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Keep the render at the full window size and position auxiliary panels above
 /// it. Frame-based layout is deliberate: overlapping children do not define a
 /// useful Auto Layout fitting size for an NSWindow content view.
-@interface ViewerOverlayView : NSView {
+@interface ViewerOverlayView : NSView <MiniMapPanelViewSizeDelegate> {
 @private
   NSView *_contentView;
   NSView *_inspectorView;
@@ -1228,6 +1228,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _settingsView = settingsView;
     _debugContentView = debugView;
     _mapPanelContentView = mapPanelView;
+    _mapPanelContentView.sizeDelegate = self;
     _inspectorWidth = inspectorWidth;
     _debugSize = debugSize;
     _panelMargin = 12.0;
@@ -1287,11 +1288,14 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   const CGFloat availableHeight =
       std::max(0.0, bounds.size.height - safeArea.top - safeArea.bottom - 2.0 * _panelMargin);
+  const CGFloat availableWidth =
+      std::max(0.0, bounds.size.width - safeArea.left - safeArea.right - 2.0 * _panelMargin);
+  const CGFloat width = std::min(preferredSize.width, availableWidth);
   const CGFloat height = std::min(preferredSize.height, availableHeight);
   const CGFloat x = visible ? NSMinX(bounds) + safeArea.left + _panelMargin
-                            : NSMinX(bounds) - preferredSize.width - _panelMargin;
+                            : NSMinX(bounds) - width - _panelMargin;
   const CGFloat y = NSMinY(bounds) + safeArea.bottom + _panelMargin;
-  return NSMakeRect(x, y, preferredSize.width, height);
+  return NSMakeRect(x, y, width, height);
 }
 
 - (void)layout {
@@ -1303,6 +1307,20 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _debugContentView.frame = _debugView.bounds;
   _mapPanelView.frame = [self mapPanelFrameForVisible:[_mapPanelContentView hasVisibleContent]];
   _mapPanelContentView.frame = _mapPanelView.bounds;
+}
+
+- (void)miniMapPanelPreferredSizeDidChange:(MiniMapPanelView *)panel {
+  if (panel != _mapPanelContentView) {
+    return;
+  }
+  const bool visible = [_mapPanelContentView hasVisibleContent];
+  const NSRect targetFrame = [self mapPanelFrameForVisible:visible];
+  [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+    context.duration = 0.25;
+    _mapPanelView.animator.frame = targetFrame;
+    _mapPanelContentView.animator.frame =
+        NSMakeRect(0.0, 0.0, targetFrame.size.width, targetFrame.size.height);
+  }];
 }
 
 - (void)toggleInspector:(id)sender {

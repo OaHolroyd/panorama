@@ -7,10 +7,18 @@
 
 #include <cstdint>
 
+@class MiniMapPanelView;
+
+@protocol MiniMapPanelViewSizeDelegate <NSObject>
+- (void)miniMapPanelPreferredSizeDidChange:(MiniMapPanelView *)panel;
+@end
+
 /// Combined fixed-centre map and terrain-point readout used by the viewer's
 /// leading overlay. MapKit implementation details remain in minimap.mm so the
 /// application controller only publishes camera and inspected-world state.
 @interface MiniMapPanelView : NSView
+
+@property(nonatomic, weak) id<MiniMapPanelViewSizeDelegate> sizeDelegate;
 
 - (instancetype)initWithObserverEasting:(double)easting
                                northing:(double)northing
