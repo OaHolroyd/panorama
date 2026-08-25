@@ -1276,8 +1276,7 @@ private:
                                 ? @"Locked terrain point is occluded"
                                 : (_pointIndicatorLocked ? @"Locked terrain point"
                                                          : @"Terrain point under map pointer");
-    NSString *symbol = _lockedPointOccluded ? @"eye.slash.fill" : @"scope";
-    _lockedPointMarker.image = [NSImage imageWithSystemSymbolName:symbol
+    _lockedPointMarker.image = [NSImage imageWithSystemSymbolName:@"scope"
                                          accessibilityDescription:description];
     [_lockedPointMarker.layer setAffineTransform:CGAffineTransformIdentity];
     _lockedPointMarker.toolTip = description;
@@ -1344,6 +1343,8 @@ private:
   }
   _lockedPointMarker.contentTintColor =
       locked ? NSColor.systemOrangeColor : NSColor.systemBlueColor;
+  _lockedPointMarker.alphaValue = _lockedPointOccluded ? 0.45 : 1.0;
+  _lockedPointMarker.layer.shadowOpacity = _lockedPointOccluded ? 0.35F : 0.9F;
   _lockedPointOnscreen = projection->onscreen;
   _lockedPointPixelX = projection->pixel_x;
   _lockedPointPixelY = projection->pixel_y;
@@ -2937,10 +2938,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     if (_pointLockPending && frame.inspection_request_token == _pointLockRequestToken &&
         matches_visible_frame && frame.inspection.has_value()) {
       _pointLockPending = false;
-      [self updatePointInfo:frame.inspection];
       if (frame.inspection->hit) {
         _pointInspectionLocked = true;
         _lockedPoint = frame.inspection;
+        [self updatePointInfo:frame.inspection];
         [self requestTargetVisibilityForPoint:*frame.inspection];
         [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                     verticalFieldOfView:frame.vertical_field_of_view
@@ -2949,6 +2950,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         // resampling this screen pixel as subsequent camera views complete.
         _renderer->request_inspection(std::nullopt);
       } else {
+        [self updatePointInfo:frame.inspection];
         _pointInfoHeading.stringValue = @"Distance";
       }
     } else if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending &&

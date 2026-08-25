@@ -50,9 +50,9 @@ enum class AnnotationKind : NSInteger {
   NSColor *color = nil;
   switch (kind) {
   case AnnotationKind::Observer:
-    symbolName = @"location.fill";
+    symbolName = @"circle.fill";
     description = @"Observer";
-    pointSize = 11.0;
+    pointSize = 9.0;
     color = NSColor.systemPurpleColor;
     break;
   case AnnotationKind::Hover:
@@ -62,15 +62,15 @@ enum class AnnotationKind : NSInteger {
     color = NSColor.systemBlueColor;
     break;
   case AnnotationKind::Locked:
-    symbolName = @"circle.circle.fill";
+    symbolName = @"circle.fill";
     description = @"Locked Terrain Point";
-    pointSize = 10.0;
+    pointSize = 7.0;
     color = NSColor.systemOrangeColor;
     break;
   case AnnotationKind::Occluded:
-    symbolName = @"eye.slash.fill";
+    symbolName = @"circle.fill";
     description = @"Occluded Locked Terrain Point";
-    pointSize = 11.0;
+    pointSize = 7.0;
     color = NSColor.systemOrangeColor;
     break;
   }
@@ -883,6 +883,7 @@ enum class AnnotationKind : NSInteger {
   MKAnnotationView *view = [_mapView viewForAnnotation:_inspectionAnnotation];
   if (view != nil) {
     view.image = annotation_image(_inspectionAnnotation.kind);
+    view.alphaValue = 1.0;
   }
   if (_followInspection) {
     _mapView.fixedCentre = coordinate;
@@ -899,6 +900,7 @@ enum class AnnotationKind : NSInteger {
   MKAnnotationView *view = [_mapView viewForAnnotation:_inspectionAnnotation];
   if (view != nil) {
     view.image = annotation_image(_inspectionAnnotation.kind);
+    view.alphaValue = 1.0;
   }
 }
 
@@ -923,6 +925,7 @@ enum class AnnotationKind : NSInteger {
                                                         reuseIdentifier:nil];
   view.canShowCallout = NO;
   view.image = annotation_image(marker.kind);
+  view.alphaValue = 1.0;
   return view;
 }
 
