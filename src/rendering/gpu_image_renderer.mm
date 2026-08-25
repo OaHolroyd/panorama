@@ -246,6 +246,7 @@ void GpuImageRenderer::render_synthetic(
   State &state = *state_;
   const uint32_t colour_source = static_cast<uint32_t>(options.colour_source);
   const uint32_t colourmap = static_cast<uint32_t>(options.colourmap);
+  const uint32_t colour_scale = static_cast<uint32_t>(options.colour_scale);
   const bool scalar_colour = options.colour_source != TerrainColourSource::White;
   if ((use_surface_normals && packed_gradients == nil) || distances == nil ||
       (scalar_colour && colour_values == nil) || !std::isfinite(options.sun_azimuth) ||
@@ -255,7 +256,8 @@ void GpuImageRenderer::render_synthetic(
       options.diffusivity > 1.0F || !std::isfinite(range.minimum) ||
       !std::isfinite(range.maximum) || range.maximum <= range.minimum ||
       colour_source > static_cast<uint32_t>(TerrainColourSource::Elevation) ||
-      colourmap > static_cast<uint32_t>(PresetColourmap::Turbo)) {
+      colourmap > static_cast<uint32_t>(PresetColourmap::Viewfinder) ||
+      colour_scale > static_cast<uint32_t>(ScalarColourScale::Quadratic)) {
     throw std::invalid_argument("Synthetic presentation inputs are invalid");
   }
   id<MTLComputePipelineState> pipeline =
@@ -290,8 +292,9 @@ void GpuImageRenderer::render_synthetic(
     [encoder setBuffer:colour_values offset:0 atIndex:3];
     [encoder setBytes:&range length:sizeof(range) atIndex:4];
     [encoder setBytes:&colourmap length:sizeof(colourmap) atIndex:5];
-    [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:6];
-    [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:7];
+    [encoder setBytes:&colour_scale length:sizeof(colour_scale) atIndex:6];
+    [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:7];
+    [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:8];
   } else {
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:3];
     [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:4];

@@ -19,6 +19,15 @@ enum class PresetColourmap : uint32_t {
   Magma = 3U,
   Cividis = 4U,
   Turbo = 5U,
+  Viewfinder = 6U,
+};
+
+/// Transform applied after range normalisation and before palette lookup.
+enum class ScalarColourScale : uint32_t {
+  Linear = 0U,
+  Logarithmic = 1U,
+  SquareRoot = 2U,
+  Quadratic = 3U,
 };
 
 /// Fixed scalar interval mapped onto the full span of a preset colourmap.
@@ -42,6 +51,8 @@ struct SyntheticRenderOptions {
   TerrainColourSource colour_source = TerrainColourSource::White;
   /// Preset applied when `colour_source` selects a scalar field.
   PresetColourmap colourmap = PresetColourmap::Viridis;
+  /// Distribution of the selected scalar interval across the palette.
+  ScalarColourScale colour_scale = ScalarColourScale::Linear;
 };
 
 } // namespace panorama

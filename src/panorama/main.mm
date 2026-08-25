@@ -38,6 +38,7 @@ struct EntrypointSettings {
   bool write_synthetic = false;
   bool synthetic_setting_seen = false;
   bool colourmap_setting_seen = false;
+  bool colour_scale_setting_seen = false;
   bool colour_range_setting_seen = false;
   float colour_minimum = 0.0F;
   std::optional<float> colour_maximum;
@@ -82,6 +83,14 @@ constexpr std::array kColourmaps = {
     std::pair{"magma", panorama::PresetColourmap::Magma},
     std::pair{"cividis", panorama::PresetColourmap::Cividis},
     std::pair{"turbo", panorama::PresetColourmap::Turbo},
+    std::pair{"viewfinder", panorama::PresetColourmap::Viewfinder},
+};
+
+constexpr std::array kColourScales = {
+    std::pair{"linear", panorama::ScalarColourScale::Linear},
+    std::pair{"logarithmic", panorama::ScalarColourScale::Logarithmic},
+    std::pair{"square-root", panorama::ScalarColourScale::SquareRoot},
+    std::pair{"quadratic", panorama::ScalarColourScale::Quadratic},
 };
 
 /// Parse and print small named enums from one canonical choice table.
@@ -140,6 +149,10 @@ void validate_output_settings(const EntrypointSettings &settings) {
       settings.synthetic.colour_source == panorama::TerrainColourSource::White) {
     throw std::invalid_argument("--colourmap requires distance or elevation terrain colour");
   }
+  if (settings.colour_scale_setting_seen &&
+      settings.synthetic.colour_source == panorama::TerrainColourSource::White) {
+    throw std::invalid_argument("--colour-scale requires distance or elevation terrain colour");
+  }
   const panorama::ScalarColourRange range = scalar_colour_range(settings);
   if (!std::isfinite(range.minimum) || !std::isfinite(range.maximum) ||
       range.maximum <= range.minimum) {
@@ -190,8 +203,10 @@ void print_usage(const char *program) {
       "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
       "  --diffusivity V       directional diffuse-light strength, 0 to 1 (default: 1)\n"
       "  --terrain-colour MODE white, distance, or elevation (default: white)\n"
-      "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, or turbo\n"
+      "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, turbo, or viewfinder\n"
       "                        (default: viridis)\n"
+      "  --colour-scale NAME   linear, logarithmic, square-root, or quadratic\n"
+      "                        (default: linear)\n"
       "\n"
       "Observer options:\n"
       "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
@@ -301,10 +316,19 @@ void print_usage(const char *program) {
           value,
           kColourmaps,
           "colourmap",
-          "viridis, plasma, inferno, magma, cividis, or turbo"
+          "viridis, plasma, inferno, magma, cividis, turbo, or viewfinder"
       );
       settings.synthetic_setting_seen = true;
       settings.colourmap_setting_seen = true;
+    } else if (option == "--colour-scale") {
+      settings.synthetic.colour_scale = parse_choice(
+          value,
+          kColourScales,
+          "colour scale",
+          "linear, logarithmic, square-root, or quadratic"
+      );
+      settings.synthetic_setting_seen = true;
+      settings.colour_scale_setting_seen = true;
     } else if (!settings.projection.parse_option(option, value)) {
       throw std::invalid_argument("Unknown option: " + std::string(option));
     }
@@ -379,7 +403,11 @@ int main(int argc, const char *argv[]) {
           choice_name(settings.synthetic.colour_source, kTerrainColours)
       );
       if (settings.synthetic.colour_source != panorama::TerrainColourSource::White) {
-        std::printf(" (%s)", choice_name(settings.synthetic.colourmap, kColourmaps));
+        std::printf(
+            " (%s, %s scale)",
+            choice_name(settings.synthetic.colourmap, kColourmaps),
+            choice_name(settings.synthetic.colour_scale, kColourScales)
+        );
       }
       std::printf(".\n");
     }

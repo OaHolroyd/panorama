@@ -1201,6 +1201,7 @@ private:
   std::optional<panorama::app::PointInspection> _mapHoverPoint;
   NSPopUpButton *_colourSourceControl;
   NSPopUpButton *_colourmapControl;
+  NSPopUpButton *_colourScaleControl;
   NSTextField *_minimumControl;
   NSTextField *_maximumControl;
   NSSlider *_zoomControl;
@@ -2369,9 +2370,22 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       selectItemAtIndex:static_cast<NSInteger>(_presentation.appearance.colour_source)];
 
   _colourmapControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-  [_colourmapControl
-      addItemsWithTitles:@[ @"Viridis", @"Plasma", @"Inferno", @"Magma", @"Cividis", @"Turbo" ]];
+  [_colourmapControl addItemsWithTitles:@[
+    @"Viridis",
+    @"Plasma",
+    @"Inferno",
+    @"Magma",
+    @"Cividis",
+    @"Turbo",
+    @"Viewfinder"
+  ]];
   [_colourmapControl selectItemAtIndex:static_cast<NSInteger>(_presentation.appearance.colourmap)];
+
+  _colourScaleControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+  [_colourScaleControl
+      addItemsWithTitles:@[ @"Linear", @"Logarithmic", @"Square root", @"Quadratic" ]];
+  [_colourScaleControl
+      selectItemAtIndex:static_cast<NSInteger>(_presentation.appearance.colour_scale)];
 
   _minimumControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
   _minimumControl.stringValue =
@@ -2499,6 +2513,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSStackView *terrainSection = make_section(@"Terrain Appearance", @[
     make_row(@"Colour by", _colourSourceControl),
     make_row(@"Colourmap", _colourmapControl),
+    make_row(@"Scale", _colourScaleControl),
     make_row(@"Range minimum", _minimumControl),
     make_row(@"Range maximum", _maximumControl),
   ]);
@@ -2819,6 +2834,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 - (void)updateSettingsControlAvailability {
   const BOOL scalarColour = _colourSourceControl.indexOfSelectedItem != 0;
   _colourmapControl.enabled = scalarColour;
+  _colourScaleControl.enabled = scalarColour;
   _minimumControl.enabled = scalarColour;
   _maximumControl.enabled = scalarColour;
   const BOOL normalLighting = _normalLightingControl.state == NSControlStateValueOn;
@@ -2874,6 +2890,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       static_cast<panorama::TerrainColourSource>(_colourSourceControl.indexOfSelectedItem);
   _presentation.appearance.colourmap =
       static_cast<panorama::PresetColourmap>(_colourmapControl.indexOfSelectedItem);
+  _presentation.appearance.colour_scale =
+      static_cast<panorama::ScalarColourScale>(_colourScaleControl.indexOfSelectedItem);
   _presentation.colour_range = {
       static_cast<float>(*minimum),
       static_cast<float>(*maximum),

@@ -32,7 +32,10 @@ void validate_output_configuration(const TerrainRenderOutputs &outputs) {
       synthetic.diffusivity < 0.0F || synthetic.diffusivity > 1.0F ||
       static_cast<uint32_t>(synthetic.colour_source) >
           static_cast<uint32_t>(TerrainColourSource::Elevation) ||
-      static_cast<uint32_t>(synthetic.colourmap) > static_cast<uint32_t>(PresetColourmap::Turbo)) {
+      static_cast<uint32_t>(synthetic.colourmap) >
+          static_cast<uint32_t>(PresetColourmap::Viewfinder) ||
+      static_cast<uint32_t>(synthetic.colour_scale) >
+          static_cast<uint32_t>(ScalarColourScale::Quadratic)) {
     throw std::invalid_argument("Synthetic render options are invalid");
   }
 }
