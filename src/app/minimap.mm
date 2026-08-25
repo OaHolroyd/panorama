@@ -337,6 +337,7 @@ enum class AnnotationKind : NSInteger {
   VisibilityMapView *_visibilityView;
   CompactMapScaleView *_scaleView;
   NSPopUpButton *_mapStyleControl;
+  NSButton *_mapFocusControl;
   NSButton *_mapSizeControl;
   MiniMapAnnotation *_observerAnnotation;
   MiniMapAnnotation *_inspectionAnnotation;
@@ -351,9 +352,11 @@ enum class AnnotationKind : NSInteger {
   __weak id<MiniMapPanelViewSizeDelegate> _sizeDelegate;
   bool _mapVisible;
   bool _pointInfoVisible;
+  bool _followInspection;
   bool _largeMap;
 }
 - (void)updateVisibilityTransform;
+- (void)updateMapFocusControl;
 - (void)updateMapSizeControl;
 @end
 
@@ -396,6 +399,18 @@ enum class AnnotationKind : NSInteger {
   _mapStyleControl.target = self;
   _mapStyleControl.action = @selector(mapStyleChanged:);
 
+  _mapFocusControl = [NSButton
+      buttonWithImage:[NSImage imageWithSystemSymbolName:@"scope"
+                                accessibilityDescription:@"Center minimap on mouseover terrain"]
+               target:self
+               action:@selector(toggleMapFocus:)];
+  _mapFocusControl.title = @"";
+  _mapFocusControl.buttonType = NSButtonTypeToggle;
+  _mapFocusControl.bordered = NO;
+  _mapFocusControl.imagePosition = NSImageOnly;
+  [_mapFocusControl.widthAnchor constraintEqualToConstant:22.0].active = YES;
+  [_mapFocusControl.heightAnchor constraintEqualToConstant:22.0].active = YES;
+
   _mapSizeControl = [NSButton
       buttonWithImage:[NSImage imageWithSystemSymbolName:@"arrow.down.left.and.arrow.up.right"
                                 accessibilityDescription:@"Enlarge minimap"]
@@ -417,6 +432,7 @@ enum class AnnotationKind : NSInteger {
     heading,
     _mapStyleControl,
     controlSpacer,
+    _mapFocusControl,
     _mapSizeControl,
   ]];
   controls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -507,7 +523,9 @@ enum class AnnotationKind : NSInteger {
 
   _mapVisible = false;
   _pointInfoVisible = false;
+  _followInspection = false;
   _largeMap = false;
+  [self updateMapFocusControl];
   [self updateMapSizeControl];
   _mapSection.hidden = YES;
   _pointInfoView.hidden = YES;
@@ -564,6 +582,33 @@ enum class AnnotationKind : NSInteger {
                                     accessibilityDescription:description];
   _mapSizeControl.toolTip = description;
   [_mapSizeControl setAccessibilityLabel:description];
+}
+
+- (void)updateMapFocusControl {
+  NSString *symbol = _followInspection ? @"location.fill" : @"scope";
+  NSString *description =
+      _followInspection ? @"Center minimap on observer" : @"Center minimap on mouseover terrain";
+  _mapFocusControl.image = [NSImage imageWithSystemSymbolName:symbol
+                                     accessibilityDescription:description];
+  _mapFocusControl.state = _followInspection ? NSControlStateValueOn : NSControlStateValueOff;
+  _mapFocusControl.toolTip = description;
+  [_mapFocusControl setAccessibilityLabel:description];
+}
+
+- (void)toggleMapFocus:(id)sender {
+  (void)sender;
+  _followInspection = !_followInspection;
+  [self updateMapFocusControl];
+
+  CLLocationCoordinate2D centre = _observerAnnotation.coordinate;
+  if (_followInspection) {
+    if (_inspectionAnnotation == nil) {
+      return;
+    }
+    centre = _inspectionAnnotation.coordinate;
+  }
+  _mapView.fixedCentre = centre;
+  [_mapView applyVisibleDistanceAnimated:NO];
 }
 
 - (void)toggleMapSize:(id)sender {
@@ -687,18 +732,24 @@ enum class AnnotationKind : NSInteger {
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked {
   const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
   const panorama::LatLon geographic = terrainCrs.to_lat_lon({easting, northing});
+  const CLLocationCoordinate2D coordinate =
+      CLLocationCoordinate2DMake(geographic.lat, geographic.lon);
   if (_inspectionAnnotation == nil) {
     _inspectionAnnotation = [[MiniMapAnnotation alloc] init];
     _inspectionAnnotation.kind = locked ? AnnotationKind::Locked : AnnotationKind::Hover;
-    _inspectionAnnotation.coordinate = CLLocationCoordinate2DMake(geographic.lat, geographic.lon);
+    _inspectionAnnotation.coordinate = coordinate;
     [_mapView addAnnotation:_inspectionAnnotation];
   } else {
     _inspectionAnnotation.kind = locked ? AnnotationKind::Locked : AnnotationKind::Hover;
-    _inspectionAnnotation.coordinate = CLLocationCoordinate2DMake(geographic.lat, geographic.lon);
+    _inspectionAnnotation.coordinate = coordinate;
   }
   MKAnnotationView *view = [_mapView viewForAnnotation:_inspectionAnnotation];
   if (view != nil) {
     view.image = annotation_image(_inspectionAnnotation.kind);
+  }
+  if (_followInspection) {
+    _mapView.fixedCentre = coordinate;
+    [_mapView applyVisibleDistanceAnimated:NO];
   }
 }
 
