@@ -1126,6 +1126,26 @@ private:
 } // namespace
 } // namespace panorama::app
 
+/// Keep the compact point footer readable without sacrificing useful precision
+/// for nearby terrain samples.
+[[nodiscard]] NSString *format_point_distance(double metres) {
+  const double magnitude = std::abs(metres);
+  if (magnitude < 100.0) {
+    return [NSString stringWithFormat:@"%.1f m", metres];
+  }
+  if (magnitude < 1'000.0) {
+    return [NSString stringWithFormat:@"%.0f m", metres];
+  }
+  const double kilometres = metres / 1'000.0;
+  if (magnitude < 10'000.0) {
+    return [NSString stringWithFormat:@"%.2f km", kilometres];
+  }
+  if (magnitude < 100'000.0) {
+    return [NSString stringWithFormat:@"%.1f km", kilometres];
+  }
+  return [NSString stringWithFormat:@"%.0f km", kilometres];
+}
+
 @class PanoramaController;
 @class ViewerOverlayView;
 @class AspectFitContainerView;
@@ -2754,7 +2774,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                  northing:point.northing
                                    locked:_pointInspectionLocked || _pointLockPending];
   _pointInfoHeading.stringValue = @"Distance";
-  _pointInfoLabel.stringValue = [NSString stringWithFormat:@"%.1f m", point.distance];
+  _pointInfoLabel.stringValue = format_point_distance(point.distance);
   [self setPointInfoSymbolsVisible:true
                             locked:_pointInspectionLocked || _pointLockPending
                           occluded:_pointInspectionLocked && _lockedPointOccluded];
