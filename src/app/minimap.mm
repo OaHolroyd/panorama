@@ -10,7 +10,7 @@
 
 constexpr CGFloat kMapPanelWidth = 300.0;
 constexpr CGFloat kMapSectionHeight = 286.0;
-constexpr CGFloat kPointSectionHeight = 174.0;
+constexpr CGFloat kPointSectionHeight = 82.0;
 constexpr double kInitialMapDistance = 50'000.0;
 constexpr double kMinimumMapDistance = 500.0;
 constexpr double kMaximumMapDistance = 2'000'000.0;
@@ -21,6 +21,40 @@ enum class AnnotationKind : NSInteger {
   Locked,
 };
 
+/// Return a small symbol-only marker rather than MapKit's full pin balloon.
+[[nodiscard]] NSImage *annotation_image(AnnotationKind kind) {
+  NSString *symbolName = nil;
+  NSString *description = nil;
+  CGFloat pointSize = 0.0;
+  NSColor *color = nil;
+  switch (kind) {
+  case AnnotationKind::Observer:
+    symbolName = @"location.fill";
+    description = @"Observer";
+    pointSize = 11.0;
+    color = NSColor.systemPurpleColor;
+    break;
+  case AnnotationKind::Hover:
+    symbolName = @"circle.fill";
+    description = @"Inspected Terrain Point";
+    pointSize = 7.0;
+    color = NSColor.systemBlueColor;
+    break;
+  case AnnotationKind::Locked:
+    symbolName = @"circle.circle.fill";
+    description = @"Locked Terrain Point";
+    pointSize = 10.0;
+    color = NSColor.systemOrangeColor;
+    break;
+  }
+  NSImageSymbolConfiguration *size =
+      [NSImageSymbolConfiguration configurationWithPointSize:pointSize weight:NSFontWeightSemibold];
+  NSImageSymbolConfiguration *tint =
+      [NSImageSymbolConfiguration configurationWithHierarchicalColor:color];
+  return [[NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:description]
+      imageWithSymbolConfiguration:[size configurationByApplyingConfiguration:tint]];
+}
+
 @interface MiniMapAnnotation : NSObject <MKAnnotation>
 @property(nonatomic) CLLocationCoordinate2D coordinate;
 @property(nonatomic) AnnotationKind kind;
@@ -29,13 +63,80 @@ enum class AnnotationKind : NSInteger {
 @implementation MiniMapAnnotation
 @end
 
+/// Compact replacement for MapKit's comparatively large built-in scale. Its
+/// length is derived from the current Web Mercator map rectangle rather than
+/// from the terrain CRS, since it describes the displayed MapKit view itself.
+@interface CompactMapScaleView : NSView
+- (void)updateForMapView:(MKMapView *)mapView;
+@end
+
+@implementation CompactMapScaleView {
+  double _barWidth;
+  double _distanceMetres;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+  (void)point;
+  return nil;
+}
+
+- (void)updateForMapView:(MKMapView *)mapView {
+  if (mapView.bounds.size.width <= 0.0) {
+    return;
+  }
+  const double mapPointsPerDisplayPoint =
+      mapView.visibleMapRect.size.width / mapView.bounds.size.width;
+  const double mapPointsPerMetre = MKMapPointsPerMeterAtLatitude(mapView.centerCoordinate.latitude);
+  if (!(mapPointsPerDisplayPoint > 0.0) || !(mapPointsPerMetre > 0.0)) {
+    return;
+  }
+  const double metresPerDisplayPoint = mapPointsPerDisplayPoint / mapPointsPerMetre;
+  constexpr double kMaximumBarWidth = 52.0;
+  const double maximumDistance = metresPerDisplayPoint * kMaximumBarWidth;
+  const double magnitude = std::pow(10.0, std::floor(std::log10(maximumDistance)));
+  const double normalized = maximumDistance / magnitude;
+  const double multiplier = normalized >= 5.0 ? 5.0 : (normalized >= 2.0 ? 2.0 : 1.0);
+  _distanceMetres = multiplier * magnitude;
+  _barWidth = _distanceMetres / metresPerDisplayPoint;
+  self.needsDisplay = YES;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+  (void)dirtyRect;
+  [[NSColor colorWithWhite:0.0 alpha:0.58] setFill];
+  [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:5.0 yRadius:5.0] fill];
+
+  const NSString *label = _distanceMetres >= 1'000.0
+                              ? [NSString stringWithFormat:@"%.0f km", _distanceMetres / 1'000.0]
+                              : [NSString stringWithFormat:@"%.0f m", _distanceMetres];
+  NSDictionary<NSAttributedStringKey, id> *attributes = @{
+    NSFontAttributeName : [NSFont systemFontOfSize:9.0 weight:NSFontWeightMedium],
+    NSForegroundColorAttributeName : NSColor.whiteColor,
+  };
+  [label drawAtPoint:NSMakePoint(7.0, 11.0) withAttributes:attributes];
+
+  const CGFloat start = 7.0;
+  const CGFloat end = start + _barWidth;
+  NSBezierPath *bar = [NSBezierPath bezierPath];
+  bar.lineWidth = 1.0;
+  [bar moveToPoint:NSMakePoint(start, 7.0)];
+  [bar lineToPoint:NSMakePoint(end, 7.0)];
+  [bar moveToPoint:NSMakePoint(start, 4.5)];
+  [bar lineToPoint:NSMakePoint(start, 9.5)];
+  [bar moveToPoint:NSMakePoint(end, 4.5)];
+  [bar lineToPoint:NSMakePoint(end, 9.5)];
+  [NSColor.whiteColor setStroke];
+  [bar stroke];
+}
+
+@end
+
 /// A north-up map whose centre is always the observer. MapKit's normal pan,
 /// pitch, and rotation gestures are disabled; scrolling and pinching change
 /// only the stored ground span, so navigation cannot lose the viewpoint.
 @interface FixedCentreMapView : MKMapView
 @property(nonatomic) CLLocationCoordinate2D fixedCentre;
 @property(nonatomic) double visibleDistance;
-- (void)zoomByFactor:(double)factor;
 @end
 
 @implementation FixedCentreMapView
@@ -46,11 +147,6 @@ enum class AnnotationKind : NSInteger {
   self.visibleDistance = distance;
   [self setRegion:MKCoordinateRegionMakeWithDistance(self.fixedCentre, distance, distance)
          animated:animated];
-}
-
-- (void)zoomByFactor:(double)factor {
-  self.visibleDistance *= factor;
-  [self applyVisibleDistanceAnimated:YES];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
@@ -71,6 +167,7 @@ enum class AnnotationKind : NSInteger {
   NSView *_mapSection;
   NSView *_pointInfoView;
   FixedCentreMapView *_mapView;
+  CompactMapScaleView *_scaleView;
   NSPopUpButton *_mapStyleControl;
   MiniMapAnnotation *_observerAnnotation;
   MiniMapAnnotation *_inspectionAnnotation;
@@ -118,21 +215,9 @@ enum class AnnotationKind : NSInteger {
   _mapStyleControl.target = self;
   _mapStyleControl.action = @selector(mapStyleChanged:);
 
-  NSButton *zoomOut = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"minus"
-                                                          accessibilityDescription:@"Zoom Map Out"]
-                                         target:self
-                                         action:@selector(zoomMapOut:)];
-  NSButton *zoomIn = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"plus"
-                                                         accessibilityDescription:@"Zoom Map In"]
-                                        target:self
-                                        action:@selector(zoomMapIn:)];
-  zoomOut.bezelStyle = NSBezelStyleAccessoryBarAction;
-  zoomIn.bezelStyle = NSBezelStyleAccessoryBarAction;
   NSStackView *controls = [NSStackView stackViewWithViews:@[
     heading,
     _mapStyleControl,
-    zoomOut,
-    zoomIn,
   ]];
   controls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   controls.alignment = NSLayoutAttributeCenterY;
@@ -151,12 +236,16 @@ enum class AnnotationKind : NSInteger {
   _mapView.rotateEnabled = NO;
   _mapView.pitchEnabled = NO;
   _mapView.showsCompass = NO;
-  _mapView.showsScale = YES;
+  _mapView.showsScale = NO;
   _mapView.wantsLayer = YES;
   _mapView.layer.cornerRadius = 10.0;
   _mapView.layer.masksToBounds = YES;
   _mapView.translatesAutoresizingMaskIntoConstraints = NO;
   [_mapSection addSubview:_mapView];
+
+  _scaleView = [[CompactMapScaleView alloc] initWithFrame:NSMakeRect(8.0, 8.0, 66.0, 28.0)];
+  _scaleView.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+  [_mapView addSubview:_scaleView];
 
   [NSLayoutConstraint activateConstraints:@[
     [controls.topAnchor constraintEqualToAnchor:_mapSection.topAnchor constant:12.0],
@@ -212,6 +301,7 @@ enum class AnnotationKind : NSInteger {
       self.bounds.size.width,
       std::max(0.0, self.bounds.size.height - pointHeight)
   );
+  [_scaleView updateForMapView:_mapView];
 }
 
 - (void)setMapVisible:(bool)visible {
@@ -255,14 +345,8 @@ enum class AnnotationKind : NSInteger {
   }
 }
 
-- (void)zoomMapOut:(id)sender {
-  (void)sender;
-  [_mapView zoomByFactor:2.0];
-}
-
-- (void)zoomMapIn:(id)sender {
-  (void)sender;
-  [_mapView zoomByFactor:0.5];
+- (void)mapViewDidChangeVisibleRegion:(MKMapView *)mapView {
+  [_scaleView updateForMapView:mapView];
 }
 
 - (void)setCameraOrientation:(panorama::CameraOrientation)orientation
@@ -328,9 +412,8 @@ enum class AnnotationKind : NSInteger {
     _inspectionAnnotation.coordinate = CLLocationCoordinate2DMake(geographic.lat, geographic.lon);
   }
   MKAnnotationView *view = [_mapView viewForAnnotation:_inspectionAnnotation];
-  if ([view isKindOfClass:MKMarkerAnnotationView.class]) {
-    MKMarkerAnnotationView *marker = (MKMarkerAnnotationView *)view;
-    marker.markerTintColor = locked ? NSColor.systemOrangeColor : NSColor.systemBlueColor;
+  if (view != nil) {
+    view.image = annotation_image(_inspectionAnnotation.kind);
   }
 }
 
@@ -347,19 +430,10 @@ enum class AnnotationKind : NSInteger {
     return nil;
   }
   MiniMapAnnotation *marker = (MiniMapAnnotation *)annotation;
-  MKMarkerAnnotationView *view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation
-                                                                    reuseIdentifier:nil];
+  MKAnnotationView *view = [[MKAnnotationView alloc] initWithAnnotation:annotation
+                                                        reuseIdentifier:nil];
   view.canShowCallout = NO;
-  if (marker.kind == AnnotationKind::Observer) {
-    view.markerTintColor = NSColor.systemPurpleColor;
-    view.glyphImage = [NSImage imageWithSystemSymbolName:@"location.fill"
-                                accessibilityDescription:@"Observer"];
-  } else {
-    view.markerTintColor =
-        marker.kind == AnnotationKind::Locked ? NSColor.systemOrangeColor : NSColor.systemBlueColor;
-    view.glyphImage = [NSImage imageWithSystemSymbolName:@"scope"
-                                accessibilityDescription:@"Inspected Terrain Point"];
-  }
+  view.image = annotation_image(marker.kind);
   return view;
 }
 
@@ -368,8 +442,8 @@ enum class AnnotationKind : NSInteger {
   if ([overlay isKindOfClass:MKPolygon.class]) {
     MKPolygonRenderer *renderer = [[MKPolygonRenderer alloc] initWithPolygon:(MKPolygon *)overlay];
     renderer.fillColor = [NSColor.systemBlueColor colorWithAlphaComponent:0.14];
-    renderer.strokeColor = [NSColor.systemBlueColor colorWithAlphaComponent:0.75];
-    renderer.lineWidth = 1.5;
+    renderer.strokeColor = NSColor.clearColor;
+    renderer.lineWidth = 0.0;
     return renderer;
   }
   MKPolylineRenderer *renderer =

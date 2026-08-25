@@ -707,6 +707,7 @@ private:
   NSSlider *_diffusivityControl;
   NSTextField *_diffusivityLabel;
   NSTextField *_debugInfoLabel;
+  NSTextField *_debugPointInfoLabel;
   NSTextField *_pointInfoHeading;
   NSTextField *_pointInfoLabel;
   uint64_t _displayedRevision;
@@ -1515,13 +1516,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _lockedPoint.reset();
     [_miniMapPanel clearInspectedPoint];
     [_panoramaView setLockedPointIndicator:std::nullopt];
-    _pointInfoHeading.stringValue = @"Point Info";
+    _pointInfoHeading.stringValue = @"Distance";
     _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
     return;
   }
 
   _pointLockPending = true;
-  _pointInfoHeading.stringValue = @"Point Info — Locking…";
+  _pointInfoHeading.stringValue = @"Distance — Locking…";
   _pointLockRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
 }
 
@@ -1540,12 +1541,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_panoramaView setLockedPointIndicator:std::nullopt];
   [_panoramaView setPointInspectionEnabled:_pointInspectionEnabled];
   [_overlayView setPointInfoVisible:_pointInspectionEnabled];
-  _pointInfoHeading.stringValue = @"Point Info";
+  _pointInfoHeading.stringValue = @"Distance";
   if (!_pointInspectionEnabled) {
     [self clearPointInspection];
-  } else {
-    [self updatePointInfo:std::nullopt];
   }
+  [self updatePointInfo:std::nullopt];
 
   if ([sender isKindOfClass:NSToolbarItem.class]) {
     NSToolbarItem *item = sender;
@@ -1838,11 +1838,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 /// Build the read-only diagnostics displayed over the leading side of the
-/// rendered scene. Values are refreshed only when a completed revision becomes
-/// visible, avoiding work on unchanged MetalKit redraws.
+/// rendered scene. Camera values change with completed revisions; inspected
+/// point details update independently as hover samples arrive.
 - (NSViewController *)makeDebugViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
-  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 220.0, 282.0)];
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 240.0, 430.0)];
   viewController.view = content;
 
   NSTextField *heading = [NSTextField labelWithString:@"Viewer Debug Info"];
@@ -1853,7 +1853,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _debugInfoLabel.maximumNumberOfLines = 0;
   _debugInfoLabel.lineBreakMode = NSLineBreakByClipping;
 
-  NSStackView *debugInfo = [NSStackView stackViewWithViews:@[ heading, _debugInfoLabel ]];
+  NSTextField *pointHeading = [NSTextField labelWithString:@"Inspected Point"];
+  pointHeading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+  _debugPointInfoLabel = [NSTextField labelWithString:@"No point selected."];
+  _debugPointInfoLabel.font = [NSFont monospacedSystemFontOfSize:12.0 weight:NSFontWeightRegular];
+  _debugPointInfoLabel.maximumNumberOfLines = 0;
+  _debugPointInfoLabel.lineBreakMode = NSLineBreakByClipping;
+
+  NSStackView *debugInfo = [NSStackView
+      stackViewWithViews:@[ heading, _debugInfoLabel, pointHeading, _debugPointInfoLabel ]];
   debugInfo.orientation = NSUserInterfaceLayoutOrientationVertical;
   debugInfo.alignment = NSLayoutAttributeLeading;
   debugInfo.spacing = 12.0;
@@ -1916,10 +1924,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Build the compact hover readout shown while point inspection is enabled.
 - (NSViewController *)makePointInfoViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
-  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 174.0)];
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 82.0)];
   viewController.view = content;
 
-  _pointInfoHeading = [NSTextField labelWithString:@"Point Info"];
+  _pointInfoHeading = [NSTextField labelWithString:@"Distance"];
   _pointInfoHeading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
   _pointInfoLabel = [NSTextField labelWithString:@"Move the pointer over the rendered terrain.\n"
                                                   "Right-click to lock a point."];
@@ -1942,31 +1950,25 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   return viewController;
 }
 
-- (void)updatePointInfo:(std::optional<panorama::app::PointInspection>)inspection {
-  if (_pointInfoLabel == nil) {
+/// Put detailed samples in the opt-in debug overlay, leaving the persistent
+/// point card small enough to sit naturally beneath the minimap.
+- (void)updateDebugPointInfo:(std::optional<panorama::app::PointInspection>)inspection {
+  if (_debugPointInfoLabel == nil) {
     return;
   }
   if (!inspection.has_value()) {
-    if (!_pointInspectionLocked) {
-      [_miniMapPanel clearInspectedPoint];
-    }
-    _pointInfoLabel.stringValue = @"Move the pointer over the rendered terrain.\n"
-                                   "Right-click to lock a point.";
+    _debugPointInfoLabel.stringValue = @"No point selected.";
     return;
   }
   const panorama::app::PointInspection &point = *inspection;
   if (!point.hit) {
-    [_miniMapPanel clearInspectedPoint];
-    _pointInfoLabel.stringValue =
-        [NSString stringWithFormat:@"Pixel      %4u, %4u\n\nNo terrain intersection",
+    _debugPointInfoLabel.stringValue =
+        [NSString stringWithFormat:@"Pixel      %4u, %4u\nNo terrain intersection",
                                    point.pixel.x,
                                    point.pixel.y];
     return;
   }
-  [_miniMapPanel setInspectedPointEasting:point.easting
-                                 northing:point.northing
-                                   locked:_pointInspectionLocked || _pointLockPending];
-  _pointInfoLabel.stringValue =
+  _debugPointInfoLabel.stringValue =
       [NSString stringWithFormat:@"Pixel      %4u, %4u\n"
                                   "Distance   %10.1f m\nElevation  %10.1f m\n"
                                   "Easting    %10.1f m\nNorthing   %10.1f m\n"
@@ -1979,6 +1981,31 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                  point.northing,
                                  point.slope_degrees,
                                  point.aspect_degrees];
+}
+
+- (void)updatePointInfo:(std::optional<panorama::app::PointInspection>)inspection {
+  if (_pointInfoLabel == nil) {
+    return;
+  }
+  [self updateDebugPointInfo:inspection];
+  if (!inspection.has_value()) {
+    if (!_pointInspectionLocked) {
+      [_miniMapPanel clearInspectedPoint];
+    }
+    _pointInfoLabel.stringValue = @"Move the pointer over the rendered terrain.\n"
+                                   "Right-click to lock a point.";
+    return;
+  }
+  const panorama::app::PointInspection &point = *inspection;
+  if (!point.hit) {
+    [_miniMapPanel clearInspectedPoint];
+    _pointInfoLabel.stringValue = @"No terrain intersection";
+    return;
+  }
+  [_miniMapPanel setInspectedPointEasting:point.easting
+                                 northing:point.northing
+                                   locked:_pointInspectionLocked || _pointLockPending];
+  _pointInfoLabel.stringValue = [NSString stringWithFormat:@"%.1f m", point.distance];
 }
 
 /// Keep a locked world point aligned with the latest completed camera view.
@@ -2000,7 +2027,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   );
   [_panoramaView setLockedPointIndicator:projection];
   _pointInfoHeading.stringValue =
-      projection.onscreen ? @"Point Info — Locked" : @"Point Info — Locked (Off-screen)";
+      projection.onscreen ? @"Distance — Locked" : @"Distance — Locked (Off-screen)";
 }
 
 /// Palette and range controls have no effect on the uncoloured white mode.
@@ -2140,7 +2167,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         // resampling this screen pixel as subsequent camera views complete.
         _renderer->request_inspection(std::nullopt);
       } else {
-        _pointInfoHeading.stringValue = @"Point Info";
+        _pointInfoHeading.stringValue = @"Distance";
       }
     } else if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending) {
       [self updatePointInfo:matches_visible_frame ? frame.inspection : std::nullopt];
@@ -2286,7 +2313,7 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   (void)notification;
   const panorama::ImageSize image = _renderer->image();
   constexpr CGFloat kInspectorWidth = 270.0;
-  constexpr NSSize kDebugSize = {220.0, 282.0};
+  constexpr NSSize kDebugSize = {240.0, 430.0};
   const NSRect windowFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   const NSRect imageFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   _window = [[NSWindow alloc]
