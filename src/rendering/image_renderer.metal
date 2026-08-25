@@ -452,7 +452,9 @@ kernel void present_synthetic_terrain(
   }
 
   const float3 normal = surface_normal(packed_gradients[index]);
-  const float visible = use_shadows == 0U ? 1.0F : float(shadow_visibility[index] != 0U);
+  const float visible = sun_and_ambient.z <= 0.0F ? 0.0F
+                        : use_shadows == 0U       ? 1.0F
+                                                  : float(shadow_visibility[index] != 0U);
   const float diffuse = visible * max(0.0F, dot(normal, sun_and_ambient.xyz));
   const float sky =
       sun_and_ambient.w * sky_lobe_exposure(normal, sun_and_ambient.xyz, ambient_detail);
@@ -507,7 +509,9 @@ kernel void present_colourmapped_synthetic_terrain(
     return;
   }
   const float3 normal = surface_normal(packed_gradients[index]);
-  const float visible = use_shadows == 0U ? 1.0F : float(shadow_visibility[index] != 0U);
+  const float visible = sun_and_ambient.z <= 0.0F ? 0.0F
+                        : use_shadows == 0U       ? 1.0F
+                                                  : float(shadow_visibility[index] != 0U);
   const float diffuse = visible * max(0.0F, dot(normal, sun_and_ambient.xyz));
   const float sky =
       sun_and_ambient.w * sky_lobe_exposure(normal, sun_and_ambient.xyz, ambient_detail);

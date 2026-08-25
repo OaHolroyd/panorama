@@ -5,6 +5,7 @@
 #include "minimap.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
+#include "solar_position.h"
 #include "synthetic_render_options.h"
 #include "terrain_catalogue.h"
 #include "terrain_presentation_settings.h"
@@ -127,6 +128,11 @@ struct ViewerSettings {
 /// formatting follows the user's locale and may use commas as decimal marks.
 [[nodiscard]] NSString *format_range_value(double value) {
   return [NSString stringWithFormat:@"%.9g", value];
+}
+
+[[nodiscard]] NSString *format_utc_minutes(double value) {
+  const int total = std::clamp(static_cast<int>(std::lround(value)), 0, 1439);
+  return [NSString stringWithFormat:@"%02d:%02d", total / 60, total % 60];
 }
 
 void print_usage(const char *program) {
@@ -1254,6 +1260,13 @@ private:
   NSTextField *_sunAzimuthLabel;
   NSSlider *_sunPolarAngleControl;
   NSTextField *_sunPolarAngleLabel;
+  NSSegmentedControl *_sunModeControl;
+  NSTextField *_astronomicalDateControl;
+  NSSlider *_astronomicalTimeControl;
+  NSTextField *_astronomicalTimeLabel;
+  NSTextField *_daylightTimesLabel;
+  double _manualSunAzimuthDegrees;
+  double _manualSunPolarAngleDegrees;
   NSSlider *_diffusivityControl;
   NSTextField *_diffusivityLabel;
   NSSlider *_skyStrengthControl;
@@ -1938,6 +1951,59 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Publish lighting-only changes without retracing the terrain. Polar angle is
 /// measured down from the zenith, while the renderer stores elevation above
 /// the horizon.
+- (BOOL)publishAstronomicalLighting {
+  const char *date = _astronomicalDateControl.stringValue.UTF8String;
+  NSString *timeValue = panorama::app::format_utc_minutes(_astronomicalTimeControl.doubleValue);
+  const char *time = timeValue.UTF8String;
+  const std::optional<panorama::app::UtcDateTime> utc = panorama::app::parse_utc_date_time(
+      date == nullptr ? std::string_view{} : std::string_view(date),
+      time == nullptr ? std::string_view{} : std::string_view(time)
+  );
+  const BOOL valid = utc.has_value();
+  _astronomicalDateControl.textColor = valid ? NSColor.labelColor : NSColor.systemRedColor;
+  if (!valid) {
+    _daylightTimesLabel.stringValue = @"Enter a valid DD-MM-YYYY date";
+    return NO;
+  }
+
+  const panorama::app::DaylightTimes daylightInfo = panorama::app::daylight_times(
+      _renderer->terrain_crs(),
+      {_observer.easting, _observer.northing},
+      *utc
+  );
+  switch (daylightInfo.state) {
+  case panorama::app::DaylightState::Normal:
+    _daylightTimesLabel.stringValue =
+        [NSString stringWithFormat:@"Sunrise %@  ·  Sunset %@",
+                                   panorama::app::format_utc_minutes(daylightInfo.sunrise_minutes),
+                                   panorama::app::format_utc_minutes(daylightInfo.sunset_minutes)];
+    break;
+  case panorama::app::DaylightState::PolarDay:
+    _daylightTimesLabel.stringValue = @"Sun above horizon all day";
+    break;
+  case panorama::app::DaylightState::PolarNight:
+    _daylightTimesLabel.stringValue = @"Sun below horizon all day";
+    break;
+  }
+
+  const panorama::app::SolarPosition sun = panorama::app::solar_position(
+      _renderer->terrain_crs(),
+      {_observer.easting, _observer.northing},
+      *utc
+  );
+  const double azimuthDegrees = sun.azimuth * panorama::app::kRadiansToDegrees;
+  const double polarDegrees =
+      std::clamp(90.0 - sun.elevation * panorama::app::kRadiansToDegrees, 0.0, 180.0);
+  _sunAzimuthControl.doubleValue = azimuthDegrees;
+  _sunPolarAngleControl.doubleValue = polarDegrees;
+  _sunAzimuthLabel.stringValue = [NSString stringWithFormat:@"%.1f°", azimuthDegrees];
+  _sunPolarAngleLabel.stringValue = [NSString stringWithFormat:@"%.1f°", polarDegrees];
+  _presentation.appearance.sun_azimuth = sun.azimuth;
+  _presentation.appearance.sun_elevation = sun.elevation;
+  _renderer->request_presentation(_presentation);
+  return YES;
+}
+
 - (void)publishLightingControls {
   _presentation.appearance.sun_azimuth =
       _sunAzimuthControl.doubleValue * panorama::app::kDegreesToRadians;
@@ -1949,12 +2015,46 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _renderer->request_presentation(_presentation);
 }
 
+- (void)sunModeChanged:(NSSegmentedControl *)sender {
+  [self updateSettingsControlAvailability];
+  if (sender.selectedSegment == 1) {
+    _manualSunAzimuthDegrees = _sunAzimuthControl.doubleValue;
+    _manualSunPolarAngleDegrees = _sunPolarAngleControl.doubleValue;
+    if (![self publishAstronomicalLighting]) {
+      NSBeep();
+    }
+  } else {
+    _sunAzimuthControl.doubleValue = _manualSunAzimuthDegrees;
+    _sunPolarAngleControl.doubleValue = _manualSunPolarAngleDegrees;
+    _sunAzimuthLabel.stringValue = [NSString stringWithFormat:@"%.0f°", _manualSunAzimuthDegrees];
+    _sunPolarAngleLabel.stringValue =
+        [NSString stringWithFormat:@"%.0f°", _manualSunPolarAngleDegrees];
+    [self publishLightingControls];
+  }
+}
+
+- (void)astronomicalInputChanged:(NSTextField *)sender {
+  (void)sender;
+  if (_sunModeControl.selectedSegment == 1 && ![self publishAstronomicalLighting]) {
+    NSBeep();
+  }
+}
+
+- (void)astronomicalTimeChanged:(NSSlider *)sender {
+  sender.doubleValue = std::round(sender.doubleValue);
+  _astronomicalTimeLabel.stringValue = panorama::app::format_utc_minutes(sender.doubleValue);
+  if (_sunModeControl.selectedSegment == 1) {
+    [self publishAstronomicalLighting];
+  }
+}
+
 - (void)sunAzimuthChanged:(NSSlider *)sender {
   constexpr double kDetentRadiusDegrees = 3.0;
   if (std::abs(sender.doubleValue - panorama::app::kDefaultSunAzimuthDegrees) <=
       kDetentRadiusDegrees) {
     sender.doubleValue = panorama::app::kDefaultSunAzimuthDegrees;
   }
+  _manualSunAzimuthDegrees = sender.doubleValue;
   _sunAzimuthLabel.stringValue = [NSString stringWithFormat:@"%.0f°", sender.doubleValue];
   [self publishLightingControls];
 }
@@ -1965,6 +2065,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       kDetentRadiusDegrees) {
     sender.doubleValue = panorama::app::kDefaultSunPolarAngleDegrees;
   }
+  _manualSunPolarAngleDegrees = sender.doubleValue;
   _sunPolarAngleLabel.stringValue = [NSString stringWithFormat:@"%.0f°", sender.doubleValue];
   [self publishLightingControls];
 }
@@ -2513,6 +2614,63 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _raytracedShadowsControl.action = @selector(raytracedShadowsChanged:);
   _raytracedShadowsControl.toolTip = @"Cast one terrain visibility ray towards the sun";
 
+  _sunModeControl = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
+  _sunModeControl.segmentCount = 2;
+  [_sunModeControl setLabel:@"Manual" forSegment:0];
+  [_sunModeControl setLabel:@"Astronomical" forSegment:1];
+  _sunModeControl.selectedSegment = 0;
+  _sunModeControl.segmentStyle = NSSegmentStyleRounded;
+  _sunModeControl.trackingMode = NSSegmentSwitchTrackingSelectOne;
+  _sunModeControl.target = self;
+  _sunModeControl.action = @selector(sunModeChanged:);
+
+  NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+  dateFormatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+  dateFormatter.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  NSDate *now = [NSDate date];
+  dateFormatter.dateFormat = @"dd-MM-yyyy";
+  _astronomicalDateControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _astronomicalDateControl.stringValue = [dateFormatter stringFromDate:now];
+  _astronomicalDateControl.placeholderString = @"DD-MM-YYYY";
+  _astronomicalDateControl.target = self;
+  _astronomicalDateControl.action = @selector(astronomicalInputChanged:);
+  _astronomicalDateControl.toolTip = @"Gregorian date in DD-MM-YYYY format";
+
+  NSCalendar *utcCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  utcCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  const NSDateComponents *utcComponents =
+      [utcCalendar components:NSCalendarUnitHour | NSCalendarUnitMinute fromDate:now];
+  const double initialUtcMinutes =
+      60.0 * static_cast<double>(utcComponents.hour) + static_cast<double>(utcComponents.minute);
+  _astronomicalTimeControl = [NSSlider sliderWithValue:initialUtcMinutes
+                                              minValue:0.0
+                                              maxValue:1439.0
+                                                target:self
+                                                action:@selector(astronomicalTimeChanged:)];
+  _astronomicalTimeControl.continuous = YES;
+  _astronomicalTimeControl.numberOfTickMarks = 7;
+  _astronomicalTimeControl.allowsTickMarkValuesOnly = NO;
+  _astronomicalTimeControl.toolTip = @"UTC time at one-minute resolution";
+  _astronomicalTimeLabel =
+      [NSTextField labelWithString:panorama::app::format_utc_minutes(initialUtcMinutes)];
+  _astronomicalTimeLabel.alignment = NSTextAlignmentRight;
+  [_astronomicalTimeLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *astronomicalTimeSlider =
+      [NSStackView stackViewWithViews:@[ _astronomicalTimeControl, _astronomicalTimeLabel ]];
+  astronomicalTimeSlider.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  astronomicalTimeSlider.alignment = NSLayoutAttributeCenterY;
+  astronomicalTimeSlider.spacing = 6.0;
+  _daylightTimesLabel = [NSTextField labelWithString:@"Sunrise —  ·  Sunset —"];
+  _daylightTimesLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  _daylightTimesLabel.textColor = NSColor.secondaryLabelColor;
+  _daylightTimesLabel.toolTip = @"UTC crossings of the geometric horizon";
+  NSStackView *astronomicalTimeSetting =
+      [NSStackView stackViewWithViews:@[ astronomicalTimeSlider, _daylightTimesLabel ]];
+  astronomicalTimeSetting.orientation = NSUserInterfaceLayoutOrientationVertical;
+  astronomicalTimeSetting.alignment = NSLayoutAttributeLeading;
+  astronomicalTimeSetting.spacing = 3.0;
+
   _sunAzimuthControl = [NSSlider
       sliderWithValue:_presentation.appearance.sun_azimuth * panorama::app::kRadiansToDegrees
              minValue:0.0
@@ -2532,6 +2690,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   sunAzimuthSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   sunAzimuthSetting.alignment = NSLayoutAttributeCenterY;
   sunAzimuthSetting.spacing = 6.0;
+  _manualSunAzimuthDegrees = _sunAzimuthControl.doubleValue;
 
   const double initialPolarAngle =
       90.0 - _presentation.appearance.sun_elevation * panorama::app::kRadiansToDegrees;
@@ -2553,6 +2712,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   sunPolarAngleSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   sunPolarAngleSetting.alignment = NSLayoutAttributeCenterY;
   sunPolarAngleSetting.spacing = 6.0;
+  _manualSunPolarAngleDegrees = _sunPolarAngleControl.doubleValue;
 
   _diffusivityControl = [NSSlider sliderWithValue:_presentation.appearance.diffusivity
                                          minValue:0.0
@@ -2670,6 +2830,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSStackView *lightingSection = make_section(@"Lighting", @[
     _normalLightingControl,
     _raytracedShadowsControl,
+    make_row(@"Sun position", _sunModeControl),
+    make_row(@"Date (UTC)", _astronomicalDateControl),
+    make_row(@"Time (UTC)", astronomicalTimeSetting),
     make_row(@"Sun azimuth", sunAzimuthSetting),
     make_row(@"Sun polar angle", sunPolarAngleSetting),
     make_row(@"Sky strength", skyStrengthSetting),
@@ -2991,9 +3154,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _maximumControl.enabled = scalarColour;
   _featureOutlineDetailControl.enabled = _featureOutlinesControl.state == NSControlStateValueOn;
   const BOOL normalLighting = _normalLightingControl.state == NSControlStateValueOn;
+  const BOOL manualSun = _sunModeControl.selectedSegment == 0;
   _raytracedShadowsControl.enabled = normalLighting;
-  _sunAzimuthControl.enabled = normalLighting;
-  _sunPolarAngleControl.enabled = normalLighting;
+  _sunModeControl.enabled = normalLighting;
+  _sunAzimuthControl.enabled = normalLighting && manualSun;
+  _sunPolarAngleControl.enabled = normalLighting && manualSun;
+  _astronomicalDateControl.enabled = normalLighting && !manualSun;
+  _astronomicalTimeControl.enabled = normalLighting && !manualSun;
   _diffusivityControl.enabled = normalLighting;
   _skyStrengthControl.enabled = normalLighting;
   _skyDetailControl.enabled = normalLighting;
@@ -3007,6 +3174,14 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Validate and publish one coherent settings snapshot to the render worker.
 - (void)applyViewerSettings:(id)sender {
   (void)sender;
+  if (_sunModeControl.selectedSegment == 1 && ![self publishAstronomicalLighting]) {
+    NSBeep();
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Invalid astronomical date";
+    alert.informativeText = @"Enter a Gregorian date as DD-MM-YYYY.";
+    [alert beginSheetModalForWindow:_window completionHandler:nil];
+    return;
+  }
   const std::optional<uint32_t> width =
       panorama::app::parse_image_dimension(_imageWidthControl.stringValue);
   const std::optional<uint32_t> height =
@@ -3235,6 +3410,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     if (observerMoved) {
       [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
       [self updatePointInfo:std::nullopt];
+      if (_sunModeControl.selectedSegment == 1) {
+        [self publishAstronomicalLighting];
+      }
     }
     const double fps = frame.milliseconds > 0.0 ? 1'000.0 / frame.milliseconds : 0.0;
     [self updateDebugInfoWithOrientation:frame.orientation
