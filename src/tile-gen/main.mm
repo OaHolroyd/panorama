@@ -62,6 +62,13 @@ void print_usage(const char *program) {
   std::printf(
       "usage: %s --input DIR [options]\n"
       "\n"
+      "Prepare projected DTM GeoTIFFs for GPU terrain tracing. The input directory\n"
+      "is scanned recursively and rechunked into aligned GeoTIFF or Metal tiles;\n"
+      "the tool does not reproject or resample source data.\n"
+      "\n"
+      "All inputs must share one projected CRS, resolution, pixel registration,\n"
+      "and sample-grid alignment. Use --dry-run to validate them before writing.\n"
+      "\n"
       "Options:\n"
       "  --output DIR        output directory (default: below data/)\n"
       "  --name NAME         output filename prefix (default: input directory name)\n"
