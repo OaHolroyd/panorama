@@ -261,6 +261,19 @@ enum class MapPointAction : uint8_t {
   MoveObserver,
 };
 
+enum class PointerOwner : uint8_t {
+  None,
+  Panorama,
+  Minimap,
+  Overlay,
+};
+
+struct TargetVisibility {
+  uint64_t revision;
+  uint64_t request_token;
+  bool occluded;
+};
+
 /// Screen-space position of a locked world point in the current camera view.
 /// Off-screen projections retain a direction from the image centre so the UI
 /// can place a directional marker at the nearest edge.
@@ -360,6 +373,8 @@ struct PresentedFrame {
   std::optional<TerrainPoint> map_point;
   uint64_t map_point_sequence;
   uint64_t map_point_request_token;
+  std::optional<TargetVisibility> target_visibility;
+  uint64_t target_visibility_sequence;
 };
 
 /// Decode one IEEE float16 value emitted by Metal without depending on a SIMD
@@ -630,6 +645,8 @@ public:
     }
     current_field_ = std::move(initial_field);
     current_observer_ = settings_.observer;
+    current_orientation_ = settings_.orientation;
+    current_vertical_field_of_view_ = settings_.vertical_field_of_view;
     requested_observer_ = settings_.observer;
     presented_observer_ = settings_.observer;
     worker_ = std::thread([this] { render_loop(); });
@@ -704,6 +721,20 @@ public:
     return token;
   }
 
+  /// Track one locked world point and depth-test it after every camera trace.
+  uint64_t request_target_visibility(std::optional<TerrainPoint> point) {
+    uint64_t token = 0U;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requested_target_ = point;
+      requested_target_token_++;
+      token = requested_target_token_;
+      target_pending_ = true;
+    }
+    changed_.notify_one();
+    return token;
+  }
+
   /// Rebuild spatial tracing around a sampled map point, preserving eye height.
   void request_observer_at(TerrainPoint point) {
     {
@@ -739,6 +770,8 @@ public:
         presented_map_point_,
         presented_map_point_sequence_,
         presented_map_point_token_,
+        presented_target_visibility_,
+        presented_target_visibility_sequence_,
     };
   }
 
@@ -761,6 +794,64 @@ public:
   }
 
 private:
+  [[nodiscard]] bool target_is_occluded(
+      TerrainPoint point,
+      CameraOrientation orientation,
+      double vertical_field_of_view
+  ) const {
+    const PointInspection projected_point = {
+        {},
+        0U,
+        true,
+        0.0F,
+        point.elevation,
+        point.easting,
+        point.northing,
+        0.0F,
+        0.0F,
+        true,
+    };
+    const LockedPointProjection projection = project_locked_point(
+        projected_point,
+        current_observer_,
+        current_field_.image,
+        vertical_field_of_view,
+        orientation
+    );
+    if (!projection.onscreen) {
+      return false;
+    }
+    const double target_distance = std::hypot(
+        point.easting - current_observer_.easting,
+        point.northing - current_observer_.northing
+    );
+    const double angular_pixel = vertical_field_of_view / current_field_.image.height;
+    const double tolerance = std::max(5.0, 2.0 * target_distance * std::tan(angular_pixel));
+    if (target_distance > static_cast<double>(settings_.max_distance) + tolerance) {
+      return true;
+    }
+    const auto *distances = static_cast<const float *>(trace_->distances().contents);
+    if (distances == nullptr || current_field_.image.width == 0U ||
+        current_field_.image.height == 0U) {
+      throw std::runtime_error("Could not map target-visibility distance buffer");
+    }
+    const uint32_t x = std::min(
+        current_field_.image.width - 1U,
+        static_cast<uint32_t>(std::llround(projection.pixel_x))
+    );
+    const uint32_t y = std::min(
+        current_field_.image.height - 1U,
+        static_cast<uint32_t>(std::llround(projection.pixel_y))
+    );
+    const size_t index =
+        static_cast<size_t>(y) * static_cast<size_t>(current_field_.image.width) + x;
+    const float collision_distance = distances[index];
+    if (!(collision_distance > 0.0F) || !std::isfinite(collision_distance)) {
+      return false;
+    }
+    return static_cast<double>(collision_distance) + tolerance < target_distance;
+  }
+
   [[nodiscard]] PointInspection inspect_pixel(InspectionPixel pixel, uint64_t revision) const {
     if (pixel.x >= current_field_.image.width || pixel.y >= current_field_.image.height) {
       throw std::out_of_range("Inspection pixel lies outside the ray image");
@@ -816,16 +907,19 @@ private:
       bool inspection_requested = false;
       bool observer_requested = false;
       bool map_point_requested = false;
+      bool target_requested = false;
       std::optional<InspectionPixel> inspection_pixel;
       uint64_t inspection_token = 0U;
       ObserverLocation observer = {};
       MapCoordinate map_coordinate = {};
       uint64_t map_point_token = 0U;
+      std::optional<TerrainPoint> target;
+      uint64_t target_token = 0U;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock, [this] {
           return stopping_ || trace_pending_ || presentation_pending_ || inspection_pending_ ||
-                 observer_pending_ || map_point_pending_;
+                 observer_pending_ || map_point_pending_ || target_pending_;
         });
         if (stopping_) {
           return;
@@ -845,11 +939,15 @@ private:
         map_point_requested = map_point_pending_;
         map_coordinate = requested_map_coordinate_;
         map_point_token = requested_map_point_token_;
+        target_requested = target_pending_ || trace_pending_ || presentation_pending_;
+        target = requested_target_;
+        target_token = requested_target_token_;
         trace_pending_ = false;
         presentation_pending_ = false;
         inspection_pending_ = false;
         observer_pending_ = false;
         map_point_pending_ = false;
+        target_pending_ = false;
       }
 
       try {
@@ -881,6 +979,9 @@ private:
             }
             trace_->trace(field);
             current_field_ = std::move(field);
+            current_orientation_ = orientation;
+            current_vertical_field_of_view_ = vertical_field_of_view;
+            current_revision_ = revision;
             current_visibility_points_ = visibility_->project(
                 trace_->ray_directions(),
                 trace_->distances(),
@@ -904,6 +1005,7 @@ private:
                 presentation.use_surface_normals,
                 timer
             );
+            current_revision_ = revision;
           }
           const double milliseconds =
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
@@ -917,6 +1019,14 @@ private:
           std::optional<TerrainPoint> map_point;
           if (map_point_requested) {
             map_point = sampler_->sample(map_coordinate);
+          }
+          std::optional<TargetVisibility> target_visibility;
+          if (target_requested && target.has_value()) {
+            target_visibility = TargetVisibility{
+                current_revision_,
+                target_token,
+                target_is_occluded(*target, current_orientation_, current_vertical_field_of_view_),
+            };
           }
 
           std::lock_guard<std::mutex> lock(mutex_);
@@ -944,6 +1054,10 @@ private:
             presented_map_point_sequence_++;
             presented_map_point_token_ = map_point_token;
           }
+          if (target_requested) {
+            presented_target_visibility_ = target_visibility;
+            presented_target_visibility_sequence_++;
+          }
         }
       } catch (const std::exception &exception) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -963,6 +1077,9 @@ private:
   id<MTLLibrary> library_;
   RayField current_field_;
   ObserverLocation current_observer_ = {};
+  CameraOrientation current_orientation_ = {};
+  double current_vertical_field_of_view_ = 0.0;
+  uint64_t current_revision_ = 0U;
   std::thread worker_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
@@ -973,12 +1090,14 @@ private:
   std::optional<InspectionPixel> requested_inspection_;
   MapCoordinate requested_map_coordinate_ = {};
   ObserverLocation requested_observer_ = {};
+  std::optional<TerrainPoint> requested_target_;
   CameraOrientation presented_orientation_ = {};
   double presented_vertical_field_of_view_ = 0.0;
   ImageSize presented_image_ = {};
   std::optional<PointInspection> presented_inspection_;
   std::optional<TerrainPoint> presented_map_point_;
   ObserverLocation presented_observer_ = {};
+  std::optional<TargetVisibility> presented_target_visibility_;
   id<MTLTexture> presented_texture_;
   id<MTLBuffer> current_visibility_points_;
   id<MTLBuffer> presented_visibility_points_;
@@ -990,6 +1109,8 @@ private:
   uint64_t requested_map_point_token_ = 0U;
   uint64_t presented_map_point_sequence_ = 0U;
   uint64_t presented_map_point_token_ = 0U;
+  uint64_t requested_target_token_ = 0U;
+  uint64_t presented_target_visibility_sequence_ = 0U;
   double observer_ground_clearance_ = 0.0;
   double frame_ms_ = 0.0;
   std::string error_;
@@ -998,6 +1119,7 @@ private:
   bool inspection_pending_ = false;
   bool observer_pending_ = false;
   bool map_point_pending_ = false;
+  bool target_pending_ = false;
   bool stopping_ = false;
 };
 
@@ -1032,11 +1154,13 @@ private:
   bool _lockedPointIndicatorActive;
   bool _lockedPointOnscreen;
   bool _pointIndicatorLocked;
+  bool _lockedPointOccluded;
 }
 @property(nonatomic, weak) PanoramaController *panoramaController;
 - (void)setPointInspectionEnabled:(bool)enabled;
 - (void)setTerrainPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection
-                          locked:(bool)locked;
+                          locked:(bool)locked
+                        occluded:(bool)occluded;
 @end
 
 @interface PanoramaController
@@ -1084,12 +1208,18 @@ private:
   uint64_t _pointLockRequestToken;
   uint64_t _displayedMapPointSequence;
   uint64_t _mapPointRequestToken;
+  uint64_t _displayedTargetVisibilitySequence;
+  uint64_t _targetVisibilityRequestToken;
+  uint64_t _targetVisibilityRevision;
+  uint64_t _inspectionRequestToken;
   panorama::app::MapPointAction _mapPointAction;
+  panorama::app::PointerOwner _pointerOwner;
   double _lockedAspectRatio;
   double _panningSensitivity;
   bool _pointInspectionEnabled;
   bool _pointInspectionLocked;
   bool _pointLockPending;
+  bool _lockedPointOccluded;
   bool _invertMousePanning;
   bool _updatingResolutionControls;
 }
@@ -1104,6 +1234,9 @@ private:
              aspectFitView:(AspectFitContainerView *)aspectFitView
               miniMapPanel:(MiniMapPanelView *)miniMapPanel;
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y;
+- (void)pointerMovedOverPanorama;
+- (void)pointerMovedOverOccludingView:(NSView *)view;
+- (void)panoramaPointerExited;
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)clearPointInspection;
 - (void)toggleMapAndPointInspection:(id)sender;
@@ -1139,9 +1272,12 @@ private:
         NSMinX(bounds) + static_cast<CGFloat>(_lockedPointPixelX / image_width) * bounds.size.width;
     centre.y = NSMaxY(bounds) -
                static_cast<CGFloat>(_lockedPointPixelY / image_height) * bounds.size.height;
-    NSString *description =
-        _pointIndicatorLocked ? @"Locked terrain point" : @"Terrain point under map pointer";
-    _lockedPointMarker.image = [NSImage imageWithSystemSymbolName:@"scope"
+    NSString *description = _lockedPointOccluded
+                                ? @"Locked terrain point is occluded"
+                                : (_pointIndicatorLocked ? @"Locked terrain point"
+                                                         : @"Terrain point under map pointer");
+    NSString *symbol = _lockedPointOccluded ? @"eye.slash.fill" : @"scope";
+    _lockedPointMarker.image = [NSImage imageWithSystemSymbolName:symbol
                                          accessibilityDescription:description];
     [_lockedPointMarker.layer setAffineTransform:CGAffineTransformIdentity];
     _lockedPointMarker.toolTip = description;
@@ -1187,9 +1323,11 @@ private:
 }
 
 - (void)setTerrainPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection
-                          locked:(bool)locked {
+                          locked:(bool)locked
+                        occluded:(bool)occluded {
   _lockedPointIndicatorActive = projection.has_value();
   _pointIndicatorLocked = locked;
+  _lockedPointOccluded = locked && occluded;
   if (!_lockedPointIndicatorActive) {
     _lockedPointMarker.hidden = YES;
     return;
@@ -1277,6 +1415,14 @@ private:
     [super mouseMoved:event];
     return;
   }
+  NSView *content = self.window.contentView;
+  const NSPoint contentPoint = [content convertPoint:event.locationInWindow fromView:nil];
+  NSView *hit = [content hitTest:contentPoint];
+  if (hit != self && ![hit isDescendantOf:self]) {
+    [self.panoramaController pointerMovedOverOccludingView:hit];
+    return;
+  }
+  [self.panoramaController pointerMovedOverPanorama];
   uint32_t x = 0U;
   uint32_t y = 0U;
   if (![self inspectionPixelForEvent:event x:&x y:&y]) {
@@ -1302,7 +1448,7 @@ private:
 - (void)mouseExited:(NSEvent *)event {
   (void)event;
   if (_pointInspectionEnabled) {
-    [self.panoramaController clearPointInspection];
+    [self.panoramaController panoramaPointerExited];
   }
 }
 
@@ -1654,6 +1800,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _panningSensitivity = 8.0;
     _presentation = renderer->initial_presentation();
     _mapPointAction = panorama::app::MapPointAction::None;
+    _pointerOwner = panorama::app::PointerOwner::None;
   }
   return self;
 }
@@ -1881,9 +2028,84 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
-  if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending) {
-    _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+  if (_pointerOwner == panorama::app::PointerOwner::Panorama && _pointInspectionEnabled &&
+      !_pointInspectionLocked && !_pointLockPending) {
+    _inspectionRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
   }
+}
+
+- (void)invalidatePanoramaHover {
+  _inspectionRequestToken = _renderer->request_inspection(std::nullopt);
+  if (!_pointInspectionLocked && !_pointLockPending) {
+    [self updatePointInfo:std::nullopt];
+  }
+}
+
+- (void)clearTargetVisibility {
+  _targetVisibilityRequestToken = _renderer->request_target_visibility(std::nullopt);
+  _targetVisibilityRevision = 0U;
+  _lockedPointOccluded = false;
+  [_miniMapPanel setLockedPointOccluded:false];
+}
+
+- (void)requestTargetVisibilityForPoint:(const panorama::app::PointInspection &)point {
+  _targetVisibilityRevision = 0U;
+  _lockedPointOccluded = false;
+  _targetVisibilityRequestToken = _renderer->request_target_visibility(
+      panorama::app::TerrainPoint{point.easting, point.northing, point.elevation}
+  );
+}
+
+- (void)clearMapHover {
+  if (_mapPointAction == panorama::app::MapPointAction::Hover) {
+    _mapPointAction = panorama::app::MapPointAction::None;
+  }
+  _mapHoverPoint.reset();
+  [self updateLockedPointIndicatorWithOrientation:_orientation
+                              verticalFieldOfView:_verticalFieldOfView
+                                            image:_image];
+}
+
+- (void)pointerMovedOverPanorama {
+  if (_pointerOwner == panorama::app::PointerOwner::Panorama) {
+    return;
+  }
+  if (_pointerOwner == panorama::app::PointerOwner::Minimap) {
+    [self clearMapHover];
+  }
+  _pointerOwner = panorama::app::PointerOwner::Panorama;
+}
+
+- (void)beginMinimapPointerOwnership {
+  if (_pointerOwner == panorama::app::PointerOwner::Minimap) {
+    return;
+  }
+  [self invalidatePanoramaHover];
+  _pointerOwner = panorama::app::PointerOwner::Minimap;
+}
+
+- (void)pointerMovedOverOccludingView:(NSView *)view {
+  const bool minimap = view == _miniMapPanel || [view isDescendantOf:_miniMapPanel];
+  if (minimap) {
+    [self beginMinimapPointerOwnership];
+    return;
+  }
+  if (_pointerOwner == panorama::app::PointerOwner::Overlay) {
+    return;
+  }
+  if (_pointerOwner == panorama::app::PointerOwner::Minimap) {
+    [self clearMapHover];
+  }
+  [self invalidatePanoramaHover];
+  _pointerOwner = panorama::app::PointerOwner::Overlay;
+}
+
+- (void)panoramaPointerExited {
+  if (_pointerOwner != panorama::app::PointerOwner::Panorama) {
+    return;
+  }
+  _pointerOwner = panorama::app::PointerOwner::None;
+  [self invalidatePanoramaHover];
 }
 
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y {
@@ -1894,10 +2116,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _pointInspectionLocked = false;
     _pointLockPending = false;
     _lockedPoint.reset();
+    [self clearTargetVisibility];
     [_miniMapPanel clearInspectedPoint];
-    [_panoramaView setTerrainPointIndicator:std::nullopt locked:true];
+    [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
     _pointInfoHeading.stringValue = @"Distance";
-    _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+    _inspectionRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
     return;
   }
 
@@ -1908,7 +2131,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
 - (void)clearPointInspection {
   if (!_pointInspectionLocked && !_pointLockPending) {
-    _renderer->request_inspection(std::nullopt);
+    [self invalidatePanoramaHover];
   }
 }
 
@@ -1916,6 +2139,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
      didHoverEasting:(double)easting
             northing:(double)northing {
   (void)panel;
+  [self beginMinimapPointerOwnership];
   if (!_pointInspectionLocked && !_pointLockPending &&
       (_mapPointAction == panorama::app::MapPointAction::None ||
        _mapPointAction == panorama::app::MapPointAction::Hover)) {
@@ -1927,13 +2151,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
 - (void)miniMapPanelDidEndHover:(MiniMapPanelView *)panel {
   (void)panel;
-  if (_mapPointAction == panorama::app::MapPointAction::Hover) {
-    _mapPointAction = panorama::app::MapPointAction::None;
+  if (_pointerOwner == panorama::app::PointerOwner::Minimap) {
+    _pointerOwner = panorama::app::PointerOwner::None;
   }
-  _mapHoverPoint.reset();
-  [self updateLockedPointIndicatorWithOrientation:_orientation
-                              verticalFieldOfView:_verticalFieldOfView
-                                            image:_image];
+  [self clearMapHover];
 }
 
 - (void)requestMapPointEasting:(double)easting
@@ -1955,6 +2176,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     didSelectEasting:(double)easting
             northing:(double)northing {
   (void)panel;
+  [self beginMinimapPointerOwnership];
   [self requestMapPointEasting:easting
                       northing:northing
                         action:panorama::app::MapPointAction::Look];
@@ -1964,6 +2186,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     didRequestObserverMoveToEasting:(double)easting
                            northing:(double)northing {
   (void)panel;
+  [self beginMinimapPointerOwnership];
   [self requestMapPointEasting:easting
                       northing:northing
                         action:panorama::app::MapPointAction::MoveObserver];
@@ -1987,11 +2210,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _pointInspectionEnabled = !_pointInspectionEnabled;
   _pointInspectionLocked = false;
   _pointLockPending = false;
+  _pointerOwner = panorama::app::PointerOwner::None;
   _mapPointAction = panorama::app::MapPointAction::None;
   _lockedPoint.reset();
+  [self clearTargetVisibility];
   [_miniMapPanel clearInspectedPoint];
   _mapHoverPoint.reset();
-  [_panoramaView setTerrainPointIndicator:std::nullopt locked:true];
+  [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
   [_panoramaView setPointInspectionEnabled:_pointInspectionEnabled];
   [_overlayView setMapAndPointInfoVisible:_pointInspectionEnabled];
   _pointInfoHeading.stringValue = @"Distance";
@@ -2490,7 +2715,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     point = &*_mapHoverPoint;
   }
   if (point == nullptr) {
-    [_panoramaView setTerrainPointIndicator:std::nullopt locked:true];
+    [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
     return;
   }
   const panorama::app::LockedPointProjection projection = panorama::app::project_locked_point(
@@ -2500,10 +2725,14 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       verticalFieldOfView,
       orientation
   );
-  [_panoramaView setTerrainPointIndicator:projection locked:locked];
+  const bool occluded =
+      locked && _lockedPointOccluded && _targetVisibilityRevision == _displayedRevision;
+  [_panoramaView setTerrainPointIndicator:projection locked:locked occluded:occluded];
+  [_miniMapPanel setLockedPointOccluded:occluded];
   if (locked) {
-    _pointInfoHeading.stringValue =
-        projection.onscreen ? @"Distance — Locked" : @"Distance — Locked (Off-screen)";
+    _pointInfoHeading.stringValue = !projection.onscreen ? @"Distance — Locked (Off-screen)"
+                                    : occluded           ? @"Distance — Locked (Occluded)"
+                                                         : @"Distance — Locked";
   }
 }
 
@@ -2581,7 +2810,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const panorama::ImageSize next_image = {*width, *height};
   if (next_image.width != _image.width || next_image.height != _image.height) {
     _image = next_image;
-    _renderer->request_inspection(std::nullopt);
+    _inspectionRequestToken = _renderer->request_inspection(std::nullopt);
     _renderer->request_view(_orientation, _verticalFieldOfView, _image);
   }
 }
@@ -2625,6 +2854,18 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   [command presentDrawable:drawable];
   [command commit];
+
+  if (frame.target_visibility_sequence != _displayedTargetVisibilitySequence) {
+    _displayedTargetVisibilitySequence = frame.target_visibility_sequence;
+    if (frame.target_visibility.has_value() &&
+        frame.target_visibility->request_token == _targetVisibilityRequestToken) {
+      _targetVisibilityRevision = frame.target_visibility->revision;
+      _lockedPointOccluded = frame.target_visibility->occluded;
+      [self updateLockedPointIndicatorWithOrientation:frame.orientation
+                                  verticalFieldOfView:frame.vertical_field_of_view
+                                                image:frame.image];
+    }
+  }
 
   if (frame.map_point_sequence != _displayedMapPointSequence) {
     _displayedMapPointSequence = frame.map_point_sequence;
@@ -2670,8 +2911,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
           _pointInspectionLocked = false;
           _pointLockPending = false;
           _lockedPoint.reset();
+          [self clearTargetVisibility];
           [_miniMapPanel clearInspectedPoint];
-          [_panoramaView setTerrainPointIndicator:std::nullopt locked:true];
+          [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
           _pointInfoHeading.stringValue = @"Moving Observer…";
           _pointInfoLabel.stringValue = @"Rebuilding the terrain view at the selected location.";
           _renderer->request_observer_at(*frame.map_point);
@@ -2680,6 +2922,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
           _pointInspectionLocked = true;
           _pointLockPending = false;
           _lockedPoint = point;
+          [self requestTargetVisibilityForPoint:point];
           [self updatePointInfo:point];
           [self lookAtTerrainPoint:point];
         }
@@ -2698,6 +2941,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       if (frame.inspection->hit) {
         _pointInspectionLocked = true;
         _lockedPoint = frame.inspection;
+        [self requestTargetVisibilityForPoint:*frame.inspection];
         [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                     verticalFieldOfView:frame.vertical_field_of_view
                                                   image:frame.image];
@@ -2707,7 +2951,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       } else {
         _pointInfoHeading.stringValue = @"Distance";
       }
-    } else if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending) {
+    } else if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending &&
+               _pointerOwner == panorama::app::PointerOwner::Panorama &&
+               frame.inspection_request_token == _inspectionRequestToken) {
       [self updatePointInfo:matches_visible_frame ? frame.inspection : std::nullopt];
     }
   }

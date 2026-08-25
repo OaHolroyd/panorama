@@ -39,6 +39,7 @@ enum class AnnotationKind : NSInteger {
   Observer,
   Hover,
   Locked,
+  Occluded,
 };
 
 /// Return a small symbol-only marker rather than MapKit's full pin balloon.
@@ -64,6 +65,12 @@ enum class AnnotationKind : NSInteger {
     symbolName = @"circle.circle.fill";
     description = @"Locked Terrain Point";
     pointSize = 10.0;
+    color = NSColor.systemOrangeColor;
+    break;
+  case AnnotationKind::Occluded:
+    symbolName = @"eye.slash.fill";
+    description = @"Occluded Locked Terrain Point";
+    pointSize = 11.0;
     color = NSColor.systemOrangeColor;
     break;
   }
@@ -880,6 +887,18 @@ enum class AnnotationKind : NSInteger {
   if (_followInspection) {
     _mapView.fixedCentre = coordinate;
     [_mapView applyVisibleDistanceAnimated:NO];
+  }
+}
+
+- (void)setLockedPointOccluded:(bool)occluded {
+  if (_inspectionAnnotation == nil || (_inspectionAnnotation.kind != AnnotationKind::Locked &&
+                                       _inspectionAnnotation.kind != AnnotationKind::Occluded)) {
+    return;
+  }
+  _inspectionAnnotation.kind = occluded ? AnnotationKind::Occluded : AnnotationKind::Locked;
+  MKAnnotationView *view = [_mapView viewForAnnotation:_inspectionAnnotation];
+  if (view != nil) {
+    view.image = annotation_image(_inspectionAnnotation.kind);
   }
 }
 

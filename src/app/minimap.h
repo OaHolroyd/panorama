@@ -59,6 +59,7 @@
 - (void)setObserverEasting:(double)easting northing:(double)northing;
 
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked;
+- (void)setLockedPointOccluded:(bool)occluded;
 - (void)clearInspectedPoint;
 
 @end
