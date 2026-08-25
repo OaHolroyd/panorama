@@ -5,6 +5,7 @@
 #include "metal_tile.h"
 #include "resident_tile_cache.h"
 #include "terrain_catalogue.h"
+#include "terrain_shadow_gpu.h"
 #include "tile_preparer.h"
 #include "timer.h"
 
@@ -99,11 +100,16 @@ struct TerrainTraceSession::State {
   std::unique_ptr<GpuRaytraceResources> gpu;
   std::unique_ptr<ResidentTileCache> cache;
   std::unique_ptr<AsyncTilePreparer> preparer;
+  std::unique_ptr<GpuTerrainShadowResources> shadows;
   ResidentTileCacheBindings cache_bindings = {};
   uint64_t deferred_successor_work = 0U;
   uint64_t locally_skipped_tiles = 0U;
   uint64_t globally_skipped_tiles = 0U;
   uint64_t frames = 0U;
+  uint64_t trace_revision = 0U;
+  uint64_t shadow_revision = std::numeric_limits<uint64_t>::max();
+  double shadow_azimuth = 0.0;
+  double shadow_elevation = 0.0;
 
   State(
       const RaytraceConfig &config_value,
@@ -347,6 +353,148 @@ void TerrainTraceSession::trace(const RayField &field) {
   state.gpu->stop_capture();
   state.timer.stop("GPU raytrace");
   state.frames++;
+  state.trace_revision++;
+}
+
+void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation) {
+  State &state = *state_;
+  if (!std::isfinite(sun_azimuth) || !std::isfinite(sun_elevation)) {
+    throw std::invalid_argument("Sun direction must be finite");
+  }
+  if (state.shadows == nullptr) {
+    // Construction is deliberately lazy: disabled shadows allocate no
+    // per-pixel storage and compile no secondary pipelines.
+    state.shadows = std::make_unique<GpuTerrainShadowResources>(
+        state.gpu->device(),
+        state.gpu->command_queue(),
+        state.gpu->library(),
+        state.gpu->traces_quantized()
+    );
+  }
+  state.shadows->resize(state.ray_count);
+  if (state.shadow_revision == state.trace_revision && state.shadow_azimuth == sun_azimuth &&
+      state.shadow_elevation == sun_elevation) {
+    return;
+  }
+  // No direct sunlight reaches terrain when the sun is below the horizon.
+  // A vertical ray cannot cross another heightfield location, so it is clear.
+  if (sun_elevation <= 0.0 || std::cos(sun_elevation) < 1e-6) {
+    state.shadows->fill_visibility(sun_elevation > 0.0 ? 1U : 0U);
+    state.shadow_revision = state.trace_revision;
+    state.shadow_azimuth = sun_azimuth;
+    state.shadow_elevation = sun_elevation;
+    return;
+  }
+
+  const float direction_x = static_cast<float>(std::sin(sun_azimuth));
+  const float direction_y = static_cast<float>(std::cos(sun_azimuth));
+  const float slope = static_cast<float>(std::tan(sun_elevation));
+  const TileGrid &grid = state.catalogue->grid();
+  ShadowTraceParameters parameters = {
+      state.parameters,
+      {
+          direction_x,
+          direction_y,
+          direction_x == 0.0F ? std::numeric_limits<float>::infinity() : 1.0F / direction_x,
+          direction_y == 0.0F ? std::numeric_limits<float>::infinity() : 1.0F / direction_y,
+          slope,
+      },
+      static_cast<float>(grid.origin_x - state.config.observer.easting),
+      static_cast<float>(grid.origin_y - state.config.observer.northing),
+      static_cast<float>(grid.width),
+      state.gpu->catalogue_hash_capacity(),
+  };
+
+  state.timer.start_wall("GPU shadow trace");
+  const std::span<const DeferredRayWork> initial = state.shadows->initialise(
+      state.gpu->ray_directions(),
+      state.gpu->distances(),
+      state.gpu->elevations(),
+      state.gpu->surface_gradients(),
+      state.gpu->catalogue_hash(),
+      parameters,
+      state.timer
+  );
+  const auto *primary_distances = static_cast<const float *>(state.gpu->distances().contents);
+  if (primary_distances == nullptr) {
+    throw std::runtime_error("Could not map shadow scheduling distances");
+  }
+  HostFrontier frontier(
+      *state.catalogue,
+      state.ray_count,
+      state.parameters.num_levels,
+      state.cache->slot_capacity(),
+      std::span<const float>(primary_distances, state.ray_count)
+  );
+  const std::vector<uint8_t> no_pinned_slots(state.cache->slot_capacity(), 0U);
+  uint32_t active_count = frontier.activate_resident(
+      state.shadows->active_frontier(),
+      0U,
+      *state.cache,
+      *state.preparer,
+      initial
+  );
+#if defined(PANORAMA_DEBUG_VALIDATION)
+  frontier.validate_deferred_work();
+  frontier.validate_frontier(state.shadows->active_frontier(), active_count, "shadow frontier");
+#endif
+  while (active_count != 0U || frontier.has_deferred_work()) {
+    if (active_count == 0U) {
+      state.timer.start_wall("Tile availability wait");
+      state.preparer->wait_for_prepared();
+      state.timer.stop("Tile availability wait");
+      frontier.mark_installed(
+          state.cache->install_prepared(*state.preparer, no_pinned_slots, state.timer)
+      );
+      active_count = frontier.activate_resident(
+          state.shadows->active_frontier(),
+          0U,
+          *state.cache,
+          *state.preparer
+      );
+#if defined(PANORAMA_DEBUG_VALIDATION)
+      frontier.validate_deferred_work();
+      frontier.validate_frontier(state.shadows->active_frontier(), active_count, "shadow frontier");
+#endif
+      continue;
+    }
+#if defined(PANORAMA_DEBUG_VALIDATION)
+    frontier.validate_frontier(state.shadows->active_frontier(), active_count, "shadow frontier");
+#endif
+    frontier.record_active_slot_use(*state.cache);
+    const GpuFrontierPassResult pass = state.shadows->trace_frontier(
+        state.cache_bindings,
+        state.gpu->catalogue_hash(),
+        parameters,
+        state.mipmap_value_count,
+        active_count,
+        state.timer
+    );
+    state.timer.add_work("GPU shadow trace", pass.device_milliseconds);
+    const std::span<const DeferredRayWork> deferred =
+        state.shadows->deferred_work(pass.deferred_count);
+#if defined(PANORAMA_DEBUG_VALIDATION)
+    frontier.validate_deferred_work(deferred);
+#endif
+    frontier.mark_installed(
+        state.cache->install_prepared(*state.preparer, no_pinned_slots, state.timer)
+    );
+    active_count = frontier.activate_resident(
+        state.shadows->active_frontier(),
+        0U,
+        *state.cache,
+        *state.preparer,
+        deferred
+    );
+#if defined(PANORAMA_DEBUG_VALIDATION)
+    frontier.validate_deferred_work();
+    frontier.validate_frontier(state.shadows->active_frontier(), active_count, "shadow frontier");
+#endif
+  }
+  state.timer.stop("GPU shadow trace");
+  state.shadow_revision = state.trace_revision;
+  state.shadow_azimuth = sun_azimuth;
+  state.shadow_elevation = sun_elevation;
 }
 
 ImageSize TerrainTraceSession::image() const { return state_->image; }
@@ -369,6 +517,13 @@ id<MTLBuffer> TerrainTraceSession::elevations() const { return state_->gpu->elev
 
 id<MTLBuffer> TerrainTraceSession::surface_gradients() const {
   return state_->gpu->surface_gradients();
+}
+
+id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
+  if (state_->shadows == nullptr || state_->shadow_revision != state_->trace_revision) {
+    throw std::logic_error("Shadows have not been traced for the current terrain view");
+  }
+  return state_->shadows->visibility();
 }
 
 void TerrainTraceSession::print_statistics() const {

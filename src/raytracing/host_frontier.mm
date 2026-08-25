@@ -14,7 +14,8 @@ HostFrontier::HostFrontier(
     uint32_t resident_slot_capacity,
     uint32_t observer_slot
 )
-    : catalogue_(catalogue), rays_(rays), parameters_(parameters),
+    : catalogue_(catalogue), ray_capacity_(rays.size()), num_levels_(parameters.num_levels),
+      scheduling_distances_(),
       source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
       source_is_pending_(catalogue.sources().size(), 0U),
       request_outstanding_(catalogue.sources().size(), 0U),
@@ -26,7 +27,7 @@ HostFrontier::HostFrontier(
       claimed_ray_(rays.size(), 0U)
 #endif
 {
-  if (rays_.empty() || rays_.size() != parameters_.ray_count || resident_slot_capacity == 0U ||
+  if (rays.empty() || rays.size() != parameters.ray_count || resident_slot_capacity == 0U ||
       observer_slot >= resident_slot_capacity) {
     throw std::invalid_argument("Host frontier requires one direction per output ray");
   }
@@ -34,6 +35,32 @@ HostFrontier::HostFrontier(
   // zero before this frame. The first frontier still references exactly that
   // one resident slot.
   active_slot_seen_[observer_slot] = 1U;
+}
+
+HostFrontier::HostFrontier(
+    const TerrainCatalogue &catalogue,
+    size_t ray_capacity,
+    uint32_t num_levels,
+    uint32_t resident_slot_capacity,
+    std::span<const float> scheduling_distances
+)
+    : catalogue_(catalogue), ray_capacity_(ray_capacity), num_levels_(num_levels),
+      scheduling_distances_(scheduling_distances),
+      source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
+      source_is_pending_(catalogue.sources().size(), 0U),
+      request_outstanding_(catalogue.sources().size(), 0U),
+      request_distances_(catalogue.sources().size(), std::numeric_limits<float>::infinity()),
+      activation_slots_(catalogue.sources().size(), std::numeric_limits<uint32_t>::max()),
+      active_slot_seen_(resident_slot_capacity, 0U)
+#if defined(PANORAMA_DEBUG_VALIDATION)
+      ,
+      claimed_ray_(ray_capacity, 0U)
+#endif
+{
+  if (ray_capacity == 0U || num_levels == 0U || resident_slot_capacity == 0U ||
+      (!scheduling_distances.empty() && scheduling_distances.size() != ray_capacity)) {
+    throw std::invalid_argument("Host frontier requires a valid ray and terrain capacity");
+  }
 }
 
 void HostFrontier::mark_installed(std::span<const uint32_t> source_indices) {
@@ -48,8 +75,9 @@ void HostFrontier::mark_installed(std::span<const uint32_t> source_indices) {
       source_is_pending_[source_index] = 1U;
     }
     for (const DeferredRayWork &work : bucket.waiting) {
-      bucket.minimum_pending_distance =
-          std::min(bucket.minimum_pending_distance, work.entry_distance);
+      const float priority = scheduling_distances_.empty() ? work.entry_distance
+                                                           : scheduling_distances_[work.ray_index];
+      bucket.minimum_pending_distance = std::min(bucket.minimum_pending_distance, priority);
     }
     pending_count_ += bucket.waiting.size();
     waiting_count_ -= bucket.waiting.size();
@@ -74,10 +102,12 @@ uint32_t HostFrontier::activate_resident(
     nearest_entry = std::min(nearest_entry, source_buckets_[source_index].minimum_pending_distance);
   }
   for (const DeferredRayWork &work : incoming) {
-    if (work.ray_index >= rays_.size() || work.source_index >= source_buckets_.size()) {
+    if (work.ray_index >= ray_capacity_ || work.source_index >= source_buckets_.size()) {
       throw std::runtime_error("Deferred frontier contains an invalid ray or source index");
     }
-    nearest_entry = std::min(nearest_entry, work.entry_distance);
+    const float priority =
+        scheduling_distances_.empty() ? work.entry_distance : scheduling_distances_[work.ray_index];
+    nearest_entry = std::min(nearest_entry, priority);
   }
   // Keep independently advancing rays within one tile width of the nearest
   // work. This limits cache churn without restoring any projection-specific
@@ -126,8 +156,9 @@ uint32_t HostFrontier::activate_resident(
       source_is_pending_[work.source_index] = 1U;
     }
     bucket.pending.push_back(work);
-    bucket.minimum_pending_distance =
-        std::min(bucket.minimum_pending_distance, work.entry_distance);
+    const float priority =
+        scheduling_distances_.empty() ? work.entry_distance : scheduling_distances_[work.ray_index];
+    bucket.minimum_pending_distance = std::min(bucket.minimum_pending_distance, priority);
     pending_count_++;
   };
   size_t retained_source_count = 0U;
@@ -148,9 +179,11 @@ uint32_t HostFrontier::activate_resident(
     const size_t work_count = bucket.pending.size();
     for (size_t work_index = 0U; work_index < work_count; work_index++) {
       const DeferredRayWork work = bucket.pending[work_index];
-      if (work.entry_distance > activation_limit) {
+      const float priority = scheduling_distances_.empty() ? work.entry_distance
+                                                           : scheduling_distances_[work.ray_index];
+      if (priority > activation_limit) {
         bucket.pending[retained_work_count++] = work;
-        remaining_minimum = std::min(remaining_minimum, work.entry_distance);
+        remaining_minimum = std::min(remaining_minimum, priority);
         continue;
       }
       pending_count_--;
@@ -158,10 +191,10 @@ uint32_t HostFrontier::activate_resident(
         bucket.waiting.push_back(work);
         waiting_count_++;
       } else {
-        if (count >= rays_.size()) {
+        if (count >= ray_capacity_) {
           throw std::runtime_error("GPU frontier exceeds the ray frontier capacity");
         }
-        items[count] = {slot, work.ray_index, parameters_.num_levels, work.entry_distance};
+        items[count] = {slot, work.ray_index, num_levels_, work.entry_distance};
         count++;
       }
     }
@@ -184,7 +217,9 @@ uint32_t HostFrontier::activate_resident(
   // Route work inside the current distance window directly instead of first
   // copying every ray through a persistent pending bucket.
   for (const DeferredRayWork &work : incoming) {
-    if (work.entry_distance > activation_limit) {
+    const float priority =
+        scheduling_distances_.empty() ? work.entry_distance : scheduling_distances_[work.ray_index];
+    if (priority > activation_limit) {
       append_pending(work);
       continue;
     }
@@ -192,14 +227,14 @@ uint32_t HostFrontier::activate_resident(
     if (slot == cache.slot_capacity()) {
       source_buckets_[work.source_index].waiting.push_back(work);
       waiting_count_++;
-      queue_request(work.source_index, work.entry_distance);
+      queue_request(work.source_index, priority);
       continue;
     }
     request_outstanding_[work.source_index] = 0U;
-    if (count >= rays_.size()) {
+    if (count >= ray_capacity_) {
       throw std::runtime_error("GPU frontier exceeds the ray frontier capacity");
     }
-    items[count] = {slot, work.ray_index, parameters_.num_levels, work.entry_distance};
+    items[count] = {slot, work.ray_index, num_levels_, work.entry_distance};
     count++;
   }
   for (uint32_t source_index : request_sources_) {
@@ -220,7 +255,7 @@ bool HostFrontier::has_deferred_work() const {
 
 #if defined(PANORAMA_DEBUG_VALIDATION)
 void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const char *name) {
-  if (count > rays_.size()) {
+  if (count > ray_capacity_) {
     throw std::runtime_error(std::string(name) + " exceeds the ray frontier capacity");
   }
   const auto *items = static_cast<const RayWorkItem *>(buffer.contents);
@@ -232,7 +267,7 @@ void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const
   for (uint32_t index = 0U; index < count; index++) {
     const uint32_t ray = items[index].ray_index;
     const uint32_t slot = items[index].slot;
-    if (ray >= rays_.size() || claimed_ray_[ray] != 0U) {
+    if (ray >= ray_capacity_ || claimed_ray_[ray] != 0U) {
       throw std::runtime_error(std::string(name) + " violates the one-segment-per-ray invariant");
     }
     if (slot >= active_slot_seen_.size() || active_slot_seen_[slot] == 0U) {
@@ -249,7 +284,7 @@ void HostFrontier::validate_frontier(id<MTLBuffer> buffer, uint32_t count, const
 }
 
 void HostFrontier::validate_deferred_work(std::span<const DeferredRayWork> incoming) {
-  if (pending_count_ + waiting_count_ + incoming.size() > rays_.size()) {
+  if (pending_count_ + waiting_count_ + incoming.size() > ray_capacity_) {
     throw std::runtime_error("Deferred frontier exceeds the ray frontier capacity");
   }
   std::fill(claimed_ray_.begin(), claimed_ray_.end(), 0U);
@@ -262,7 +297,7 @@ void HostFrontier::validate_deferred_work(std::span<const DeferredRayWork> incom
     listed_source[source_index] = 1U;
   }
   const auto claim = [this](const DeferredRayWork &deferred) {
-    if (deferred.ray_index >= rays_.size() || deferred.source_index >= source_buckets_.size() ||
+    if (deferred.ray_index >= ray_capacity_ || deferred.source_index >= source_buckets_.size() ||
         claimed_ray_[deferred.ray_index] != 0U) {
       throw std::runtime_error("Deferred frontier violates the one-segment-per-ray invariant");
     }

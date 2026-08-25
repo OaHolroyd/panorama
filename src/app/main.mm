@@ -5,6 +5,7 @@
 #include "minimap.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
+#include "solar_position.h"
 #include "synthetic_render_options.h"
 #include "terrain_catalogue.h"
 #include "terrain_presentation_settings.h"
@@ -12,6 +13,7 @@
 #include "timer.h"
 
 #import <AppKit/AppKit.h>
+#import <MapKit/MapKit.h>
 #import <MetalKit/MetalKit.h>
 
 #include <algorithm>
@@ -45,7 +47,9 @@ constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
 constexpr double kDefaultVerticalFieldOfView = 70.0 * kDegreesToRadians;
 constexpr double kDefaultSunAzimuthDegrees = 225.0;
-constexpr double kDefaultSunPolarAngleDegrees = 55.0;
+constexpr double kDefaultSunAltitudeDegrees = 35.0;
+constexpr float kDefaultSkyStrength = 0.28F;
+constexpr float kDefaultSkyDetail = 0.65F;
 constexpr float kDefaultDiffusivity = 1.0F;
 
 struct ViewerSettings {
@@ -62,8 +66,9 @@ struct ViewerSettings {
       .appearance =
           {
               .sun_azimuth = kDefaultSunAzimuthDegrees * kDegreesToRadians,
-              .sun_elevation = (90.0 - kDefaultSunPolarAngleDegrees) * kDegreesToRadians,
-              .ambient_light = 0.28F,
+              .sun_elevation = kDefaultSunAltitudeDegrees * kDegreesToRadians,
+              .ambient_light = kDefaultSkyStrength,
+              .ambient_detail = kDefaultSkyDetail,
               .diffusivity = kDefaultDiffusivity,
               .colour_source = TerrainColourSource::White,
               .colourmap = PresetColourmap::Viridis,
@@ -124,6 +129,108 @@ struct ViewerSettings {
 /// formatting follows the user's locale and may use commas as decimal marks.
 [[nodiscard]] NSString *format_range_value(double value) {
   return [NSString stringWithFormat:@"%.9g", value];
+}
+
+[[nodiscard]] NSString *format_clock_minutes(double value) {
+  const int total = std::clamp(static_cast<int>(std::lround(value)), 0, 1439);
+  return [NSString stringWithFormat:@"%02d:%02d", total / 60, total % 60];
+}
+
+/// Interpret calendar fields in the observer's time zone, then return the UTC
+/// fields consumed by the solar-position calculation. The round trip rejects
+/// local times which do not exist when daylight saving advances the clock.
+[[nodiscard]] std::optional<CalendarDateTime>
+local_date_time_to_utc(CalendarDateTime local, NSTimeZone *timeZone) {
+  NSCalendar *localCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  localCalendar.timeZone = timeZone;
+  NSDateComponents *localComponents = [[NSDateComponents alloc] init];
+  localComponents.year = local.year;
+  localComponents.month = local.month;
+  localComponents.day = local.day;
+  localComponents.hour = local.hour;
+  localComponents.minute = local.minute;
+  localComponents.timeZone = timeZone;
+  NSDate *instant = [localCalendar dateFromComponents:localComponents];
+  if (instant == nil) {
+    return std::nullopt;
+  }
+
+  constexpr NSCalendarUnit fields = NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
+                                    NSCalendarUnitHour | NSCalendarUnitMinute;
+  NSDateComponents *roundTrip = [localCalendar components:fields fromDate:instant];
+  if (roundTrip.year != local.year || roundTrip.month != local.month ||
+      roundTrip.day != local.day || roundTrip.hour != local.hour ||
+      roundTrip.minute != local.minute) {
+    return std::nullopt;
+  }
+
+  NSCalendar *utcCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  utcCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  NSDateComponents *utc = [utcCalendar components:fields fromDate:instant];
+  return CalendarDateTime{
+      static_cast<int>(utc.year),
+      static_cast<int>(utc.month),
+      static_cast<int>(utc.day),
+      static_cast<int>(utc.hour),
+      static_cast<int>(utc.minute),
+  };
+}
+
+/// Convert UTC minutes relative to the supplied Gregorian date into an
+/// observer-local clock label. Minutes may cross a UTC day boundary.
+[[nodiscard]] NSString *
+format_local_daylight_time(CalendarDateTime date, double utcMinutes, NSTimeZone *timeZone) {
+  NSCalendar *utcCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  utcCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  NSDateComponents *midnightComponents = [[NSDateComponents alloc] init];
+  midnightComponents.year = date.year;
+  midnightComponents.month = date.month;
+  midnightComponents.day = date.day;
+  midnightComponents.timeZone = utcCalendar.timeZone;
+  NSDate *midnight = [utcCalendar dateFromComponents:midnightComponents];
+  NSDate *instant = [midnight dateByAddingTimeInterval:utcMinutes * 60.0];
+
+  NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+  formatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+  formatter.timeZone = timeZone;
+  formatter.dateFormat = @"HH:mm";
+  return [formatter stringFromDate:instant];
+}
+
+/// Describe the civil-time offset at the selected instant. Using the instant,
+/// rather than the zone's current abbreviation, keeps historical and future
+/// dates on the correct side of daylight-saving transitions.
+[[nodiscard]] NSString *format_time_zone_summary(NSTimeZone *timeZone, CalendarDateTime utc) {
+  NSCalendar *utcCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  utcCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  NSDateComponents *components = [[NSDateComponents alloc] init];
+  components.year = utc.year;
+  components.month = utc.month;
+  components.day = utc.day;
+  components.hour = utc.hour;
+  components.minute = utc.minute;
+  components.timeZone = utcCalendar.timeZone;
+  NSDate *instant = [utcCalendar dateFromComponents:components];
+
+  const NSInteger offsetMinutes = [timeZone secondsFromGMTForDate:instant] / 60;
+  const NSInteger absoluteMinutes = std::abs(offsetMinutes);
+  NSString *offset =
+      absoluteMinutes % 60 == 0
+          ? [NSString
+                stringWithFormat:@"UTC%c%ld", offsetMinutes < 0 ? '-' : '+', absoluteMinutes / 60]
+          : [NSString stringWithFormat:@"UTC%c%ld:%02ld",
+                                       offsetMinutes < 0 ? '-' : '+',
+                                       absoluteMinutes / 60,
+                                       absoluteMinutes % 60];
+  NSString *abbreviation = [timeZone abbreviationForDate:instant];
+  if (abbreviation == nil) {
+    abbreviation = timeZone.name;
+  }
+  return [NSString stringWithFormat:@"%@ • %@", abbreviation, offset];
 }
 
 void print_usage(const char *program) {
@@ -1007,6 +1114,12 @@ private:
           if (presentation_requested) {
             Timer timer("GPU presentation");
             presentation_->resize(current_field_.image);
+            if (presentation.use_surface_normals && presentation.appearance.raytraced_shadows) {
+              trace_->trace_shadows(
+                  presentation.appearance.sun_azimuth,
+                  presentation.appearance.sun_elevation
+              );
+            }
             const id<MTLBuffer> colour_values =
                 presentation.appearance.colour_source == TerrainColourSource::Elevation
                     ? trace_->elevations()
@@ -1016,6 +1129,9 @@ private:
                 trace_->distances(),
                 trace_->ray_directions(),
                 colour_values,
+                presentation.use_surface_normals && presentation.appearance.raytraced_shadows
+                    ? trace_->shadow_visibility()
+                    : nil,
                 presentation.appearance,
                 presentation.colour_range,
                 presentation.use_surface_normals,
@@ -1234,15 +1350,42 @@ private:
   NSButton *_matchWindowControl;
   NSButton *_invertMousePanningControl;
   NSButton *_normalLightingControl;
+  NSButton *_raytracedShadowsControl;
   NSButton *_featureOutlinesControl;
   NSSlider *_featureOutlineDetailControl;
   NSTextField *_featureOutlineDetailLabel;
   NSSlider *_sunAzimuthControl;
   NSTextField *_sunAzimuthLabel;
-  NSSlider *_sunPolarAngleControl;
-  NSTextField *_sunPolarAngleLabel;
+  NSSlider *_sunAltitudeControl;
+  NSTextField *_sunAltitudeLabel;
+  NSSegmentedControl *_sunModeControl;
+  NSTextField *_astronomicalDateControl;
+  NSSlider *_astronomicalTimeControl;
+  NSTextField *_astronomicalTimeLabel;
+  NSButton *_astronomicalTimeDecreaseControl;
+  NSButton *_astronomicalTimeIncreaseControl;
+  NSTextField *_daylightTimesLabel;
+  NSStackView *_daylightSymbolsRow;
+  NSTextField *_sunriseTimeLabel;
+  NSTextField *_sunsetTimeLabel;
+  MKReverseGeocodingRequest *_timeZoneRequest;
+  NSTimeZone *_observerTimeZone;
+  uint64_t _timeZoneRequestToken;
+  bool _astronomicalControlsUseObserverTime;
+  bool _timeZoneLookupInProgress;
+  double _manualSunAzimuthDegrees;
+  double _manualSunAltitudeDegrees;
+  NSArray<NSView *> *_scalarColourRows;
+  NSView *_featureOutlineDetailRow;
+  NSArray<NSView *> *_normalLightingRows;
+  NSArray<NSView *> *_manualSunRows;
+  NSArray<NSView *> *_astronomicalSunRows;
   NSSlider *_diffusivityControl;
   NSTextField *_diffusivityLabel;
+  NSSlider *_skyStrengthControl;
+  NSTextField *_skyStrengthLabel;
+  NSSlider *_skyDetailControl;
+  NSTextField *_skyDetailLabel;
   NSTextField *_debugInfoLabel;
   NSTextField *_debugPointInfoLabel;
   NSTextField *_pointInfoHeading;
@@ -1287,6 +1430,11 @@ private:
 - (void)toggleMapAndPointInspection:(id)sender;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
+- (void)resolveObserverTimeZone;
+- (void)setDaylightStatus:(NSString *)status;
+- (BOOL)publishAstronomicalLighting;
+- (BOOL)publishTerrainControls;
+- (BOOL)commitResolutionControls;
 - (NSViewController *)makeSettingsViewController;
 - (NSViewController *)makeDebugViewController;
 - (NSViewController *)makePointInfoViewController;
@@ -1627,6 +1775,71 @@ private:
 
 @end
 
+/// A compact inspector section whose disclosure state survives app launches.
+/// Hiding the content stack removes it from its parent stack's fitting height,
+/// so collapsed sections also shorten the scrollable document immediately.
+@interface InspectorSectionView : NSStackView {
+@private
+  NSButton *_disclosureButton;
+  NSStackView *_contentStack;
+  NSString *_defaultsKey;
+}
+- (instancetype)initWithTitle:(NSString *)title
+                     controls:(NSArray<NSView *> *)controls
+                  defaultsKey:(NSString *)defaultsKey;
+@end
+
+@implementation InspectorSectionView
+
+- (instancetype)initWithTitle:(NSString *)title
+                     controls:(NSArray<NSView *> *)controls
+                  defaultsKey:(NSString *)defaultsKey {
+  self = [super initWithFrame:NSZeroRect];
+  if (self != nil) {
+    _defaultsKey = [defaultsKey copy];
+    _disclosureButton = [NSButton buttonWithTitle:title
+                                           target:self
+                                           action:@selector(toggleDisclosure:)];
+    _disclosureButton.bordered = NO;
+    _disclosureButton.imagePosition = NSImageLeading;
+    _disclosureButton.alignment = NSTextAlignmentLeft;
+    _disclosureButton.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize
+                                               weight:NSFontWeightSemibold];
+
+    _contentStack = [NSStackView stackViewWithViews:controls];
+    _contentStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    _contentStack.alignment = NSLayoutAttributeLeading;
+    _contentStack.spacing = 8.0;
+
+    self.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.alignment = NSLayoutAttributeLeading;
+    self.spacing = 8.0;
+    [self addArrangedSubview:_disclosureButton];
+    [self addArrangedSubview:_contentStack];
+
+    NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:_defaultsKey];
+    [self setExpanded:saved == nil || saved.boolValue];
+  }
+  return self;
+}
+
+- (void)setExpanded:(BOOL)expanded {
+  _contentStack.hidden = !expanded;
+  _disclosureButton.image =
+      [NSImage imageWithSystemSymbolName:expanded ? @"chevron.down" : @"chevron.right"
+                accessibilityDescription:expanded ? @"Collapse section" : @"Expand section"];
+  _disclosureButton.accessibilityValue = expanded ? @"Expanded" : @"Collapsed";
+}
+
+- (void)toggleDisclosure:(id)sender {
+  (void)sender;
+  const BOOL expanded = _contentStack.hidden;
+  [self setExpanded:expanded];
+  [NSUserDefaults.standardUserDefaults setBool:expanded forKey:_defaultsKey];
+}
+
+@end
+
 /// Wrap custom overlay content in the current platform's native translucent
 /// material. The returned view owns `contentView` through either the modern
 /// Liquid Glass API or the pre-macOS 26 visual-effect fallback.
@@ -1918,16 +2131,220 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _panningSensitivityLabel.stringValue = [NSString stringWithFormat:@"%.0f", _panningSensitivity];
 }
 
-/// Publish lighting-only changes without retracing the terrain. Polar angle is
-/// measured down from the zenith, while the renderer stores elevation above
-/// the horizon.
+- (void)setDaylightStatus:(NSString *)status {
+  _daylightTimesLabel.stringValue = status;
+  _daylightSymbolsRow.hidden = YES;
+}
+
+- (void)resolveObserverTimeZone {
+  const uint64_t requestToken = ++_timeZoneRequestToken;
+  _observerTimeZone = nil;
+  _timeZoneLookupInProgress = true;
+  [self setDaylightStatus:@"Finding observer time zone…"];
+  [self updateSettingsControlAvailability];
+
+  [_timeZoneRequest cancel];
+  const panorama::LatLon geographic =
+      _renderer->terrain_crs().to_lat_lon({_observer.easting, _observer.northing});
+  CLLocation *location = [[CLLocation alloc] initWithLatitude:geographic.lat
+                                                    longitude:geographic.lon];
+  _timeZoneRequest = [[MKReverseGeocodingRequest alloc] initWithLocation:location];
+  __weak PanoramaController *weakSelf = self;
+  [_timeZoneRequest
+      getMapItemsWithCompletionHandler:^(NSArray<MKMapItem *> *mapItems, NSError *error) {
+        // Geocoding may finish after another observer move. Marshal UI
+        // work to the main queue and discard superseded responses.
+        dispatch_async(dispatch_get_main_queue(), ^{
+          PanoramaController *strongSelf = weakSelf;
+          if (strongSelf == nil || requestToken != strongSelf->_timeZoneRequestToken) {
+            return;
+          }
+          strongSelf->_timeZoneLookupInProgress = false;
+          NSTimeZone *timeZone = mapItems.firstObject.timeZone;
+          if (error != nil || timeZone == nil) {
+            [strongSelf setDaylightStatus:@"Observer time zone unavailable"];
+            [strongSelf updateSettingsControlAvailability];
+            return;
+          }
+
+          strongSelf->_observerTimeZone = timeZone;
+          strongSelf->_astronomicalTimeControl.toolTip = [NSString
+              stringWithFormat:@"Local time in %@ at one-minute resolution", timeZone.name];
+          strongSelf->_daylightTimesLabel.toolTip =
+              [NSString stringWithFormat:@"Local geometric-horizon crossings in %@", timeZone.name];
+
+          // Populate the initial controls with the current civil time at
+          // the observer. Later observer moves preserve the user's chosen
+          // wall-clock date and time, but reinterpret them at the new site.
+          if (!strongSelf->_astronomicalControlsUseObserverTime) {
+            NSDate *now = [NSDate date];
+            NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+            dateFormatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+            dateFormatter.timeZone = timeZone;
+            dateFormatter.dateFormat = @"dd-MM-yyyy";
+            strongSelf->_astronomicalDateControl.stringValue = [dateFormatter stringFromDate:now];
+
+            NSCalendar *calendar =
+                [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+            calendar.timeZone = timeZone;
+            NSDateComponents *components =
+                [calendar components:NSCalendarUnitHour | NSCalendarUnitMinute fromDate:now];
+            const double minutes = static_cast<double>(components.hour * 60 + components.minute);
+            strongSelf->_astronomicalTimeControl.doubleValue = minutes;
+            strongSelf->_astronomicalTimeLabel.stringValue =
+                panorama::app::format_clock_minutes(minutes);
+            strongSelf->_astronomicalControlsUseObserverTime = true;
+          }
+
+          [strongSelf updateSettingsControlAvailability];
+          if (strongSelf->_sunModeControl.selectedSegment == 1) {
+            [strongSelf publishAstronomicalLighting];
+          } else {
+            [strongSelf setDaylightStatus:[NSString stringWithFormat:@"Observer time · %@",
+                                                                     timeZone.abbreviation]];
+          }
+        });
+      }];
+}
+
+/// Publish the astronomical direction as grid azimuth and altitude without
+/// retracing the terrain.
+- (BOOL)publishAstronomicalLighting {
+  if (_observerTimeZone == nil) {
+    [self setDaylightStatus:_timeZoneLookupInProgress ? @"Finding observer time zone…"
+                                                      : @"Observer time zone unavailable"];
+    return NO;
+  }
+
+  const char *date = _astronomicalDateControl.stringValue.UTF8String;
+  NSString *timeValue = panorama::app::format_clock_minutes(_astronomicalTimeControl.doubleValue);
+  const char *time = timeValue.UTF8String;
+  const std::optional<panorama::app::CalendarDateTime> local = panorama::app::parse_date_time(
+      date == nullptr ? std::string_view{} : std::string_view(date),
+      time == nullptr ? std::string_view{} : std::string_view(time)
+  );
+  _astronomicalDateControl.textColor =
+      local.has_value() ? NSColor.labelColor : NSColor.systemRedColor;
+  if (!local.has_value()) {
+    [self setDaylightStatus:@"Enter a valid DD-MM-YYYY date"];
+    return NO;
+  }
+  const std::optional<panorama::app::CalendarDateTime> utc =
+      panorama::app::local_date_time_to_utc(*local, _observerTimeZone);
+  if (!utc.has_value()) {
+    [self setDaylightStatus:@"This local time does not exist"];
+    return NO;
+  }
+
+  const panorama::app::DaylightTimes daylightInfo = panorama::app::daylight_times(
+      _renderer->terrain_crs(),
+      {_observer.easting, _observer.northing},
+      *local
+  );
+  NSString *timeZoneSummary =
+      panorama::app::format_time_zone_summary(_observerTimeZone, utc.value());
+  switch (daylightInfo.state) {
+  case panorama::app::DaylightState::Normal:
+    _daylightTimesLabel.stringValue = timeZoneSummary;
+    _sunriseTimeLabel.stringValue = panorama::app::format_local_daylight_time(
+        *local,
+        daylightInfo.sunrise_minutes,
+        _observerTimeZone
+    );
+    _sunsetTimeLabel.stringValue = panorama::app::format_local_daylight_time(
+        *local,
+        daylightInfo.sunset_minutes,
+        _observerTimeZone
+    );
+    _daylightSymbolsRow.hidden = NO;
+    break;
+  case panorama::app::DaylightState::PolarDay:
+    [self setDaylightStatus:[NSString stringWithFormat:@"%@\nSun above horizon all day",
+                                                       timeZoneSummary]];
+    break;
+  case panorama::app::DaylightState::PolarNight:
+    [self setDaylightStatus:[NSString stringWithFormat:@"%@\nSun below horizon all day",
+                                                       timeZoneSummary]];
+    break;
+  }
+
+  const panorama::app::SolarPosition sun = panorama::app::solar_position(
+      _renderer->terrain_crs(),
+      {_observer.easting, _observer.northing},
+      utc.value()
+  );
+  const double azimuthDegrees = sun.azimuth * panorama::app::kRadiansToDegrees;
+  const double altitudeDegrees = sun.elevation * panorama::app::kRadiansToDegrees;
+  _sunAzimuthControl.doubleValue = azimuthDegrees;
+  _sunAltitudeControl.doubleValue = altitudeDegrees;
+  _sunAzimuthLabel.stringValue = [NSString stringWithFormat:@"%.1f°", azimuthDegrees];
+  _sunAltitudeLabel.stringValue = [NSString stringWithFormat:@"%.1f°", altitudeDegrees];
+  _presentation.appearance.sun_azimuth = sun.azimuth;
+  _presentation.appearance.sun_elevation = sun.elevation;
+  _renderer->request_presentation(_presentation);
+  return YES;
+}
+
 - (void)publishLightingControls {
   _presentation.appearance.sun_azimuth =
       _sunAzimuthControl.doubleValue * panorama::app::kDegreesToRadians;
   _presentation.appearance.sun_elevation =
-      (90.0 - _sunPolarAngleControl.doubleValue) * panorama::app::kDegreesToRadians;
+      _sunAltitudeControl.doubleValue * panorama::app::kDegreesToRadians;
   _presentation.appearance.diffusivity = static_cast<float>(_diffusivityControl.doubleValue);
+  _presentation.appearance.ambient_light = static_cast<float>(_skyStrengthControl.doubleValue);
+  _presentation.appearance.ambient_detail = static_cast<float>(_skyDetailControl.doubleValue);
   _renderer->request_presentation(_presentation);
+}
+
+- (void)sunModeChanged:(NSSegmentedControl *)sender {
+  [self updateSettingsControlAvailability];
+  if (sender.selectedSegment == 1) {
+    _manualSunAzimuthDegrees = _sunAzimuthControl.doubleValue;
+    _manualSunAltitudeDegrees = _sunAltitudeControl.doubleValue;
+    if (_observerTimeZone == nil) {
+      if (!_timeZoneLookupInProgress) {
+        [self resolveObserverTimeZone];
+      }
+    } else if (![self publishAstronomicalLighting]) {
+      NSBeep();
+    }
+  } else {
+    _sunAzimuthControl.doubleValue = _manualSunAzimuthDegrees;
+    _sunAltitudeControl.doubleValue = _manualSunAltitudeDegrees;
+    _sunAzimuthLabel.stringValue = [NSString stringWithFormat:@"%.0f°", _manualSunAzimuthDegrees];
+    _sunAltitudeLabel.stringValue = [NSString stringWithFormat:@"%.0f°", _manualSunAltitudeDegrees];
+    [self publishLightingControls];
+  }
+}
+
+- (void)astronomicalInputChanged:(NSTextField *)sender {
+  (void)sender;
+  if (_sunModeControl.selectedSegment == 1 && ![self publishAstronomicalLighting]) {
+    NSBeep();
+  }
+}
+
+- (void)astronomicalTimeChanged:(NSSlider *)sender {
+  sender.doubleValue = std::round(sender.doubleValue);
+  _astronomicalTimeLabel.stringValue = panorama::app::format_clock_minutes(sender.doubleValue);
+  [self updateSettingsControlAvailability];
+  if (_sunModeControl.selectedSegment == 1) {
+    [self publishAstronomicalLighting];
+  }
+}
+
+- (void)adjustAstronomicalTime:(NSButton *)sender {
+  const double minutes = std::clamp(
+      std::round(_astronomicalTimeControl.doubleValue) + static_cast<double>(sender.tag),
+      _astronomicalTimeControl.minValue,
+      _astronomicalTimeControl.maxValue
+  );
+  _astronomicalTimeControl.doubleValue = minutes;
+  _astronomicalTimeLabel.stringValue = panorama::app::format_clock_minutes(minutes);
+  [self updateSettingsControlAvailability];
+  if (_sunModeControl.selectedSegment == 1) {
+    [self publishAstronomicalLighting];
+  }
 }
 
 - (void)sunAzimuthChanged:(NSSlider *)sender {
@@ -1936,17 +2353,19 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       kDetentRadiusDegrees) {
     sender.doubleValue = panorama::app::kDefaultSunAzimuthDegrees;
   }
+  _manualSunAzimuthDegrees = sender.doubleValue;
   _sunAzimuthLabel.stringValue = [NSString stringWithFormat:@"%.0f°", sender.doubleValue];
   [self publishLightingControls];
 }
 
-- (void)sunPolarAngleChanged:(NSSlider *)sender {
+- (void)sunAltitudeChanged:(NSSlider *)sender {
   constexpr double kDetentRadiusDegrees = 2.0;
-  if (std::abs(sender.doubleValue - panorama::app::kDefaultSunPolarAngleDegrees) <=
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultSunAltitudeDegrees) <=
       kDetentRadiusDegrees) {
-    sender.doubleValue = panorama::app::kDefaultSunPolarAngleDegrees;
+    sender.doubleValue = panorama::app::kDefaultSunAltitudeDegrees;
   }
-  _sunPolarAngleLabel.stringValue = [NSString stringWithFormat:@"%.0f°", sender.doubleValue];
+  _manualSunAltitudeDegrees = sender.doubleValue;
+  _sunAltitudeLabel.stringValue = [NSString stringWithFormat:@"%.0f°", sender.doubleValue];
   [self publishLightingControls];
 }
 
@@ -1959,14 +2378,37 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self publishLightingControls];
 }
 
+- (void)skyStrengthChanged:(NSSlider *)sender {
+  constexpr double kDetentRadius = 0.02;
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultSkyStrength) <= kDetentRadius) {
+    sender.doubleValue = panorama::app::kDefaultSkyStrength;
+  }
+  _skyStrengthLabel.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+  [self publishLightingControls];
+}
+
+- (void)skyDetailChanged:(NSSlider *)sender {
+  constexpr double kDetentRadius = 0.02;
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultSkyDetail) <= kDetentRadius) {
+    sender.doubleValue = panorama::app::kDefaultSkyDetail;
+  }
+  _skyDetailLabel.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+  [self publishLightingControls];
+}
+
 - (void)normalLightingChanged:(NSButton *)sender {
   _presentation.use_surface_normals = sender.state == NSControlStateValueOn;
   [self updateSettingsControlAvailability];
   _renderer->request_presentation(_presentation);
 }
 
+- (void)raytracedShadowsChanged:(NSButton *)sender {
+  _presentation.appearance.raytraced_shadows = sender.state == NSControlStateValueOn;
+  _renderer->request_presentation(_presentation);
+}
+
 /// Feature outlines are presentation-only, like lighting, so both controls
-/// can update the current trace immediately without waiting for Apply.
+/// update the current trace immediately.
 - (void)publishFeatureOutlineControls {
   _presentation.appearance.feature_outlines =
       _featureOutlinesControl.state == NSControlStateValueOn;
@@ -2008,8 +2450,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 /// Maintain the captured aspect ratio while either dimension is edited. The
-/// paired field changes immediately, but GPU resources are resized only when
-/// the user applies the completed settings.
+/// paired field changes immediately; editing completion commits both values.
 - (void)controlTextDidChange:(NSNotification *)notification {
   if (_updatingResolutionControls || _aspectLockControl.state != NSControlStateValueOn) {
     return;
@@ -2036,6 +2477,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _updatingResolutionControls = false;
 }
 
+- (void)controlTextDidEndEditing:(NSNotification *)notification {
+  NSTextField *field = notification.object;
+  if (field == _imageWidthControl || field == _imageHeightControl) {
+    [self commitResolutionControls];
+  } else if (field == _minimumControl || field == _maximumControl) {
+    [self publishTerrainControls];
+  } else if (field == _astronomicalDateControl) {
+    [self astronomicalInputChanged:field];
+  }
+}
+
 /// Match the render aspect to the available window content by changing only
 /// its horizontal pixel count. Vertical resolution and vertical FOV remain
 /// untouched.
@@ -2060,7 +2512,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   if (_aspectLockControl.state == NSControlStateValueOn) {
     _lockedAspectRatio = static_cast<double>(rounded_width) / *height;
   }
-  [self applyViewerSettings:nil];
+  [self commitResolutionControls];
 }
 
 - (void)zoomWithScrollDelta:(double)delta precise:(bool)precise {
@@ -2389,7 +2841,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   _invertMousePanningControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _invertMousePanningControl.buttonType = NSButtonTypeSwitch;
-  _invertMousePanningControl.title = @"Invert click-and-drag panning";
+  _invertMousePanningControl.title = @"Invert drag direction";
   _invertMousePanningControl.state = NSControlStateValueOff;
   _invertMousePanningControl.target = self;
   _invertMousePanningControl.action = @selector(invertMousePanningChanged:);
@@ -2420,10 +2872,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _minimumControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
   _minimumControl.stringValue =
       panorama::app::format_range_value(_presentation.colour_range.minimum);
+  _minimumControl.delegate = self;
 
   _maximumControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
   _maximumControl.stringValue =
       panorama::app::format_range_value(_presentation.colour_range.maximum);
+  _maximumControl.delegate = self;
 
   _featureOutlinesControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _featureOutlinesControl.buttonType = NSButtonTypeSwitch;
@@ -2456,11 +2910,144 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   _normalLightingControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _normalLightingControl.buttonType = NSButtonTypeSwitch;
-  _normalLightingControl.title = @"Shade using surface normals";
+  _normalLightingControl.title = @"Surface shading";
   _normalLightingControl.state =
       _presentation.use_surface_normals ? NSControlStateValueOn : NSControlStateValueOff;
   _normalLightingControl.target = self;
   _normalLightingControl.action = @selector(normalLightingChanged:);
+
+  _raytracedShadowsControl = [[NSButton alloc] initWithFrame:NSZeroRect];
+  _raytracedShadowsControl.buttonType = NSButtonTypeSwitch;
+  _raytracedShadowsControl.title = @"Hard shadows";
+  _raytracedShadowsControl.state =
+      _presentation.appearance.raytraced_shadows ? NSControlStateValueOn : NSControlStateValueOff;
+  _raytracedShadowsControl.target = self;
+  _raytracedShadowsControl.action = @selector(raytracedShadowsChanged:);
+  _raytracedShadowsControl.toolTip = @"Cast one terrain visibility ray towards the sun";
+
+  _sunModeControl = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
+  _sunModeControl.segmentCount = 2;
+  [_sunModeControl setLabel:@"Manual" forSegment:0];
+  [_sunModeControl setLabel:@"Astronomical" forSegment:1];
+  _sunModeControl.selectedSegment = 0;
+  _sunModeControl.segmentStyle = NSSegmentStyleRounded;
+  _sunModeControl.trackingMode = NSSegmentSwitchTrackingSelectOne;
+  _sunModeControl.target = self;
+  _sunModeControl.action = @selector(sunModeChanged:);
+
+  NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+  dateFormatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+  dateFormatter.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  NSDate *now = [NSDate date];
+  dateFormatter.dateFormat = @"dd-MM-yyyy";
+  _astronomicalDateControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _astronomicalDateControl.stringValue = [dateFormatter stringFromDate:now];
+  _astronomicalDateControl.placeholderString = @"DD-MM-YYYY";
+  _astronomicalDateControl.delegate = self;
+  _astronomicalDateControl.toolTip = @"Gregorian date in DD-MM-YYYY format";
+
+  NSCalendar *utcCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  utcCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  const NSDateComponents *utcComponents =
+      [utcCalendar components:NSCalendarUnitHour | NSCalendarUnitMinute fromDate:now];
+  const double initialUtcMinutes =
+      60.0 * static_cast<double>(utcComponents.hour) + static_cast<double>(utcComponents.minute);
+  _astronomicalTimeControl = [NSSlider sliderWithValue:initialUtcMinutes
+                                              minValue:0.0
+                                              maxValue:1439.0
+                                                target:self
+                                                action:@selector(astronomicalTimeChanged:)];
+  _astronomicalTimeControl.continuous = YES;
+  _astronomicalTimeControl.numberOfTickMarks = 7;
+  _astronomicalTimeControl.allowsTickMarkValuesOnly = NO;
+  _astronomicalTimeControl.toolTip = @"Observer-local time at one-minute resolution";
+  _astronomicalTimeLabel =
+      [NSTextField labelWithString:panorama::app::format_clock_minutes(initialUtcMinutes)];
+  _astronomicalTimeLabel.alignment = NSTextAlignmentRight;
+  [_astronomicalTimeLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  _astronomicalTimeDecreaseControl = [NSButton buttonWithTitle:@"−"
+                                                        target:self
+                                                        action:@selector(adjustAstronomicalTime:)];
+  _astronomicalTimeDecreaseControl.tag = -1;
+  _astronomicalTimeDecreaseControl.controlSize = NSControlSizeSmall;
+  _astronomicalTimeDecreaseControl.continuous = YES;
+  [_astronomicalTimeDecreaseControl setPeriodicDelay:0.4F interval:0.08F];
+  _astronomicalTimeDecreaseControl.toolTip = @"Move back one minute";
+  [_astronomicalTimeDecreaseControl setAccessibilityLabel:@"Decrease time by one minute"];
+  [_astronomicalTimeDecreaseControl.widthAnchor constraintEqualToConstant:22.0].active = YES;
+  _astronomicalTimeIncreaseControl = [NSButton buttonWithTitle:@"+"
+                                                        target:self
+                                                        action:@selector(adjustAstronomicalTime:)];
+  _astronomicalTimeIncreaseControl.tag = 1;
+  _astronomicalTimeIncreaseControl.controlSize = NSControlSizeSmall;
+  _astronomicalTimeIncreaseControl.continuous = YES;
+  [_astronomicalTimeIncreaseControl setPeriodicDelay:0.4F interval:0.08F];
+  _astronomicalTimeIncreaseControl.toolTip = @"Move forward one minute";
+  [_astronomicalTimeIncreaseControl setAccessibilityLabel:@"Increase time by one minute"];
+  [_astronomicalTimeIncreaseControl.widthAnchor constraintEqualToConstant:22.0].active = YES;
+  NSStackView *astronomicalTimeSlider = [NSStackView stackViewWithViews:@[
+    _astronomicalTimeDecreaseControl,
+    _astronomicalTimeControl,
+    _astronomicalTimeIncreaseControl,
+    _astronomicalTimeLabel,
+  ]];
+  astronomicalTimeSlider.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  astronomicalTimeSlider.alignment = NSLayoutAttributeCenterY;
+  astronomicalTimeSlider.spacing = 4.0;
+  _daylightTimesLabel = [NSTextField labelWithString:@"Time zone —"];
+  _daylightTimesLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  _daylightTimesLabel.textColor = NSColor.secondaryLabelColor;
+  _daylightTimesLabel.maximumNumberOfLines = 2;
+  _daylightTimesLabel.lineBreakMode = NSLineBreakByClipping;
+  _daylightTimesLabel.toolTip = @"Local crossings of the geometric horizon";
+
+  NSImageSymbolConfiguration *daylightSymbolConfiguration =
+      [NSImageSymbolConfiguration configurationWithPointSize:NSFont.smallSystemFontSize
+                                                      weight:NSFontWeightRegular];
+  NSImageView *sunriseIcon = [NSImageView
+      imageViewWithImage:[[NSImage imageWithSystemSymbolName:@"sunrise"
+                                    accessibilityDescription:@"Sunrise"]
+                             imageWithSymbolConfiguration:daylightSymbolConfiguration]];
+  sunriseIcon.contentTintColor = NSColor.secondaryLabelColor;
+  sunriseIcon.toolTip = @"Sunrise";
+  [sunriseIcon setAccessibilityLabel:@"Sunrise"];
+  [sunriseIcon.widthAnchor constraintEqualToConstant:15.0].active = YES;
+  NSImageView *sunsetIcon = [NSImageView
+      imageViewWithImage:[[NSImage imageWithSystemSymbolName:@"sunset"
+                                    accessibilityDescription:@"Sunset"]
+                             imageWithSymbolConfiguration:daylightSymbolConfiguration]];
+  sunsetIcon.contentTintColor = NSColor.secondaryLabelColor;
+  sunsetIcon.toolTip = @"Sunset";
+  [sunsetIcon setAccessibilityLabel:@"Sunset"];
+  [sunsetIcon.widthAnchor constraintEqualToConstant:15.0].active = YES;
+
+  _sunriseTimeLabel = [NSTextField labelWithString:@"—"];
+  _sunsetTimeLabel = [NSTextField labelWithString:@"—"];
+  NSTextField *daylightSeparator = [NSTextField labelWithString:@"•"];
+  for (NSTextField *label in @[ _sunriseTimeLabel, daylightSeparator, _sunsetTimeLabel ]) {
+    label.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    label.textColor = NSColor.secondaryLabelColor;
+  }
+  _daylightSymbolsRow = [NSStackView stackViewWithViews:@[
+    sunriseIcon,
+    _sunriseTimeLabel,
+    daylightSeparator,
+    sunsetIcon,
+    _sunsetTimeLabel,
+  ]];
+  _daylightSymbolsRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  _daylightSymbolsRow.alignment = NSLayoutAttributeCenterY;
+  _daylightSymbolsRow.spacing = 4.0;
+
+  NSStackView *astronomicalTimeSetting = [NSStackView stackViewWithViews:@[
+    astronomicalTimeSlider,
+    _daylightTimesLabel,
+    _daylightSymbolsRow,
+  ]];
+  astronomicalTimeSetting.orientation = NSUserInterfaceLayoutOrientationVertical;
+  astronomicalTimeSetting.alignment = NSLayoutAttributeLeading;
+  astronomicalTimeSetting.spacing = 3.0;
 
   _sunAzimuthControl = [NSSlider
       sliderWithValue:_presentation.appearance.sun_azimuth * panorama::app::kRadiansToDegrees
@@ -2481,27 +3068,29 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   sunAzimuthSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   sunAzimuthSetting.alignment = NSLayoutAttributeCenterY;
   sunAzimuthSetting.spacing = 6.0;
+  _manualSunAzimuthDegrees = _sunAzimuthControl.doubleValue;
 
-  const double initialPolarAngle =
-      90.0 - _presentation.appearance.sun_elevation * panorama::app::kRadiansToDegrees;
-  _sunPolarAngleControl = [NSSlider sliderWithValue:initialPolarAngle
-                                           minValue:0.0
-                                           maxValue:180.0
-                                             target:self
-                                             action:@selector(sunPolarAngleChanged:)];
-  _sunPolarAngleControl.continuous = YES;
-  _sunPolarAngleControl.numberOfTickMarks = 7;
-  _sunPolarAngleControl.allowsTickMarkValuesOnly = NO;
-  _sunPolarAngleControl.toolTip = @"0° overhead, 90° at the horizon";
-  _sunPolarAngleLabel =
-      [NSTextField labelWithString:[NSString stringWithFormat:@"%.0f°", initialPolarAngle]];
-  _sunPolarAngleLabel.alignment = NSTextAlignmentRight;
-  [_sunPolarAngleLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
-  NSStackView *sunPolarAngleSetting =
-      [NSStackView stackViewWithViews:@[ _sunPolarAngleControl, _sunPolarAngleLabel ]];
-  sunPolarAngleSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-  sunPolarAngleSetting.alignment = NSLayoutAttributeCenterY;
-  sunPolarAngleSetting.spacing = 6.0;
+  const double initialAltitude =
+      _presentation.appearance.sun_elevation * panorama::app::kRadiansToDegrees;
+  _sunAltitudeControl = [NSSlider sliderWithValue:initialAltitude
+                                         minValue:-90.0
+                                         maxValue:90.0
+                                           target:self
+                                           action:@selector(sunAltitudeChanged:)];
+  _sunAltitudeControl.continuous = YES;
+  _sunAltitudeControl.numberOfTickMarks = 7;
+  _sunAltitudeControl.allowsTickMarkValuesOnly = NO;
+  _sunAltitudeControl.toolTip = @"Degrees above or below the horizon";
+  _sunAltitudeLabel =
+      [NSTextField labelWithString:[NSString stringWithFormat:@"%.0f°", initialAltitude]];
+  _sunAltitudeLabel.alignment = NSTextAlignmentRight;
+  [_sunAltitudeLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *sunAltitudeSetting =
+      [NSStackView stackViewWithViews:@[ _sunAltitudeControl, _sunAltitudeLabel ]];
+  sunAltitudeSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  sunAltitudeSetting.alignment = NSLayoutAttributeCenterY;
+  sunAltitudeSetting.spacing = 6.0;
+  _manualSunAltitudeDegrees = _sunAltitudeControl.doubleValue;
 
   _diffusivityControl = [NSSlider sliderWithValue:_presentation.appearance.diffusivity
                                          minValue:0.0
@@ -2522,22 +3111,58 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   diffusivitySetting.alignment = NSLayoutAttributeCenterY;
   diffusivitySetting.spacing = 6.0;
 
-  NSButton *apply = [[NSButton alloc] initWithFrame:NSZeroRect];
-  apply.title = @"Apply";
-  apply.bezelStyle = NSBezelStyleRounded;
-  apply.keyEquivalent = @"\r";
-  apply.target = self;
-  apply.action = @selector(applyViewerSettings:);
+  _skyStrengthControl = [NSSlider sliderWithValue:_presentation.appearance.ambient_light
+                                         minValue:0.0
+                                         maxValue:1.0
+                                           target:self
+                                           action:@selector(skyStrengthChanged:)];
+  _skyStrengthControl.continuous = YES;
+  _skyStrengthControl.numberOfTickMarks = 11;
+  _skyStrengthControl.allowsTickMarkValuesOnly = NO;
+  _skyStrengthControl.toolTip = @"Overall strength of diffuse atmospheric light";
+  _skyStrengthLabel = [NSTextField
+      labelWithString:[NSString stringWithFormat:@"%.2f", _skyStrengthControl.doubleValue]];
+  _skyStrengthLabel.alignment = NSTextAlignmentRight;
+  [_skyStrengthLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *skyStrengthSetting =
+      [NSStackView stackViewWithViews:@[ _skyStrengthControl, _skyStrengthLabel ]];
+  skyStrengthSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  skyStrengthSetting.alignment = NSLayoutAttributeCenterY;
+  skyStrengthSetting.spacing = 6.0;
+
+  _skyDetailControl = [NSSlider sliderWithValue:_presentation.appearance.ambient_detail
+                                       minValue:0.0
+                                       maxValue:1.0
+                                         target:self
+                                         action:@selector(skyDetailChanged:)];
+  _skyDetailControl.continuous = YES;
+  _skyDetailControl.numberOfTickMarks = 11;
+  _skyDetailControl.allowsTickMarkValuesOnly = NO;
+  _skyDetailControl.toolTip = @"Normal-dependent detail from five sampled sky directions";
+  _skyDetailLabel = [NSTextField
+      labelWithString:[NSString stringWithFormat:@"%.2f", _skyDetailControl.doubleValue]];
+  _skyDetailLabel.alignment = NSTextAlignmentRight;
+  [_skyDetailLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *skyDetailSetting =
+      [NSStackView stackViewWithViews:@[ _skyDetailControl, _skyDetailLabel ]];
+  skyDetailSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  skyDetailSetting.alignment = NSLayoutAttributeCenterY;
+  skyDetailSetting.spacing = 6.0;
+
   _colourSourceControl.target = self;
   _colourSourceControl.action = @selector(renderModeChanged:);
+  _colourmapControl.target = self;
+  _colourmapControl.action = @selector(renderModeChanged:);
+  _colourScaleControl.target = self;
+  _colourScaleControl.action = @selector(renderModeChanged:);
 
   auto make_row = [](NSString *title, NSView *control) {
     NSTextField *label = [NSTextField labelWithString:title];
-    [label.widthAnchor constraintEqualToConstant:105.0].active = YES;
+    [label.widthAnchor constraintEqualToConstant:82.0].active = YES;
     // The 300-point panel has 268 points inside its horizontal margins.
     // Keep each row within that width instead of allowing controls to crowd
     // the trailing glass edge.
-    [control.widthAnchor constraintGreaterThanOrEqualToConstant:155.0].active = YES;
+    [control.widthAnchor constraintGreaterThanOrEqualToConstant:178.0].active = YES;
     NSStackView *row = [NSStackView stackViewWithViews:@[ label, control ]];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.alignment = NSLayoutAttributeCenterY;
@@ -2545,49 +3170,84 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return row;
   };
 
-  auto make_section = [](NSString *title, NSArray<NSView *> *controls) {
-    NSTextField *sectionHeading = [NSTextField labelWithString:title];
-    sectionHeading.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize
-                                            weight:NSFontWeightSemibold];
-    sectionHeading.textColor = NSColor.secondaryLabelColor;
-    NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObject:sectionHeading];
-    [views addObjectsFromArray:controls];
-    NSStackView *section = [NSStackView stackViewWithViews:views];
-    section.orientation = NSUserInterfaceLayoutOrientationVertical;
-    section.alignment = NSLayoutAttributeLeading;
-    section.spacing = 8.0;
-    [section setCustomSpacing:10.0 afterView:sectionHeading];
-    return section;
-  };
+  NSStackView *rangeSetting = [NSStackView stackViewWithViews:@[
+    _minimumControl,
+    [NSTextField labelWithString:@"–"],
+    _maximumControl,
+  ]];
+  rangeSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  rangeSetting.alignment = NSLayoutAttributeCenterY;
+  rangeSetting.spacing = 5.0;
+  [_minimumControl.widthAnchor constraintEqualToConstant:80.0].active = YES;
+  [_maximumControl.widthAnchor constraintEqualToConstant:80.0].active = YES;
 
-  NSStackView *cameraSection = make_section(@"Camera", @[
-    make_row(@"Zoom (V. FOV)", zoomSetting),
-    make_row(@"Resolution", resolutionSetting),
-    _matchWindowControl,
-  ]);
-  NSStackView *navigationSection = make_section(@"Navigation", @[
-    make_row(@"Pan sensitivity", panningSensitivitySetting),
-    _invertMousePanningControl,
-  ]);
-  NSStackView *terrainSection = make_section(@"Terrain Appearance", @[
-    make_row(@"Colour by", _colourSourceControl),
-    make_row(@"Colourmap", _colourmapControl),
-    make_row(@"Scale", _colourScaleControl),
-    make_row(@"Range minimum", _minimumControl),
-    make_row(@"Range maximum", _maximumControl),
-    _featureOutlinesControl,
-    make_row(@"Outline detail", featureOutlineDetailSetting),
-  ]);
-  NSStackView *lightingSection = make_section(@"Lighting", @[
-    _normalLightingControl,
-    make_row(@"Sun azimuth", sunAzimuthSetting),
-    make_row(@"Sun polar angle", sunPolarAngleSetting),
-    make_row(@"Diffusivity", diffusivitySetting),
-  ]);
+  NSView *colourmapRow = make_row(@"Colourmap", _colourmapControl);
+  NSView *colourScaleRow = make_row(@"Scale", _colourScaleControl);
+  NSView *colourRangeRow = make_row(@"Range (m)", rangeSetting);
+  _scalarColourRows = @[ colourmapRow, colourScaleRow, colourRangeRow ];
+  _featureOutlineDetailRow = make_row(@"Detail", featureOutlineDetailSetting);
+
+  NSView *sunModeRow = make_row(@"Sun", _sunModeControl);
+  NSView *dateRow = make_row(@"Date", _astronomicalDateControl);
+  NSView *timeRow = make_row(@"Local time", astronomicalTimeSetting);
+  NSView *azimuthRow = make_row(@"Azimuth", sunAzimuthSetting);
+  NSView *altitudeRow = make_row(@"Altitude", sunAltitudeSetting);
+  NSView *skyStrengthRow = make_row(@"Sky strength", skyStrengthSetting);
+  NSView *skyDetailRow = make_row(@"Sky detail", skyDetailSetting);
+  NSView *diffusivityRow = make_row(@"Sun strength", diffusivitySetting);
+  _manualSunRows = @[ azimuthRow, altitudeRow ];
+  _astronomicalSunRows = @[ dateRow, timeRow ];
+  _normalLightingRows = @[
+    _raytracedShadowsControl,
+    sunModeRow,
+    dateRow,
+    timeRow,
+    azimuthRow,
+    altitudeRow,
+    skyStrengthRow,
+    skyDetailRow,
+    diffusivityRow,
+  ];
+
+  InspectorSectionView *cameraSection =
+      [[InspectorSectionView alloc] initWithTitle:@"Camera"
+                                         controls:@[
+                                           make_row(@"FOV", zoomSetting),
+                                           make_row(@"Resolution", resolutionSetting),
+                                           _matchWindowControl,
+                                           make_row(@"Pan speed", panningSensitivitySetting),
+                                           _invertMousePanningControl,
+                                         ]
+                                      defaultsKey:@"panorama.inspector.camera.expanded"];
+  InspectorSectionView *terrainSection =
+      [[InspectorSectionView alloc] initWithTitle:@"Terrain"
+                                         controls:@[
+                                           make_row(@"Colour by", _colourSourceControl),
+                                           colourmapRow,
+                                           colourScaleRow,
+                                           colourRangeRow,
+                                           _featureOutlinesControl,
+                                           _featureOutlineDetailRow,
+                                         ]
+                                      defaultsKey:@"panorama.inspector.terrain.expanded"];
+  InspectorSectionView *lightingSection =
+      [[InspectorSectionView alloc] initWithTitle:@"Lighting"
+                                         controls:@[
+                                           _normalLightingControl,
+                                           _raytracedShadowsControl,
+                                           sunModeRow,
+                                           dateRow,
+                                           timeRow,
+                                           azimuthRow,
+                                           altitudeRow,
+                                           skyStrengthRow,
+                                           skyDetailRow,
+                                           diffusivityRow,
+                                         ]
+                                      defaultsKey:@"panorama.inspector.lighting.expanded"];
 
   NSStackView *settings = [[NSStackView alloc] initWithFrame:NSZeroRect];
-  for (NSView *view in
-       @[ heading, cameraSection, navigationSection, terrainSection, lightingSection, apply ]) {
+  for (NSView *view in @[ heading, cameraSection, terrainSection, lightingSection ]) {
     [settings addArrangedSubview:view];
   }
   settings.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -2617,6 +3277,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   ]];
 
   [self updateSettingsControlAvailability];
+  [self resolveObserverTimeZone];
   return viewController;
 }
 
@@ -2893,58 +3554,58 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Palette and range controls have no effect on the uncoloured white mode.
 - (void)updateSettingsControlAvailability {
   const BOOL scalarColour = _colourSourceControl.indexOfSelectedItem != 0;
-  _colourmapControl.enabled = scalarColour;
-  _colourScaleControl.enabled = scalarColour;
-  _minimumControl.enabled = scalarColour;
-  _maximumControl.enabled = scalarColour;
-  _featureOutlineDetailControl.enabled = _featureOutlinesControl.state == NSControlStateValueOn;
+  for (NSView *row in _scalarColourRows) {
+    row.hidden = !scalarColour;
+  }
+  _featureOutlineDetailRow.hidden = _featureOutlinesControl.state != NSControlStateValueOn;
   const BOOL normalLighting = _normalLightingControl.state == NSControlStateValueOn;
-  _sunAzimuthControl.enabled = normalLighting;
-  _sunPolarAngleControl.enabled = normalLighting;
-  _diffusivityControl.enabled = normalLighting;
+  const BOOL manualSun = _sunModeControl.selectedSegment == 0;
+  const BOOL hasObserverTimeZone = _observerTimeZone != nil;
+  for (NSView *view in _normalLightingRows) {
+    view.hidden = !normalLighting;
+  }
+  for (NSView *row in _manualSunRows) {
+    row.hidden = !normalLighting || !manualSun;
+  }
+  for (NSView *row in _astronomicalSunRows) {
+    row.hidden = !normalLighting || manualSun;
+  }
+
+  const BOOL astronomicalTimeEnabled = normalLighting && !manualSun && hasObserverTimeZone;
+  _astronomicalDateControl.enabled = astronomicalTimeEnabled;
+  _astronomicalTimeControl.enabled = astronomicalTimeEnabled;
+  _astronomicalTimeDecreaseControl.enabled =
+      astronomicalTimeEnabled && _astronomicalTimeControl.doubleValue > 0.0;
+  _astronomicalTimeIncreaseControl.enabled =
+      astronomicalTimeEnabled && _astronomicalTimeControl.doubleValue < 1439.0;
 }
 
 - (void)renderModeChanged:(id)sender {
   (void)sender;
   [self updateSettingsControlAvailability];
+  [self publishTerrainControls];
 }
 
-/// Validate and publish one coherent settings snapshot to the render worker.
-- (void)applyViewerSettings:(id)sender {
-  (void)sender;
-  const std::optional<uint32_t> width =
-      panorama::app::parse_image_dimension(_imageWidthControl.stringValue);
-  const std::optional<uint32_t> height =
-      panorama::app::parse_image_dimension(_imageHeightControl.stringValue);
-  const uint64_t pixel_count =
-      width.has_value() && height.has_value() ? static_cast<uint64_t>(*width) * *height : 0U;
-  if (!width.has_value() || !height.has_value() ||
-      pixel_count > std::numeric_limits<uint32_t>::max()) {
-    NSBeep();
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Invalid render resolution";
-    alert.informativeText =
-        @"Width and height must be positive whole numbers, and their product must fit in the "
-         "Metal ray-index range.";
-    [alert beginSheetModalForWindow:_window completionHandler:nil];
-    return;
-  }
-
+/// Commit the colour controls independently of camera and lighting edits.
+- (BOOL)publishTerrainControls {
   const std::optional<double> minimum =
       panorama::app::parse_range_value(_minimumControl.stringValue);
   const std::optional<double> maximum =
       panorama::app::parse_range_value(_maximumControl.stringValue);
-  if (!minimum.has_value() || !maximum.has_value() || *maximum <= *minimum ||
-      *minimum < -std::numeric_limits<float>::max() ||
-      *maximum > std::numeric_limits<float>::max()) {
-    NSBeep();
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Invalid colour range";
-    alert.informativeText =
-        @"Use commas only as optional thousands separators and a period as the decimal "
-         "separator. The maximum must be a finite value greater than the minimum.";
-    [alert beginSheetModalForWindow:_window completionHandler:nil];
-    return;
+  const BOOL validRange = minimum.has_value() && maximum.has_value() && *maximum > *minimum &&
+                          *minimum >= -std::numeric_limits<float>::max() &&
+                          *maximum <= std::numeric_limits<float>::max();
+  _minimumControl.textColor = validRange ? NSColor.controlTextColor : NSColor.systemRedColor;
+  _maximumControl.textColor = validRange ? NSColor.controlTextColor : NSColor.systemRedColor;
+  NSString *rangeError = validRange
+                             ? nil
+                             : @"Enter finite metre values with the maximum greater than the "
+                                "minimum; commas may only separate thousands.";
+  _minimumControl.toolTip = rangeError;
+  _maximumControl.toolTip = rangeError;
+  const BOOL scalarColour = _colourSourceControl.indexOfSelectedItem != 0;
+  if (scalarColour && !validRange) {
+    return NO;
   }
 
   _presentation.appearance.colour_source =
@@ -2953,28 +3614,46 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       static_cast<panorama::PresetColourmap>(_colourmapControl.indexOfSelectedItem);
   _presentation.appearance.colour_scale =
       static_cast<panorama::ScalarColourScale>(_colourScaleControl.indexOfSelectedItem);
-  _presentation.appearance.feature_outlines =
-      _featureOutlinesControl.state == NSControlStateValueOn;
-  _presentation.appearance.feature_outline_detail =
-      static_cast<float>(_featureOutlineDetailControl.doubleValue / 10.0);
-  _presentation.colour_range = {
-      static_cast<float>(*minimum),
-      static_cast<float>(*maximum),
-  };
-  _presentation.use_surface_normals = _normalLightingControl.state == NSControlStateValueOn;
-  _presentation.appearance.sun_azimuth =
-      _sunAzimuthControl.doubleValue * panorama::app::kDegreesToRadians;
-  _presentation.appearance.sun_elevation =
-      (90.0 - _sunPolarAngleControl.doubleValue) * panorama::app::kDegreesToRadians;
-  _presentation.appearance.diffusivity = static_cast<float>(_diffusivityControl.doubleValue);
+  if (validRange) {
+    _presentation.colour_range = {
+        static_cast<float>(*minimum),
+        static_cast<float>(*maximum),
+    };
+  }
   _renderer->request_presentation(_presentation);
+  return YES;
+}
 
+/// Resize only after both text fields form a valid Metal image size. Invalid
+/// edits remain visible in red so the user can correct them without dismissing
+/// an alert or losing the partially entered value.
+- (BOOL)commitResolutionControls {
+  const std::optional<uint32_t> width =
+      panorama::app::parse_image_dimension(_imageWidthControl.stringValue);
+  const std::optional<uint32_t> height =
+      panorama::app::parse_image_dimension(_imageHeightControl.stringValue);
+  const uint64_t pixelCount =
+      width.has_value() && height.has_value() ? static_cast<uint64_t>(*width) * *height : 0U;
+  const BOOL valid =
+      width.has_value() && height.has_value() && pixelCount <= std::numeric_limits<uint32_t>::max();
+  _imageWidthControl.textColor = valid ? NSColor.controlTextColor : NSColor.systemRedColor;
+  _imageHeightControl.textColor = valid ? NSColor.controlTextColor : NSColor.systemRedColor;
+  NSString *resolutionError =
+      valid ? nil
+            : @"Width and height must be positive whole numbers whose product fits in the "
+               "32-bit Metal ray-index range.";
+  _imageWidthControl.toolTip = resolutionError;
+  _imageHeightControl.toolTip = resolutionError;
+  if (!valid) {
+    return NO;
+  }
   const panorama::ImageSize next_image = {*width, *height};
   if (next_image.width != _image.width || next_image.height != _image.height) {
     _image = next_image;
     _inspectionRequestToken = _renderer->request_inspection(std::nullopt);
     _renderer->request_view(_orientation, _verticalFieldOfView, _image);
   }
+  return YES;
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -3129,13 +3808,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _window.title = [NSString stringWithFormat:@"panorama-app — error: %s", frame.error.c_str()];
   } else if (frame.revision != 0U && frame.revision != _displayedRevision) {
     _displayedRevision = frame.revision;
-    const bool observerMoved = frame.observer.easting != _observer.easting ||
-                               frame.observer.northing != _observer.northing ||
-                               frame.observer.elevation != _observer.elevation;
+    const bool observerPositionMoved = frame.observer.easting != _observer.easting ||
+                                       frame.observer.northing != _observer.northing;
+    const bool observerMoved =
+        observerPositionMoved || frame.observer.elevation != _observer.elevation;
     _observer = frame.observer;
     if (observerMoved) {
       [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
       [self updatePointInfo:std::nullopt];
+      if (observerPositionMoved) {
+        [self resolveObserverTimeZone];
+      }
     }
     const double fps = frame.milliseconds > 0.0 ? 1'000.0 / frame.milliseconds : 0.0;
     [self updateDebugInfoWithOrientation:frame.orientation

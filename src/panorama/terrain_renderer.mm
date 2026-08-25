@@ -30,8 +30,9 @@ void validate_output_configuration(const TerrainRenderOutputs &outputs) {
       !std::isfinite(synthetic.ambient_light) || synthetic.ambient_light < 0.0F ||
       synthetic.ambient_light > 1.0F || !std::isfinite(synthetic.diffusivity) ||
       synthetic.diffusivity < 0.0F || synthetic.diffusivity > 1.0F ||
-      !std::isfinite(synthetic.feature_outline_detail) || synthetic.feature_outline_detail < 0.0F ||
-      synthetic.feature_outline_detail > 1.0F ||
+      !std::isfinite(synthetic.ambient_detail) || synthetic.ambient_detail < 0.0F ||
+      synthetic.ambient_detail > 1.0F || !std::isfinite(synthetic.feature_outline_detail) ||
+      synthetic.feature_outline_detail < 0.0F || synthetic.feature_outline_detail > 1.0F ||
       static_cast<uint32_t>(synthetic.colour_source) >
           static_cast<uint32_t>(TerrainColourSource::Elevation) ||
       static_cast<uint32_t>(synthetic.colourmap) >
@@ -100,6 +101,12 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
   }
 
   if (outputs.write_synthetic) {
+    if (outputs.synthetic_options.raytraced_shadows) {
+      trace.trace_shadows(
+          outputs.synthetic_options.sun_azimuth,
+          outputs.synthetic_options.sun_elevation
+      );
+    }
     const id<MTLBuffer> colour_values =
         outputs.synthetic_options.colour_source == TerrainColourSource::Elevation
             ? trace.elevations()
@@ -110,6 +117,7 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
           distances,
           trace.ray_directions(),
           colour_values,
+          outputs.synthetic_options.raytraced_shadows ? trace.shadow_visibility() : nil,
           outputs.synthetic_options,
           outputs.scalar_colour_range,
           true,
@@ -138,11 +146,11 @@ void render_terrain(
         }
     );
     trace.trace(field);
-    trace.print_statistics();
 
     // PNG encoding is a replaceable output backend and deliberately remains
     // outside the terrain session's cumulative trace timer.
     write_png_outputs(outputs, trace);
+    trace.print_statistics();
   }
 }
 

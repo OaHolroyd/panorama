@@ -81,6 +81,7 @@ public:
       id<MTLBuffer> distances,
       id<MTLBuffer> ray_directions,
       id<MTLBuffer> colour_values,
+      id<MTLBuffer> shadow_visibility,
       const SyntheticRenderOptions &options,
       ScalarColourRange range,
       bool use_surface_normals,

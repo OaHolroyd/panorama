@@ -43,8 +43,10 @@ struct SyntheticRenderOptions {
   double sun_azimuth;
   /// Sun angle in radians above the local horizontal plane.
   double sun_elevation;
-  /// Direction-independent light fraction in the inclusive range [0, 1].
+  /// Overall diffuse sky-light strength in the inclusive range [0, 1].
   float ambient_light;
+  /// Blend from constant ambient to normal-dependent five-lobe skylight.
+  float ambient_detail = 0.65F;
   /// Strength of the directional Lambertian term in the inclusive range [0, 1].
   float diffusivity = 1.0F;
   /// White terrain, or a collision field normalised over a fixed range.
@@ -57,6 +59,8 @@ struct SyntheticRenderOptions {
   bool feature_outlines = false;
   /// Outline sensitivity in [0, 1], from only major divisions to fine detail.
   float feature_outline_detail = 0.7F;
+  /// Occlude the directional term using one terrain ray towards the sun.
+  bool raytraced_shadows = false;
 };
 
 } // namespace panorama
