@@ -1711,8 +1711,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _imageHeightControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
   _imageHeightControl.stringValue = [NSString stringWithFormat:@"%u", _image.height];
   _imageHeightControl.delegate = self;
-  [_imageWidthControl.widthAnchor constraintEqualToConstant:42.0].active = YES;
-  [_imageHeightControl.widthAnchor constraintEqualToConstant:42.0].active = YES;
+  // Leave comfortable edit padding around common four-digit dimensions such
+  // as 1920 and 1024 instead of sizing the fields to their initial values.
+  [_imageWidthControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
+  [_imageHeightControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
   NSTextField *resolutionSeparator = [NSTextField labelWithString:@"×"];
 
   _aspectLockControl = [[NSButton alloc] initWithFrame:NSZeroRect];
@@ -1853,10 +1855,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   auto make_row = [](NSString *title, NSView *control) {
     NSTextField *label = [NSTextField labelWithString:title];
     [label.widthAnchor constraintEqualToConstant:105.0].active = YES;
-    // The 270-point panel has 238 points inside its horizontal margins.
+    // The 300-point panel has 268 points inside its horizontal margins.
     // Keep each row within that width instead of allowing controls to crowd
     // the trailing glass edge.
-    [control.widthAnchor constraintGreaterThanOrEqualToConstant:125.0].active = YES;
+    [control.widthAnchor constraintGreaterThanOrEqualToConstant:155.0].active = YES;
     NSStackView *row = [NSStackView stackViewWithViews:@[ label, control ]];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.alignment = NSLayoutAttributeCenterY;
@@ -2412,7 +2414,7 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   (void)notification;
   const panorama::ImageSize image = _renderer->image();
-  constexpr CGFloat kInspectorWidth = 270.0;
+  constexpr CGFloat kInspectorWidth = 300.0;
   constexpr NSSize kDebugSize = {240.0, 430.0};
   const NSRect windowFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   const NSRect imageFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
