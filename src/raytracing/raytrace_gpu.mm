@@ -123,24 +123,27 @@ struct GpuRaytraceResources::State {
   GpuTraceOutputRequirements outputs;
   bool capture_active = false;
 
+  /// Allocate a complete ray-dependent resource set before publishing it.
+  /// Keeping the old set intact until every allocation succeeds makes a
+  /// failed interactive resize recoverable by the caller.
   void replace_ray_buffers(std::span<const RayDirection> next_rays) {
     if (next_rays.empty() || next_rays.size() > std::numeric_limits<uint32_t>::max()) {
       throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
     }
-    frontier_capacity = static_cast<uint32_t>(next_rays.size());
-    rays = make_buffer(
+    const uint32_t next_capacity = static_cast<uint32_t>(next_rays.size());
+    id<MTLBuffer> next_ray_buffer = make_buffer(
         device,
         next_rays.data(),
         checked_buffer_length(next_rays.size(), sizeof(RayDirection), "ray directions"),
         "ray directions"
     );
-    distance_output = make_buffer(
+    id<MTLBuffer> next_distance_output = make_buffer(
         device,
         nullptr,
         checked_buffer_length(next_rays.size(), sizeof(float), "distance output"),
         "distance output"
     );
-    elevation_output = make_buffer(
+    id<MTLBuffer> next_elevation_output = make_buffer(
         device,
         nullptr,
         outputs.elevations
@@ -148,7 +151,7 @@ struct GpuRaytraceResources::State {
             : sizeof(float),
         "elevation output"
     );
-    surface_gradient_output = make_buffer(
+    id<MTLBuffer> next_surface_gradient_output = make_buffer(
         device,
         nullptr,
         outputs.surface_gradients
@@ -156,28 +159,37 @@ struct GpuRaytraceResources::State {
             : sizeof(uint32_t),
         "surface gradient output"
     );
-    active = make_buffer(
+    id<MTLBuffer> next_active = make_buffer(
         device,
         nullptr,
         checked_buffer_length(next_rays.size(), sizeof(RayWorkItem), "active frontier"),
         "active frontier"
     );
-    continuations = make_buffer(
+    id<MTLBuffer> next_continuations = make_buffer(
         device,
         nullptr,
         checked_buffer_length(next_rays.size(), sizeof(float), "ray continuations"),
         "ray continuations"
     );
-    deferred_items = make_buffer(
+    id<MTLBuffer> next_deferred_items = make_buffer(
         device,
         nullptr,
         checked_buffer_length(next_rays.size(), sizeof(DeferredRayWork), "deferred frontier"),
         "deferred frontier"
     );
-    clear_buffer(distance_output, "distance output");
+    clear_buffer(next_distance_output, "distance output");
     if (outputs.elevations) {
-      clear_buffer(elevation_output, "elevation output");
+      clear_buffer(next_elevation_output, "elevation output");
     }
+
+    frontier_capacity = next_capacity;
+    rays = next_ray_buffer;
+    distance_output = next_distance_output;
+    elevation_output = next_elevation_output;
+    surface_gradient_output = next_surface_gradient_output;
+    active = next_active;
+    continuations = next_continuations;
+    deferred_items = next_deferred_items;
   }
 };
 

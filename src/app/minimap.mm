@@ -39,11 +39,10 @@ enum class AnnotationKind : NSInteger {
   Observer,
   Hover,
   Locked,
-  Occluded,
 };
 
 /// Return a small symbol-only marker rather than MapKit's full pin balloon.
-[[nodiscard]] NSImage *annotation_image(AnnotationKind kind) {
+[[nodiscard]] static NSImage *annotation_image(AnnotationKind kind) {
   NSString *symbolName = nil;
   NSString *description = nil;
   CGFloat pointSize = 0.0;
@@ -64,12 +63,6 @@ enum class AnnotationKind : NSInteger {
   case AnnotationKind::Locked:
     symbolName = @"circle.fill";
     description = @"Locked Terrain Point";
-    pointSize = 7.0;
-    color = NSColor.systemOrangeColor;
-    break;
-  case AnnotationKind::Occluded:
-    symbolName = @"circle.fill";
-    description = @"Occluded Locked Terrain Point";
     pointSize = 7.0;
     color = NSColor.systemOrangeColor;
     break;
@@ -174,7 +167,6 @@ enum class AnnotationKind : NSInteger {
                        library:(id<MTLLibrary>)library;
 - (void)setPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image;
 - (void)setMapParameters:(VisibilityMapParameters)parameters;
-- (void)refresh;
 @end
 
 @implementation VisibilityMapView
@@ -254,17 +246,13 @@ enum class AnnotationKind : NSInteger {
     _points = points;
     _mapParameters.ray_count = static_cast<uint32_t>(count);
   }
-  [self refresh];
+  [self setNeedsDisplay:YES];
 }
 
 - (void)setMapParameters:(VisibilityMapParameters)parameters {
   const uint32_t rayCount = _mapParameters.ray_count;
   _mapParameters = parameters;
   _mapParameters.ray_count = rayCount;
-  [self refresh];
-}
-
-- (void)refresh {
   [self setNeedsDisplay:YES];
 }
 
@@ -313,9 +301,10 @@ enum class AnnotationKind : NSInteger {
 - (void)showContextMenuForCoordinate:(CLLocationCoordinate2D)coordinate event:(NSEvent *)event;
 @end
 
-/// A north-up map whose centre is always the observer. MapKit's normal pan,
-/// pitch, and rotation gestures are disabled; scrolling and pinching change
-/// only the stored ground span, so navigation cannot lose the viewpoint.
+/// A north-up map kept on a caller-selected observer or inspection point.
+/// MapKit's normal pan, pitch, and rotation gestures are disabled; scrolling
+/// and pinching change only the stored ground span, so navigation cannot lose
+/// the selected focus.
 @interface FixedCentreMapView : MKMapView {
 @private
   NSTrackingArea *_interactionTrackingArea;
@@ -350,6 +339,8 @@ enum class AnnotationKind : NSInteger {
 
 - (void)mouseMoved:(NSEvent *)event {
   const NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  // Terrain sampling may perform tile I/O. Ignore sub-three-point jitter while
+  // still updating rapidly enough for the marker to follow deliberate motion.
   if (_hasLastHoverPoint &&
       std::hypot(point.x - _lastHoverPoint.x, point.y - _lastHoverPoint.y) < 3.0) {
     return;
@@ -378,23 +369,23 @@ enum class AnnotationKind : NSInteger {
   [self.interactionOwner showContextMenuForCoordinate:[self coordinateForEvent:event] event:event];
 }
 
-- (void)applyVisibleDistanceAnimated:(BOOL)animated {
+- (void)applyVisibleDistance {
   const double distance =
       std::clamp(self.visibleDistance, kMinimumMapDistance, kMaximumMapDistance);
   self.visibleDistance = distance;
   [self setRegion:MKCoordinateRegionMakeWithDistance(self.fixedCentre, distance, distance)
-         animated:animated];
+         animated:NO];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
   const double coefficient = event.hasPreciseScrollingDeltas ? 0.012 : 0.08;
   self.visibleDistance *= std::exp(-event.scrollingDeltaY * coefficient);
-  [self applyVisibleDistanceAnimated:NO];
+  [self applyVisibleDistance];
 }
 
 - (void)magnifyWithEvent:(NSEvent *)event {
   self.visibleDistance *= std::exp(-event.magnification);
-  [self applyVisibleDistanceAnimated:NO];
+  [self applyVisibleDistance];
 }
 
 @end
@@ -422,8 +413,7 @@ enum class AnnotationKind : NSInteger {
   __weak id<MiniMapPanelViewSizeDelegate> _sizeDelegate;
   __weak id<MiniMapPanelViewInteractionDelegate> _interactionDelegate;
   CLLocationCoordinate2D _contextCoordinate;
-  bool _mapVisible;
-  bool _pointInfoVisible;
+  bool _contentVisible;
   bool _followInspection;
   bool _largeMap;
 }
@@ -595,8 +585,7 @@ enum class AnnotationKind : NSInteger {
   _northBasisCoordinate = CLLocationCoordinate2DMake(northBasis.lat, northBasis.lon);
   [self mapStyleChanged:_mapStyleControl];
 
-  _mapVisible = false;
-  _pointInfoVisible = false;
+  _contentVisible = false;
   _followInspection = false;
   _largeMap = false;
   [self updateMapFocusControl];
@@ -608,7 +597,7 @@ enum class AnnotationKind : NSInteger {
 
 - (void)layout {
   [super layout];
-  const CGFloat pointHeight = _pointInfoVisible ? kPointSectionHeight : 0.0;
+  const CGFloat pointHeight = _contentVisible ? kPointSectionHeight : 0.0;
   _pointInfoView.frame = NSMakeRect(0.0, 0.0, self.bounds.size.width, pointHeight);
   _mapSection.frame = NSMakeRect(
       0.0,
@@ -621,27 +610,19 @@ enum class AnnotationKind : NSInteger {
 }
 
 - (void)setMapAndPointInfoVisible:(bool)visible {
-  _mapVisible = visible;
-  _pointInfoVisible = visible;
+  _contentVisible = visible;
   _mapSection.hidden = !visible;
   _pointInfoView.hidden = !visible;
   if (visible) {
-    [_visibilityView refresh];
+    [_visibilityView setNeedsDisplay:YES];
   }
   [self setNeedsLayout:YES];
-}
-
-- (bool)hasVisibleContent {
-  return _mapVisible || _pointInfoVisible;
 }
 
 - (NSSize)preferredPanelSize {
   const CGFloat mapWidth = _largeMap ? kLargeMapPanelWidth : kCompactMapPanelWidth;
   const CGFloat mapHeight = _largeMap ? kLargeMapSectionHeight : kCompactMapSectionHeight;
-  const CGFloat width = _mapVisible ? mapWidth : 230.0;
-  const CGFloat height =
-      (_mapVisible ? mapHeight : 0.0) + (_pointInfoVisible ? kPointSectionHeight : 0.0);
-  return NSMakeSize(width, height);
+  return NSMakeSize(mapWidth, _contentVisible ? mapHeight + kPointSectionHeight : 0.0);
 }
 
 - (void)updateMapSizeControl {
@@ -678,7 +659,7 @@ enum class AnnotationKind : NSInteger {
     centre = _inspectionAnnotation.coordinate;
   }
   _mapView.fixedCentre = centre;
-  [_mapView applyVisibleDistanceAnimated:NO];
+  [_mapView applyVisibleDistance];
 }
 
 - (void)toggleMapSize:(id)sender {
@@ -861,7 +842,7 @@ enum class AnnotationKind : NSInteger {
   _northBasisCoordinate = CLLocationCoordinate2DMake(north.lat, north.lon);
   if (!_followInspection || _inspectionAnnotation == nil) {
     _mapView.fixedCentre = coordinate;
-    [_mapView applyVisibleDistanceAnimated:NO];
+    [_mapView applyVisibleDistance];
   }
   [self updateVisibilityTransform];
 }
@@ -887,20 +868,7 @@ enum class AnnotationKind : NSInteger {
   }
   if (_followInspection) {
     _mapView.fixedCentre = coordinate;
-    [_mapView applyVisibleDistanceAnimated:NO];
-  }
-}
-
-- (void)setLockedPointOccluded:(bool)occluded {
-  if (_inspectionAnnotation == nil || (_inspectionAnnotation.kind != AnnotationKind::Locked &&
-                                       _inspectionAnnotation.kind != AnnotationKind::Occluded)) {
-    return;
-  }
-  _inspectionAnnotation.kind = occluded ? AnnotationKind::Occluded : AnnotationKind::Locked;
-  MKAnnotationView *view = [_mapView viewForAnnotation:_inspectionAnnotation];
-  if (view != nil) {
-    view.image = annotation_image(_inspectionAnnotation.kind);
-    view.alphaValue = 1.0;
+    [_mapView applyVisibleDistance];
   }
 }
 
@@ -911,7 +879,7 @@ enum class AnnotationKind : NSInteger {
   }
   if (_followInspection) {
     _mapView.fixedCentre = _observerAnnotation.coordinate;
-    [_mapView applyVisibleDistanceAnimated:NO];
+    [_mapView applyVisibleDistance];
   }
 }
 

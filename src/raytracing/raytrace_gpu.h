@@ -57,8 +57,8 @@ struct GpuTraceOutputRequirements {
 /// Long-lived Metal resources for repeated multi-tile frontier passes.
 ///
 /// This class owns device/pipeline state and buffers whose lifetime spans the
-/// complete render. The scheduler retains policy: it decides which work is
-/// active, when resident terrain is installed, and how source-bucketed
+/// complete tracing session. The scheduler retains policy: it decides which
+/// work is active, when resident terrain is installed, and how source-bucketed
 /// successors are reactivated. One call encodes the ordered trace and
 /// continuation-culling kernels.
 class GpuRaytraceResources {

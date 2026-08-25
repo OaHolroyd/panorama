@@ -59,16 +59,17 @@ struct ViewerSettings {
   double vertical_field_of_view = kDefaultVerticalFieldOfView;
   CameraOrientation orientation = {0.0, 0.0, 0.0};
   TerrainPresentationSettings presentation = {
-      {
-          kDefaultSunAzimuthDegrees * kDegreesToRadians,
-          (90.0 - kDefaultSunPolarAngleDegrees) * kDegreesToRadians,
-          0.28F,
-          kDefaultDiffusivity,
-          TerrainColourSource::White,
-          PresetColourmap::Viridis,
-      },
-      {0.0F, 600'000.0F},
-      true,
+      .appearance =
+          {
+              .sun_azimuth = kDefaultSunAzimuthDegrees * kDegreesToRadians,
+              .sun_elevation = (90.0 - kDefaultSunPolarAngleDegrees) * kDegreesToRadians,
+              .ambient_light = 0.28F,
+              .diffusivity = kDefaultDiffusivity,
+              .colour_source = TerrainColourSource::White,
+              .colourmap = PresetColourmap::Viridis,
+          },
+      .colour_range = {0.0F, 600'000.0F},
+      .use_surface_normals = true,
   };
 };
 
@@ -240,20 +241,24 @@ struct PointInspection {
   double northing;
   float slope_degrees;
   float aspect_degrees;
+  /// Map samples have no source pixel, slope, or aspect value.
   bool map_selected;
 };
 
+/// Projected horizontal coordinate awaiting terrain-elevation sampling.
 struct MapCoordinate {
   double easting;
   double northing;
 };
 
+/// Minimal world-space terrain sample shared by map movement and visibility.
 struct TerrainPoint {
   double easting;
   double northing;
   float elevation;
 };
 
+/// Operation to complete when the latest asynchronous map sample arrives.
 enum class MapPointAction : uint8_t {
   None,
   Hover,
@@ -261,6 +266,7 @@ enum class MapPointAction : uint8_t {
   MoveObserver,
 };
 
+/// Overlay region currently responsible for point-inspection hover state.
 enum class PointerOwner : uint8_t {
   None,
   Panorama,
@@ -268,6 +274,7 @@ enum class PointerOwner : uint8_t {
   Overlay,
 };
 
+/// Occlusion result tied to both a rendered revision and request generation.
 struct TargetVisibility {
   uint64_t revision;
   uint64_t request_token;
@@ -289,7 +296,7 @@ struct LockedPointProjection {
 /// camera. The curvature adjustment reconstructs the apparent vertical ray
 /// displacement used when the original terrain collision was recorded.
 [[nodiscard]] LockedPointProjection project_locked_point(
-    const PointInspection &point,
+    TerrainPoint point,
     ObserverLocation observer,
     ImageSize image,
     double vertical_field_of_view,
@@ -357,6 +364,7 @@ struct LockedPointProjection {
   return {false, pixel_x, pixel_y, direction_x, direction_y};
 }
 
+/// One mutex-consistent snapshot consumed by the main-thread Metal view.
 struct PresentedFrame {
   id<MTLTexture> texture;
   id<MTLBuffer> visibility_points;
@@ -480,29 +488,23 @@ public:
       float max_distance
   )
       : device_(device), tile_dir_(tile_dir), max_distance_(max_distance),
-        catalogue_(
-            std::make_unique<TerrainCatalogue>(
-                TerrainCatalogue::discover(tile_dir, observer, max_distance, 0U)
-            )
-        ),
+        catalogue_(TerrainCatalogue::discover(tile_dir, observer, max_distance, 0U)),
         io_queue_(make_metal_io_queue(device)) {}
 
   void recenter(ObserverLocation observer) {
-    catalogue_ = std::make_unique<TerrainCatalogue>(
-        TerrainCatalogue::discover(tile_dir_, observer, max_distance_, 0U)
-    );
+    catalogue_ = TerrainCatalogue::discover(tile_dir_, observer, max_distance_, 0U);
     cached_vertices_.clear();
     cached_key_.reset();
   }
 
   [[nodiscard]] std::optional<TerrainPoint> sample(MapCoordinate coordinate) {
-    const TileKey key = tile_key_at(catalogue_->grid(), coordinate.easting, coordinate.northing);
-    const std::optional<uint32_t> source_index = catalogue_->find_source(key);
+    const TileKey key = tile_key_at(catalogue_.grid(), coordinate.easting, coordinate.northing);
+    const std::optional<uint32_t> source_index = catalogue_.find_source(key);
     if (!source_index.has_value()) {
       return std::nullopt;
     }
     if (!cached_key_.has_value() || !(*cached_key_ == key)) {
-      load(catalogue_->sources()[*source_index]);
+      load(catalogue_.sources()[*source_index]);
       cached_key_ = key;
     }
 
@@ -583,7 +585,7 @@ private:
   id<MTLDevice> device_;
   std::filesystem::path tile_dir_;
   float max_distance_;
-  std::unique_ptr<TerrainCatalogue> catalogue_;
+  TerrainCatalogue catalogue_;
   id<MTLIOCommandQueue> io_queue_;
   std::optional<TileKey> cached_key_;
   std::vector<float> cached_vertices_;
@@ -616,7 +618,7 @@ public:
     trace_ = std::make_unique<TerrainTraceSession>(
         config,
         initial_field,
-        GpuTraceOutputRequirements{true, true}
+        GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
     );
     device_ = trace_->device();
     display_queue_ = [device_ newCommandQueue];
@@ -629,7 +631,13 @@ public:
         display_queue_,
         library_,
         settings_.image,
-        GpuPresentationRequirements{false, false, true, true, false},
+        GpuPresentationRequirements{
+            .scalar_diagnostics = false,
+            .normal_diagnostics = false,
+            .white_synthetic = true,
+            .synthetic_scalar_colour = true,
+            .host_readback = false,
+        },
         MTLPixelFormatBGRA8Unorm
     );
     visibility_ = std::make_unique<GpuVisibilityPointProjector>(device_, display_queue_, library_);
@@ -755,30 +763,30 @@ public:
   [[nodiscard]] PresentedFrame presented_frame() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return {
-        presented_texture_,
-        presented_visibility_points_,
-        presented_image_,
-        presented_orientation_,
-        presented_vertical_field_of_view_,
-        presented_revision_,
-        frame_ms_,
-        error_,
-        presented_inspection_,
-        presented_inspection_sequence_,
-        presented_inspection_token_,
-        presented_observer_,
-        presented_map_point_,
-        presented_map_point_sequence_,
-        presented_map_point_token_,
-        presented_target_visibility_,
-        presented_target_visibility_sequence_,
+        .texture = presented_texture_,
+        .visibility_points = presented_visibility_points_,
+        .image = presented_image_,
+        .orientation = presented_orientation_,
+        .vertical_field_of_view = presented_vertical_field_of_view_,
+        .revision = presented_revision_,
+        .milliseconds = frame_ms_,
+        .error = error_,
+        .inspection = presented_inspection_,
+        .inspection_sequence = presented_inspection_sequence_,
+        .inspection_request_token = presented_inspection_token_,
+        .observer = presented_observer_,
+        .map_point = presented_map_point_,
+        .map_point_sequence = presented_map_point_sequence_,
+        .map_point_request_token = presented_map_point_token_,
+        .target_visibility = presented_target_visibility_,
+        .target_visibility_sequence = presented_target_visibility_sequence_,
     };
   }
 
   [[nodiscard]] id<MTLDevice> device() const { return device_; }
   [[nodiscard]] id<MTLCommandQueue> command_queue() const { return display_queue_; }
   [[nodiscard]] id<MTLLibrary> library() const { return library_; }
-  [[nodiscard]] ImageSize image() const { return settings_.image; }
+  [[nodiscard]] ImageSize initial_image() const { return settings_.image; }
   [[nodiscard]] ObserverLocation observer() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return presented_observer_;
@@ -799,20 +807,8 @@ private:
       CameraOrientation orientation,
       double vertical_field_of_view
   ) const {
-    const PointInspection projected_point = {
-        {},
-        0U,
-        true,
-        0.0F,
-        point.elevation,
-        point.easting,
-        point.northing,
-        0.0F,
-        0.0F,
-        true,
-    };
     const LockedPointProjection projection = project_locked_point(
-        projected_point,
+        point,
         current_observer_,
         current_field_.image,
         vertical_field_of_view,
@@ -866,7 +862,18 @@ private:
       throw std::runtime_error("Could not map point-inspection buffers");
     }
 
-    PointInspection result = {pixel, revision, false, 0.0F, 0.0F, 0.0, 0.0, 0.0F, 0.0F, false};
+    PointInspection result = {
+        .pixel = pixel,
+        .revision = revision,
+        .hit = false,
+        .distance = 0.0F,
+        .elevation = 0.0F,
+        .easting = 0.0,
+        .northing = 0.0,
+        .slope_degrees = 0.0F,
+        .aspect_degrees = 0.0F,
+        .map_selected = false,
+    };
     const float distance = distances[index];
     if (!(distance > 0.0F) || !std::isfinite(distance)) {
       return result;
@@ -968,7 +975,7 @@ private:
               auto replacement = std::make_unique<TerrainTraceSession>(
                   config,
                   field,
-                  GpuTraceOutputRequirements{true, true}
+                  GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
               );
               if (replacement->device() != device_) {
                 throw std::runtime_error("Observer relocation selected a different Metal device");
@@ -1024,9 +1031,13 @@ private:
           std::optional<TargetVisibility> target_visibility;
           if (target_requested && target.has_value()) {
             target_visibility = TargetVisibility{
-                current_revision_,
-                target_token,
-                target_is_occluded(*target, current_orientation_, current_vertical_field_of_view_),
+                .revision = current_revision_,
+                .request_token = target_token,
+                .occluded = target_is_occluded(
+                    *target,
+                    current_orientation_,
+                    current_vertical_field_of_view_
+                ),
             };
           }
 
@@ -1129,7 +1140,7 @@ private:
 
 /// Keep the compact point footer readable without sacrificing useful precision
 /// for nearby terrain samples.
-[[nodiscard]] NSString *format_point_distance(double metres) {
+[[nodiscard]] static NSString *format_point_distance(double metres) {
   const double magnitude = std::abs(metres);
   if (magnitude < 100.0) {
     return [NSString stringWithFormat:@"%.1f m", metres];
@@ -1265,7 +1276,6 @@ private:
 - (void)pointerMovedOverOccludingView:(NSView *)view;
 - (void)panoramaPointerExited;
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
-- (void)clearPointInspection;
 - (void)toggleMapAndPointInspection:(id)sender;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
@@ -1652,8 +1662,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   CGFloat _panelMargin;
   bool _inspectorVisible;
   bool _debugVisible;
-  bool _mapVisible;
-  bool _pointInfoVisible;
+  bool _mapAndPointInfoVisible;
 }
 - (instancetype)initWithFrame:(NSRect)frame
                   contentView:(NSView *)contentView
@@ -1688,8 +1697,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _panelMargin = 12.0;
     _inspectorVisible = true;
     _debugVisible = false;
-    _mapVisible = false;
-    _pointInfoVisible = false;
+    _mapAndPointInfoVisible = false;
     self.wantsLayer = YES;
     self.layer.masksToBounds = YES;
     [self addSubview:_contentView];
@@ -1759,7 +1767,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _settingsView.frame = _inspectorView.bounds;
   _debugView.frame = [self debugFrameForVisible:_debugVisible];
   _debugContentView.frame = _debugView.bounds;
-  _mapPanelView.frame = [self mapPanelFrameForVisible:[_mapPanelContentView hasVisibleContent]];
+  _mapPanelView.frame = [self mapPanelFrameForVisible:_mapAndPointInfoVisible];
   _mapPanelContentView.frame = _mapPanelView.bounds;
 }
 
@@ -1767,8 +1775,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   if (panel != _mapPanelContentView) {
     return;
   }
-  const bool visible = [_mapPanelContentView hasVisibleContent];
-  const NSRect targetFrame = [self mapPanelFrameForVisible:visible];
+  const NSRect targetFrame = [self mapPanelFrameForVisible:_mapAndPointInfoVisible];
   [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
     context.duration = 0.25;
     _mapPanelView.animator.frame = targetFrame;
@@ -1796,14 +1803,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)setMapAndPointInfoVisible:(bool)visible {
-  if (_mapVisible == visible && _pointInfoVisible == visible) {
+  if (_mapAndPointInfoVisible == visible) {
     return;
   }
-  _mapVisible = visible;
-  _pointInfoVisible = visible;
+  _mapAndPointInfoVisible = visible;
   [_mapPanelContentView setMapAndPointInfoVisible:visible];
-  const bool panelVisible = [_mapPanelContentView hasVisibleContent];
-  const NSRect targetFrame = [self mapPanelFrameForVisible:panelVisible];
+  const NSRect targetFrame = [self mapPanelFrameForVisible:visible];
   [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
     context.duration = 0.25;
     _mapPanelView.animator.frame = targetFrame;
@@ -1825,7 +1830,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _observer = renderer->observer();
     _orientation = renderer->initial_orientation();
     _verticalFieldOfView = renderer->initial_vertical_field_of_view();
-    _image = renderer->image();
+    _image = renderer->initial_image();
     _lockedAspectRatio = static_cast<double>(_image.width) / _image.height;
     _panningSensitivity = 8.0;
     _presentation = renderer->initial_presentation();
@@ -2097,15 +2102,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _targetVisibilityRequestToken = _renderer->request_target_visibility(std::nullopt);
   _targetVisibilityRevision = 0U;
   _lockedPointOccluded = false;
-  [_miniMapPanel setLockedPointOccluded:false];
 }
 
-- (void)requestTargetVisibilityForPoint:(const panorama::app::PointInspection &)point {
+- (void)requestTargetVisibilityForPoint:(panorama::app::TerrainPoint)point {
   _targetVisibilityRevision = 0U;
   _lockedPointOccluded = false;
-  _targetVisibilityRequestToken = _renderer->request_target_visibility(
-      panorama::app::TerrainPoint{point.easting, point.northing, point.elevation}
-  );
+  _targetVisibilityRequestToken = _renderer->request_target_visibility(point);
 }
 
 - (void)clearMapHover {
@@ -2184,12 +2186,6 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _pointLockRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
 }
 
-- (void)clearPointInspection {
-  if (!_pointInspectionLocked && !_pointLockPending) {
-    [self invalidatePanoramaHover];
-  }
-}
-
 - (void)miniMapPanel:(MiniMapPanelView *)panel
      didHoverEasting:(double)easting
             northing:(double)northing {
@@ -2247,7 +2243,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                         action:panorama::app::MapPointAction::MoveObserver];
 }
 
-- (void)lookAtTerrainPoint:(const panorama::app::PointInspection &)point {
+- (void)lookAtTerrainPoint:(panorama::app::TerrainPoint)point {
   const double east = point.easting - _observer.easting;
   const double north = point.northing - _observer.northing;
   const double horizontal = std::hypot(east, north);
@@ -2275,7 +2271,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_panoramaView setPointInspectionEnabled:_pointInspectionEnabled];
   [_overlayView setMapAndPointInfoVisible:_pointInspectionEnabled];
   if (!_pointInspectionEnabled) {
-    [self clearPointInspection];
+    [self invalidatePanoramaHover];
   }
   [self updatePointInfo:std::nullopt];
 
@@ -2871,7 +2867,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   const panorama::app::LockedPointProjection projection = panorama::app::project_locked_point(
-      *point,
+      {point->easting, point->northing, point->elevation},
       _observer,
       image,
       verticalFieldOfView,
@@ -2880,7 +2876,6 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const bool occluded =
       locked && _lockedPointOccluded && _targetVisibilityRevision == _displayedRevision;
   [_panoramaView setTerrainPointIndicator:projection locked:locked occluded:occluded];
-  [_miniMapPanel setLockedPointOccluded:occluded];
   if (locked) {
     _pointInfoHeading.stringValue = @"Distance";
     [self setPointInfoSymbolsVisible:true locked:true occluded:occluded];
@@ -3049,16 +3044,16 @@ static NSView *makeOverlayPanel(NSView *contentView) {
             frame.map_point->northing - _observer.northing
         );
         panorama::app::PointInspection point = {
-            {},
-            frame.revision,
-            true,
-            static_cast<float>(distance),
-            frame.map_point->elevation,
-            frame.map_point->easting,
-            frame.map_point->northing,
-            0.0F,
-            0.0F,
-            true,
+            .pixel = {},
+            .revision = frame.revision,
+            .hit = true,
+            .distance = static_cast<float>(distance),
+            .elevation = frame.map_point->elevation,
+            .easting = frame.map_point->easting,
+            .northing = frame.map_point->northing,
+            .slope_degrees = 0.0F,
+            .aspect_degrees = 0.0F,
+            .map_selected = true,
         };
         if (action == panorama::app::MapPointAction::Hover) {
           _mapHoverPoint = point;
@@ -3081,9 +3076,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
           _pointInspectionLocked = true;
           _pointLockPending = false;
           _lockedPoint = point;
-          [self requestTargetVisibilityForPoint:point];
+          [self requestTargetVisibilityForPoint:*frame.map_point];
           [self updatePointInfo:point];
-          [self lookAtTerrainPoint:point];
+          [self lookAtTerrainPoint:*frame.map_point];
         }
       }
     }
@@ -3100,7 +3095,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         _pointInspectionLocked = true;
         _lockedPoint = frame.inspection;
         [self updatePointInfo:frame.inspection];
-        [self requestTargetVisibilityForPoint:*frame.inspection];
+        const panorama::app::TerrainPoint target = {
+            frame.inspection->easting,
+            frame.inspection->northing,
+            frame.inspection->elevation,
+        };
+        [self requestTargetVisibilityForPoint:target];
         [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                     verticalFieldOfView:frame.vertical_field_of_view
                                                   image:frame.image];
@@ -3250,7 +3250,7 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   (void)notification;
-  const panorama::ImageSize image = _renderer->image();
+  const panorama::ImageSize image = _renderer->initial_image();
   constexpr CGFloat kInspectorWidth = 300.0;
   constexpr NSSize kDebugSize = {240.0, 430.0};
   const NSRect windowFrame = NSMakeRect(0.0, 0.0, image.width, image.height);

@@ -124,6 +124,8 @@ struct TerrainTraceSession::State {
     const TileGrid &grid = catalogue->grid();
     const TileKey origin_key = catalogue->origin().key;
 
+    // The observer tile establishes the dimensions and CRS shared by every
+    // fixed-stride atlas slot for the lifetime of this session.
     timer.start_work("Tile load");
     origin = std::make_unique<LoadedTile>(LoadedTile::load(catalogue->origin().path));
     timer.stop("Tile load");
@@ -207,6 +209,8 @@ struct TerrainTraceSession::State {
   [[nodiscard]] uint32_t ensure_observer_resident() {
     uint32_t slot = cache->slot_for_source(0U);
     const std::vector<uint8_t> no_pinned_slots(cache->slot_capacity(), 0U);
+    // The origin can be evicted after an earlier view. No GPU pass is active
+    // here, so publishing it again may use any cache slot.
     while (slot == cache->slot_capacity()) {
       preparer->request(0U, 0.0F);
       (void)cache->install_prepared(*preparer, no_pinned_slots, timer);
@@ -237,6 +241,8 @@ void TerrainTraceSession::trace(const RayField &field) {
                                   field.image.height != state.image.height ||
                                   ray_count != state.ray_count;
 
+  // Ray-dependent storage changes with the viewport; catalogue discovery,
+  // terrain preparation, pipelines, and the resident atlas remain intact.
   const uint32_t observer_slot = state.ensure_observer_resident();
   if (dimensions_changed) {
     state.gpu->resize_rays(field.rays);
@@ -290,6 +296,8 @@ void TerrainTraceSession::trace(const RayField &field) {
       frontier.validate_deferred_work(deferred);
 #endif
       state.timer.start_wall("Frontier bookkeeping");
+      // The completed pass no longer reads the atlas. Publish available tiles,
+      // then reactivate every continuation whose source is now resident.
       frontier.mark_installed(
           state.cache->install_prepared(*state.preparer, no_pinned_slots, state.timer)
       );
@@ -307,6 +315,8 @@ void TerrainTraceSession::trace(const RayField &field) {
       state.timer.stop("Frontier bookkeeping");
 
       while (active_count == 0U && frontier.has_deferred_work()) {
+        // Deferred work remains but none of it is resident. Wait for one of
+        // the already-requested sources instead of submitting an empty pass.
         state.timer.start_wall("Tile availability wait");
         state.preparer->wait_for_prepared();
         state.timer.stop("Tile availability wait");

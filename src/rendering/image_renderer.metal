@@ -3,9 +3,9 @@
 using namespace metal;
 
 /// Per-pixel terrain ray ABI shared with `RayDirection` in ray_projection.h.
-/// The visibility overlay only consumes the normalized horizontal direction,
-/// but retaining the complete layout lets it read the tracer's buffer directly.
-struct VisibilityRayDirection {
+/// Keeping the complete layout lets the minimap and outline passes consume the
+/// tracer's buffer directly without a repacking pass.
+struct PresentationRayDirection {
   float x;
   float y;
   float inverse_x;
@@ -13,8 +13,8 @@ struct VisibilityRayDirection {
   float slope;
 };
 
-/// Affine projected-terrain-to-Metal-clip transform for the small fixed-centre
-/// minimap. The host derives the two basis vectors through the terrain CRS and
+/// Affine projected-terrain-to-Metal-clip transform for the minimap. The host
+/// derives the two basis vectors through the terrain CRS and
 /// MapKit, preserving local grid convergence relative to geographic north.
 struct VisibilityMapParameters {
   float centre_x;
@@ -36,7 +36,7 @@ struct VisibilityPointVertex {
 /// collision. The viewer publishes this buffer with the matching frame so a
 /// subsequent trace can safely reuse its ray and distance storage.
 kernel void visibility_collision_points(
-    device const VisibilityRayDirection *rays [[buffer(0)]],
+    device const PresentationRayDirection *rays [[buffer(0)]],
     device const float *distances [[buffer(1)]],
     device float2 *points [[buffer(2)]],
     constant uint &ray_count [[buffer(3)]],
@@ -53,7 +53,7 @@ kernel void visibility_collision_points(
 
 /// Project every completed terrain collision directly into the minimap.
 /// Invalid/no-hit rays are moved outside the clip volume and therefore emit no
-/// fragment. Point coverage is deliberately fixed for this first implementation.
+/// fragment. Fixed two-pixel coverage keeps cost and opacity predictable.
 vertex VisibilityPointVertex visibility_point_vertex(
     device const float2 *points [[buffer(0)]],
     constant VisibilityMapParameters &map [[buffer(1)]],
@@ -135,9 +135,9 @@ constant float3 preset_colourmaps[6][5] = {
     },
 };
 
-/// Exact distance palette embedded in Viewfinder Panoramas' indexed GIFs.
-/// The source uses 96 discrete colours from dark green at the viewpoint to
-/// white at the caller-selected maximum distance.
+/// Exact 96-colour distance palette extracted from the indexed panorama GIFs
+/// published at https://viewfinderpanoramas.org/panoramas.html. It progresses
+/// from dark green at the viewpoint to white at the selected maximum distance.
 constant uchar3 viewfinder_colourmap[96] = {
     uchar3(0x00, 0x78, 0x00), uchar3(0x00, 0x81, 0x00), uchar3(0x00, 0x8a, 0x00),
     uchar3(0x00, 0x93, 0x00), uchar3(0x00, 0x9c, 0x00), uchar3(0x00, 0xa5, 0x00),
@@ -284,7 +284,7 @@ inline float3 linear_to_srgb(float3 value) {
 /// frame. Tracing stores horizontal distance; its ray slope and effective-
 /// Earth curvature recover the vertical component without consulting DEM
 /// normals.
-inline float3 collision_point(VisibilityRayDirection ray, float distance, float curvature) {
+inline float3 collision_point(PresentationRayDirection ray, float distance, float curvature) {
   return float3(
       distance * ray.x,
       distance * ray.y,
@@ -296,7 +296,7 @@ inline float3 collision_point(VisibilityRayDirection ray, float distance, float 
 /// at their nearer slant range would normally be. A continuous front-facing
 /// surface is close to one; separated surfaces and grazing ridges are larger.
 inline float surface_separation(
-    device const VisibilityRayDirection *rays,
+    device const PresentationRayDirection *rays,
     device const float *distances,
     uint index,
     uint neighbour_index,
@@ -308,8 +308,8 @@ inline float surface_separation(
     return 0.0F;
   }
 
-  const VisibilityRayDirection ray = rays[index];
-  const VisibilityRayDirection neighbour_ray = rays[neighbour_index];
+  const PresentationRayDirection ray = rays[index];
+  const PresentationRayDirection neighbour_ray = rays[neighbour_index];
   const float3 ray_vector = float3(ray.x, ray.y, ray.slope);
   const float3 neighbour_ray_vector = float3(neighbour_ray.x, neighbour_ray.y, neighbour_ray.slope);
   const float ray_length = length(ray_vector);
@@ -330,7 +330,7 @@ inline float surface_separation(
 /// one-, two-, and four-pixel baselines. Fine-scale evidence localises the
 /// result while agreement at a wider scale rejects isolated depth noise.
 kernel void compute_feature_outlines(
-    device const VisibilityRayDirection *rays [[buffer(0)]],
+    device const PresentationRayDirection *rays [[buffer(0)]],
     device const float *distances [[buffer(1)]],
     constant float &detail [[buffer(2)]],
     constant float &curvature [[buffer(3)]],
@@ -350,10 +350,13 @@ kernel void compute_feature_outlines(
   }
 
   const float sensitivity = clamp(detail, 0.0F, 1.0F);
-  // The useful part of the old range was concentrated at its least-sensitive
-  // end. Spread that region across this control: level 7 is approximately the
-  // former level 1, with ample room below it for only major divisions.
+  // Bias most of the control toward major separations. The upper end still
+  // exposes fine grazing ridges without making the default image excessively
+  // dense.
   const float separation_threshold = mix(24.0F, 6.0F, sensitivity);
+  // A fixed physical gap occupies a smaller fraction of the expected spacing
+  // at wider baselines, hence the falling thresholds. Fine evidence remains
+  // mandatory below so coarse tests validate an edge without broadening it.
   const float fine_threshold = max(1.35F, 0.45F * separation_threshold);
   const float medium_threshold = max(1.5F, 0.75F * separation_threshold);
   const float coarse_threshold = max(1.25F, 0.55F * separation_threshold);
@@ -387,10 +390,6 @@ kernel void compute_feature_outlines(
   output.write(float4(outlined ? 1.0F : 0.0F), position);
 }
 
-inline bool feature_outline(texture2d<float, access::read> feature_outline_mask, uint2 position) {
-  return feature_outline_mask.read(position).r >= 0.5F;
-}
-
 /// Render white Lambertian terrain under one directional sun and ambient term.
 kernel void present_synthetic_terrain(
     device const uint *packed_gradients [[buffer(0)]],
@@ -412,7 +411,7 @@ kernel void present_synthetic_terrain(
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
-  if (feature_outlines != 0U && feature_outline(feature_outline_mask, position)) {
+  if (feature_outlines != 0U && feature_outline_mask.read(position).r >= 0.5F) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
@@ -457,7 +456,7 @@ kernel void present_colourmapped_synthetic_terrain(
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
-  if (feature_outlines != 0U && feature_outline(feature_outline_mask, position)) {
+  if (feature_outlines != 0U && feature_outline_mask.read(position).r >= 0.5F) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }

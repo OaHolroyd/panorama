@@ -90,7 +90,7 @@ struct GpuImageRenderer::State {
   NSUInteger bytes_per_row;
   MTLPixelFormat output_pixel_format;
   bool host_readback;
-  bool synthetic;
+  bool supports_synthetic;
 
   void resize(ImageSize next_image) {
     const uint64_t pixel_count = static_cast<uint64_t>(next_image.width) * next_image.height;
@@ -115,7 +115,9 @@ struct GpuImageRenderer::State {
     next_output.label = @"Presented image";
 
     id<MTLTexture> next_feature_outline_mask = nil;
-    if (synthetic) {
+    if (supports_synthetic) {
+      // Keep the mask available even when outlines are currently disabled;
+      // the interactive viewer can enable them without reallocating targets.
       MTLTextureDescriptor *mask_descriptor =
           [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
                                                              width:next_image.width
@@ -163,8 +165,12 @@ GpuImageRenderer::GpuImageRenderer(
 ) {
   const uint64_t pixel_count = static_cast<uint64_t>(image.width) * image.height;
   if (device == nil || queue == nil || library == nil || pixel_count == 0U ||
-      pixel_count > std::numeric_limits<uint32_t>::max()) {
-    throw std::invalid_argument("GPU image renderer requires valid Metal state and dimensions");
+      pixel_count > std::numeric_limits<uint32_t>::max() ||
+      (output_pixel_format != MTLPixelFormatRGBA8Unorm &&
+       output_pixel_format != MTLPixelFormatBGRA8Unorm)) {
+    throw std::invalid_argument(
+        "GPU image renderer requires valid Metal state, dimensions, and an RGBA8 target"
+    );
   }
 
   auto state = std::make_unique<State>();
@@ -172,7 +178,7 @@ GpuImageRenderer::GpuImageRenderer(
   state->queue = queue;
   state->output_pixel_format = output_pixel_format;
   state->host_readback = requirements.host_readback;
-  state->synthetic = requirements.white_synthetic || requirements.synthetic_scalar_colour;
+  state->supports_synthetic = requirements.white_synthetic || requirements.synthetic_scalar_colour;
   if (requirements.scalar_diagnostics) {
     state->scalar = make_pipeline(device, library, @"present_scalar_viridis");
   }
@@ -186,17 +192,13 @@ GpuImageRenderer::GpuImageRenderer(
     state->colourmapped_synthetic =
         make_pipeline(device, library, @"present_colourmapped_synthetic_terrain");
   }
-  if (state->synthetic) {
+  if (state->supports_synthetic) {
     state->feature_outlines = make_pipeline(device, library, @"compute_feature_outlines");
   }
   if (requirements.host_readback) {
     state->pack_rgb = make_pipeline(device, library, @"pack_presented_rgb");
   }
 
-  if (output_pixel_format != MTLPixelFormatRGBA8Unorm &&
-      output_pixel_format != MTLPixelFormatBGRA8Unorm) {
-    throw std::invalid_argument("GPU image renderer requires an RGBA8 or BGRA8 target");
-  }
   state->resize(image);
   state_ = std::move(state);
 }

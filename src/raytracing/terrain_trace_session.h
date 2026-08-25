@@ -16,8 +16,8 @@ namespace panorama {
 /// Catalogue discovery, Metal pipelines, preparation workers, and the
 /// resident terrain/mipmap atlas live for the complete session. Each call to
 /// `trace` replaces only the ray field and transient frontier, allowing turns
-/// and resolution changes to reuse cached terrain. Future movement support can
-/// update observer-specific state without making atlas lifetime frame-specific.
+/// and resolution changes to reuse cached terrain. A moved observer uses a new
+/// session because it changes the finite source catalogue and tracing origin.
 class TerrainTraceSession {
 public:
   TerrainTraceSession(

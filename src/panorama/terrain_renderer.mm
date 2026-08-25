@@ -69,14 +69,15 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
       trace.command_queue(),
       trace.library(),
       image,
-      {
-          outputs.write_diagnostics,
-          outputs.write_diagnostics && outputs.write_normal_diagnostic,
-          outputs.write_synthetic &&
-              outputs.synthetic_options.colour_source == TerrainColourSource::White,
-          outputs.write_synthetic &&
+      GpuPresentationRequirements{
+          .scalar_diagnostics = outputs.write_diagnostics,
+          .normal_diagnostics = outputs.write_diagnostics && outputs.write_normal_diagnostic,
+          .white_synthetic = outputs.write_synthetic &&
+                             outputs.synthetic_options.colour_source == TerrainColourSource::White,
+          .synthetic_scalar_colour =
+              outputs.write_synthetic &&
               outputs.synthetic_options.colour_source != TerrainColourSource::White,
-          true,
+          .host_readback = true,
       }
   );
   timer.stop("GPU presentation setup");
@@ -131,9 +132,9 @@ void render_terrain(
     TerrainTraceSession trace(
         config,
         field,
-        {
-            outputs.requires_elevations(),
-            outputs.requires_normals(),
+        GpuTraceOutputRequirements{
+            .elevations = outputs.requires_elevations(),
+            .surface_gradients = outputs.requires_normals(),
         }
     );
     trace.trace(field);

@@ -14,6 +14,8 @@
 @end
 
 @protocol MiniMapPanelViewInteractionDelegate <NSObject>
+/// Hover previews a terrain point; primary click selects it for viewing; a
+/// secondary click or Option-click requests observer movement.
 - (void)miniMapPanel:(MiniMapPanelView *)panel
      didHoverEasting:(double)easting
             northing:(double)northing;
@@ -26,7 +28,7 @@
                            northing:(double)northing;
 @end
 
-/// Combined fixed-centre map and terrain-point readout used by the viewer's
+/// Combined controlled-centre map and terrain-point readout used by the viewer's
 /// leading overlay. MapKit implementation details remain in minimap.mm so the
 /// application controller only publishes camera and inspected-world state.
 @interface MiniMapPanelView : NSView
@@ -43,8 +45,9 @@
                            commandQueue:(id<MTLCommandQueue>)commandQueue
                                 library:(id<MTLLibrary>)library;
 
+/// Show or hide the map and point footer as one coupled interaction surface.
 - (void)setMapAndPointInfoVisible:(bool)visible;
-- (bool)hasVisibleContent;
+/// Return the compact or expanded size, including the coupled point footer.
 - (NSSize)preferredPanelSize;
 
 /// Update the projected heading wedge to match the displayed camera view.
@@ -58,8 +61,8 @@
 /// Move all observer-relative map graphics after an interactive relocation.
 - (void)setObserverEasting:(double)easting northing:(double)northing;
 
+/// Display the hover or locked point using the viewer's blue/orange convention.
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked;
-- (void)setLockedPointOccluded:(bool)occluded;
 - (void)clearInspectedPoint;
 
 @end
