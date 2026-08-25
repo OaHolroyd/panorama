@@ -30,9 +30,9 @@ struct PreparedTile {
 struct TilePreparationStatistics {
   /// All scheduler request calls; the two following counters partition this total.
   uint64_t requests;
-  /// First request for a source during this render.
+  /// First request for a source during this preparer's lifetime.
   uint64_t unique_requests;
-  /// Repeat request for a source, whether deduplicated or requeued after eviction.
+  /// Repeat request, whether deduplicated or requeued after an eviction.
   uint64_t duplicate_requests;
   uint32_t worker_count;
 };

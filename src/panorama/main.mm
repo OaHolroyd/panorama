@@ -38,6 +38,7 @@ struct EntrypointSettings {
   bool write_synthetic = false;
   bool synthetic_setting_seen = false;
   bool colourmap_setting_seen = false;
+  bool colour_scale_setting_seen = false;
   bool colour_range_setting_seen = false;
   float colour_minimum = 0.0F;
   std::optional<float> colour_maximum;
@@ -45,6 +46,7 @@ struct EntrypointSettings {
       225.0 * kDegreesToRadians,
       35.0 * kDegreesToRadians,
       0.28F,
+      1.0F,
   };
   double easting = 2623452.4;
   double northing = 1100502.2;
@@ -81,6 +83,14 @@ constexpr std::array kColourmaps = {
     std::pair{"magma", panorama::PresetColourmap::Magma},
     std::pair{"cividis", panorama::PresetColourmap::Cividis},
     std::pair{"turbo", panorama::PresetColourmap::Turbo},
+    std::pair{"viewfinder", panorama::PresetColourmap::Viewfinder},
+};
+
+constexpr std::array kColourScales = {
+    std::pair{"linear", panorama::ScalarColourScale::Linear},
+    std::pair{"logarithmic", panorama::ScalarColourScale::Logarithmic},
+    std::pair{"square-root", panorama::ScalarColourScale::SquareRoot},
+    std::pair{"quadratic", panorama::ScalarColourScale::Quadratic},
 };
 
 /// Parse and print small named enums from one canonical choice table.
@@ -139,6 +149,10 @@ void validate_output_settings(const EntrypointSettings &settings) {
       settings.synthetic.colour_source == panorama::TerrainColourSource::White) {
     throw std::invalid_argument("--colourmap requires distance or elevation terrain colour");
   }
+  if (settings.colour_scale_setting_seen &&
+      settings.synthetic.colour_source == panorama::TerrainColourSource::White) {
+    throw std::invalid_argument("--colour-scale requires distance or elevation terrain colour");
+  }
   const panorama::ScalarColourRange range = scalar_colour_range(settings);
   if (!std::isfinite(range.minimum) || !std::isfinite(range.maximum) ||
       range.maximum <= range.minimum) {
@@ -187,9 +201,14 @@ void print_usage(const char *program) {
       "  --sun-azimuth D       clockwise from grid north (default: 225)\n"
       "  --sun-elevation D     above the horizon (default: 35)\n"
       "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
+      "  --diffusivity V       directional diffuse-light strength, 0 to 1 (default: 1)\n"
+      "  --feature-outlines    draw multiscale black surface-separation lines\n"
+      "  --outline-detail N    outline detail from 0 to 10 (default: 7)\n"
       "  --terrain-colour MODE white, distance, or elevation (default: white)\n"
-      "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, or turbo\n"
+      "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, turbo, or viewfinder\n"
       "                        (default: viridis)\n"
+      "  --colour-scale NAME   linear, logarithmic, square-root, or quadratic\n"
+      "                        (default: linear)\n"
       "\n"
       "Observer options:\n"
       "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
@@ -230,6 +249,11 @@ void print_usage(const char *program) {
     }
     if (option == "--synthetic-output") {
       settings.write_synthetic = true;
+      continue;
+    }
+    if (option == "--feature-outlines") {
+      settings.synthetic.feature_outlines = true;
+      settings.synthetic_setting_seen = true;
       continue;
     }
 
@@ -277,6 +301,20 @@ void print_usage(const char *program) {
       }
       settings.synthetic.ambient_light = static_cast<float>(parsed);
       settings.synthetic_setting_seen = true;
+    } else if (option == "--diffusivity") {
+      const double parsed = panorama::arguments::parse_finite_double(value, option);
+      if (parsed < 0.0 || parsed > 1.0) {
+        throw std::out_of_range("Diffusivity must be between zero and one");
+      }
+      settings.synthetic.diffusivity = static_cast<float>(parsed);
+      settings.synthetic_setting_seen = true;
+    } else if (option == "--outline-detail") {
+      const double parsed = panorama::arguments::parse_finite_double(value, option);
+      if (parsed < 0.0 || parsed > 10.0) {
+        throw std::out_of_range("Outline detail must be between 0 and 10");
+      }
+      settings.synthetic.feature_outline_detail = static_cast<float>(parsed / 10.0);
+      settings.synthetic_setting_seen = true;
     } else if (option == "--colour-min") {
       settings.colour_minimum = parse_float32(value, option);
       settings.colour_range_setting_seen = true;
@@ -292,10 +330,19 @@ void print_usage(const char *program) {
           value,
           kColourmaps,
           "colourmap",
-          "viridis, plasma, inferno, magma, cividis, or turbo"
+          "viridis, plasma, inferno, magma, cividis, turbo, or viewfinder"
       );
       settings.synthetic_setting_seen = true;
       settings.colourmap_setting_seen = true;
+    } else if (option == "--colour-scale") {
+      settings.synthetic.colour_scale = parse_choice(
+          value,
+          kColourScales,
+          "colour scale",
+          "linear, logarithmic, square-root, or quadratic"
+      );
+      settings.synthetic_setting_seen = true;
+      settings.colour_scale_setting_seen = true;
     } else if (!settings.projection.parse_option(option, value)) {
       throw std::invalid_argument("Unknown option: " + std::string(option));
     }
@@ -362,14 +409,25 @@ int main(int argc, const char *argv[]) {
     if (settings.write_synthetic) {
       std::printf(
           "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f, "
-          "terrain colour %s",
+          "diffusivity %.3f, terrain colour %s",
           settings.synthetic.sun_azimuth / kDegreesToRadians,
           settings.synthetic.sun_elevation / kDegreesToRadians,
           settings.synthetic.ambient_light,
+          settings.synthetic.diffusivity,
           choice_name(settings.synthetic.colour_source, kTerrainColours)
       );
       if (settings.synthetic.colour_source != panorama::TerrainColourSource::White) {
-        std::printf(" (%s)", choice_name(settings.synthetic.colourmap, kColourmaps));
+        std::printf(
+            " (%s, %s scale)",
+            choice_name(settings.synthetic.colourmap, kColourmaps),
+            choice_name(settings.synthetic.colour_scale, kColourScales)
+        );
+      }
+      if (settings.synthetic.feature_outlines) {
+        std::printf(
+            ", feature outlines detail %.0f",
+            10.0 * settings.synthetic.feature_outline_detail
+        );
       }
       std::printf(".\n");
     }

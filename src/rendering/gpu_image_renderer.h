@@ -31,8 +31,9 @@ struct GpuImageReadback {
 struct GpuPresentationRequirements {
   bool scalar_diagnostics;
   bool normal_diagnostics;
-  bool synthetic;
-  /// Select the distance/elevation rather than white synthetic pipeline.
+  /// Enable uncoloured (white base) synthetic terrain presentation.
+  bool white_synthetic;
+  /// Enable distance/elevation colourmapped synthetic presentation.
   bool synthetic_scalar_colour;
   /// Allocate the packing pipeline and shared buffer used by CLI image files.
   bool host_readback;
@@ -40,10 +41,10 @@ struct GpuPresentationRequirements {
 
 /// Reusable post-trace GPU presentation resources for one output image size.
 ///
-/// Each render method converts scientific trace buffers into the same RGBA8
-/// Metal texture. The CLI reads that texture back for PNG encoding; a future
-/// interactive renderer can instead sample or blit `texture()` directly and
-/// omit all host readback and ImageIO work.
+/// Each render method converts scientific trace buffers into the same 8-bit
+/// four-channel Metal texture. The CLI reads that texture back for PNG
+/// encoding, while the interactive viewer blits `texture()` directly and
+/// omits host readback and ImageIO work.
 class GpuImageRenderer {
 public:
   GpuImageRenderer(
@@ -51,12 +52,16 @@ public:
       id<MTLCommandQueue> queue,
       id<MTLLibrary> library,
       ImageSize image,
-      GpuPresentationRequirements requirements
+      GpuPresentationRequirements requirements,
+      MTLPixelFormat output_pixel_format = MTLPixelFormatRGBA8Unorm
   );
 
   GpuImageRenderer(const GpuImageRenderer &) = delete;
   GpuImageRenderer &operator=(const GpuImageRenderer &) = delete;
   ~GpuImageRenderer();
+
+  /// Reallocate only image-sized targets while retaining compiled pipelines.
+  void resize(ImageSize image);
 
   /// Render a scalar diagnostic using viridis over a fixed value range.
   void render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer);
@@ -65,13 +70,20 @@ public:
   void
   render_surface_normals(id<MTLBuffer> packed_gradients, id<MTLBuffer> distances, Timer &timer);
 
-  /// Render lit terrain on black using white or colourmapped scalar values.
+  /// Render terrain on black using white or colourmapped scalar values.
+  ///
+  /// `packed_gradients` may be nil when normal lighting is disabled. Callers
+  /// which switch lighting at runtime should retain it so enabling lighting
+  /// remains a presentation-only operation. `ray_directions` is required only
+  /// when feature outlines are enabled.
   void render_synthetic(
       id<MTLBuffer> packed_gradients,
       id<MTLBuffer> distances,
+      id<MTLBuffer> ray_directions,
       id<MTLBuffer> colour_values,
       const SyntheticRenderOptions &options,
       ScalarColourRange range,
+      bool use_surface_normals,
       Timer &timer
   );
 

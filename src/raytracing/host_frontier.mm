@@ -11,7 +11,8 @@ HostFrontier::HostFrontier(
     const TerrainCatalogue &catalogue,
     std::span<const RayDirection> rays,
     const RaytraceParameters &parameters,
-    uint32_t resident_slot_capacity
+    uint32_t resident_slot_capacity,
+    uint32_t observer_slot
 )
     : catalogue_(catalogue), rays_(rays), parameters_(parameters),
       source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
@@ -19,18 +20,20 @@ HostFrontier::HostFrontier(
       request_outstanding_(catalogue.sources().size(), 0U),
       request_distances_(catalogue.sources().size(), std::numeric_limits<float>::infinity()),
       activation_slots_(catalogue.sources().size(), std::numeric_limits<uint32_t>::max()),
-      active_slots_{0U}, active_slot_seen_(resident_slot_capacity, 0U)
+      active_slots_{observer_slot}, active_slot_seen_(resident_slot_capacity, 0U)
 #if defined(PANORAMA_DEBUG_VALIDATION)
       ,
       claimed_ray_(rays.size(), 0U)
 #endif
 {
-  if (rays_.empty() || rays_.size() != parameters_.ray_count || resident_slot_capacity == 0U) {
+  if (rays_.empty() || rays_.size() != parameters_.ray_count || resident_slot_capacity == 0U ||
+      observer_slot >= resident_slot_capacity) {
     throw std::invalid_argument("Host frontier requires one direction per output ray");
   }
-  // ResidentTileCache installs the observer tile in slot zero, and the first
-  // GPU frontier contains every ray in that tile.
-  active_slot_seen_[0] = 1U;
+  // A persistent session may have moved the observer source away from slot
+  // zero before this frame. The first frontier still references exactly that
+  // one resident slot.
+  active_slot_seen_[observer_slot] = 1U;
 }
 
 void HostFrontier::mark_installed(std::span<const uint32_t> source_indices) {

@@ -122,6 +122,75 @@ struct GpuRaytraceResources::State {
   bool trace_quantized;
   GpuTraceOutputRequirements outputs;
   bool capture_active = false;
+
+  /// Allocate a complete ray-dependent resource set before publishing it.
+  /// Keeping the old set intact until every allocation succeeds makes a
+  /// failed interactive resize recoverable by the caller.
+  void replace_ray_buffers(std::span<const RayDirection> next_rays) {
+    if (next_rays.empty() || next_rays.size() > std::numeric_limits<uint32_t>::max()) {
+      throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
+    }
+    const uint32_t next_capacity = static_cast<uint32_t>(next_rays.size());
+    id<MTLBuffer> next_ray_buffer = make_buffer(
+        device,
+        next_rays.data(),
+        checked_buffer_length(next_rays.size(), sizeof(RayDirection), "ray directions"),
+        "ray directions"
+    );
+    id<MTLBuffer> next_distance_output = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(float), "distance output"),
+        "distance output"
+    );
+    id<MTLBuffer> next_elevation_output = make_buffer(
+        device,
+        nullptr,
+        outputs.elevations
+            ? checked_buffer_length(next_rays.size(), sizeof(float), "elevation output")
+            : sizeof(float),
+        "elevation output"
+    );
+    id<MTLBuffer> next_surface_gradient_output = make_buffer(
+        device,
+        nullptr,
+        outputs.surface_gradients
+            ? checked_buffer_length(next_rays.size(), sizeof(uint32_t), "surface gradient output")
+            : sizeof(uint32_t),
+        "surface gradient output"
+    );
+    id<MTLBuffer> next_active = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(RayWorkItem), "active frontier"),
+        "active frontier"
+    );
+    id<MTLBuffer> next_continuations = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(float), "ray continuations"),
+        "ray continuations"
+    );
+    id<MTLBuffer> next_deferred_items = make_buffer(
+        device,
+        nullptr,
+        checked_buffer_length(next_rays.size(), sizeof(DeferredRayWork), "deferred frontier"),
+        "deferred frontier"
+    );
+    clear_buffer(next_distance_output, "distance output");
+    if (outputs.elevations) {
+      clear_buffer(next_elevation_output, "elevation output");
+    }
+
+    frontier_capacity = next_capacity;
+    rays = next_ray_buffer;
+    distance_output = next_distance_output;
+    elevation_output = next_elevation_output;
+    surface_gradient_output = next_surface_gradient_output;
+    active = next_active;
+    continuations = next_continuations;
+    deferred_items = next_deferred_items;
+  }
 };
 
 GpuRaytraceResources::GpuRaytraceResources(
@@ -135,7 +204,6 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
   }
   auto state = std::make_unique<State>();
-  state->frontier_capacity = static_cast<uint32_t>(rays.size());
   state->catalogue_hash_capacity = catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
   state->outputs = outputs;
@@ -178,65 +246,15 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::runtime_error("Could not create continuation pipeline");
   }
 
-  // Static per-pixel directions and scientific output buffers persist for
-  // every frontier pass.
-  state->rays = make_buffer(
-      state->device,
-      rays.data(),
-      checked_buffer_length(rays.size(), sizeof(RayDirection), "ray directions"),
-      "ray directions"
-  );
-  state->distance_output = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(float), "distance output"),
-      "distance output"
-  );
   // Function-constant specialization removes disabled output work. One-word
   // placeholders preserve the common kernel ABI without full per-ray buffers.
-  state->elevation_output = make_buffer(
-      state->device,
-      nullptr,
-      outputs.elevations ? checked_buffer_length(rays.size(), sizeof(float), "elevation output")
-                         : sizeof(float),
-      "elevation output"
-  );
-  state->surface_gradient_output = make_buffer(
-      state->device,
-      nullptr,
-      outputs.surface_gradients
-          ? checked_buffer_length(rays.size(), sizeof(uint32_t), "surface gradient output")
-          : sizeof(uint32_t),
-      "surface gradient output"
-  );
-  clear_buffer(state->distance_output, "distance output");
-  if (outputs.elevations) {
-    clear_buffer(state->elevation_output, "elevation output");
-  }
+  state->replace_ray_buffers(rays);
   // Every positive distance is written beside its gradient, and consumers use
   // distance as the validity mask, so clearing this potentially large buffer
   // would add setup bandwidth without defining any observable output.
 
   // A command completes before the host replaces this frontier with the next
   // source-bucketed batch, so one shared work buffer is sufficient.
-  state->active = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(RayWorkItem), "active frontier"),
-      "active frontier"
-  );
-  state->continuations = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(float), "ray continuations"),
-      "ray continuations"
-  );
-  state->deferred_items = make_buffer(
-      state->device,
-      nullptr,
-      checked_buffer_length(rays.size(), sizeof(DeferredRayWork), "deferred frontier"),
-      "deferred frontier"
-  );
   state->deferred_count =
       make_buffer(state->device, nullptr, sizeof(uint32_t), "deferred frontier count");
   std::vector<CatalogueTileHashEntry> catalogue_entries(
@@ -277,14 +295,44 @@ GpuRaytraceResources::GpuRaytraceResources(
 
 GpuRaytraceResources::~GpuRaytraceResources() { stop_capture(); }
 
-void GpuRaytraceResources::initialise_frontier() {
+void GpuRaytraceResources::update_rays(std::span<const RayDirection> rays) {
+  State &state = *state_;
+  if (rays.size() != state.frontier_capacity) {
+    throw std::invalid_argument("Updated ray field has the wrong size");
+  }
+  void *ray_contents = state.rays.contents;
+  void *distance_contents = state.distance_output.contents;
+  if (ray_contents == nullptr || distance_contents == nullptr) {
+    throw std::runtime_error("Could not map reusable raytrace buffers");
+  }
+  std::memcpy(ray_contents, rays.data(), rays.size_bytes());
+  std::memset(distance_contents, 0, state.distance_output.length);
+  if (state.outputs.elevations) {
+    void *elevation_contents = state.elevation_output.contents;
+    if (elevation_contents == nullptr) {
+      throw std::runtime_error("Could not map reusable elevation output");
+    }
+    std::memset(elevation_contents, 0, state.elevation_output.length);
+  }
+}
+
+void GpuRaytraceResources::resize_rays(std::span<const RayDirection> rays) {
+  State &state = *state_;
+  if (rays.size() == state.frontier_capacity) {
+    update_rays(rays);
+    return;
+  }
+  state.replace_ray_buffers(rays);
+}
+
+void GpuRaytraceResources::initialise_frontier(uint32_t observer_slot) {
   State &state = *state_;
   auto *items = static_cast<RayWorkItem *>(state.active.contents);
   if (items == nullptr) {
     throw std::runtime_error("Could not map active frontier buffer");
   }
   for (uint32_t ray = 0U; ray < state.frontier_capacity; ray++) {
-    items[ray] = {0U, ray, 1U, 0.0F};
+    items[ray] = {observer_slot, ray, 1U, 0.0F};
   }
 }
 
@@ -394,6 +442,9 @@ std::span<const DeferredRayWork> GpuRaytraceResources::deferred_work(uint32_t co
 }
 
 id<MTLBuffer> GpuRaytraceResources::distances() const { return state_->distance_output; }
+
+id<MTLBuffer> GpuRaytraceResources::ray_directions() const { return state_->rays; }
+
 id<MTLBuffer> GpuRaytraceResources::elevations() const {
   if (!state_->outputs.elevations) {
     throw std::logic_error("Elevations were not requested");

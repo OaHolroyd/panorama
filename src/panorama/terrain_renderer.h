@@ -36,10 +36,11 @@ struct TerrainRenderOutputs {
   }
 };
 
-/// Trace an explicitly supplied per-pixel ray field and render selected outputs.
+/// Trace one explicitly supplied per-pixel ray field and render selected outputs.
 ///
-/// This is the command-line application's orchestration boundary. The tracing
-/// and rendering implementations remain independently reusable beneath it.
+/// This convenience boundary constructs a short-lived `TerrainTraceSession`
+/// for the command-line application. Interactive clients retain their session
+/// directly so catalogue, atlas, and pipeline state survives between views.
 void render_terrain(
     const RaytraceConfig &config,
     const RayField &field,

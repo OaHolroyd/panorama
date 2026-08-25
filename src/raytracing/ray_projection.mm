@@ -178,6 +178,23 @@ CameraIntrinsics::from_horizontal_field_of_view(ImageSize image, double horizont
   };
 }
 
+CameraIntrinsics
+CameraIntrinsics::from_vertical_field_of_view(ImageSize image, double vertical_field_of_view) {
+  (void)checked_pixel_count(image);
+  if (!std::isfinite(vertical_field_of_view) || vertical_field_of_view <= 0.0 ||
+      vertical_field_of_view >= std::numbers::pi_v<double>) {
+    throw std::invalid_argument("Vertical field of view must lie between zero and pi");
+  }
+  const double focal =
+      0.5 * static_cast<double>(image.height) / std::tan(0.5 * vertical_field_of_view);
+  return {
+      focal,
+      focal,
+      0.5 * static_cast<double>(image.width),
+      0.5 * static_cast<double>(image.height),
+  };
+}
+
 RayField make_angular_ray_field(ImageSize image, const AngularProjection &projection) {
   const size_t ray_count = checked_pixel_count(image);
   if (!std::isfinite(projection.azimuth_start) || !std::isfinite(projection.azimuth_end) ||

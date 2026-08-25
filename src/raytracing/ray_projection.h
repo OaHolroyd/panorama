@@ -45,6 +45,11 @@ struct CameraIntrinsics {
   /// The field of view must be strictly between zero and pi radians.
   [[nodiscard]] static CameraIntrinsics
   from_horizontal_field_of_view(ImageSize image, double horizontal_field_of_view);
+
+  /// Construct centred, square-pixel intrinsics from a vertical field of view.
+  /// The field of view must be strictly between zero and pi radians.
+  [[nodiscard]] static CameraIntrinsics
+  from_vertical_field_of_view(ImageSize image, double vertical_field_of_view);
 };
 
 /// Select an ideal pinhole lens with no optical distortion.

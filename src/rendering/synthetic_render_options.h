@@ -19,6 +19,15 @@ enum class PresetColourmap : uint32_t {
   Magma = 3U,
   Cividis = 4U,
   Turbo = 5U,
+  Viewfinder = 6U,
+};
+
+/// Transform applied after range normalisation and before palette lookup.
+enum class ScalarColourScale : uint32_t {
+  Linear = 0U,
+  Logarithmic = 1U,
+  SquareRoot = 2U,
+  Quadratic = 3U,
 };
 
 /// Fixed scalar interval mapped onto the full span of a preset colourmap.
@@ -36,10 +45,18 @@ struct SyntheticRenderOptions {
   double sun_elevation;
   /// Direction-independent light fraction in the inclusive range [0, 1].
   float ambient_light;
+  /// Strength of the directional Lambertian term in the inclusive range [0, 1].
+  float diffusivity = 1.0F;
   /// White terrain, or a collision field normalised over a fixed range.
   TerrainColourSource colour_source = TerrainColourSource::White;
   /// Preset applied when `colour_source` selects a scalar field.
   PresetColourmap colourmap = PresetColourmap::Viridis;
+  /// Distribution of the selected scalar interval across the palette.
+  ScalarColourScale colour_scale = ScalarColourScale::Linear;
+  /// Draw one-pixel black outlines at multiscale geometric surface separations.
+  bool feature_outlines = false;
+  /// Outline sensitivity in [0, 1], from only major divisions to fine detail.
+  float feature_outline_detail = 0.7F;
 };
 
 } // namespace panorama

@@ -1,12 +1,14 @@
-# Panorama rendering and tile-generation command-line executables.
+# Panorama CLI, interactive viewer, and tile-generation executables.
 PANORAMA_EXE := panorama
+PANORAMA_APP_EXE := panorama-app
 TILE_GEN_EXE := panorama-tile-gen
 
 # Keep application coordination, tracing, and presentation separate. Common
-# format and argument code lives in shared/ and is linked into both executables
-# without either depending on the other's entry point.
+# format and argument code lives in shared/ and is linked into the relevant
+# executables without one application depending on another's entry point.
 SRC_DIR := src
 PANORAMA_SRC_DIR := $(SRC_DIR)/panorama
+PANORAMA_APP_SRC_DIR := $(SRC_DIR)/app
 RAYTRACE_SRC_DIR := $(SRC_DIR)/raytracing
 RENDERING_SRC_DIR := $(SRC_DIR)/rendering
 TILE_GEN_SRC_DIR := $(SRC_DIR)/tile-gen
@@ -29,6 +31,7 @@ GDAL_LIBS := $(shell $(GDAL_CONFIG) --libs)
 CPPFLAGS := $(GDAL_CFLAGS)
 PANORAMA_INCLUDES := -I$(PANORAMA_SRC_DIR) -I$(RAYTRACE_SRC_DIR) \
 	-I$(RENDERING_SRC_DIR) -I$(SHARED_SRC_DIR)
+PANORAMA_VIEWER_INCLUDES := -I$(PANORAMA_APP_SRC_DIR) $(PANORAMA_INCLUDES)
 RAYTRACE_INCLUDES := -I$(RAYTRACE_SRC_DIR) -I$(SHARED_SRC_DIR)
 RENDERING_INCLUDES := -I$(RENDERING_SRC_DIR) -I$(RAYTRACE_SRC_DIR) -I$(SHARED_SRC_DIR)
 TILE_GEN_INCLUDES := -I$(TILE_GEN_SRC_DIR) -I$(SHARED_SRC_DIR)
@@ -37,6 +40,8 @@ WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion
 COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
 # ImageIO/CoreGraphics encode diagnostic and rendered images as PNG files.
 FRAMEWORKS := -framework Foundation -framework Metal -framework CoreGraphics -framework ImageIO
+VIEWER_FRAMEWORKS := -framework Foundation -framework Metal -framework AppKit -framework MetalKit \
+	-framework MapKit -framework CoreLocation
 LDLIBS := $(GDAL_LIBS)
 
 # Select with `make DEBUG=1`; release is the default.
@@ -66,6 +71,10 @@ RENDERING_SRC := $(wildcard $(RENDERING_SRC_DIR)/*.mm)
 RENDERING_OBJ := \
 	$(patsubst $(RENDERING_SRC_DIR)/%.mm,$(OBJ_DIR)/rendering/%.o,$(RENDERING_SRC))
 PANORAMA_OBJ := $(PANORAMA_APP_OBJ) $(RAYTRACE_OBJ) $(RENDERING_OBJ)
+PANORAMA_VIEWER_SRC := $(wildcard $(PANORAMA_APP_SRC_DIR)/*.mm)
+PANORAMA_VIEWER_OBJ := \
+	$(patsubst $(PANORAMA_APP_SRC_DIR)/%.mm,$(OBJ_DIR)/app/%.o,$(PANORAMA_VIEWER_SRC))
+PANORAMA_VIEWER_CORE_OBJ := $(RAYTRACE_OBJ) $(OBJ_DIR)/rendering/gpu_image_renderer.o
 TILE_GEN_SRC := $(wildcard $(TILE_GEN_SRC_DIR)/*.mm)
 TILE_GEN_OBJ := $(patsubst $(TILE_GEN_SRC_DIR)/%.mm,$(OBJ_DIR)/tile-gen/%.o,$(TILE_GEN_SRC))
 SHARED_SRC := $(wildcard $(SHARED_SRC_DIR)/*.mm)
@@ -81,17 +90,25 @@ METAL_LIB := $(OBJ_DIR)/panorama.metallib
 # Tell panorama host code where this configuration's generated metallib lives.
 PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
-DEPS := $(PANORAMA_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) $(SHARED_OBJ:.o=.d)
+DEPS := $(PANORAMA_OBJ:.o=.d) $(PANORAMA_VIEWER_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) \
+	$(SHARED_OBJ:.o=.d)
 
 .PHONY: all clean rebuild compile_commands FORCE
 
-all: $(PANORAMA_EXE) $(TILE_GEN_EXE)
+all: $(PANORAMA_EXE) $(PANORAMA_APP_EXE) $(TILE_GEN_EXE)
 
 # The executable name is shared by configurations, so relink it to the
 # configuration requested by this invocation even if the other build was newer.
 $(PANORAMA_EXE): FORCE $(PANORAMA_OBJ) $(SHARED_OBJ) $(METAL_LIB)
 	@printf 'Linking %s\n' '$@'
 	$(CXX) $(OPT_FLAGS) -o $@ $(PANORAMA_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
+
+# The interactive viewer reuses the complete tracing/presentation core but
+# replaces the CLI entry point with an AppKit/MetalKit window.
+$(PANORAMA_APP_EXE): FORCE $(PANORAMA_VIEWER_OBJ) $(PANORAMA_VIEWER_CORE_OBJ) $(SHARED_OBJ) $(METAL_LIB)
+	@printf 'Linking %s\n' '$@'
+	$(CXX) $(OPT_FLAGS) -o $@ $(PANORAMA_VIEWER_OBJ) $(PANORAMA_VIEWER_CORE_OBJ) $(SHARED_OBJ) \
+		$(VIEWER_FRAMEWORKS) $(LDLIBS)
 
 # The tile generator does not use a metallib. It links Metal because the
 # custom-tile writer uses Metal I/O compression contexts.
@@ -103,6 +120,10 @@ $(TILE_GEN_EXE): FORCE $(TILE_GEN_OBJ) $(SHARED_OBJ)
 $(OBJ_DIR)/panorama/%.o: $(PANORAMA_SRC_DIR)/%.mm | $(OBJ_DIR)/panorama
 	@printf 'Compiling %s\n' '$@'
 	$(CXX) $(PANORAMA_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/app/%.o: $(PANORAMA_APP_SRC_DIR)/%.mm | $(OBJ_DIR)/app
+	@printf 'Compiling %s\n' '$@'
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/raytracing/%.o: $(RAYTRACE_SRC_DIR)/%.mm | $(OBJ_DIR)/raytracing
 	@printf 'Compiling %s\n' '$@'
@@ -134,7 +155,7 @@ $(METAL_LIB): $(METAL_AIR)
 	@printf 'Creating %s\n' '$@'
 	$(METALLIB) -o $@ $^
 
-$(OBJ_DIR)/panorama $(OBJ_DIR)/raytracing $(OBJ_DIR)/rendering $(OBJ_DIR)/tile-gen $(OBJ_DIR)/shared:
+$(OBJ_DIR)/panorama $(OBJ_DIR)/app $(OBJ_DIR)/raytracing $(OBJ_DIR)/rendering $(OBJ_DIR)/tile-gen $(OBJ_DIR)/shared:
 	mkdir -p $@
 
 # Generate the compilation database consumed by clangd/objc-clangd. Bear
@@ -149,7 +170,7 @@ compile_commands:
 rebuild: clean all
 
 clean:
-	rm -rf $(PANORAMA_EXE) $(TILE_GEN_EXE) $(OBJ_ROOT) compile_commands.json
+	rm -rf $(PANORAMA_EXE) $(PANORAMA_APP_EXE) $(TILE_GEN_EXE) $(OBJ_ROOT) compile_commands.json
 
 # A phony prerequisite makes the shared executable relink when switching
 # between debug and release object directories.

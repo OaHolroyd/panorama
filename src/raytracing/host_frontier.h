@@ -23,7 +23,8 @@ public:
       const TerrainCatalogue &catalogue,
       std::span<const RayDirection> rays,
       const RaytraceParameters &parameters,
-      uint32_t resident_slot_capacity
+      uint32_t resident_slot_capacity,
+      uint32_t observer_slot
   );
 
   /// Clear pending-request state for sources just published by the atlas cache.

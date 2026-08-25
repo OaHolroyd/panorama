@@ -57,13 +57,13 @@ struct GpuTraceOutputRequirements {
 /// Long-lived Metal resources for repeated multi-tile frontier passes.
 ///
 /// This class owns device/pipeline state and buffers whose lifetime spans the
-/// complete render. The scheduler retains policy: it decides which work is
-/// active, when resident terrain is installed, and how source-bucketed
+/// complete tracing session. The scheduler retains policy: it decides which
+/// work is active, when resident terrain is installed, and how source-bucketed
 /// successors are reactivated. One call encodes the ordered trace and
 /// continuation-culling kernels.
 class GpuRaytraceResources {
 public:
-  /// Create all reusable Metal resources for a fixed per-pixel ray field.
+  /// Create all reusable Metal resources for an initial per-pixel ray field.
   ///
   /// Optional outputs specialize the trace pipeline, removing their collision
   /// arithmetic, buffer writes, and full-size allocations when disabled.
@@ -80,8 +80,14 @@ public:
   /// Stop an active capture before releasing the owned command queue.
   ~GpuRaytraceResources();
 
-  /// Fill the current frontier with every ray in the observer tile.
-  void initialise_frontier();
+  /// Replace the fixed-size ray field and clear outputs from the preceding frame.
+  void update_rays(std::span<const RayDirection> rays);
+
+  /// Reallocate ray-dependent buffers for a differently sized output image.
+  void resize_rays(std::span<const RayDirection> rays);
+
+  /// Fill the current frontier with every ray in the observer tile's current slot.
+  void initialise_frontier(uint32_t observer_slot);
 
   /// Return the Metal device shared with resident terrain atlas allocation.
   [[nodiscard]] id<MTLDevice> device() const;
@@ -109,6 +115,13 @@ public:
 
   /// Return the shared distance output buffer after tracing completes.
   [[nodiscard]] id<MTLBuffer> distances() const;
+
+  /// Return the per-pixel ray directions corresponding to the current outputs.
+  ///
+  /// Post-trace GPU consumers can combine these with `distances()` without
+  /// duplicating the potentially large ray field or reading it back through
+  /// the host.
+  [[nodiscard]] id<MTLBuffer> ray_directions() const;
 
   /// Return the shared elevation output buffer after tracing completes.
   ///
