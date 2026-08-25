@@ -999,6 +999,7 @@ private:
             presentation_->render_synthetic(
                 trace_->surface_gradients(),
                 trace_->distances(),
+                trace_->ray_directions(),
                 colour_values,
                 presentation.appearance,
                 presentation.colour_range,
@@ -1957,7 +1958,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _presentation.appearance.feature_outlines =
       _featureOutlinesControl.state == NSControlStateValueOn;
   _presentation.appearance.feature_outline_detail =
-      static_cast<float>((_featureOutlineDetailControl.doubleValue - 1.0) / 9.0);
+      static_cast<float>(_featureOutlineDetailControl.doubleValue / 10.0);
   _renderer->request_presentation(_presentation);
 }
 
@@ -2427,19 +2428,18 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       _presentation.appearance.feature_outlines ? NSControlStateValueOn : NSControlStateValueOff;
   _featureOutlinesControl.target = self;
   _featureOutlinesControl.action = @selector(featureOutlinesChanged:);
-  _featureOutlinesControl.toolTip =
-      @"Draw black lines where neighbouring rays hit significantly different distances";
+  _featureOutlinesControl.toolTip = @"Draw black lines at multiscale geometric surface separations";
 
-  const double initialOutlineDetail = 1.0 + 9.0 * _presentation.appearance.feature_outline_detail;
+  const double initialOutlineDetail = 10.0 * _presentation.appearance.feature_outline_detail;
   _featureOutlineDetailControl = [NSSlider sliderWithValue:initialOutlineDetail
-                                                  minValue:1.0
+                                                  minValue:0.0
                                                   maxValue:10.0
                                                     target:self
                                                     action:@selector(featureOutlineDetailChanged:)];
   _featureOutlineDetailControl.continuous = YES;
-  _featureOutlineDetailControl.numberOfTickMarks = 10;
+  _featureOutlineDetailControl.numberOfTickMarks = 11;
   _featureOutlineDetailControl.allowsTickMarkValuesOnly = YES;
-  _featureOutlineDetailControl.toolTip = @"Higher values outline smaller distance discontinuities";
+  _featureOutlineDetailControl.toolTip = @"Higher values outline smaller surface separations";
   _featureOutlineDetailLabel =
       [NSTextField labelWithString:[NSString stringWithFormat:@"%.0f", initialOutlineDetail]];
   _featureOutlineDetailLabel.alignment = NSTextAlignmentRight;
@@ -2953,7 +2953,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _presentation.appearance.feature_outlines =
       _featureOutlinesControl.state == NSControlStateValueOn;
   _presentation.appearance.feature_outline_detail =
-      static_cast<float>((_featureOutlineDetailControl.doubleValue - 1.0) / 9.0);
+      static_cast<float>(_featureOutlineDetailControl.doubleValue / 10.0);
   _presentation.colour_range = {
       static_cast<float>(*minimum),
       static_cast<float>(*maximum),

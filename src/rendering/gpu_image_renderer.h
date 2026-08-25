@@ -74,10 +74,12 @@ public:
   ///
   /// `packed_gradients` may be nil when normal lighting is disabled. Callers
   /// which switch lighting at runtime should retain it so enabling lighting
-  /// remains a presentation-only operation.
+  /// remains a presentation-only operation. `ray_directions` is required only
+  /// when feature outlines are enabled.
   void render_synthetic(
       id<MTLBuffer> packed_gradients,
       id<MTLBuffer> distances,
+      id<MTLBuffer> ray_directions,
       id<MTLBuffer> colour_values,
       const SyntheticRenderOptions &options,
       ScalarColourRange range,

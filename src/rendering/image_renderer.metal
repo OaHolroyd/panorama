@@ -280,40 +280,115 @@ inline float3 linear_to_srgb(float3 value) {
   );
 }
 
-/// Draw only the nearer side of a depth discontinuity, keeping the result to
-/// one screen pixel while avoiding doubled edges. The threshold grows with
-/// range, with an additional quadratic term suppressing crowded horizons.
-inline bool feature_outline(
+/// Reconstruct a terrain collision in the observer's local east/north/up
+/// frame. Tracing stores horizontal distance; its ray slope and effective-
+/// Earth curvature recover the vertical component without consulting DEM
+/// normals.
+inline float3 collision_point(VisibilityRayDirection ray, float distance, float curvature) {
+  return float3(
+      distance * ray.x,
+      distance * ray.y,
+      distance * ray.slope + curvature * distance * distance
+  );
+}
+
+/// Measure how much farther apart two collision points are than adjacent rays
+/// at their nearer slant range would normally be. A continuous front-facing
+/// surface is close to one; separated surfaces and grazing ridges are larger.
+inline float surface_separation(
+    device const VisibilityRayDirection *rays,
     device const float *distances,
-    uint2 position,
-    uint width,
-    uint height,
-    float detail
+    uint index,
+    uint neighbour_index,
+    float curvature
 ) {
+  const float distance = distances[index];
+  const float neighbour_distance = distances[neighbour_index];
+  if (!(neighbour_distance > distance) || !isfinite(neighbour_distance)) {
+    return 0.0F;
+  }
+
+  const VisibilityRayDirection ray = rays[index];
+  const VisibilityRayDirection neighbour_ray = rays[neighbour_index];
+  const float3 ray_vector = float3(ray.x, ray.y, ray.slope);
+  const float3 neighbour_ray_vector = float3(neighbour_ray.x, neighbour_ray.y, neighbour_ray.slope);
+  const float ray_length = length(ray_vector);
+  const float neighbour_ray_length = length(neighbour_ray_vector);
+  const float angular_chord =
+      length(ray_vector / ray_length - neighbour_ray_vector / neighbour_ray_length);
+  const float nearer_slant_range =
+      min(distance * ray_length, neighbour_distance * neighbour_ray_length);
+  const float expected_spacing = max(nearer_slant_range * angular_chord, 1.0F);
+  const float actual_spacing = length(
+      collision_point(neighbour_ray, neighbour_distance, curvature) -
+      collision_point(ray, distance, curvature)
+  );
+  return actual_spacing / expected_spacing;
+}
+
+/// Generate a reusable one-byte outline mask from geometric separation at
+/// one-, two-, and four-pixel baselines. Fine-scale evidence localises the
+/// result while agreement at a wider scale rejects isolated depth noise.
+kernel void compute_feature_outlines(
+    device const VisibilityRayDirection *rays [[buffer(0)]],
+    device const float *distances [[buffer(1)]],
+    constant float &detail [[buffer(2)]],
+    constant float &curvature [[buffer(3)]],
+    texture2d<float, access::write> output [[texture(0)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+  const uint width = output.get_width();
+  const uint height = output.get_height();
+  if (position.x >= width || position.y >= height) {
+    return;
+  }
   const uint index = position.y * width + position.x;
   const float distance = distances[index];
-  const float sensitivity = clamp(detail, 0.0F, 1.0F);
-  const float minimum_jump = mix(80.0F, 5.0F, sensitivity);
-  const float relative_jump = mix(0.05F, 0.004F, sensitivity);
-  const float distant_jump = mix(0.015F, 0.0015F, sensitivity);
-  const float threshold =
-      minimum_jump + distance * (relative_jump + distant_jump * distance / 100000.0F);
-  constexpr int2 offsets[] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
-  for (uint neighbour_index = 0U; neighbour_index < 4U; neighbour_index++) {
-    const int2 neighbour = int2(position) + offsets[neighbour_index];
-    if (neighbour.x < 0 || neighbour.y < 0 || neighbour.x >= int(width) ||
-        neighbour.y >= int(height)) {
-      continue;
-    }
-    const float neighbour_distance = distances[uint(neighbour.y) * width + uint(neighbour.x)];
-    if (!(neighbour_distance > 0.0F) || !isfinite(neighbour_distance)) {
-      return true;
-    }
-    if (neighbour_distance - distance > threshold) {
-      return true;
-    }
+  if (!(distance > 0.0F) || !isfinite(distance)) {
+    output.write(float4(0.0F), position);
+    return;
   }
-  return false;
+
+  const float sensitivity = clamp(detail, 0.0F, 1.0F);
+  // The useful part of the old range was concentrated at its least-sensitive
+  // end. Spread that region across this control: level 7 is approximately the
+  // former level 1, with ample room below it for only major divisions.
+  const float separation_threshold = mix(24.0F, 6.0F, sensitivity);
+  const float fine_threshold = max(1.35F, 0.45F * separation_threshold);
+  const float medium_threshold = max(1.5F, 0.75F * separation_threshold);
+  const float coarse_threshold = max(1.25F, 0.55F * separation_threshold);
+  constexpr int2 directions[] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
+  constexpr int radii[] = {1, 2, 4};
+
+  bool outlined = false;
+  for (uint direction_index = 0U; direction_index < 4U && !outlined; direction_index++) {
+    float evidence[3] = {0.0F, 0.0F, 0.0F};
+    bool immediate_sky = false;
+    for (uint scale = 0U; scale < 3U; scale++) {
+      const int2 neighbour = int2(position) + radii[scale] * directions[direction_index];
+      if (neighbour.x < 0 || neighbour.y < 0 || neighbour.x >= int(width) ||
+          neighbour.y >= int(height)) {
+        continue;
+      }
+      const uint neighbour_index = uint(neighbour.y) * width + uint(neighbour.x);
+      const float neighbour_distance = distances[neighbour_index];
+      if (!(neighbour_distance > 0.0F) || !isfinite(neighbour_distance)) {
+        immediate_sky = immediate_sky || scale == 0U;
+        continue;
+      }
+      evidence[scale] = surface_separation(rays, distances, index, neighbour_index, curvature);
+    }
+
+    const bool fine = evidence[0] > fine_threshold;
+    const bool medium = evidence[1] > medium_threshold;
+    const bool coarse = evidence[2] > coarse_threshold;
+    outlined = immediate_sky || (fine && (medium || coarse));
+  }
+  output.write(float4(outlined ? 1.0F : 0.0F), position);
+}
+
+inline bool feature_outline(texture2d<float, access::read> feature_outline_mask, uint2 position) {
+  return feature_outline_mask.read(position).r >= 0.5F;
 }
 
 /// Render white Lambertian terrain under one directional sun and ambient term.
@@ -324,8 +399,8 @@ kernel void present_synthetic_terrain(
     constant uint &use_surface_normals [[buffer(3)]],
     constant float &diffusivity [[buffer(4)]],
     constant uint &feature_outlines [[buffer(5)]],
-    constant float &feature_outline_detail [[buffer(6)]],
     texture2d<float, access::write> output [[texture(0)]],
+    texture2d<float, access::read> feature_outline_mask [[texture(1)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   if (position.x >= output.get_width() || position.y >= output.get_height()) {
@@ -337,13 +412,7 @@ kernel void present_synthetic_terrain(
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
-  if (feature_outlines != 0U && feature_outline(
-                                    distances,
-                                    position,
-                                    output.get_width(),
-                                    output.get_height(),
-                                    feature_outline_detail
-                                )) {
+  if (feature_outlines != 0U && feature_outline(feature_outline_mask, position)) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
@@ -375,8 +444,8 @@ kernel void present_colourmapped_synthetic_terrain(
     constant uint &use_surface_normals [[buffer(7)]],
     constant float &diffusivity [[buffer(8)]],
     constant uint &feature_outlines [[buffer(9)]],
-    constant float &feature_outline_detail [[buffer(10)]],
     texture2d<float, access::write> output [[texture(0)]],
+    texture2d<float, access::read> feature_outline_mask [[texture(1)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   if (position.x >= output.get_width() || position.y >= output.get_height()) {
@@ -388,13 +457,7 @@ kernel void present_colourmapped_synthetic_terrain(
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
-  if (feature_outlines != 0U && feature_outline(
-                                    distances,
-                                    position,
-                                    output.get_width(),
-                                    output.get_height(),
-                                    feature_outline_detail
-                                )) {
+  if (feature_outlines != 0U && feature_outline(feature_outline_mask, position)) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }

@@ -202,8 +202,8 @@ void print_usage(const char *program) {
       "  --sun-elevation D     above the horizon (default: 35)\n"
       "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
       "  --diffusivity V       directional diffuse-light strength, 0 to 1 (default: 1)\n"
-      "  --feature-outlines    draw adaptive black depth-discontinuity lines\n"
-      "  --outline-detail N    outline detail from 1 to 10 (default: 7)\n"
+      "  --feature-outlines    draw multiscale black surface-separation lines\n"
+      "  --outline-detail N    outline detail from 0 to 10 (default: 7)\n"
       "  --terrain-colour MODE white, distance, or elevation (default: white)\n"
       "  --colourmap NAME      viridis, plasma, inferno, magma, cividis, turbo, or viewfinder\n"
       "                        (default: viridis)\n"
@@ -310,10 +310,10 @@ void print_usage(const char *program) {
       settings.synthetic_setting_seen = true;
     } else if (option == "--outline-detail") {
       const double parsed = panorama::arguments::parse_finite_double(value, option);
-      if (parsed < 1.0 || parsed > 10.0) {
-        throw std::out_of_range("Outline detail must be between 1 and 10");
+      if (parsed < 0.0 || parsed > 10.0) {
+        throw std::out_of_range("Outline detail must be between 0 and 10");
       }
-      settings.synthetic.feature_outline_detail = static_cast<float>((parsed - 1.0) / 9.0);
+      settings.synthetic.feature_outline_detail = static_cast<float>(parsed / 10.0);
       settings.synthetic_setting_seen = true;
     } else if (option == "--colour-min") {
       settings.colour_minimum = parse_float32(value, option);
@@ -426,7 +426,7 @@ int main(int argc, const char *argv[]) {
       if (settings.synthetic.feature_outlines) {
         std::printf(
             ", feature outlines detail %.0f",
-            1.0 + 9.0 * settings.synthetic.feature_outline_detail
+            10.0 * settings.synthetic.feature_outline_detail
         );
       }
       std::printf(".\n");

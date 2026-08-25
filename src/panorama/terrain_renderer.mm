@@ -107,6 +107,7 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
       renderer.render_synthetic(
           trace.surface_gradients(),
           distances,
+          trace.ray_directions(),
           colour_values,
           outputs.synthetic_options,
           outputs.scalar_colour_range,

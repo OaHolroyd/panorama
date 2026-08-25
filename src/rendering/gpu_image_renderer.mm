@@ -1,5 +1,6 @@
 #include "gpu_image_renderer.h"
 
+#include "raytrace_config.h"
 #include "timer.h"
 
 #import <Foundation/Foundation.h>
@@ -78,15 +79,18 @@ struct GpuImageRenderer::State {
   id<MTLCommandQueue> queue;
   id<MTLComputePipelineState> scalar;
   id<MTLComputePipelineState> normals;
+  id<MTLComputePipelineState> feature_outlines;
   id<MTLComputePipelineState> white_synthetic;
   id<MTLComputePipelineState> colourmapped_synthetic;
   id<MTLComputePipelineState> pack_rgb;
   id<MTLTexture> output;
+  id<MTLTexture> feature_outline_mask;
   id<MTLBuffer> readback;
   ImageSize image;
   NSUInteger bytes_per_row;
   MTLPixelFormat output_pixel_format;
   bool host_readback;
+  bool synthetic;
 
   void resize(ImageSize next_image) {
     const uint64_t pixel_count = static_cast<uint64_t>(next_image.width) * next_image.height;
@@ -110,6 +114,22 @@ struct GpuImageRenderer::State {
     }
     next_output.label = @"Presented image";
 
+    id<MTLTexture> next_feature_outline_mask = nil;
+    if (synthetic) {
+      MTLTextureDescriptor *mask_descriptor =
+          [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                             width:next_image.width
+                                                            height:next_image.height
+                                                         mipmapped:NO];
+      mask_descriptor.storageMode = MTLStorageModePrivate;
+      mask_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      next_feature_outline_mask = [device newTextureWithDescriptor:mask_descriptor];
+      if (next_feature_outline_mask == nil) {
+        throw std::runtime_error("Could not allocate GPU feature-outline mask");
+      }
+      next_feature_outline_mask.label = @"Multiscale feature outlines";
+    }
+
     id<MTLBuffer> next_readback = nil;
     NSUInteger next_bytes_per_row = 0U;
     if (host_readback) {
@@ -127,6 +147,7 @@ struct GpuImageRenderer::State {
 
     image = next_image;
     output = next_output;
+    feature_outline_mask = next_feature_outline_mask;
     readback = next_readback;
     bytes_per_row = next_bytes_per_row;
   }
@@ -151,6 +172,7 @@ GpuImageRenderer::GpuImageRenderer(
   state->queue = queue;
   state->output_pixel_format = output_pixel_format;
   state->host_readback = requirements.host_readback;
+  state->synthetic = requirements.white_synthetic || requirements.synthetic_scalar_colour;
   if (requirements.scalar_diagnostics) {
     state->scalar = make_pipeline(device, library, @"present_scalar_viridis");
   }
@@ -163,6 +185,9 @@ GpuImageRenderer::GpuImageRenderer(
   if (requirements.synthetic_scalar_colour) {
     state->colourmapped_synthetic =
         make_pipeline(device, library, @"present_colourmapped_synthetic_terrain");
+  }
+  if (state->synthetic) {
+    state->feature_outlines = make_pipeline(device, library, @"compute_feature_outlines");
   }
   if (requirements.host_readback) {
     state->pack_rgb = make_pipeline(device, library, @"pack_presented_rgb");
@@ -237,6 +262,7 @@ void GpuImageRenderer::render_surface_normals(
 void GpuImageRenderer::render_synthetic(
     id<MTLBuffer> packed_gradients,
     id<MTLBuffer> distances,
+    id<MTLBuffer> ray_directions,
     id<MTLBuffer> colour_values,
     const SyntheticRenderOptions &options,
     ScalarColourRange range,
@@ -249,6 +275,7 @@ void GpuImageRenderer::render_synthetic(
   const uint32_t colour_scale = static_cast<uint32_t>(options.colour_scale);
   const bool scalar_colour = options.colour_source != TerrainColourSource::White;
   if ((use_surface_normals && packed_gradients == nil) || distances == nil ||
+      (options.feature_outlines && ray_directions == nil) ||
       (scalar_colour && colour_values == nil) || !std::isfinite(options.sun_azimuth) ||
       !std::isfinite(options.sun_elevation) || !std::isfinite(options.ambient_light) ||
       options.ambient_light < 0.0F || options.ambient_light > 1.0F ||
@@ -281,11 +308,36 @@ void GpuImageRenderer::render_synthetic(
 
   timer.start_wall("Pixel conversion");
   id<MTLCommandBuffer> command = [state.queue commandBuffer];
-  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  if (command == nil || encoder == nil) {
+  if (command == nil) {
     throw std::runtime_error("Could not create synthetic presentation command");
   }
   command.label = @"Present synthetic terrain";
+
+  if (options.feature_outlines) {
+    if (state.feature_outlines == nil || state.feature_outline_mask == nil) {
+      throw std::logic_error("Feature-outline presentation was not enabled");
+    }
+    id<MTLComputeCommandEncoder> outline_encoder = [command computeCommandEncoder];
+    if (outline_encoder == nil) {
+      throw std::runtime_error("Could not create feature-outline command encoder");
+    }
+    const float curvature = static_cast<float>(kCurvatureCoefficient);
+    outline_encoder.label = @"compute_feature_outlines";
+    [outline_encoder setBuffer:ray_directions offset:0 atIndex:0];
+    [outline_encoder setBuffer:distances offset:0 atIndex:1];
+    [outline_encoder setBytes:&options.feature_outline_detail
+                       length:sizeof(options.feature_outline_detail)
+                      atIndex:2];
+    [outline_encoder setBytes:&curvature length:sizeof(curvature) atIndex:3];
+    [outline_encoder setTexture:state.feature_outline_mask atIndex:0];
+    dispatch_image(outline_encoder, state.feature_outlines, state.image);
+    [outline_encoder endEncoding];
+  }
+
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  if (encoder == nil) {
+    throw std::runtime_error("Could not create synthetic presentation command");
+  }
   encoder.label =
       scalar_colour ? @"present_colourmapped_synthetic_terrain" : @"present_synthetic_terrain";
   [encoder setBuffer:packed_gradients offset:0 atIndex:0];
@@ -299,18 +351,13 @@ void GpuImageRenderer::render_synthetic(
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:7];
     [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:8];
     [encoder setBytes:&feature_outlines length:sizeof(feature_outlines) atIndex:9];
-    [encoder setBytes:&options.feature_outline_detail
-               length:sizeof(options.feature_outline_detail)
-              atIndex:10];
   } else {
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:3];
     [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:4];
     [encoder setBytes:&feature_outlines length:sizeof(feature_outlines) atIndex:5];
-    [encoder setBytes:&options.feature_outline_detail
-               length:sizeof(options.feature_outline_detail)
-              atIndex:6];
   }
   [encoder setTexture:state.output atIndex:0];
+  [encoder setTexture:state.feature_outline_mask atIndex:1];
   dispatch_image(encoder, pipeline, state.image);
   [encoder endEncoding];
   complete_timed_command(command, timer, "Pixel conversion", @"GPU synthetic presentation failed");
