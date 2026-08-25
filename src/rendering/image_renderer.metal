@@ -280,6 +280,42 @@ inline float3 linear_to_srgb(float3 value) {
   );
 }
 
+/// Draw only the nearer side of a depth discontinuity, keeping the result to
+/// one screen pixel while avoiding doubled edges. The threshold grows with
+/// range, with an additional quadratic term suppressing crowded horizons.
+inline bool feature_outline(
+    device const float *distances,
+    uint2 position,
+    uint width,
+    uint height,
+    float detail
+) {
+  const uint index = position.y * width + position.x;
+  const float distance = distances[index];
+  const float sensitivity = clamp(detail, 0.0F, 1.0F);
+  const float minimum_jump = mix(80.0F, 5.0F, sensitivity);
+  const float relative_jump = mix(0.05F, 0.004F, sensitivity);
+  const float distant_jump = mix(0.015F, 0.0015F, sensitivity);
+  const float threshold =
+      minimum_jump + distance * (relative_jump + distant_jump * distance / 100000.0F);
+  constexpr int2 offsets[] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
+  for (uint neighbour_index = 0U; neighbour_index < 4U; neighbour_index++) {
+    const int2 neighbour = int2(position) + offsets[neighbour_index];
+    if (neighbour.x < 0 || neighbour.y < 0 || neighbour.x >= int(width) ||
+        neighbour.y >= int(height)) {
+      continue;
+    }
+    const float neighbour_distance = distances[uint(neighbour.y) * width + uint(neighbour.x)];
+    if (!(neighbour_distance > 0.0F) || !isfinite(neighbour_distance)) {
+      return true;
+    }
+    if (neighbour_distance - distance > threshold) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// Render white Lambertian terrain under one directional sun and ambient term.
 kernel void present_synthetic_terrain(
     device const uint *packed_gradients [[buffer(0)]],
@@ -287,6 +323,8 @@ kernel void present_synthetic_terrain(
     constant float4 &sun_and_ambient [[buffer(2)]],
     constant uint &use_surface_normals [[buffer(3)]],
     constant float &diffusivity [[buffer(4)]],
+    constant uint &feature_outlines [[buffer(5)]],
+    constant float &feature_outline_detail [[buffer(6)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
@@ -296,6 +334,16 @@ kernel void present_synthetic_terrain(
   const uint index = position.y * output.get_width() + position.x;
   const float distance = distances[index];
   if (!(distance > 0.0F) || !isfinite(distance)) {
+    output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
+    return;
+  }
+  if (feature_outlines != 0U && feature_outline(
+                                    distances,
+                                    position,
+                                    output.get_width(),
+                                    output.get_height(),
+                                    feature_outline_detail
+                                )) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }
@@ -326,6 +374,8 @@ kernel void present_colourmapped_synthetic_terrain(
     constant uint &colour_scale [[buffer(6)]],
     constant uint &use_surface_normals [[buffer(7)]],
     constant float &diffusivity [[buffer(8)]],
+    constant uint &feature_outlines [[buffer(9)]],
+    constant float &feature_outline_detail [[buffer(10)]],
     texture2d<float, access::write> output [[texture(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
@@ -335,6 +385,16 @@ kernel void present_colourmapped_synthetic_terrain(
   const uint index = position.y * output.get_width() + position.x;
   const float distance = distances[index];
   if (!(distance > 0.0F) || !isfinite(distance)) {
+    output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
+    return;
+  }
+  if (feature_outlines != 0U && feature_outline(
+                                    distances,
+                                    position,
+                                    output.get_width(),
+                                    output.get_height(),
+                                    feature_outline_detail
+                                )) {
     output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
     return;
   }

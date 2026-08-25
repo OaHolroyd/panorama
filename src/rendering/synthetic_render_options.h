@@ -53,6 +53,10 @@ struct SyntheticRenderOptions {
   PresetColourmap colourmap = PresetColourmap::Viridis;
   /// Distribution of the selected scalar interval across the palette.
   ScalarColourScale colour_scale = ScalarColourScale::Linear;
+  /// Draw one-pixel black outlines at significant ray-distance discontinuities.
+  bool feature_outlines = false;
+  /// Outline sensitivity in [0, 1], from only major divisions to fine detail.
+  float feature_outline_detail = 2.0F / 3.0F;
 };
 
 } // namespace panorama

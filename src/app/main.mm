@@ -1214,6 +1214,9 @@ private:
   NSButton *_matchWindowControl;
   NSButton *_invertMousePanningControl;
   NSButton *_normalLightingControl;
+  NSButton *_featureOutlinesControl;
+  NSSlider *_featureOutlineDetailControl;
+  NSTextField *_featureOutlineDetailLabel;
   NSSlider *_sunAzimuthControl;
   NSTextField *_sunAzimuthLabel;
   NSSlider *_sunPolarAngleControl;
@@ -1948,6 +1951,28 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _renderer->request_presentation(_presentation);
 }
 
+/// Feature outlines are presentation-only, like lighting, so both controls
+/// can update the current trace immediately without waiting for Apply.
+- (void)publishFeatureOutlineControls {
+  _presentation.appearance.feature_outlines =
+      _featureOutlinesControl.state == NSControlStateValueOn;
+  _presentation.appearance.feature_outline_detail =
+      static_cast<float>((_featureOutlineDetailControl.doubleValue - 1.0) / 9.0);
+  _renderer->request_presentation(_presentation);
+}
+
+- (void)featureOutlinesChanged:(NSButton *)sender {
+  (void)sender;
+  [self updateSettingsControlAvailability];
+  [self publishFeatureOutlineControls];
+}
+
+- (void)featureOutlineDetailChanged:(NSSlider *)sender {
+  sender.doubleValue = std::round(sender.doubleValue);
+  _featureOutlineDetailLabel.stringValue = [NSString stringWithFormat:@"%.0f", sender.doubleValue];
+  [self publishFeatureOutlineControls];
+}
+
 - (void)updateAspectLockAppearance {
   const BOOL locked = _aspectLockControl.state == NSControlStateValueOn;
   _aspectLockControl.image = [NSImage
@@ -2395,6 +2420,36 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _maximumControl.stringValue =
       panorama::app::format_range_value(_presentation.colour_range.maximum);
 
+  _featureOutlinesControl = [[NSButton alloc] initWithFrame:NSZeroRect];
+  _featureOutlinesControl.buttonType = NSButtonTypeSwitch;
+  _featureOutlinesControl.title = @"Feature outlines";
+  _featureOutlinesControl.state =
+      _presentation.appearance.feature_outlines ? NSControlStateValueOn : NSControlStateValueOff;
+  _featureOutlinesControl.target = self;
+  _featureOutlinesControl.action = @selector(featureOutlinesChanged:);
+  _featureOutlinesControl.toolTip =
+      @"Draw black lines where neighbouring rays hit significantly different distances";
+
+  const double initialOutlineDetail = 1.0 + 9.0 * _presentation.appearance.feature_outline_detail;
+  _featureOutlineDetailControl = [NSSlider sliderWithValue:initialOutlineDetail
+                                                  minValue:1.0
+                                                  maxValue:10.0
+                                                    target:self
+                                                    action:@selector(featureOutlineDetailChanged:)];
+  _featureOutlineDetailControl.continuous = YES;
+  _featureOutlineDetailControl.numberOfTickMarks = 10;
+  _featureOutlineDetailControl.allowsTickMarkValuesOnly = YES;
+  _featureOutlineDetailControl.toolTip = @"Higher values outline smaller distance discontinuities";
+  _featureOutlineDetailLabel =
+      [NSTextField labelWithString:[NSString stringWithFormat:@"%.0f", initialOutlineDetail]];
+  _featureOutlineDetailLabel.alignment = NSTextAlignmentRight;
+  [_featureOutlineDetailLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *featureOutlineDetailSetting = [NSStackView
+      stackViewWithViews:@[ _featureOutlineDetailControl, _featureOutlineDetailLabel ]];
+  featureOutlineDetailSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  featureOutlineDetailSetting.alignment = NSLayoutAttributeCenterY;
+  featureOutlineDetailSetting.spacing = 6.0;
+
   _normalLightingControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _normalLightingControl.buttonType = NSButtonTypeSwitch;
   _normalLightingControl.title = @"Shade using surface normals";
@@ -2516,6 +2571,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     make_row(@"Scale", _colourScaleControl),
     make_row(@"Range minimum", _minimumControl),
     make_row(@"Range maximum", _maximumControl),
+    _featureOutlinesControl,
+    make_row(@"Outline detail", featureOutlineDetailSetting),
   ]);
   NSStackView *lightingSection = make_section(@"Lighting", @[
     _normalLightingControl,
@@ -2837,6 +2894,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _colourScaleControl.enabled = scalarColour;
   _minimumControl.enabled = scalarColour;
   _maximumControl.enabled = scalarColour;
+  _featureOutlineDetailControl.enabled = _featureOutlinesControl.state == NSControlStateValueOn;
   const BOOL normalLighting = _normalLightingControl.state == NSControlStateValueOn;
   _sunAzimuthControl.enabled = normalLighting;
   _sunPolarAngleControl.enabled = normalLighting;
@@ -2892,6 +2950,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       static_cast<panorama::PresetColourmap>(_colourmapControl.indexOfSelectedItem);
   _presentation.appearance.colour_scale =
       static_cast<panorama::ScalarColourScale>(_colourScaleControl.indexOfSelectedItem);
+  _presentation.appearance.feature_outlines =
+      _featureOutlinesControl.state == NSControlStateValueOn;
+  _presentation.appearance.feature_outline_detail =
+      static_cast<float>((_featureOutlineDetailControl.doubleValue - 1.0) / 9.0);
   _presentation.colour_range = {
       static_cast<float>(*minimum),
       static_cast<float>(*maximum),

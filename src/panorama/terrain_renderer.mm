@@ -30,6 +30,8 @@ void validate_output_configuration(const TerrainRenderOutputs &outputs) {
       !std::isfinite(synthetic.ambient_light) || synthetic.ambient_light < 0.0F ||
       synthetic.ambient_light > 1.0F || !std::isfinite(synthetic.diffusivity) ||
       synthetic.diffusivity < 0.0F || synthetic.diffusivity > 1.0F ||
+      !std::isfinite(synthetic.feature_outline_detail) || synthetic.feature_outline_detail < 0.0F ||
+      synthetic.feature_outline_detail > 1.0F ||
       static_cast<uint32_t>(synthetic.colour_source) >
           static_cast<uint32_t>(TerrainColourSource::Elevation) ||
       static_cast<uint32_t>(synthetic.colourmap) >
