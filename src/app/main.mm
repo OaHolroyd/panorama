@@ -1203,6 +1203,8 @@ private:
   NSTextField *_debugPointInfoLabel;
   NSTextField *_pointInfoHeading;
   NSTextField *_pointInfoLabel;
+  NSImageView *_pointVisibilityIcon;
+  NSImageView *_pointLockIcon;
   uint64_t _displayedRevision;
   uint64_t _displayedInspectionSequence;
   uint64_t _pointLockRequestToken;
@@ -1240,6 +1242,8 @@ private:
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)clearPointInspection;
 - (void)toggleMapAndPointInspection:(id)sender;
+- (void)setPointInfoStatus:(NSString *)status;
+- (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
 - (NSViewController *)makeSettingsViewController;
 - (NSViewController *)makeDebugViewController;
 - (NSViewController *)makePointInfoViewController;
@@ -2062,6 +2066,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _mapPointAction = panorama::app::MapPointAction::None;
   }
   _mapHoverPoint.reset();
+  if (!_pointInspectionLocked && !_pointLockPending) {
+    [self updatePointInfo:std::nullopt];
+  }
   [self updateLockedPointIndicatorWithOrientation:_orientation
                               verticalFieldOfView:_verticalFieldOfView
                                             image:_image];
@@ -2120,13 +2127,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [self clearTargetVisibility];
     [_miniMapPanel clearInspectedPoint];
     [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
-    _pointInfoHeading.stringValue = @"Distance";
+    [self setPointInfoStatus:@""];
     _inspectionRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
     return;
   }
 
   _pointLockPending = true;
-  _pointInfoHeading.stringValue = @"Distance — Locking…";
+  [self setPointInfoStatus:@"Locking point…"];
   _pointLockRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
 }
 
@@ -2167,9 +2174,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _mapPointAction = action;
   _mapPointRequestToken = _renderer->request_map_point({easting, northing});
   if (action != panorama::app::MapPointAction::Hover) {
-    _pointInfoHeading.stringValue = action == panorama::app::MapPointAction::MoveObserver
-                                        ? @"Moving Observer…"
-                                        : @"Locating Point…";
+    [self setPointInfoStatus:action == panorama::app::MapPointAction::MoveObserver
+                                 ? @"Moving observer…"
+                                 : @"Locating point…"];
   }
 }
 
@@ -2220,7 +2227,6 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
   [_panoramaView setPointInspectionEnabled:_pointInspectionEnabled];
   [_overlayView setMapAndPointInfoVisible:_pointInspectionEnabled];
-  _pointInfoHeading.stringValue = @"Distance";
   if (!_pointInspectionEnabled) {
     [self clearPointInspection];
   }
@@ -2605,31 +2611,81 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Build the compact hover readout shown while point inspection is enabled.
 - (NSViewController *)makePointInfoViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
-  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 82.0)];
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 36.0)];
   viewController.view = content;
 
-  _pointInfoHeading = [NSTextField labelWithString:@"Distance"];
+  _pointInfoHeading = [NSTextField labelWithString:@""];
   _pointInfoHeading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-  _pointInfoLabel =
-      [NSTextField labelWithString:@"Hover map to preview; hover terrain for details.\n"
-                                    "Click map to look; right-click map to move."];
+  _pointInfoHeading.maximumNumberOfLines = 1;
+  _pointInfoHeading.lineBreakMode = NSLineBreakByTruncatingTail;
+  _pointInfoLabel = [NSTextField labelWithString:@""];
   _pointInfoLabel.font = [NSFont monospacedSystemFontOfSize:12.0 weight:NSFontWeightRegular];
-  _pointInfoLabel.maximumNumberOfLines = 0;
-  _pointInfoLabel.lineBreakMode = NSLineBreakByWordWrapping;
+  _pointInfoLabel.maximumNumberOfLines = 1;
+  _pointInfoLabel.lineBreakMode = NSLineBreakByClipping;
 
-  NSStackView *pointInfo = [NSStackView stackViewWithViews:@[ _pointInfoHeading, _pointInfoLabel ]];
-  pointInfo.orientation = NSUserInterfaceLayoutOrientationVertical;
-  pointInfo.alignment = NSLayoutAttributeLeading;
-  pointInfo.spacing = 10.0;
+  _pointVisibilityIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+  _pointVisibilityIcon.contentTintColor = NSColor.secondaryLabelColor;
+  _pointVisibilityIcon.hidden = YES;
+  _pointLockIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+  _pointLockIcon.contentTintColor = NSColor.secondaryLabelColor;
+  _pointLockIcon.hidden = YES;
+
+  NSStackView *pointInfo = [NSStackView stackViewWithViews:@[
+    _pointInfoHeading,
+    _pointInfoLabel,
+    _pointVisibilityIcon,
+    _pointLockIcon
+  ]];
+  pointInfo.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  pointInfo.alignment = NSLayoutAttributeCenterY;
+  pointInfo.spacing = 8.0;
   pointInfo.translatesAutoresizingMaskIntoConstraints = NO;
   [content addSubview:pointInfo];
   [NSLayoutConstraint activateConstraints:@[
-    [pointInfo.topAnchor constraintEqualToAnchor:content.topAnchor constant:14.0],
+    [pointInfo.centerYAnchor constraintEqualToAnchor:content.centerYAnchor],
     [pointInfo.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
     [pointInfo.trailingAnchor constraintLessThanOrEqualToAnchor:content.trailingAnchor
                                                        constant:-14.0],
   ]];
   return viewController;
+}
+
+- (void)setPointInfoStatus:(NSString *)status {
+  if (_pointInfoHeading == nil) {
+    return;
+  }
+  _pointInfoHeading.stringValue = status;
+  _pointInfoLabel.stringValue = @"";
+  [self setPointInfoSymbolsVisible:false locked:false occluded:false];
+}
+
+- (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded {
+  if (_pointVisibilityIcon == nil || _pointLockIcon == nil) {
+    return;
+  }
+  _pointVisibilityIcon.hidden = !visible;
+  _pointLockIcon.hidden = !visible;
+  if (!visible) {
+    return;
+  }
+
+  NSString *visibilitySymbol = occluded ? @"eye.slash" : @"eye";
+  NSString *visibilityDescription =
+      occluded ? @"Terrain point is occluded" : @"Terrain point is visible";
+  NSString *lockSymbol = locked ? @"lock.fill" : @"lock.open";
+  NSString *lockDescription = locked ? @"Terrain point is locked" : @"Terrain point is unlocked";
+  NSImageSymbolConfiguration *configuration =
+      [NSImageSymbolConfiguration configurationWithPointSize:12.0 weight:NSFontWeightMedium];
+  _pointVisibilityIcon.image = [[NSImage imageWithSystemSymbolName:visibilitySymbol
+                                          accessibilityDescription:visibilityDescription]
+      imageWithSymbolConfiguration:configuration];
+  _pointVisibilityIcon.toolTip = visibilityDescription;
+  [_pointVisibilityIcon setAccessibilityLabel:visibilityDescription];
+  _pointLockIcon.image = [[NSImage imageWithSystemSymbolName:lockSymbol
+                                    accessibilityDescription:lockDescription]
+      imageWithSymbolConfiguration:configuration];
+  _pointLockIcon.toolTip = lockDescription;
+  [_pointLockIcon setAccessibilityLabel:lockDescription];
 }
 
 /// Put detailed samples in the opt-in debug overlay, leaving the persistent
@@ -2685,20 +2741,23 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     if (!_pointInspectionLocked) {
       [_miniMapPanel clearInspectedPoint];
     }
-    _pointInfoLabel.stringValue = @"Hover map to preview; hover terrain for details.\n"
-                                   "Click map to look; right-click map to move.";
+    [self setPointInfoStatus:@""];
     return;
   }
   const panorama::app::PointInspection &point = *inspection;
   if (!point.hit) {
     [_miniMapPanel clearInspectedPoint];
-    _pointInfoLabel.stringValue = @"No terrain intersection";
+    [self setPointInfoStatus:@"No terrain intersection"];
     return;
   }
   [_miniMapPanel setInspectedPointEasting:point.easting
                                  northing:point.northing
                                    locked:_pointInspectionLocked || _pointLockPending];
+  _pointInfoHeading.stringValue = @"Distance";
   _pointInfoLabel.stringValue = [NSString stringWithFormat:@"%.1f m", point.distance];
+  [self setPointInfoSymbolsVisible:true
+                            locked:_pointInspectionLocked || _pointLockPending
+                          occluded:_pointInspectionLocked && _lockedPointOccluded];
 }
 
 /// Keep a locked world point aligned with the latest completed camera view.
@@ -2731,9 +2790,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_panoramaView setTerrainPointIndicator:projection locked:locked occluded:occluded];
   [_miniMapPanel setLockedPointOccluded:occluded];
   if (locked) {
-    _pointInfoHeading.stringValue = !projection.onscreen ? @"Distance — Locked (Off-screen)"
-                                    : occluded           ? @"Distance — Locked (Occluded)"
-                                                         : @"Distance — Locked";
+    _pointInfoHeading.stringValue = @"Distance";
+    [self setPointInfoSymbolsVisible:true locked:true occluded:occluded];
   }
 }
 
@@ -2877,13 +2935,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       if (!frame.map_point.has_value()) {
         _mapHoverPoint.reset();
         if (action == panorama::app::MapPointAction::Hover) {
+          [self updatePointInfo:std::nullopt];
           [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                       verticalFieldOfView:frame.vertical_field_of_view
                                                     image:frame.image];
         } else {
           NSBeep();
-          _pointInfoHeading.stringValue = @"No Terrain Coverage";
-          _pointInfoLabel.stringValue = @"The selected map location is outside the loaded terrain.";
+          [self setPointInfoStatus:@"No terrain coverage"];
         }
       } else {
         const double distance = std::hypot(
@@ -2904,6 +2962,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         };
         if (action == panorama::app::MapPointAction::Hover) {
           _mapHoverPoint = point;
+          [self updatePointInfo:point];
           [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                       verticalFieldOfView:frame.vertical_field_of_view
                                                     image:frame.image];
@@ -2915,8 +2974,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
           [self clearTargetVisibility];
           [_miniMapPanel clearInspectedPoint];
           [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
-          _pointInfoHeading.stringValue = @"Moving Observer…";
-          _pointInfoLabel.stringValue = @"Rebuilding the terrain view at the selected location.";
+          [self setPointInfoStatus:@"Moving observer…"];
           _renderer->request_observer_at(*frame.map_point);
         } else {
           _mapHoverPoint.reset();
@@ -2951,7 +3009,6 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         _renderer->request_inspection(std::nullopt);
       } else {
         [self updatePointInfo:frame.inspection];
-        _pointInfoHeading.stringValue = @"Distance";
       }
     } else if (_pointInspectionEnabled && !_pointInspectionLocked && !_pointLockPending &&
                _pointerOwner == panorama::app::PointerOwner::Panorama &&
@@ -2970,9 +3027,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _observer = frame.observer;
     if (observerMoved) {
       [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
-      _pointInfoHeading.stringValue = @"Observer Moved";
-      _pointInfoLabel.stringValue = @"Left-click the map to look at a point.\n"
-                                     "Right-click to move again.";
+      [self updatePointInfo:std::nullopt];
     }
     const double fps = frame.milliseconds > 0.0 ? 1'000.0 / frame.milliseconds : 0.0;
     [self updateDebugInfoWithOrientation:frame.orientation

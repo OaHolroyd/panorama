@@ -15,7 +15,7 @@ constexpr CGFloat kCompactMapPanelWidth = 300.0;
 constexpr CGFloat kCompactMapSectionHeight = 286.0;
 constexpr CGFloat kLargeMapPanelWidth = 520.0;
 constexpr CGFloat kLargeMapSectionHeight = 456.0;
-constexpr CGFloat kPointSectionHeight = 82.0;
+constexpr CGFloat kPointSectionHeight = 36.0;
 constexpr double kInitialMapDistance = 50'000.0;
 constexpr double kMinimumMapDistance = 500.0;
 constexpr double kMaximumMapDistance = 2'000'000.0;
@@ -551,7 +551,7 @@ enum class AnnotationKind : NSInteger {
     [_mapView.topAnchor constraintEqualToAnchor:controls.bottomAnchor constant:8.0],
     [_mapView.leadingAnchor constraintEqualToAnchor:_mapSection.leadingAnchor constant:12.0],
     [_mapView.trailingAnchor constraintEqualToAnchor:_mapSection.trailingAnchor constant:-12.0],
-    [_mapView.bottomAnchor constraintEqualToAnchor:_mapSection.bottomAnchor constant:-12.0],
+    [_mapView.bottomAnchor constraintEqualToAnchor:_mapSection.bottomAnchor constant:-6.0],
   ]];
 
   // Terrain and ray geometry use the dataset's projected CRS (for example,
