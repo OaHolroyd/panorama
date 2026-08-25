@@ -43,10 +43,11 @@ struct EntrypointSettings {
   float colour_minimum = 0.0F;
   std::optional<float> colour_maximum;
   panorama::SyntheticRenderOptions synthetic = {
-      225.0 * kDegreesToRadians,
-      35.0 * kDegreesToRadians,
-      0.28F,
-      1.0F,
+      .sun_azimuth = 225.0 * kDegreesToRadians,
+      .sun_elevation = 35.0 * kDegreesToRadians,
+      .ambient_light = 0.28F,
+      .ambient_detail = 0.65F,
+      .diffusivity = 1.0F,
   };
   double easting = 2623452.4;
   double northing = 1100502.2;
@@ -206,7 +207,8 @@ void print_usage(const char *program) {
       "Synthetic image options (angles are degrees):\n"
       "  --sun-azimuth D       clockwise from grid north (default: 225)\n"
       "  --sun-elevation D     above the horizon (default: 35)\n"
-      "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
+      "  --ambient-light V     diffuse sky-light strength, 0 to 1 (default: 0.28)\n"
+      "  --ambient-detail V    normal-dependent five-lobe skylight, 0 to 1 (default: 0.65)\n"
       "  --diffusivity V       directional diffuse-light strength, 0 to 1 (default: 1)\n"
       "  --raytraced-shadows   cast one hard terrain-shadow ray per lit collision\n"
       "  --feature-outlines    draw multiscale black surface-separation lines\n"
@@ -312,6 +314,13 @@ void print_usage(const char *program) {
         throw std::out_of_range("Ambient light must be between zero and one");
       }
       settings.synthetic.ambient_light = static_cast<float>(parsed);
+      settings.synthetic_setting_seen = true;
+    } else if (option == "--ambient-detail") {
+      const double parsed = panorama::arguments::parse_finite_double(value, option);
+      if (parsed < 0.0 || parsed > 1.0) {
+        throw std::out_of_range("Ambient detail must be between zero and one");
+      }
+      settings.synthetic.ambient_detail = static_cast<float>(parsed);
       settings.synthetic_setting_seen = true;
     } else if (option == "--diffusivity") {
       const double parsed = panorama::arguments::parse_finite_double(value, option);
@@ -420,11 +429,12 @@ int main(int argc, const char *argv[]) {
     );
     if (settings.write_synthetic) {
       std::printf(
-          "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f, "
-          "diffusivity %.3f, terrain colour %s",
+          "Synthetic image: sun azimuth %.3f deg, elevation %.3f deg, ambient %.3f "
+          "(detail %.3f), diffusivity %.3f, terrain colour %s",
           settings.synthetic.sun_azimuth / kDegreesToRadians,
           settings.synthetic.sun_elevation / kDegreesToRadians,
           settings.synthetic.ambient_light,
+          settings.synthetic.ambient_detail,
           settings.synthetic.diffusivity,
           choice_name(settings.synthetic.colour_source, kTerrainColours)
       );

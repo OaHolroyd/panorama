@@ -43,8 +43,10 @@ struct SyntheticRenderOptions {
   double sun_azimuth;
   /// Sun angle in radians above the local horizontal plane.
   double sun_elevation;
-  /// Direction-independent light fraction in the inclusive range [0, 1].
+  /// Overall diffuse sky-light strength in the inclusive range [0, 1].
   float ambient_light;
+  /// Blend from constant ambient to normal-dependent five-lobe skylight.
+  float ambient_detail = 0.65F;
   /// Strength of the directional Lambertian term in the inclusive range [0, 1].
   float diffusivity = 1.0F;
   /// White terrain, or a collision field normalised over a fixed range.

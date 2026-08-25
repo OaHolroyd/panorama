@@ -390,7 +390,35 @@ kernel void compute_feature_outlines(
   output.write(float4(outlined ? 1.0F : 0.0F), position);
 }
 
-/// Render white Lambertian terrain under one directional sun and ambient term.
+/// Approximate atmospheric light with a zenith lobe and four diagonal lobes.
+/// Sunward diagonal weights add aspect detail; normalisation keeps horizontal
+/// terrain at the configured sky strength.
+inline float sky_lobe_exposure(float3 normal, float3 sun, float detail) {
+  constexpr float diagonal_z = 0.70710678F;
+  constexpr float diagonal_xy = 0.5F;
+  const float2 sun_horizontal =
+      length_squared(sun.xy) > 1e-8F ? normalize(sun.xy) : float2(0.0F, 1.0F);
+  const float3 directions[4] = {
+      float3(diagonal_xy, diagonal_xy, diagonal_z),
+      float3(-diagonal_xy, diagonal_xy, diagonal_z),
+      float3(-diagonal_xy, -diagonal_xy, diagonal_z),
+      float3(diagonal_xy, -diagonal_xy, diagonal_z),
+  };
+  float irradiance = 1.5F * max(normal.z, 0.0F);
+  float horizontal_irradiance = 1.5F;
+  for (uint index = 0U; index < 4U; index++) {
+    const float weight =
+        1.0F + 0.75F * max(dot(normalize(directions[index].xy), sun_horizontal), 0.0F);
+    irradiance += weight * max(dot(normal, directions[index]), 0.0F);
+    horizontal_irradiance += weight * diagonal_z;
+  }
+  const float normalised = clamp(irradiance / horizontal_irradiance, 0.0F, 1.0F);
+  // Preserve scattered fill on surfaces facing away from every sampled lobe.
+  const float detailed = mix(0.35F, 1.0F, normalised);
+  return mix(1.0F, detailed, detail);
+}
+
+/// Render white Lambertian terrain under one directional sun and skylight.
 kernel void present_synthetic_terrain(
     device const uint *packed_gradients [[buffer(0)]],
     device const float *distances [[buffer(1)]],
@@ -400,6 +428,7 @@ kernel void present_synthetic_terrain(
     constant uint &feature_outlines [[buffer(5)]],
     device const uchar *shadow_visibility [[buffer(6)]],
     constant uint &use_shadows [[buffer(7)]],
+    constant float &ambient_detail [[buffer(8)]],
     texture2d<float, access::write> output [[texture(0)]],
     texture2d<float, access::read> feature_outline_mask [[texture(1)]],
     uint2 position [[thread_position_in_grid]]
@@ -422,10 +451,12 @@ kernel void present_synthetic_terrain(
     return;
   }
 
+  const float3 normal = surface_normal(packed_gradients[index]);
   const float visible = use_shadows == 0U ? 1.0F : float(shadow_visibility[index] != 0U);
-  const float diffuse =
-      visible * max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
-  const float linear = sun_and_ambient.w + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
+  const float diffuse = visible * max(0.0F, dot(normal, sun_and_ambient.xyz));
+  const float sky =
+      sun_and_ambient.w * sky_lobe_exposure(normal, sun_and_ambient.xyz, ambient_detail);
+  const float linear = sky + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
   const float srgb =
       linear <= 0.0031308F ? 12.92F * linear : 1.055F * pow(linear, 1.0F / 2.4F) - 0.055F;
   output.write(float4(srgb, srgb, srgb, 1.0F), position);
@@ -448,6 +479,7 @@ kernel void present_colourmapped_synthetic_terrain(
     constant uint &feature_outlines [[buffer(9)]],
     device const uchar *shadow_visibility [[buffer(10)]],
     constant uint &use_shadows [[buffer(11)]],
+    constant float &ambient_detail [[buffer(12)]],
     texture2d<float, access::write> output [[texture(0)]],
     texture2d<float, access::read> feature_outline_mask [[texture(1)]],
     uint2 position [[thread_position_in_grid]]
@@ -474,10 +506,12 @@ kernel void present_colourmapped_synthetic_terrain(
     output.write(float4(base_srgb, 1.0F), position);
     return;
   }
+  const float3 normal = surface_normal(packed_gradients[index]);
   const float visible = use_shadows == 0U ? 1.0F : float(shadow_visibility[index] != 0U);
-  const float diffuse =
-      visible * max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
-  const float illumination = sun_and_ambient.w + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
+  const float diffuse = visible * max(0.0F, dot(normal, sun_and_ambient.xyz));
+  const float sky =
+      sun_and_ambient.w * sky_lobe_exposure(normal, sun_and_ambient.xyz, ambient_detail);
+  const float illumination = sky + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
   output.write(float4(linear_to_srgb(srgb_to_linear(base_srgb) * illumination), 1.0F), position);
 }
 

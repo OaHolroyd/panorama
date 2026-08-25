@@ -46,6 +46,8 @@ constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
 constexpr double kDefaultVerticalFieldOfView = 70.0 * kDegreesToRadians;
 constexpr double kDefaultSunAzimuthDegrees = 225.0;
 constexpr double kDefaultSunPolarAngleDegrees = 55.0;
+constexpr float kDefaultSkyStrength = 0.28F;
+constexpr float kDefaultSkyDetail = 0.65F;
 constexpr float kDefaultDiffusivity = 1.0F;
 
 struct ViewerSettings {
@@ -63,7 +65,8 @@ struct ViewerSettings {
           {
               .sun_azimuth = kDefaultSunAzimuthDegrees * kDegreesToRadians,
               .sun_elevation = (90.0 - kDefaultSunPolarAngleDegrees) * kDegreesToRadians,
-              .ambient_light = 0.28F,
+              .ambient_light = kDefaultSkyStrength,
+              .ambient_detail = kDefaultSkyDetail,
               .diffusivity = kDefaultDiffusivity,
               .colour_source = TerrainColourSource::White,
               .colourmap = PresetColourmap::Viridis,
@@ -1253,6 +1256,10 @@ private:
   NSTextField *_sunPolarAngleLabel;
   NSSlider *_diffusivityControl;
   NSTextField *_diffusivityLabel;
+  NSSlider *_skyStrengthControl;
+  NSTextField *_skyStrengthLabel;
+  NSSlider *_skyDetailControl;
+  NSTextField *_skyDetailLabel;
   NSTextField *_debugInfoLabel;
   NSTextField *_debugPointInfoLabel;
   NSTextField *_pointInfoHeading;
@@ -1937,6 +1944,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _presentation.appearance.sun_elevation =
       (90.0 - _sunPolarAngleControl.doubleValue) * panorama::app::kDegreesToRadians;
   _presentation.appearance.diffusivity = static_cast<float>(_diffusivityControl.doubleValue);
+  _presentation.appearance.ambient_light = static_cast<float>(_skyStrengthControl.doubleValue);
+  _presentation.appearance.ambient_detail = static_cast<float>(_skyDetailControl.doubleValue);
   _renderer->request_presentation(_presentation);
 }
 
@@ -1966,6 +1975,24 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     sender.doubleValue = panorama::app::kDefaultDiffusivity;
   }
   _diffusivityLabel.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+  [self publishLightingControls];
+}
+
+- (void)skyStrengthChanged:(NSSlider *)sender {
+  constexpr double kDetentRadius = 0.02;
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultSkyStrength) <= kDetentRadius) {
+    sender.doubleValue = panorama::app::kDefaultSkyStrength;
+  }
+  _skyStrengthLabel.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+  [self publishLightingControls];
+}
+
+- (void)skyDetailChanged:(NSSlider *)sender {
+  constexpr double kDetentRadius = 0.02;
+  if (std::abs(sender.doubleValue - panorama::app::kDefaultSkyDetail) <= kDetentRadius) {
+    sender.doubleValue = panorama::app::kDefaultSkyDetail;
+  }
+  _skyDetailLabel.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
   [self publishLightingControls];
 }
 
@@ -2546,6 +2573,44 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   diffusivitySetting.alignment = NSLayoutAttributeCenterY;
   diffusivitySetting.spacing = 6.0;
 
+  _skyStrengthControl = [NSSlider sliderWithValue:_presentation.appearance.ambient_light
+                                         minValue:0.0
+                                         maxValue:1.0
+                                           target:self
+                                           action:@selector(skyStrengthChanged:)];
+  _skyStrengthControl.continuous = YES;
+  _skyStrengthControl.numberOfTickMarks = 11;
+  _skyStrengthControl.allowsTickMarkValuesOnly = NO;
+  _skyStrengthControl.toolTip = @"Overall strength of diffuse atmospheric light";
+  _skyStrengthLabel = [NSTextField
+      labelWithString:[NSString stringWithFormat:@"%.2f", _skyStrengthControl.doubleValue]];
+  _skyStrengthLabel.alignment = NSTextAlignmentRight;
+  [_skyStrengthLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *skyStrengthSetting =
+      [NSStackView stackViewWithViews:@[ _skyStrengthControl, _skyStrengthLabel ]];
+  skyStrengthSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  skyStrengthSetting.alignment = NSLayoutAttributeCenterY;
+  skyStrengthSetting.spacing = 6.0;
+
+  _skyDetailControl = [NSSlider sliderWithValue:_presentation.appearance.ambient_detail
+                                       minValue:0.0
+                                       maxValue:1.0
+                                         target:self
+                                         action:@selector(skyDetailChanged:)];
+  _skyDetailControl.continuous = YES;
+  _skyDetailControl.numberOfTickMarks = 11;
+  _skyDetailControl.allowsTickMarkValuesOnly = NO;
+  _skyDetailControl.toolTip = @"Normal-dependent detail from five sampled sky directions";
+  _skyDetailLabel = [NSTextField
+      labelWithString:[NSString stringWithFormat:@"%.2f", _skyDetailControl.doubleValue]];
+  _skyDetailLabel.alignment = NSTextAlignmentRight;
+  [_skyDetailLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *skyDetailSetting =
+      [NSStackView stackViewWithViews:@[ _skyDetailControl, _skyDetailLabel ]];
+  skyDetailSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  skyDetailSetting.alignment = NSLayoutAttributeCenterY;
+  skyDetailSetting.spacing = 6.0;
+
   NSButton *apply = [[NSButton alloc] initWithFrame:NSZeroRect];
   apply.title = @"Apply";
   apply.bezelStyle = NSBezelStyleRounded;
@@ -2607,6 +2672,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _raytracedShadowsControl,
     make_row(@"Sun azimuth", sunAzimuthSetting),
     make_row(@"Sun polar angle", sunPolarAngleSetting),
+    make_row(@"Sky strength", skyStrengthSetting),
+    make_row(@"Sky detail", skyDetailSetting),
     make_row(@"Diffusivity", diffusivitySetting),
   ]);
 
@@ -2928,6 +2995,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _sunAzimuthControl.enabled = normalLighting;
   _sunPolarAngleControl.enabled = normalLighting;
   _diffusivityControl.enabled = normalLighting;
+  _skyStrengthControl.enabled = normalLighting;
+  _skyDetailControl.enabled = normalLighting;
 }
 
 - (void)renderModeChanged:(id)sender {
@@ -2995,6 +3064,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _presentation.appearance.sun_elevation =
       (90.0 - _sunPolarAngleControl.doubleValue) * panorama::app::kDegreesToRadians;
   _presentation.appearance.diffusivity = static_cast<float>(_diffusivityControl.doubleValue);
+  _presentation.appearance.ambient_light = static_cast<float>(_skyStrengthControl.doubleValue);
+  _presentation.appearance.ambient_detail = static_cast<float>(_skyDetailControl.doubleValue);
   _renderer->request_presentation(_presentation);
 
   const panorama::ImageSize next_image = {*width, *height};

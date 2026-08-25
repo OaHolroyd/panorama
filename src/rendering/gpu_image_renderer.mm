@@ -283,11 +283,12 @@ void GpuImageRenderer::render_synthetic(
       (scalar_colour && colour_values == nil) || !std::isfinite(options.sun_azimuth) ||
       !std::isfinite(options.sun_elevation) || !std::isfinite(options.ambient_light) ||
       options.ambient_light < 0.0F || options.ambient_light > 1.0F ||
-      !std::isfinite(options.diffusivity) || options.diffusivity < 0.0F ||
-      options.diffusivity > 1.0F || !std::isfinite(options.feature_outline_detail) ||
-      options.feature_outline_detail < 0.0F || options.feature_outline_detail > 1.0F ||
-      !std::isfinite(range.minimum) || !std::isfinite(range.maximum) ||
-      range.maximum <= range.minimum ||
+      !std::isfinite(options.ambient_detail) || options.ambient_detail < 0.0F ||
+      options.ambient_detail > 1.0F || !std::isfinite(options.diffusivity) ||
+      options.diffusivity < 0.0F || options.diffusivity > 1.0F ||
+      !std::isfinite(options.feature_outline_detail) || options.feature_outline_detail < 0.0F ||
+      options.feature_outline_detail > 1.0F || !std::isfinite(range.minimum) ||
+      !std::isfinite(range.maximum) || range.maximum <= range.minimum ||
       colour_source > static_cast<uint32_t>(TerrainColourSource::Elevation) ||
       colourmap > static_cast<uint32_t>(PresetColourmap::Viewfinder) ||
       colour_scale > static_cast<uint32_t>(ScalarColourScale::Quadratic)) {
@@ -358,12 +359,14 @@ void GpuImageRenderer::render_synthetic(
     [encoder setBytes:&feature_outlines length:sizeof(feature_outlines) atIndex:9];
     [encoder setBuffer:shadow_visibility offset:0 atIndex:10];
     [encoder setBytes:&use_shadows length:sizeof(use_shadows) atIndex:11];
+    [encoder setBytes:&options.ambient_detail length:sizeof(options.ambient_detail) atIndex:12];
   } else {
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:3];
     [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:4];
     [encoder setBytes:&feature_outlines length:sizeof(feature_outlines) atIndex:5];
     [encoder setBuffer:shadow_visibility offset:0 atIndex:6];
     [encoder setBytes:&use_shadows length:sizeof(use_shadows) atIndex:7];
+    [encoder setBytes:&options.ambient_detail length:sizeof(options.ambient_detail) atIndex:8];
   }
   [encoder setTexture:state.output atIndex:0];
   [encoder setTexture:state.feature_outline_mask atIndex:1];
