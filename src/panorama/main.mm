@@ -172,6 +172,12 @@ void validate_output_settings(const EntrypointSettings &settings) {
 void print_usage(const char *program) {
   std::printf(
       "usage: %s [options]\n"
+      "\n"
+      "Trace a prepared DTM on the GPU and write panoramic or camera-projected\n"
+      "distance, elevation, normal, and optionally shaded terrain PNGs. Output\n"
+      "files are written to the current directory.\n"
+      "\n"
+      "Terrain options:\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
       "                        (default: data/swissalti3d-10-level-0)\n"
       "  --tile-cache-mib N    resident terrain-cache budget in MiB (default: 128)\n"

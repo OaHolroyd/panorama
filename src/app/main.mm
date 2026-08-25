@@ -129,6 +129,12 @@ struct ViewerSettings {
 void print_usage(const char *program) {
   std::printf(
       "usage: %s [options]\n"
+      "\n"
+      "Interactively explore a prepared DTM using real-time persistent GPU terrain\n"
+      "tracing. The viewer includes a minimap, appearance and camera settings, and\n"
+      "interactive collision inspection.\n"
+      "\n"
+      "Input and camera options:\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
@@ -144,7 +150,9 @@ void print_usage(const char *program) {
       "  --pitch D             initial pitch above the horizon (default: 0)\n"
       "  --help                show this message\n"
       "\n"
-      "Drag with the mouse or use WASD/arrow keys to look around; scroll to zoom.\n",
+      "Viewer controls:\n"
+      "  Drag with the mouse or use WASD/arrow keys to look around; scroll to zoom.\n"
+      "  Use the toolbar to show the settings inspector, debug data, or minimap.\n",
       program
   );
 }
