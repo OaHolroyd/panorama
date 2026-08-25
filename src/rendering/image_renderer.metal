@@ -2,6 +2,93 @@
 
 using namespace metal;
 
+/// Per-pixel terrain ray ABI shared with `RayDirection` in ray_projection.h.
+/// The visibility overlay only consumes the normalized horizontal direction,
+/// but retaining the complete layout lets it read the tracer's buffer directly.
+struct VisibilityRayDirection {
+  float x;
+  float y;
+  float inverse_x;
+  float inverse_y;
+  float slope;
+};
+
+/// Affine projected-terrain-to-Metal-clip transform for the small fixed-centre
+/// minimap. The host derives the two basis vectors through the terrain CRS and
+/// MapKit, preserving local grid convergence relative to geographic north.
+struct VisibilityMapParameters {
+  float centre_x;
+  float centre_y;
+  float east_x_per_metre;
+  float east_y_per_metre;
+  float north_x_per_metre;
+  float north_y_per_metre;
+  float point_size;
+  uint ray_count;
+};
+
+struct VisibilityPointVertex {
+  float4 position [[position]];
+  float point_size [[point_size]];
+};
+
+/// Snapshot one immutable observer-relative east/north point for each completed
+/// collision. The viewer publishes this buffer with the matching frame so a
+/// subsequent trace can safely reuse its ray and distance storage.
+kernel void visibility_collision_points(
+    device const VisibilityRayDirection *rays [[buffer(0)]],
+    device const float *distances [[buffer(1)]],
+    device float2 *points [[buffer(2)]],
+    constant uint &ray_count [[buffer(3)]],
+    uint index [[thread_position_in_grid]]
+) {
+  if (index >= ray_count) {
+    return;
+  }
+  const float distance = distances[index];
+  points[index] = distance > 0.0F && isfinite(distance)
+                      ? distance * float2(rays[index].x, rays[index].y)
+                      : float2(INFINITY);
+}
+
+/// Project every completed terrain collision directly into the minimap.
+/// Invalid/no-hit rays are moved outside the clip volume and therefore emit no
+/// fragment. Point coverage is deliberately fixed for this first implementation.
+vertex VisibilityPointVertex visibility_point_vertex(
+    device const float2 *points [[buffer(0)]],
+    constant VisibilityMapParameters &map [[buffer(1)]],
+    uint index [[vertex_id]]
+) {
+  VisibilityPointVertex output;
+  output.point_size = map.point_size;
+  if (index >= map.ray_count) {
+    output.position = float4(2.0F, 2.0F, 0.0F, 1.0F);
+    return output;
+  }
+
+  const float2 point = points[index];
+  if (!all(isfinite(point))) {
+    output.position = float4(2.0F, 2.0F, 0.0F, 1.0F);
+    return output;
+  }
+
+  output.position = float4(
+      map.centre_x + point.x * map.east_x_per_metre + point.y * map.north_x_per_metre,
+      map.centre_y + point.x * map.east_y_per_metre + point.y * map.north_y_per_metre,
+      0.0F,
+      1.0F
+  );
+  return output;
+}
+
+/// Emit a constant translucent system-blue-like highlight. RGB is
+/// premultiplied because Core Animation composites the transparent Metal layer.
+fragment float4 visibility_point_fragment() {
+  constexpr float alpha = 0.34F;
+  constexpr float3 colour = float3(0.0F, 0.48F, 1.0F);
+  return float4(alpha * colour, alpha);
+}
+
 /// Five-stop approximations of the CLI's built-in colourmaps.
 constant float3 preset_colourmaps[6][5] = {
     {

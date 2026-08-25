@@ -351,6 +351,8 @@ id<MTLCommandQueue> TerrainTraceSession::command_queue() const {
 
 id<MTLLibrary> TerrainTraceSession::library() const { return state_->gpu->library(); }
 
+id<MTLBuffer> TerrainTraceSession::ray_directions() const { return state_->gpu->ray_directions(); }
+
 id<MTLBuffer> TerrainTraceSession::distances() const { return state_->gpu->distances(); }
 
 id<MTLBuffer> TerrainTraceSession::elevations() const { return state_->gpu->elevations(); }

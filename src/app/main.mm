@@ -323,6 +323,7 @@ struct LockedPointProjection {
 
 struct PresentedFrame {
   id<MTLTexture> texture;
+  id<MTLBuffer> visibility_points;
   ImageSize image;
   CameraOrientation orientation;
   double vertical_field_of_view;
@@ -342,6 +343,88 @@ struct PresentedFrame {
   std::memcpy(&value, &bits, sizeof(value));
   return static_cast<float>(value);
 }
+
+/// GPU-only conversion from reusable trace buffers to an immutable buffer of
+/// observer-relative east/north collision points. Publishing a fresh buffer
+/// per trace prevents continuous camera input from exposing the minimap to
+/// ray storage which the next trace is already clearing or replacing.
+class GpuVisibilityPointProjector {
+public:
+  GpuVisibilityPointProjector(
+      id<MTLDevice> device,
+      id<MTLCommandQueue> queue,
+      id<MTLLibrary> library
+  )
+      : device_(device), queue_(queue) {
+    if (device_ == nil || queue_ == nil || library == nil) {
+      throw std::invalid_argument("Visibility projection requires valid Metal resources");
+    }
+    id<MTLFunction> function = [library newFunctionWithName:@"visibility_collision_points"];
+    if (function == nil) {
+      throw std::runtime_error("Visibility collision-point kernel is missing");
+    }
+    NSError *error = nil;
+    pipeline_ = [device_ newComputePipelineStateWithFunction:function error:&error];
+    if (pipeline_ == nil) {
+      const char *detail = error == nil ? "unknown error" : error.localizedDescription.UTF8String;
+      throw std::runtime_error(
+          "Could not create visibility collision-point pipeline: " + std::string(detail)
+      );
+    }
+  }
+
+  [[nodiscard]] id<MTLBuffer>
+  project(id<MTLBuffer> rays, id<MTLBuffer> distances, ImageSize image) const {
+    const uint64_t count64 = static_cast<uint64_t>(image.width) * image.height;
+    const uint64_t rayBytes = count64 * sizeof(RayDirection);
+    const uint64_t distanceBytes = count64 * sizeof(float);
+    if (count64 == 0U || count64 > std::numeric_limits<uint32_t>::max() || rays == nil ||
+        distances == nil || rays.length < rayBytes || distances.length < distanceBytes) {
+      throw std::invalid_argument("Visibility projection requires valid trace buffers");
+    }
+    const uint32_t count = static_cast<uint32_t>(count64);
+    const NSUInteger length = static_cast<NSUInteger>(count64 * 2U * sizeof(float));
+    id<MTLBuffer> points = [device_ newBufferWithLength:length
+                                                options:MTLResourceStorageModePrivate];
+    if (points == nil) {
+      throw std::runtime_error("Could not allocate visibility collision-point buffer");
+    }
+    points.label = @"Minimap visibility collision points";
+
+    id<MTLCommandBuffer> command = [queue_ commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (command == nil || encoder == nil) {
+      throw std::runtime_error("Could not create visibility collision-point command");
+    }
+    command.label = @"Project minimap visibility collisions";
+    encoder.label = @"visibility_collision_points";
+    [encoder setComputePipelineState:pipeline_];
+    [encoder setBuffer:rays offset:0 atIndex:0];
+    [encoder setBuffer:distances offset:0 atIndex:1];
+    [encoder setBuffer:points offset:0 atIndex:2];
+    [encoder setBytes:&count length:sizeof(count) atIndex:3];
+    const NSUInteger groupWidth =
+        std::min<NSUInteger>(256U, pipeline_.maxTotalThreadsPerThreadgroup);
+    [encoder dispatchThreads:MTLSizeMake(count, 1U, 1U)
+        threadsPerThreadgroup:MTLSizeMake(groupWidth, 1U, 1U)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+      const char *detail =
+          command.error == nil ? "unknown error" : command.error.localizedDescription.UTF8String;
+      throw std::runtime_error(
+          "GPU visibility collision-point projection failed: " + std::string(detail)
+      );
+    }
+    return points;
+  }
+
+private:
+  id<MTLDevice> device_;
+  id<MTLCommandQueue> queue_;
+  id<MTLComputePipelineState> pipeline_;
+};
 
 /// Serial background renderer which coalesces input to the latest camera view.
 class ViewerRenderer {
@@ -375,6 +458,11 @@ public:
         settings_.image,
         GpuPresentationRequirements{false, false, true, true, false},
         MTLPixelFormatBGRA8Unorm
+    );
+    visibility_ = std::make_unique<GpuVisibilityPointProjector>(
+        trace_->device(),
+        trace_->command_queue(),
+        trace_->library()
     );
     current_field_ = std::move(initial_field);
     worker_ = std::thread([this] { render_loop(); });
@@ -439,6 +527,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     return {
         presented_texture_,
+        presented_visibility_points_,
         presented_image_,
         presented_orientation_,
         presented_vertical_field_of_view_,
@@ -453,6 +542,7 @@ public:
 
   [[nodiscard]] id<MTLDevice> device() const { return trace_->device(); }
   [[nodiscard]] id<MTLCommandQueue> command_queue() const { return trace_->command_queue(); }
+  [[nodiscard]] id<MTLLibrary> library() const { return trace_->library(); }
   [[nodiscard]] ImageSize image() const { return settings_.image; }
   [[nodiscard]] ObserverLocation observer() const { return settings_.observer; }
   [[nodiscard]] Crs terrain_crs() const { return trace_->crs(); }
@@ -551,6 +641,11 @@ private:
             RayField field = make_view(image, orientation, vertical_field_of_view);
             trace_->trace(field);
             current_field_ = std::move(field);
+            current_visibility_points_ = visibility_->project(
+                trace_->ray_directions(),
+                trace_->distances(),
+                current_field_.image
+            );
           }
 
           if (presentation_requested) {
@@ -583,6 +678,7 @@ private:
           std::lock_guard<std::mutex> lock(mutex_);
           if (presentation_requested) {
             presented_texture_ = presentation_->texture();
+            presented_visibility_points_ = current_visibility_points_;
             presented_image_ = current_field_.image;
             presented_orientation_ = orientation;
             presented_vertical_field_of_view_ = vertical_field_of_view;
@@ -610,6 +706,7 @@ private:
   ViewerSettings settings_;
   std::unique_ptr<TerrainTraceSession> trace_;
   std::unique_ptr<GpuImageRenderer> presentation_;
+  std::unique_ptr<GpuVisibilityPointProjector> visibility_;
   RayField current_field_;
   std::thread worker_;
   mutable std::mutex mutex_;
@@ -624,6 +721,8 @@ private:
   ImageSize presented_image_ = {};
   std::optional<PointInspection> presented_inspection_;
   id<MTLTexture> presented_texture_;
+  id<MTLBuffer> current_visibility_points_;
+  id<MTLBuffer> presented_visibility_points_;
   uint64_t requested_revision_ = 0U;
   uint64_t requested_inspection_token_ = 0U;
   uint64_t presented_revision_ = 0U;
@@ -2190,6 +2289,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [_miniMapPanel setCameraOrientation:frame.orientation
                     verticalFieldOfView:frame.vertical_field_of_view
                                   image:frame.image];
+    [_miniMapPanel setVisibilityPoints:frame.visibility_points image:frame.image];
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",
                          frame.orientation.heading * panorama::app::kRadiansToDegrees,
@@ -2353,7 +2453,10 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
                                                northing:observer.northing
                                         terrainEpsgCode:_renderer->terrain_crs().epsg_code()
                                             maxDistance:_renderer->max_distance()
-                                          pointInfoView:pointInfoController.view];
+                                          pointInfoView:pointInfoController.view
+                                            metalDevice:_renderer->device()
+                                           commandQueue:_renderer->command_queue()
+                                                library:_renderer->library()];
   _overlayView = [[ViewerOverlayView alloc] initWithFrame:imageFrame
                                               contentView:imageContainer
                                              settingsView:settingsController.view

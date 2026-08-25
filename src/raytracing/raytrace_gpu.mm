@@ -430,6 +430,9 @@ std::span<const DeferredRayWork> GpuRaytraceResources::deferred_work(uint32_t co
 }
 
 id<MTLBuffer> GpuRaytraceResources::distances() const { return state_->distance_output; }
+
+id<MTLBuffer> GpuRaytraceResources::ray_directions() const { return state_->rays; }
+
 id<MTLBuffer> GpuRaytraceResources::elevations() const {
   if (!state_->outputs.elevations) {
     throw std::logic_error("Elevations were not requested");

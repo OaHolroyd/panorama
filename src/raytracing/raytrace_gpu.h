@@ -116,6 +116,13 @@ public:
   /// Return the shared distance output buffer after tracing completes.
   [[nodiscard]] id<MTLBuffer> distances() const;
 
+  /// Return the per-pixel ray directions corresponding to the current outputs.
+  ///
+  /// Post-trace GPU consumers can combine these with `distances()` without
+  /// duplicating the potentially large ray field or reading it back through
+  /// the host.
+  [[nodiscard]] id<MTLBuffer> ray_directions() const;
+
   /// Return the shared elevation output buffer after tracing completes.
   ///
   /// Throws if elevation output was disabled when this object was created.

@@ -3,6 +3,7 @@
 #include "ray_projection.h"
 
 #import <AppKit/AppKit.h>
+#import <Metal/Metal.h>
 
 #include <cstdint>
 
@@ -15,7 +16,10 @@
                                northing:(double)northing
                         terrainEpsgCode:(uint32_t)epsgCode
                             maxDistance:(double)maxDistance
-                          pointInfoView:(NSView *)pointInfoView;
+                          pointInfoView:(NSView *)pointInfoView
+                            metalDevice:(id<MTLDevice>)metalDevice
+                           commandQueue:(id<MTLCommandQueue>)commandQueue
+                                library:(id<MTLLibrary>)library;
 
 - (void)setMapVisible:(bool)visible;
 - (void)setPointInfoVisible:(bool)visible;
@@ -26,6 +30,9 @@
 - (void)setCameraOrientation:(panorama::CameraOrientation)orientation
          verticalFieldOfView:(double)verticalFieldOfView
                        image:(panorama::ImageSize)image;
+
+/// Display one projected point for every valid collision in a completed trace.
+- (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image;
 
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked;
 - (void)clearInspectedPoint;

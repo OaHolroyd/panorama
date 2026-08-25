@@ -39,6 +39,7 @@ public:
   [[nodiscard]] id<MTLDevice> device() const;
   [[nodiscard]] id<MTLCommandQueue> command_queue() const;
   [[nodiscard]] id<MTLLibrary> library() const;
+  [[nodiscard]] id<MTLBuffer> ray_directions() const;
   [[nodiscard]] id<MTLBuffer> distances() const;
   [[nodiscard]] id<MTLBuffer> elevations() const;
   [[nodiscard]] id<MTLBuffer> surface_gradients() const;

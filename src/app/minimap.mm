@@ -3,10 +3,13 @@
 #include "crs.h"
 
 #import <MapKit/MapKit.h>
+#import <MetalKit/MetalKit.h>
 #import <QuartzCore/QuartzCore.h>
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <string>
 
 constexpr CGFloat kMapPanelWidth = 300.0;
 constexpr CGFloat kMapSectionHeight = 286.0;
@@ -14,6 +17,21 @@ constexpr CGFloat kPointSectionHeight = 82.0;
 constexpr double kInitialMapDistance = 50'000.0;
 constexpr double kMinimumMapDistance = 500.0;
 constexpr double kMaximumMapDistance = 2'000'000.0;
+constexpr double kVisibilityBasisDistance = 1'000.0;
+
+/// Scalar-only ABI mirrored by `VisibilityMapParameters` in image_renderer.metal.
+struct VisibilityMapParameters {
+  float centre_x;
+  float centre_y;
+  float east_x_per_metre;
+  float east_y_per_metre;
+  float north_x_per_metre;
+  float north_y_per_metre;
+  float point_size;
+  uint32_t ray_count;
+};
+
+static_assert(sizeof(VisibilityMapParameters) == 8U * sizeof(uint32_t));
 
 enum class AnnotationKind : NSInteger {
   Observer,
@@ -131,6 +149,153 @@ enum class AnnotationKind : NSInteger {
 
 @end
 
+/// Transparent, non-interactive Metal layer drawn over MapKit. It consumes the
+/// immutable point buffer published with a completed frame, so hundreds of
+/// thousands of collisions remain one GPU draw rather than becoming MapKit
+/// annotations or host-side paths.
+@interface VisibilityMapView : MTKView <MTKViewDelegate> {
+@private
+  id<MTLCommandQueue> _visibilityCommandQueue;
+  id<MTLRenderPipelineState> _visibilityPipeline;
+  id<MTLBuffer> _points;
+  VisibilityMapParameters _mapParameters;
+}
+- (instancetype)initWithDevice:(id<MTLDevice>)device
+                  commandQueue:(id<MTLCommandQueue>)commandQueue
+                       library:(id<MTLLibrary>)library;
+- (void)setPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image;
+- (void)setMapParameters:(VisibilityMapParameters)parameters;
+- (void)refresh;
+@end
+
+@implementation VisibilityMapView
+
+- (instancetype)initWithDevice:(id<MTLDevice>)device
+                  commandQueue:(id<MTLCommandQueue>)commandQueue
+                       library:(id<MTLLibrary>)library {
+  self = [super initWithFrame:NSZeroRect device:device];
+  if (self == nil) {
+    return nil;
+  }
+  if (device == nil || commandQueue == nil || library == nil) {
+    throw std::invalid_argument("Visibility map requires valid Metal resources");
+  }
+
+  id<MTLFunction> vertex = [library newFunctionWithName:@"visibility_point_vertex"];
+  id<MTLFunction> fragment = [library newFunctionWithName:@"visibility_point_fragment"];
+  if (vertex == nil || fragment == nil) {
+    throw std::runtime_error("Visibility point shaders are missing from the Metal library");
+  }
+
+  self.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+  MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+  descriptor.label = @"Minimap visibility points";
+  descriptor.vertexFunction = vertex;
+  descriptor.fragmentFunction = fragment;
+  descriptor.colorAttachments[0].pixelFormat = self.colorPixelFormat;
+  descriptor.colorAttachments[0].blendingEnabled = YES;
+  // Maximum blending preserves a constant highlight opacity where many camera
+  // rays land on the same minimap pixel.
+  descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationMax;
+  descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationMax;
+  descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+  descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+  descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+  descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+
+  NSError *error = nil;
+  _visibilityPipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (_visibilityPipeline == nil) {
+    const char *detail = error == nil ? "unknown error" : error.localizedDescription.UTF8String;
+    throw std::runtime_error(
+        "Could not create minimap visibility pipeline: " + std::string(detail)
+    );
+  }
+
+  _visibilityCommandQueue = commandQueue;
+  _mapParameters.point_size = 2.0F;
+  self.delegate = self;
+  self.paused = YES;
+  self.enableSetNeedsDisplay = YES;
+  self.autoResizeDrawable = YES;
+  self.framebufferOnly = YES;
+  self.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+  self.wantsLayer = YES;
+  self.layer.opaque = NO;
+  self.layer.backgroundColor = NSColor.clearColor.CGColor;
+  return self;
+}
+
+- (BOOL)isOpaque {
+  return NO;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+  (void)point;
+  return nil;
+}
+
+- (void)setPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image {
+  const uint64_t count = static_cast<uint64_t>(image.width) * image.height;
+  const uint64_t pointBytes = count * 2U * sizeof(float);
+  if (count == 0U || count > UINT32_MAX || points == nil || points.length < pointBytes) {
+    _points = nil;
+    _mapParameters.ray_count = 0U;
+  } else {
+    _points = points;
+    _mapParameters.ray_count = static_cast<uint32_t>(count);
+  }
+  [self refresh];
+}
+
+- (void)setMapParameters:(VisibilityMapParameters)parameters {
+  const uint32_t rayCount = _mapParameters.ray_count;
+  _mapParameters = parameters;
+  _mapParameters.ray_count = rayCount;
+  [self refresh];
+}
+
+- (void)refresh {
+  [self setNeedsDisplay:YES];
+}
+
+- (void)drawInMTKView:(MTKView *)view {
+  id<CAMetalDrawable> drawable = view.currentDrawable;
+  MTLRenderPassDescriptor *pass = view.currentRenderPassDescriptor;
+  if (drawable == nil || pass == nil) {
+    return;
+  }
+  pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+
+  id<MTLCommandBuffer> command = [_visibilityCommandQueue commandBuffer];
+  id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+  if (command == nil || encoder == nil) {
+    return;
+  }
+  command.label = @"Draw minimap visibility";
+  encoder.label = @"visibility points";
+  if (_points != nil && _mapParameters.ray_count > 0U) {
+    [encoder setRenderPipelineState:_visibilityPipeline];
+    [encoder setVertexBuffer:_points offset:0 atIndex:0];
+    [encoder setVertexBytes:&_mapParameters length:sizeof(_mapParameters) atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypePoint
+                vertexStart:0U
+                vertexCount:_mapParameters.ray_count];
+  }
+  [encoder endEncoding];
+  [command presentDrawable:drawable];
+  [command commit];
+}
+
+- (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
+  (void)view;
+  (void)size;
+}
+
+@end
+
 /// A north-up map whose centre is always the observer. MapKit's normal pan,
 /// pitch, and rotation gestures are disabled; scrolling and pinching change
 /// only the stored ground span, so navigation cannot lose the viewpoint.
@@ -167,10 +332,13 @@ enum class AnnotationKind : NSInteger {
   NSView *_mapSection;
   NSView *_pointInfoView;
   FixedCentreMapView *_mapView;
+  VisibilityMapView *_visibilityView;
   CompactMapScaleView *_scaleView;
   NSPopUpButton *_mapStyleControl;
   MiniMapAnnotation *_observerAnnotation;
   MiniMapAnnotation *_inspectionAnnotation;
+  CLLocationCoordinate2D _eastBasisCoordinate;
+  CLLocationCoordinate2D _northBasisCoordinate;
   id<MKOverlay> _fieldOfViewOverlay;
   id<MKOverlay> _headingOverlay;
   double _observerEasting;
@@ -180,6 +348,7 @@ enum class AnnotationKind : NSInteger {
   bool _mapVisible;
   bool _pointInfoVisible;
 }
+- (void)updateVisibilityTransform;
 @end
 
 @implementation MiniMapPanelView
@@ -188,7 +357,10 @@ enum class AnnotationKind : NSInteger {
                                northing:(double)northing
                         terrainEpsgCode:(uint32_t)epsgCode
                             maxDistance:(double)maxDistance
-                          pointInfoView:(NSView *)pointInfoView {
+                          pointInfoView:(NSView *)pointInfoView
+                            metalDevice:(id<MTLDevice>)metalDevice
+                           commandQueue:(id<MTLCommandQueue>)commandQueue
+                                library:(id<MTLLibrary>)library {
   self = [super initWithFrame:NSMakeRect(0.0, 0.0, kMapPanelWidth, kMapSectionHeight)];
   if (self == nil) {
     return nil;
@@ -243,6 +415,13 @@ enum class AnnotationKind : NSInteger {
   _mapView.translatesAutoresizingMaskIntoConstraints = NO;
   [_mapSection addSubview:_mapView];
 
+  _visibilityView = [[VisibilityMapView alloc] initWithDevice:metalDevice
+                                                 commandQueue:commandQueue
+                                                      library:library];
+  _visibilityView.frame = _mapView.bounds;
+  _visibilityView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  [_mapView addSubview:_visibilityView];
+
   _scaleView = [[CompactMapScaleView alloc] initWithFrame:NSMakeRect(8.0, 8.0, 66.0, 28.0)];
   _scaleView.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
   [_mapView addSubview:_scaleView];
@@ -282,6 +461,20 @@ enum class AnnotationKind : NSInteger {
   _observerAnnotation.kind = AnnotationKind::Observer;
   _observerAnnotation.coordinate = observerCoordinate;
   [_mapView addAnnotation:_observerAnnotation];
+  const panorama::LatLon eastBasis = terrainCrs.to_lat_lon(
+      {
+          _observerEasting + kVisibilityBasisDistance,
+          _observerNorthing,
+      }
+  );
+  const panorama::LatLon northBasis = terrainCrs.to_lat_lon(
+      {
+          _observerEasting,
+          _observerNorthing + kVisibilityBasisDistance,
+      }
+  );
+  _eastBasisCoordinate = CLLocationCoordinate2DMake(eastBasis.lat, eastBasis.lon);
+  _northBasisCoordinate = CLLocationCoordinate2DMake(northBasis.lat, northBasis.lon);
   [self mapStyleChanged:_mapStyleControl];
 
   _mapVisible = false;
@@ -302,11 +495,15 @@ enum class AnnotationKind : NSInteger {
       std::max(0.0, self.bounds.size.height - pointHeight)
   );
   [_scaleView updateForMapView:_mapView];
+  [self updateVisibilityTransform];
 }
 
 - (void)setMapVisible:(bool)visible {
   _mapVisible = visible;
   _mapSection.hidden = !visible;
+  if (visible) {
+    [_visibilityView refresh];
+  }
   [self setNeedsLayout:YES];
 }
 
@@ -347,6 +544,41 @@ enum class AnnotationKind : NSInteger {
 
 - (void)mapViewDidChangeVisibleRegion:(MKMapView *)mapView {
   [_scaleView updateForMapView:mapView];
+  [self updateVisibilityTransform];
+}
+
+/// Approximate the projected terrain CRS over this compact map with the local
+/// east/north Jacobian at the observer. Deriving both basis endpoints through
+/// the full CRS and MapKit conversion keeps grid convergence aligned with the
+/// existing FOV wedge while the map zoom changes.
+- (void)updateVisibilityTransform {
+  const NSSize size = _visibilityView.bounds.size;
+  if (size.width <= 0.0 || size.height <= 0.0) {
+    return;
+  }
+  const NSPoint centre = [_mapView convertCoordinate:_observerAnnotation.coordinate
+                                       toPointToView:_visibilityView];
+  const NSPoint east = [_mapView convertCoordinate:_eastBasisCoordinate
+                                     toPointToView:_visibilityView];
+  const NSPoint north = [_mapView convertCoordinate:_northBasisCoordinate
+                                      toPointToView:_visibilityView];
+  const auto clip = [size](NSPoint point) {
+    return NSMakePoint(2.0 * point.x / size.width - 1.0, 2.0 * point.y / size.height - 1.0);
+  };
+  const NSPoint centreClip = clip(centre);
+  const NSPoint eastClip = clip(east);
+  const NSPoint northClip = clip(north);
+  const VisibilityMapParameters parameters = {
+      static_cast<float>(centreClip.x),
+      static_cast<float>(centreClip.y),
+      static_cast<float>((eastClip.x - centreClip.x) / kVisibilityBasisDistance),
+      static_cast<float>((eastClip.y - centreClip.y) / kVisibilityBasisDistance),
+      static_cast<float>((northClip.x - centreClip.x) / kVisibilityBasisDistance),
+      static_cast<float>((northClip.y - centreClip.y) / kVisibilityBasisDistance),
+      2.0F,
+      0U,
+  };
+  [_visibilityView setMapParameters:parameters];
 }
 
 - (void)setCameraOrientation:(panorama::CameraOrientation)orientation
@@ -397,6 +629,10 @@ enum class AnnotationKind : NSInteger {
   _headingOverlay = [MKPolyline polylineWithCoordinates:headingLine count:2];
   [_mapView addOverlay:_fieldOfViewOverlay level:MKOverlayLevelAboveRoads];
   [_mapView addOverlay:_headingOverlay level:MKOverlayLevelAboveRoads];
+}
+
+- (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image {
+  [_visibilityView setPoints:points image:image];
 }
 
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked {
