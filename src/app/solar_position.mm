@@ -36,7 +36,7 @@ constexpr double kEarthRadiusMetres = 6'378'137.0;
   return value < 0.0 ? value + 360.0 : value;
 }
 
-[[nodiscard]] double julian_day(UtcDateTime utc) {
+[[nodiscard]] double julian_day(CalendarDateTime utc) {
   int year = utc.year;
   int month = utc.month;
   if (month <= 2) {
@@ -57,7 +57,7 @@ struct SolarEphemeris {
   double equation_of_time;
 };
 
-[[nodiscard]] SolarEphemeris solar_ephemeris(UtcDateTime utc) {
+[[nodiscard]] SolarEphemeris solar_ephemeris(CalendarDateTime utc) {
   const double centuries = (julian_day(utc) - 2'451'545.0) / 36'525.0;
   const double mean_longitude =
       normalised_degrees(280.46646 + centuries * (36'000.76983 + 0.0003032 * centuries));
@@ -90,7 +90,7 @@ struct SolarEphemeris {
 
 } // namespace
 
-std::optional<UtcDateTime> parse_utc_date_time(std::string_view date, std::string_view time) {
+std::optional<CalendarDateTime> parse_date_time(std::string_view date, std::string_view time) {
   if (date.size() != 10U || date[2] != '-' || date[5] != '-' || time.size() != 5U ||
       time[2] != ':') {
     return std::nullopt;
@@ -105,10 +105,10 @@ std::optional<UtcDateTime> parse_utc_date_time(std::string_view date, std::strin
       *minute < 0 || *minute > 59) {
     return std::nullopt;
   }
-  return UtcDateTime{*year, *month, *day, *hour, *minute};
+  return CalendarDateTime{*year, *month, *day, *hour, *minute};
 }
 
-SolarPosition solar_position(const Crs &crs, Coord observer, UtcDateTime utc) {
+SolarPosition solar_position(const Crs &crs, Coord observer, CalendarDateTime utc) {
   const LatLon geographic = crs.to_lat_lon(observer);
   const double latitude = geographic.lat * kDegreesToRadians;
   const double longitude = geographic.lon;
@@ -160,7 +160,7 @@ SolarPosition solar_position(const Crs &crs, Coord observer, UtcDateTime utc) {
   return {grid_azimuth, elevation};
 }
 
-DaylightTimes daylight_times(const Crs &crs, Coord observer, UtcDateTime date) {
+DaylightTimes daylight_times(const Crs &crs, Coord observer, CalendarDateTime date) {
   const LatLon geographic = crs.to_lat_lon(observer);
   const double latitude = geographic.lat * kDegreesToRadians;
   date.hour = 12;
@@ -175,14 +175,10 @@ DaylightTimes daylight_times(const Crs &crs, Coord observer, UtcDateTime date) {
   }
   const double hour_angle_degrees = std::acos(cosine_hour_angle) * kRadiansToDegrees;
   const double solar_noon = 720.0 - 4.0 * geographic.lon - ephemeris.equation_of_time;
-  const auto clock_minutes = [](double minutes) {
-    minutes = std::fmod(minutes, 1440.0);
-    return minutes < 0.0 ? minutes + 1440.0 : minutes;
-  };
   return {
       DaylightState::Normal,
-      clock_minutes(solar_noon - 4.0 * hour_angle_degrees),
-      clock_minutes(solar_noon + 4.0 * hour_angle_degrees),
+      solar_noon - 4.0 * hour_angle_degrees,
+      solar_noon + 4.0 * hour_angle_degrees,
   };
 }
 

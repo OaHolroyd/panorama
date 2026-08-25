@@ -7,8 +7,9 @@
 
 namespace panorama::app {
 
-/// One Gregorian date and UTC clock time used for astronomical lighting.
-struct UtcDateTime {
+/// Gregorian calendar fields. Callers choose their time-zone interpretation;
+/// `solar_position` specifically expects these fields to describe UTC.
+struct CalendarDateTime {
   int year;
   int month;
   int day;
@@ -28,23 +29,25 @@ enum class DaylightState {
   PolarNight,
 };
 
-/// Geometric horizon crossings in UTC minutes after midnight.
+/// Geometric horizon crossings represented relative to UTC midnight.
 struct DaylightTimes {
   DaylightState state;
+  /// UTC minutes relative to midnight on the supplied date. Values are not
+  /// wrapped so callers can preserve the correct day in every time zone.
   double sunrise_minutes;
   double sunset_minutes;
 };
 
 /// Parse strict DD-MM-YYYY and HH:MM input, rejecting invalid calendar dates.
-[[nodiscard]] std::optional<UtcDateTime>
-parse_utc_date_time(std::string_view date, std::string_view time);
+[[nodiscard]] std::optional<CalendarDateTime>
+parse_date_time(std::string_view date, std::string_view time);
 
 /// Derive geometric solar angles at a projected observer coordinate.
 /// Azimuth is clockwise from grid north and elevation is above the horizon.
-[[nodiscard]] SolarPosition solar_position(const Crs &crs, Coord observer, UtcDateTime utc);
+[[nodiscard]] SolarPosition solar_position(const Crs &crs, Coord observer, CalendarDateTime utc);
 
-/// Derive geometric sunrise and sunset for the supplied UTC calendar date.
+/// Derive geometric sunrise and sunset for the supplied Gregorian date.
 /// The clock fields in `date` are ignored.
-[[nodiscard]] DaylightTimes daylight_times(const Crs &crs, Coord observer, UtcDateTime date);
+[[nodiscard]] DaylightTimes daylight_times(const Crs &crs, Coord observer, CalendarDateTime date);
 
 } // namespace panorama::app

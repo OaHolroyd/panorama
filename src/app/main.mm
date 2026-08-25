@@ -13,6 +13,7 @@
 #include "timer.h"
 
 #import <AppKit/AppKit.h>
+#import <MapKit/MapKit.h>
 #import <MetalKit/MetalKit.h>
 
 #include <algorithm>
@@ -130,9 +131,73 @@ struct ViewerSettings {
   return [NSString stringWithFormat:@"%.9g", value];
 }
 
-[[nodiscard]] NSString *format_utc_minutes(double value) {
+[[nodiscard]] NSString *format_clock_minutes(double value) {
   const int total = std::clamp(static_cast<int>(std::lround(value)), 0, 1439);
   return [NSString stringWithFormat:@"%02d:%02d", total / 60, total % 60];
+}
+
+/// Interpret calendar fields in the observer's time zone, then return the UTC
+/// fields consumed by the solar-position calculation. The round trip rejects
+/// local times which do not exist when daylight saving advances the clock.
+[[nodiscard]] std::optional<CalendarDateTime>
+local_date_time_to_utc(CalendarDateTime local, NSTimeZone *timeZone) {
+  NSCalendar *localCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  localCalendar.timeZone = timeZone;
+  NSDateComponents *localComponents = [[NSDateComponents alloc] init];
+  localComponents.year = local.year;
+  localComponents.month = local.month;
+  localComponents.day = local.day;
+  localComponents.hour = local.hour;
+  localComponents.minute = local.minute;
+  localComponents.timeZone = timeZone;
+  NSDate *instant = [localCalendar dateFromComponents:localComponents];
+  if (instant == nil) {
+    return std::nullopt;
+  }
+
+  constexpr NSCalendarUnit fields = NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
+                                    NSCalendarUnitHour | NSCalendarUnitMinute;
+  NSDateComponents *roundTrip = [localCalendar components:fields fromDate:instant];
+  if (roundTrip.year != local.year || roundTrip.month != local.month ||
+      roundTrip.day != local.day || roundTrip.hour != local.hour ||
+      roundTrip.minute != local.minute) {
+    return std::nullopt;
+  }
+
+  NSCalendar *utcCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  utcCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  NSDateComponents *utc = [utcCalendar components:fields fromDate:instant];
+  return CalendarDateTime{
+      static_cast<int>(utc.year),
+      static_cast<int>(utc.month),
+      static_cast<int>(utc.day),
+      static_cast<int>(utc.hour),
+      static_cast<int>(utc.minute),
+  };
+}
+
+/// Convert UTC minutes relative to the supplied Gregorian date into an
+/// observer-local clock label. Minutes may cross a UTC day boundary.
+[[nodiscard]] NSString *
+format_local_daylight_time(CalendarDateTime date, double utcMinutes, NSTimeZone *timeZone) {
+  NSCalendar *utcCalendar =
+      [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  utcCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+  NSDateComponents *midnightComponents = [[NSDateComponents alloc] init];
+  midnightComponents.year = date.year;
+  midnightComponents.month = date.month;
+  midnightComponents.day = date.day;
+  midnightComponents.timeZone = utcCalendar.timeZone;
+  NSDate *midnight = [utcCalendar dateFromComponents:midnightComponents];
+  NSDate *instant = [midnight dateByAddingTimeInterval:utcMinutes * 60.0];
+
+  NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+  formatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+  formatter.timeZone = timeZone;
+  formatter.dateFormat = @"HH:mm";
+  return [formatter stringFromDate:instant];
 }
 
 void print_usage(const char *program) {
@@ -1265,6 +1330,11 @@ private:
   NSSlider *_astronomicalTimeControl;
   NSTextField *_astronomicalTimeLabel;
   NSTextField *_daylightTimesLabel;
+  MKReverseGeocodingRequest *_timeZoneRequest;
+  NSTimeZone *_observerTimeZone;
+  uint64_t _timeZoneRequestToken;
+  bool _astronomicalControlsUseObserverTime;
+  bool _timeZoneLookupInProgress;
   double _manualSunAzimuthDegrees;
   double _manualSunPolarAngleDegrees;
   NSSlider *_diffusivityControl;
@@ -1317,6 +1387,8 @@ private:
 - (void)toggleMapAndPointInspection:(id)sender;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
+- (void)resolveObserverTimeZone;
+- (BOOL)publishAstronomicalLighting;
 - (NSViewController *)makeSettingsViewController;
 - (NSViewController *)makeDebugViewController;
 - (NSViewController *)makePointInfoViewController;
@@ -1948,35 +2020,126 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _panningSensitivityLabel.stringValue = [NSString stringWithFormat:@"%.0f", _panningSensitivity];
 }
 
+- (void)resolveObserverTimeZone {
+  const uint64_t requestToken = ++_timeZoneRequestToken;
+  _observerTimeZone = nil;
+  _timeZoneLookupInProgress = true;
+  _daylightTimesLabel.stringValue = @"Finding observer time zone…";
+  [self updateSettingsControlAvailability];
+
+  [_timeZoneRequest cancel];
+  const panorama::LatLon geographic =
+      _renderer->terrain_crs().to_lat_lon({_observer.easting, _observer.northing});
+  CLLocation *location = [[CLLocation alloc] initWithLatitude:geographic.lat
+                                                    longitude:geographic.lon];
+  _timeZoneRequest = [[MKReverseGeocodingRequest alloc] initWithLocation:location];
+  __weak PanoramaController *weakSelf = self;
+  [_timeZoneRequest
+      getMapItemsWithCompletionHandler:^(NSArray<MKMapItem *> *mapItems, NSError *error) {
+        // Geocoding may finish after another observer move. Marshal UI
+        // work to the main queue and discard superseded responses.
+        dispatch_async(dispatch_get_main_queue(), ^{
+          PanoramaController *strongSelf = weakSelf;
+          if (strongSelf == nil || requestToken != strongSelf->_timeZoneRequestToken) {
+            return;
+          }
+          strongSelf->_timeZoneLookupInProgress = false;
+          NSTimeZone *timeZone = mapItems.firstObject.timeZone;
+          if (error != nil || timeZone == nil) {
+            strongSelf->_daylightTimesLabel.stringValue = @"Observer time zone unavailable";
+            [strongSelf updateSettingsControlAvailability];
+            return;
+          }
+
+          strongSelf->_observerTimeZone = timeZone;
+          strongSelf->_astronomicalTimeControl.toolTip = [NSString
+              stringWithFormat:@"Local time in %@ at one-minute resolution", timeZone.name];
+          strongSelf->_daylightTimesLabel.toolTip =
+              [NSString stringWithFormat:@"Local geometric-horizon crossings in %@", timeZone.name];
+
+          // Populate the initial controls with the current civil time at
+          // the observer. Later observer moves preserve the user's chosen
+          // wall-clock date and time, but reinterpret them at the new site.
+          if (!strongSelf->_astronomicalControlsUseObserverTime) {
+            NSDate *now = [NSDate date];
+            NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+            dateFormatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+            dateFormatter.timeZone = timeZone;
+            dateFormatter.dateFormat = @"dd-MM-yyyy";
+            strongSelf->_astronomicalDateControl.stringValue = [dateFormatter stringFromDate:now];
+
+            NSCalendar *calendar =
+                [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+            calendar.timeZone = timeZone;
+            NSDateComponents *components =
+                [calendar components:NSCalendarUnitHour | NSCalendarUnitMinute fromDate:now];
+            const double minutes = static_cast<double>(components.hour * 60 + components.minute);
+            strongSelf->_astronomicalTimeControl.doubleValue = minutes;
+            strongSelf->_astronomicalTimeLabel.stringValue =
+                panorama::app::format_clock_minutes(minutes);
+            strongSelf->_astronomicalControlsUseObserverTime = true;
+          }
+
+          [strongSelf updateSettingsControlAvailability];
+          if (strongSelf->_sunModeControl.selectedSegment == 1) {
+            [strongSelf publishAstronomicalLighting];
+          } else {
+            strongSelf->_daylightTimesLabel.stringValue =
+                [NSString stringWithFormat:@"Observer time · %@", timeZone.abbreviation];
+          }
+        });
+      }];
+}
+
 /// Publish lighting-only changes without retracing the terrain. Polar angle is
 /// measured down from the zenith, while the renderer stores elevation above
 /// the horizon.
 - (BOOL)publishAstronomicalLighting {
+  if (_observerTimeZone == nil) {
+    _daylightTimesLabel.stringValue = _timeZoneLookupInProgress ? @"Finding observer time zone…"
+                                                                : @"Observer time zone unavailable";
+    return NO;
+  }
+
   const char *date = _astronomicalDateControl.stringValue.UTF8String;
-  NSString *timeValue = panorama::app::format_utc_minutes(_astronomicalTimeControl.doubleValue);
+  NSString *timeValue = panorama::app::format_clock_minutes(_astronomicalTimeControl.doubleValue);
   const char *time = timeValue.UTF8String;
-  const std::optional<panorama::app::UtcDateTime> utc = panorama::app::parse_utc_date_time(
+  const std::optional<panorama::app::CalendarDateTime> local = panorama::app::parse_date_time(
       date == nullptr ? std::string_view{} : std::string_view(date),
       time == nullptr ? std::string_view{} : std::string_view(time)
   );
-  const BOOL valid = utc.has_value();
-  _astronomicalDateControl.textColor = valid ? NSColor.labelColor : NSColor.systemRedColor;
-  if (!valid) {
+  _astronomicalDateControl.textColor =
+      local.has_value() ? NSColor.labelColor : NSColor.systemRedColor;
+  if (!local.has_value()) {
     _daylightTimesLabel.stringValue = @"Enter a valid DD-MM-YYYY date";
+    return NO;
+  }
+  const std::optional<panorama::app::CalendarDateTime> utc =
+      panorama::app::local_date_time_to_utc(*local, _observerTimeZone);
+  if (!utc.has_value()) {
+    _daylightTimesLabel.stringValue = @"This local time does not exist";
     return NO;
   }
 
   const panorama::app::DaylightTimes daylightInfo = panorama::app::daylight_times(
       _renderer->terrain_crs(),
       {_observer.easting, _observer.northing},
-      *utc
+      *local
   );
   switch (daylightInfo.state) {
   case panorama::app::DaylightState::Normal:
     _daylightTimesLabel.stringValue =
         [NSString stringWithFormat:@"Sunrise %@  ·  Sunset %@",
-                                   panorama::app::format_utc_minutes(daylightInfo.sunrise_minutes),
-                                   panorama::app::format_utc_minutes(daylightInfo.sunset_minutes)];
+                                   panorama::app::format_local_daylight_time(
+                                       *local,
+                                       daylightInfo.sunrise_minutes,
+                                       _observerTimeZone
+                                   ),
+                                   panorama::app::format_local_daylight_time(
+                                       *local,
+                                       daylightInfo.sunset_minutes,
+                                       _observerTimeZone
+                                   )];
     break;
   case panorama::app::DaylightState::PolarDay:
     _daylightTimesLabel.stringValue = @"Sun above horizon all day";
@@ -1989,7 +2152,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const panorama::app::SolarPosition sun = panorama::app::solar_position(
       _renderer->terrain_crs(),
       {_observer.easting, _observer.northing},
-      *utc
+      utc.value()
   );
   const double azimuthDegrees = sun.azimuth * panorama::app::kRadiansToDegrees;
   const double polarDegrees =
@@ -2020,7 +2183,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   if (sender.selectedSegment == 1) {
     _manualSunAzimuthDegrees = _sunAzimuthControl.doubleValue;
     _manualSunPolarAngleDegrees = _sunPolarAngleControl.doubleValue;
-    if (![self publishAstronomicalLighting]) {
+    if (_observerTimeZone == nil) {
+      if (!_timeZoneLookupInProgress) {
+        [self resolveObserverTimeZone];
+      }
+    } else if (![self publishAstronomicalLighting]) {
       NSBeep();
     }
   } else {
@@ -2042,7 +2209,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
 - (void)astronomicalTimeChanged:(NSSlider *)sender {
   sender.doubleValue = std::round(sender.doubleValue);
-  _astronomicalTimeLabel.stringValue = panorama::app::format_utc_minutes(sender.doubleValue);
+  _astronomicalTimeLabel.stringValue = panorama::app::format_clock_minutes(sender.doubleValue);
   if (_sunModeControl.selectedSegment == 1) {
     [self publishAstronomicalLighting];
   }
@@ -2651,9 +2818,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _astronomicalTimeControl.continuous = YES;
   _astronomicalTimeControl.numberOfTickMarks = 7;
   _astronomicalTimeControl.allowsTickMarkValuesOnly = NO;
-  _astronomicalTimeControl.toolTip = @"UTC time at one-minute resolution";
+  _astronomicalTimeControl.toolTip = @"Observer-local time at one-minute resolution";
   _astronomicalTimeLabel =
-      [NSTextField labelWithString:panorama::app::format_utc_minutes(initialUtcMinutes)];
+      [NSTextField labelWithString:panorama::app::format_clock_minutes(initialUtcMinutes)];
   _astronomicalTimeLabel.alignment = NSTextAlignmentRight;
   [_astronomicalTimeLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
   NSStackView *astronomicalTimeSlider =
@@ -2664,7 +2831,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _daylightTimesLabel = [NSTextField labelWithString:@"Sunrise —  ·  Sunset —"];
   _daylightTimesLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
   _daylightTimesLabel.textColor = NSColor.secondaryLabelColor;
-  _daylightTimesLabel.toolTip = @"UTC crossings of the geometric horizon";
+  _daylightTimesLabel.toolTip = @"Local crossings of the geometric horizon";
   NSStackView *astronomicalTimeSetting =
       [NSStackView stackViewWithViews:@[ astronomicalTimeSlider, _daylightTimesLabel ]];
   astronomicalTimeSetting.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -2831,8 +2998,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _normalLightingControl,
     _raytracedShadowsControl,
     make_row(@"Sun position", _sunModeControl),
-    make_row(@"Date (UTC)", _astronomicalDateControl),
-    make_row(@"Time (UTC)", astronomicalTimeSetting),
+    make_row(@"Date (local)", _astronomicalDateControl),
+    make_row(@"Time (local)", astronomicalTimeSetting),
     make_row(@"Sun azimuth", sunAzimuthSetting),
     make_row(@"Sun polar angle", sunPolarAngleSetting),
     make_row(@"Sky strength", skyStrengthSetting),
@@ -2872,6 +3039,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   ]];
 
   [self updateSettingsControlAvailability];
+  [self resolveObserverTimeZone];
   return viewController;
 }
 
@@ -3155,12 +3323,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _featureOutlineDetailControl.enabled = _featureOutlinesControl.state == NSControlStateValueOn;
   const BOOL normalLighting = _normalLightingControl.state == NSControlStateValueOn;
   const BOOL manualSun = _sunModeControl.selectedSegment == 0;
+  const BOOL hasObserverTimeZone = _observerTimeZone != nil;
   _raytracedShadowsControl.enabled = normalLighting;
   _sunModeControl.enabled = normalLighting;
   _sunAzimuthControl.enabled = normalLighting && manualSun;
   _sunPolarAngleControl.enabled = normalLighting && manualSun;
-  _astronomicalDateControl.enabled = normalLighting && !manualSun;
-  _astronomicalTimeControl.enabled = normalLighting && !manualSun;
+  _astronomicalDateControl.enabled = normalLighting && !manualSun && hasObserverTimeZone;
+  _astronomicalTimeControl.enabled = normalLighting && !manualSun && hasObserverTimeZone;
   _diffusivityControl.enabled = normalLighting;
   _skyStrengthControl.enabled = normalLighting;
   _skyDetailControl.enabled = normalLighting;
@@ -3177,8 +3346,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   if (_sunModeControl.selectedSegment == 1 && ![self publishAstronomicalLighting]) {
     NSBeep();
     NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Invalid astronomical date";
-    alert.informativeText = @"Enter a Gregorian date as DD-MM-YYYY.";
+    if (_observerTimeZone == nil) {
+      alert.messageText = @"Observer time zone unavailable";
+      alert.informativeText =
+          @"The observer's local time zone could not be determined. Check the network "
+           "connection or move the observer and try again.";
+    } else {
+      alert.messageText = @"Invalid astronomical date or time";
+      alert.informativeText =
+          @"Enter a Gregorian date as DD-MM-YYYY. Some times do not exist when daylight "
+           "saving advances the local clock.";
+    }
     [alert beginSheetModalForWindow:_window completionHandler:nil];
     return;
   }
@@ -3403,15 +3581,16 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _window.title = [NSString stringWithFormat:@"panorama-app — error: %s", frame.error.c_str()];
   } else if (frame.revision != 0U && frame.revision != _displayedRevision) {
     _displayedRevision = frame.revision;
-    const bool observerMoved = frame.observer.easting != _observer.easting ||
-                               frame.observer.northing != _observer.northing ||
-                               frame.observer.elevation != _observer.elevation;
+    const bool observerPositionMoved = frame.observer.easting != _observer.easting ||
+                                       frame.observer.northing != _observer.northing;
+    const bool observerMoved =
+        observerPositionMoved || frame.observer.elevation != _observer.elevation;
     _observer = frame.observer;
     if (observerMoved) {
       [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
       [self updatePointInfo:std::nullopt];
-      if (_sunModeControl.selectedSegment == 1) {
-        [self publishAstronomicalLighting];
+      if (observerPositionMoved) {
+        [self resolveObserverTimeZone];
       }
     }
     const double fps = frame.milliseconds > 0.0 ? 1'000.0 / frame.milliseconds : 0.0;
