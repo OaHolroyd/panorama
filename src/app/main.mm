@@ -1,5 +1,6 @@
 #include "arguments.h"
 #include "gpu_image_renderer.h"
+#include "minimap.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
 #include "synthetic_render_options.h"
@@ -454,6 +455,7 @@ public:
   [[nodiscard]] id<MTLCommandQueue> command_queue() const { return trace_->command_queue(); }
   [[nodiscard]] ImageSize image() const { return settings_.image; }
   [[nodiscard]] ObserverLocation observer() const { return settings_.observer; }
+  [[nodiscard]] Crs terrain_crs() const { return trace_->crs(); }
   [[nodiscard]] double initial_vertical_field_of_view() const {
     return settings_.vertical_field_of_view;
   }
@@ -678,6 +680,7 @@ private:
   __weak PanoramaView *_panoramaView;
   __weak ViewerOverlayView *_overlayView;
   __weak AspectFitContainerView *_aspectFitView;
+  __weak MiniMapPanelView *_miniMapPanel;
   panorama::CameraOrientation _orientation;
   double _verticalFieldOfView;
   panorama::ImageSize _image;
@@ -725,7 +728,8 @@ private:
 - (void)zoomWithScrollDelta:(double)delta precise:(bool)precise;
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView
-             aspectFitView:(AspectFitContainerView *)aspectFitView;
+             aspectFitView:(AspectFitContainerView *)aspectFitView
+              miniMapPanel:(MiniMapPanelView *)miniMapPanel;
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)clearPointInspection;
@@ -1086,14 +1090,14 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSView *_settingsView;
   NSView *_debugView;
   NSView *_debugContentView;
-  NSView *_pointInfoView;
-  NSView *_pointInfoContentView;
+  NSView *_mapPanelView;
+  MiniMapPanelView *_mapPanelContentView;
   CGFloat _inspectorWidth;
   NSSize _debugSize;
-  NSSize _pointInfoSize;
   CGFloat _panelMargin;
   bool _inspectorVisible;
   bool _debugVisible;
+  bool _mapVisible;
   bool _pointInfoVisible;
 }
 - (instancetype)initWithFrame:(NSRect)frame
@@ -1102,10 +1106,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                inspectorWidth:(CGFloat)inspectorWidth
                     debugView:(NSView *)debugView
                     debugSize:(NSSize)debugSize
-                pointInfoView:(NSView *)pointInfoView
-                pointInfoSize:(NSSize)pointInfoSize;
+                 mapPanelView:(MiniMapPanelView *)mapPanelView;
 - (void)toggleInspector:(id)sender;
 - (void)toggleDebugOverlay:(id)sender;
+- (void)toggleMap:(id)sender;
 - (void)setPointInfoVisible:(bool)visible;
 @end
 
@@ -1117,20 +1121,19 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                inspectorWidth:(CGFloat)inspectorWidth
                     debugView:(NSView *)debugView
                     debugSize:(NSSize)debugSize
-                pointInfoView:(NSView *)pointInfoView
-                pointInfoSize:(NSSize)pointInfoSize {
+                 mapPanelView:(MiniMapPanelView *)mapPanelView {
   self = [super initWithFrame:frame];
   if (self != nil) {
     _contentView = contentView;
     _settingsView = settingsView;
     _debugContentView = debugView;
-    _pointInfoContentView = pointInfoView;
+    _mapPanelContentView = mapPanelView;
     _inspectorWidth = inspectorWidth;
     _debugSize = debugSize;
-    _pointInfoSize = pointInfoSize;
     _panelMargin = 12.0;
     _inspectorVisible = true;
     _debugVisible = false;
+    _mapVisible = false;
     _pointInfoVisible = false;
     self.wantsLayer = YES;
     self.layer.masksToBounds = YES;
@@ -1138,10 +1141,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
     _inspectorView = makeOverlayPanel(_settingsView);
     _debugView = makeOverlayPanel(_debugContentView);
-    _pointInfoView = makeOverlayPanel(_pointInfoContentView);
+    _mapPanelView = makeOverlayPanel(_mapPanelContentView);
     [self addSubview:_inspectorView];
     [self addSubview:_debugView];
-    [self addSubview:_pointInfoView];
+    [self addSubview:_mapPanelView];
   }
   return self;
 }
@@ -1173,13 +1176,22 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   return NSMakeRect(x, y, _debugSize.width, height);
 }
 
-- (NSRect)pointInfoFrameForVisible:(bool)visible {
+- (NSRect)mapPanelFrameForVisible:(bool)visible {
   const NSRect bounds = self.bounds;
   const NSEdgeInsets safeArea = self.safeAreaInsets;
+  NSSize preferredSize = [_mapPanelContentView preferredPanelSize];
+  // Preserve the outgoing panel's size while its final visible section slides
+  // away; the content reports zero height once both sections are disabled.
+  if (!visible && preferredSize.height == 0.0 && _mapPanelView.frame.size.height > 0.0) {
+    preferredSize = _mapPanelView.frame.size;
+  }
+  const CGFloat availableHeight =
+      std::max(0.0, bounds.size.height - safeArea.top - safeArea.bottom - 2.0 * _panelMargin);
+  const CGFloat height = std::min(preferredSize.height, availableHeight);
   const CGFloat x = visible ? NSMinX(bounds) + safeArea.left + _panelMargin
-                            : NSMinX(bounds) - _pointInfoSize.width - _panelMargin;
+                            : NSMinX(bounds) - preferredSize.width - _panelMargin;
   const CGFloat y = NSMinY(bounds) + safeArea.bottom + _panelMargin;
-  return NSMakeRect(x, y, _pointInfoSize.width, _pointInfoSize.height);
+  return NSMakeRect(x, y, preferredSize.width, height);
 }
 
 - (void)layout {
@@ -1189,8 +1201,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _settingsView.frame = _inspectorView.bounds;
   _debugView.frame = [self debugFrameForVisible:_debugVisible];
   _debugContentView.frame = _debugView.bounds;
-  _pointInfoView.frame = [self pointInfoFrameForVisible:_pointInfoVisible];
-  _pointInfoContentView.frame = _pointInfoView.bounds;
+  _mapPanelView.frame = [self mapPanelFrameForVisible:[_mapPanelContentView hasVisibleContent]];
+  _mapPanelContentView.frame = _mapPanelView.bounds;
 }
 
 - (void)toggleInspector:(id)sender {
@@ -1211,14 +1223,38 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }];
 }
 
+- (void)toggleMap:(id)sender {
+  _mapVisible = !_mapVisible;
+  [_mapPanelContentView setMapVisible:_mapVisible];
+  const bool panelVisible = [_mapPanelContentView hasVisibleContent];
+  const NSRect targetFrame = [self mapPanelFrameForVisible:panelVisible];
+  [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+    context.duration = 0.25;
+    _mapPanelView.animator.frame = targetFrame;
+    _mapPanelContentView.animator.frame =
+        NSMakeRect(0.0, 0.0, targetFrame.size.width, targetFrame.size.height);
+  }];
+  if ([sender isKindOfClass:NSToolbarItem.class]) {
+    NSToolbarItem *item = sender;
+    if (@available(macOS 26.0, *)) {
+      item.style = _mapVisible ? NSToolbarItemStyleProminent : NSToolbarItemStylePlain;
+    }
+  }
+}
+
 - (void)setPointInfoVisible:(bool)visible {
   if (_pointInfoVisible == visible) {
     return;
   }
   _pointInfoVisible = visible;
+  [_mapPanelContentView setPointInfoVisible:visible];
+  const bool panelVisible = [_mapPanelContentView hasVisibleContent];
+  const NSRect targetFrame = [self mapPanelFrameForVisible:panelVisible];
   [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
     context.duration = 0.25;
-    _pointInfoView.animator.frame = [self pointInfoFrameForVisible:_pointInfoVisible];
+    _mapPanelView.animator.frame = targetFrame;
+    _mapPanelContentView.animator.frame =
+        NSMakeRect(0.0, 0.0, targetFrame.size.width, targetFrame.size.height);
   }];
 }
 
@@ -1455,10 +1491,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView
-             aspectFitView:(AspectFitContainerView *)aspectFitView {
+             aspectFitView:(AspectFitContainerView *)aspectFitView
+              miniMapPanel:(MiniMapPanelView *)miniMapPanel {
   _panoramaView = panoramaView;
   _overlayView = overlayView;
   _aspectFitView = aspectFitView;
+  _miniMapPanel = miniMapPanel;
 }
 
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
@@ -1475,6 +1513,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _pointInspectionLocked = false;
     _pointLockPending = false;
     _lockedPoint.reset();
+    [_miniMapPanel clearInspectedPoint];
     [_panoramaView setLockedPointIndicator:std::nullopt];
     _pointInfoHeading.stringValue = @"Point Info";
     _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
@@ -1497,6 +1536,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _pointInspectionLocked = false;
   _pointLockPending = false;
   _lockedPoint.reset();
+  [_miniMapPanel clearInspectedPoint];
   [_panoramaView setLockedPointIndicator:std::nullopt];
   [_panoramaView setPointInspectionEnabled:_pointInspectionEnabled];
   [_overlayView setPointInfoVisible:_pointInspectionEnabled];
@@ -1907,18 +1947,25 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   if (!inspection.has_value()) {
+    if (!_pointInspectionLocked) {
+      [_miniMapPanel clearInspectedPoint];
+    }
     _pointInfoLabel.stringValue = @"Move the pointer over the rendered terrain.\n"
                                    "Right-click to lock a point.";
     return;
   }
   const panorama::app::PointInspection &point = *inspection;
   if (!point.hit) {
+    [_miniMapPanel clearInspectedPoint];
     _pointInfoLabel.stringValue =
         [NSString stringWithFormat:@"Pixel      %4u, %4u\n\nNo terrain intersection",
                                    point.pixel.x,
                                    point.pixel.y];
     return;
   }
+  [_miniMapPanel setInspectedPointEasting:point.easting
+                                 northing:point.northing
+                                   locked:_pointInspectionLocked || _pointLockPending];
   _pointInfoLabel.stringValue =
       [NSString stringWithFormat:@"Pixel      %4u, %4u\n"
                                   "Distance   %10.1f m\nElevation  %10.1f m\n"
@@ -2113,6 +2160,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                 verticalFieldOfView:frame.vertical_field_of_view
                                               image:frame.image];
+    [_miniMapPanel setCameraOrientation:frame.orientation
+                    verticalFieldOfView:frame.vertical_field_of_view
+                                  image:frame.image];
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",
                          frame.orientation.heading * panorama::app::kRadiansToDegrees,
@@ -2130,6 +2180,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 @end
 
 static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.debug-info";
+static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.minimap";
 static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
     @"panorama.point-inspector";
 
@@ -2158,6 +2209,7 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   (void)toolbar;
   return @[
     NSToolbarFlexibleSpaceItemIdentifier,
+    kMapToolbarItemIdentifier,
     kPointInspectorToolbarItemIdentifier,
     kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
@@ -2169,6 +2221,7 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   return @[
     NSToolbarFlexibleSpaceItemIdentifier,
     NSToolbarSpaceItemIdentifier,
+    kMapToolbarItemIdentifier,
     kPointInspectorToolbarItemIdentifier,
     kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
@@ -2182,9 +2235,10 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   (void)willBeInserted;
   const BOOL isInspector = [itemIdentifier isEqualToString:NSToolbarToggleInspectorItemIdentifier];
   const BOOL isDebug = [itemIdentifier isEqualToString:kDebugToolbarItemIdentifier];
+  const BOOL isMap = [itemIdentifier isEqualToString:kMapToolbarItemIdentifier];
   const BOOL isPointInspector =
       [itemIdentifier isEqualToString:kPointInspectorToolbarItemIdentifier];
-  if (!isInspector && !isDebug && !isPointInspector) {
+  if (!isInspector && !isDebug && !isMap && !isPointInspector) {
     return nil;
   }
 
@@ -2209,6 +2263,13 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
     item.image = [NSImage imageWithSystemSymbolName:@"info.circle"
                            accessibilityDescription:@"Toggle Debug Info"];
     item.action = @selector(toggleDebugOverlay:);
+  } else if (isMap) {
+    item.target = _overlayView;
+    item.label = @"Minimap";
+    item.paletteLabel = @"Minimap";
+    item.toolTip = @"Show or hide the fixed-centre terrain map";
+    item.image = [NSImage imageWithSystemSymbolName:@"map" accessibilityDescription:@"Toggle Map"];
+    item.action = @selector(toggleMap:);
   } else {
     item.label = @"Inspect Point";
     item.paletteLabel = @"Inspect Point";
@@ -2226,7 +2287,6 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   const panorama::ImageSize image = _renderer->image();
   constexpr CGFloat kInspectorWidth = 270.0;
   constexpr NSSize kDebugSize = {220.0, 282.0};
-  constexpr NSSize kPointInfoSize = {230.0, 174.0};
   const NSRect windowFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   const NSRect imageFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
   _window = [[NSWindow alloc]
@@ -2260,15 +2320,24 @@ static NSToolbarItemIdentifier const kPointInspectorToolbarItemIdentifier =
   NSViewController *settingsController = [_controller makeSettingsViewController];
   NSViewController *debugController = [_controller makeDebugViewController];
   NSViewController *pointInfoController = [_controller makePointInfoViewController];
+  const panorama::ObserverLocation observer = _renderer->observer();
+  MiniMapPanelView *miniMapPanel =
+      [[MiniMapPanelView alloc] initWithObserverEasting:observer.easting
+                                               northing:observer.northing
+                                        terrainEpsgCode:_renderer->terrain_crs().epsg_code()
+                                            maxDistance:_renderer->max_distance()
+                                          pointInfoView:pointInfoController.view];
   _overlayView = [[ViewerOverlayView alloc] initWithFrame:imageFrame
                                               contentView:imageContainer
                                              settingsView:settingsController.view
                                            inspectorWidth:kInspectorWidth
                                                 debugView:debugController.view
                                                 debugSize:kDebugSize
-                                            pointInfoView:pointInfoController.view
-                                            pointInfoSize:kPointInfoSize];
-  [_controller attachPanoramaView:view overlayView:_overlayView aspectFitView:imageContainer];
+                                             mapPanelView:miniMapPanel];
+  [_controller attachPanoramaView:view
+                      overlayView:_overlayView
+                    aspectFitView:imageContainer
+                     miniMapPanel:miniMapPanel];
 
   NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"panorama.toolbar"];
   toolbar.delegate = self;

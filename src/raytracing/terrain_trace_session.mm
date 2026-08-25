@@ -341,6 +341,8 @@ void TerrainTraceSession::trace(const RayField &field) {
 
 ImageSize TerrainTraceSession::image() const { return state_->image; }
 
+Crs TerrainTraceSession::crs() const { return state_->origin->crs; }
+
 id<MTLDevice> TerrainTraceSession::device() const { return state_->gpu->device(); }
 
 id<MTLCommandQueue> TerrainTraceSession::command_queue() const {

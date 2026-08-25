@@ -40,7 +40,8 @@ WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion
 COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
 # ImageIO/CoreGraphics encode diagnostic and rendered images as PNG files.
 FRAMEWORKS := -framework Foundation -framework Metal -framework CoreGraphics -framework ImageIO
-VIEWER_FRAMEWORKS := -framework Foundation -framework Metal -framework AppKit -framework MetalKit
+VIEWER_FRAMEWORKS := -framework Foundation -framework Metal -framework AppKit -framework MetalKit \
+	-framework MapKit -framework CoreLocation
 LDLIBS := $(GDAL_LIBS)
 
 # Select with `make DEBUG=1`; release is the default.
