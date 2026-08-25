@@ -13,12 +13,26 @@
 - (void)miniMapPanelPreferredSizeDidChange:(MiniMapPanelView *)panel;
 @end
 
+@protocol MiniMapPanelViewInteractionDelegate <NSObject>
+- (void)miniMapPanel:(MiniMapPanelView *)panel
+     didHoverEasting:(double)easting
+            northing:(double)northing;
+- (void)miniMapPanelDidEndHover:(MiniMapPanelView *)panel;
+- (void)miniMapPanel:(MiniMapPanelView *)panel
+    didSelectEasting:(double)easting
+            northing:(double)northing;
+- (void)miniMapPanel:(MiniMapPanelView *)panel
+    didRequestObserverMoveToEasting:(double)easting
+                           northing:(double)northing;
+@end
+
 /// Combined fixed-centre map and terrain-point readout used by the viewer's
 /// leading overlay. MapKit implementation details remain in minimap.mm so the
 /// application controller only publishes camera and inspected-world state.
 @interface MiniMapPanelView : NSView
 
 @property(nonatomic, weak) id<MiniMapPanelViewSizeDelegate> sizeDelegate;
+@property(nonatomic, weak) id<MiniMapPanelViewInteractionDelegate> interactionDelegate;
 
 - (instancetype)initWithObserverEasting:(double)easting
                                northing:(double)northing
@@ -29,8 +43,7 @@
                            commandQueue:(id<MTLCommandQueue>)commandQueue
                                 library:(id<MTLLibrary>)library;
 
-- (void)setMapVisible:(bool)visible;
-- (void)setPointInfoVisible:(bool)visible;
+- (void)setMapAndPointInfoVisible:(bool)visible;
 - (bool)hasVisibleContent;
 - (NSSize)preferredPanelSize;
 
@@ -41,6 +54,9 @@
 
 /// Display one projected point for every valid collision in a completed trace.
 - (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image;
+
+/// Move all observer-relative map graphics after an interactive relocation.
+- (void)setObserverEasting:(double)easting northing:(double)northing;
 
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked;
 - (void)clearInspectedPoint;

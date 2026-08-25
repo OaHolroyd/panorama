@@ -298,15 +298,78 @@ enum class AnnotationKind : NSInteger {
 
 @end
 
+@interface MiniMapPanelView (MapInteraction)
+- (void)mapDidHoverCoordinate:(CLLocationCoordinate2D)coordinate;
+- (void)mapDidEndHover;
+- (void)mapDidSelectCoordinate:(CLLocationCoordinate2D)coordinate;
+- (void)mapDidRequestObserverMoveCoordinate:(CLLocationCoordinate2D)coordinate;
+- (void)showContextMenuForCoordinate:(CLLocationCoordinate2D)coordinate event:(NSEvent *)event;
+@end
+
 /// A north-up map whose centre is always the observer. MapKit's normal pan,
 /// pitch, and rotation gestures are disabled; scrolling and pinching change
 /// only the stored ground span, so navigation cannot lose the viewpoint.
-@interface FixedCentreMapView : MKMapView
+@interface FixedCentreMapView : MKMapView {
+@private
+  NSTrackingArea *_interactionTrackingArea;
+  NSPoint _lastHoverPoint;
+  bool _hasLastHoverPoint;
+}
 @property(nonatomic) CLLocationCoordinate2D fixedCentre;
 @property(nonatomic) double visibleDistance;
+@property(nonatomic, weak) MiniMapPanelView *interactionOwner;
 @end
 
 @implementation FixedCentreMapView
+
+- (void)updateTrackingAreas {
+  [super updateTrackingAreas];
+  if (_interactionTrackingArea != nil) {
+    [self removeTrackingArea:_interactionTrackingArea];
+  }
+  _interactionTrackingArea =
+      [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                   options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                                           NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
+                                     owner:self
+                                  userInfo:nil];
+  [self addTrackingArea:_interactionTrackingArea];
+}
+
+- (CLLocationCoordinate2D)coordinateForEvent:(NSEvent *)event {
+  const NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  return [self convertPoint:point toCoordinateFromView:self];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+  const NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  if (_hasLastHoverPoint &&
+      std::hypot(point.x - _lastHoverPoint.x, point.y - _lastHoverPoint.y) < 3.0) {
+    return;
+  }
+  _lastHoverPoint = point;
+  _hasLastHoverPoint = true;
+  [self.interactionOwner mapDidHoverCoordinate:[self coordinateForEvent:event]];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+  (void)event;
+  _hasLastHoverPoint = false;
+  [self.interactionOwner mapDidEndHover];
+}
+
+- (void)mouseDown:(NSEvent *)event {
+  const CLLocationCoordinate2D coordinate = [self coordinateForEvent:event];
+  if ((event.modifierFlags & NSEventModifierFlagOption) != 0U) {
+    [self.interactionOwner mapDidRequestObserverMoveCoordinate:coordinate];
+  } else {
+    [self.interactionOwner mapDidSelectCoordinate:coordinate];
+  }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+  [self.interactionOwner showContextMenuForCoordinate:[self coordinateForEvent:event] event:event];
+}
 
 - (void)applyVisibleDistanceAnimated:(BOOL)animated {
   const double distance =
@@ -350,6 +413,8 @@ enum class AnnotationKind : NSInteger {
   double _maxDistance;
   uint32_t _terrainEpsgCode;
   __weak id<MiniMapPanelViewSizeDelegate> _sizeDelegate;
+  __weak id<MiniMapPanelViewInteractionDelegate> _interactionDelegate;
+  CLLocationCoordinate2D _contextCoordinate;
   bool _mapVisible;
   bool _pointInfoVisible;
   bool _followInspection;
@@ -363,6 +428,7 @@ enum class AnnotationKind : NSInteger {
 @implementation MiniMapPanelView
 
 @synthesize sizeDelegate = _sizeDelegate;
+@synthesize interactionDelegate = _interactionDelegate;
 
 - (instancetype)initWithObserverEasting:(double)easting
                                northing:(double)northing
@@ -446,6 +512,7 @@ enum class AnnotationKind : NSInteger {
   [_mapSection addSubview:controls];
 
   _mapView = [[FixedCentreMapView alloc] initWithFrame:NSZeroRect];
+  _mapView.interactionOwner = self;
   _mapView.delegate = self;
   _mapView.scrollEnabled = NO;
   _mapView.zoomEnabled = NO;
@@ -546,18 +613,14 @@ enum class AnnotationKind : NSInteger {
   [self updateVisibilityTransform];
 }
 
-- (void)setMapVisible:(bool)visible {
+- (void)setMapAndPointInfoVisible:(bool)visible {
   _mapVisible = visible;
+  _pointInfoVisible = visible;
   _mapSection.hidden = !visible;
+  _pointInfoView.hidden = !visible;
   if (visible) {
     [_visibilityView refresh];
   }
-  [self setNeedsLayout:YES];
-}
-
-- (void)setPointInfoVisible:(bool)visible {
-  _pointInfoVisible = visible;
-  _pointInfoView.hidden = !visible;
   [self setNeedsLayout:YES];
 }
 
@@ -729,6 +792,73 @@ enum class AnnotationKind : NSInteger {
   [_visibilityView setPoints:points image:image];
 }
 
+- (panorama::Coord)projectedCoordinate:(CLLocationCoordinate2D)coordinate {
+  const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
+  return terrainCrs.from_lat_lon({coordinate.latitude, coordinate.longitude});
+}
+
+- (void)mapDidHoverCoordinate:(CLLocationCoordinate2D)coordinate {
+  if (_interactionDelegate == nil) {
+    return;
+  }
+  const panorama::Coord projected = [self projectedCoordinate:coordinate];
+  [_interactionDelegate miniMapPanel:self didHoverEasting:projected.x northing:projected.y];
+}
+
+- (void)mapDidEndHover {
+  [_interactionDelegate miniMapPanelDidEndHover:self];
+}
+
+- (void)mapDidSelectCoordinate:(CLLocationCoordinate2D)coordinate {
+  const panorama::Coord projected = [self projectedCoordinate:coordinate];
+  [_interactionDelegate miniMapPanel:self didSelectEasting:projected.x northing:projected.y];
+}
+
+- (void)mapDidRequestObserverMoveCoordinate:(CLLocationCoordinate2D)coordinate {
+  const panorama::Coord projected = [self projectedCoordinate:coordinate];
+  [_interactionDelegate miniMapPanel:self
+      didRequestObserverMoveToEasting:projected.x
+                             northing:projected.y];
+}
+
+- (void)showContextMenuForCoordinate:(CLLocationCoordinate2D)coordinate event:(NSEvent *)event {
+  _contextCoordinate = coordinate;
+  NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+  NSMenuItem *move = [[NSMenuItem alloc] initWithTitle:@"Move Observer Here"
+                                                action:@selector(moveObserverFromContextMenu:)
+                                         keyEquivalent:@""];
+  move.target = self;
+  [menu addItem:move];
+  const NSPoint location = [_mapView convertPoint:event.locationInWindow fromView:nil];
+  [menu popUpMenuPositioningItem:nil atLocation:location inView:_mapView];
+}
+
+- (void)moveObserverFromContextMenu:(id)sender {
+  (void)sender;
+  [self mapDidRequestObserverMoveCoordinate:_contextCoordinate];
+}
+
+- (void)setObserverEasting:(double)easting northing:(double)northing {
+  _observerEasting = easting;
+  _observerNorthing = northing;
+  const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
+  const panorama::LatLon observer = terrainCrs.to_lat_lon({easting, northing});
+  const CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(observer.lat, observer.lon);
+  _observerAnnotation.coordinate = coordinate;
+
+  const panorama::LatLon east =
+      terrainCrs.to_lat_lon({easting + kVisibilityBasisDistance, northing});
+  const panorama::LatLon north =
+      terrainCrs.to_lat_lon({easting, northing + kVisibilityBasisDistance});
+  _eastBasisCoordinate = CLLocationCoordinate2DMake(east.lat, east.lon);
+  _northBasisCoordinate = CLLocationCoordinate2DMake(north.lat, north.lon);
+  if (!_followInspection || _inspectionAnnotation == nil) {
+    _mapView.fixedCentre = coordinate;
+    [_mapView applyVisibleDistanceAnimated:NO];
+  }
+  [self updateVisibilityTransform];
+}
+
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked {
   const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
   const panorama::LatLon geographic = terrainCrs.to_lat_lon({easting, northing});
@@ -757,6 +887,10 @@ enum class AnnotationKind : NSInteger {
   if (_inspectionAnnotation != nil) {
     [_mapView removeAnnotation:_inspectionAnnotation];
     _inspectionAnnotation = nil;
+  }
+  if (_followInspection) {
+    _mapView.fixedCentre = _observerAnnotation.coordinate;
+    [_mapView applyVisibleDistanceAnimated:NO];
   }
 }
 
