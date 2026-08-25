@@ -1007,6 +1007,12 @@ private:
           if (presentation_requested) {
             Timer timer("GPU presentation");
             presentation_->resize(current_field_.image);
+            if (presentation.use_surface_normals && presentation.appearance.raytraced_shadows) {
+              trace_->trace_shadows(
+                  presentation.appearance.sun_azimuth,
+                  presentation.appearance.sun_elevation
+              );
+            }
             const id<MTLBuffer> colour_values =
                 presentation.appearance.colour_source == TerrainColourSource::Elevation
                     ? trace_->elevations()
@@ -1016,6 +1022,9 @@ private:
                 trace_->distances(),
                 trace_->ray_directions(),
                 colour_values,
+                presentation.use_surface_normals && presentation.appearance.raytraced_shadows
+                    ? trace_->shadow_visibility()
+                    : nil,
                 presentation.appearance,
                 presentation.colour_range,
                 presentation.use_surface_normals,
@@ -1234,6 +1243,7 @@ private:
   NSButton *_matchWindowControl;
   NSButton *_invertMousePanningControl;
   NSButton *_normalLightingControl;
+  NSButton *_raytracedShadowsControl;
   NSButton *_featureOutlinesControl;
   NSSlider *_featureOutlineDetailControl;
   NSTextField *_featureOutlineDetailLabel;
@@ -1965,6 +1975,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _renderer->request_presentation(_presentation);
 }
 
+- (void)raytracedShadowsChanged:(NSButton *)sender {
+  _presentation.appearance.raytraced_shadows = sender.state == NSControlStateValueOn;
+  _renderer->request_presentation(_presentation);
+}
+
 /// Feature outlines are presentation-only, like lighting, so both controls
 /// can update the current trace immediately without waiting for Apply.
 - (void)publishFeatureOutlineControls {
@@ -2462,6 +2477,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _normalLightingControl.target = self;
   _normalLightingControl.action = @selector(normalLightingChanged:);
 
+  _raytracedShadowsControl = [[NSButton alloc] initWithFrame:NSZeroRect];
+  _raytracedShadowsControl.buttonType = NSButtonTypeSwitch;
+  _raytracedShadowsControl.title = @"Raytraced hard shadows";
+  _raytracedShadowsControl.state =
+      _presentation.appearance.raytraced_shadows ? NSControlStateValueOn : NSControlStateValueOff;
+  _raytracedShadowsControl.target = self;
+  _raytracedShadowsControl.action = @selector(raytracedShadowsChanged:);
+  _raytracedShadowsControl.toolTip = @"Cast one terrain visibility ray towards the sun";
+
   _sunAzimuthControl = [NSSlider
       sliderWithValue:_presentation.appearance.sun_azimuth * panorama::app::kRadiansToDegrees
              minValue:0.0
@@ -2580,6 +2604,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   ]);
   NSStackView *lightingSection = make_section(@"Lighting", @[
     _normalLightingControl,
+    _raytracedShadowsControl,
     make_row(@"Sun azimuth", sunAzimuthSetting),
     make_row(@"Sun polar angle", sunPolarAngleSetting),
     make_row(@"Diffusivity", diffusivitySetting),
@@ -2899,6 +2924,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _maximumControl.enabled = scalarColour;
   _featureOutlineDetailControl.enabled = _featureOutlinesControl.state == NSControlStateValueOn;
   const BOOL normalLighting = _normalLightingControl.state == NSControlStateValueOn;
+  _raytracedShadowsControl.enabled = normalLighting;
   _sunAzimuthControl.enabled = normalLighting;
   _sunPolarAngleControl.enabled = normalLighting;
   _diffusivityControl.enabled = normalLighting;
@@ -2962,6 +2988,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       static_cast<float>(*maximum),
   };
   _presentation.use_surface_normals = _normalLightingControl.state == NSControlStateValueOn;
+  _presentation.appearance.raytraced_shadows =
+      _raytracedShadowsControl.state == NSControlStateValueOn;
   _presentation.appearance.sun_azimuth =
       _sunAzimuthControl.doubleValue * panorama::app::kDegreesToRadians;
   _presentation.appearance.sun_elevation =

@@ -208,6 +208,7 @@ void print_usage(const char *program) {
       "  --sun-elevation D     above the horizon (default: 35)\n"
       "  --ambient-light V     direction-independent light, 0 to 1 (default: 0.28)\n"
       "  --diffusivity V       directional diffuse-light strength, 0 to 1 (default: 1)\n"
+      "  --raytraced-shadows   cast one hard terrain-shadow ray per lit collision\n"
       "  --feature-outlines    draw multiscale black surface-separation lines\n"
       "  --outline-detail N    outline detail from 0 to 10 (default: 7)\n"
       "  --terrain-colour MODE white, distance, or elevation (default: white)\n"
@@ -259,6 +260,11 @@ void print_usage(const char *program) {
     }
     if (option == "--feature-outlines") {
       settings.synthetic.feature_outlines = true;
+      settings.synthetic_setting_seen = true;
+      continue;
+    }
+    if (option == "--raytraced-shadows") {
+      settings.synthetic.raytraced_shadows = true;
       settings.synthetic_setting_seen = true;
       continue;
     }
@@ -434,6 +440,9 @@ int main(int argc, const char *argv[]) {
             ", feature outlines detail %.0f",
             10.0 * settings.synthetic.feature_outline_detail
         );
+      }
+      if (settings.synthetic.raytraced_shadows) {
+        std::printf(", raytraced hard shadows");
       }
       std::printf(".\n");
     }

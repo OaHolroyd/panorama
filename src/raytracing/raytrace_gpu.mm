@@ -43,7 +43,7 @@ static_assert(sizeof(CatalogueTileHashEntry) == 3U * sizeof(uint64_t));
   return value;
 }
 
-[[nodiscard]] uint32_t catalogue_hash_capacity(size_t source_count) {
+[[nodiscard]] uint32_t make_catalogue_hash_capacity(size_t source_count) {
   uint64_t capacity = 1U;
   while (capacity < 2U * source_count) {
     capacity <<= 1U;
@@ -204,7 +204,7 @@ GpuRaytraceResources::GpuRaytraceResources(
     throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
   }
   auto state = std::make_unique<State>();
-  state->catalogue_hash_capacity = catalogue_hash_capacity(sources.size());
+  state->catalogue_hash_capacity = make_catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
   state->outputs = outputs;
   state->device = MTLCreateSystemDefaultDevice();
@@ -444,6 +444,14 @@ std::span<const DeferredRayWork> GpuRaytraceResources::deferred_work(uint32_t co
 id<MTLBuffer> GpuRaytraceResources::distances() const { return state_->distance_output; }
 
 id<MTLBuffer> GpuRaytraceResources::ray_directions() const { return state_->rays; }
+
+id<MTLBuffer> GpuRaytraceResources::catalogue_hash() const { return state_->catalogue_hash; }
+
+uint32_t GpuRaytraceResources::catalogue_hash_capacity() const {
+  return state_->catalogue_hash_capacity;
+}
+
+bool GpuRaytraceResources::traces_quantized() const { return state_->trace_quantized; }
 
 id<MTLBuffer> GpuRaytraceResources::elevations() const {
   if (!state_->outputs.elevations) {

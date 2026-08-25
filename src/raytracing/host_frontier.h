@@ -27,6 +27,16 @@ public:
       uint32_t observer_slot
   );
 
+  /// Construct an initially empty scheduler for rays whose first source is
+  /// supplied as deferred work (for example, per-collision shadow rays).
+  HostFrontier(
+      const TerrainCatalogue &catalogue,
+      size_t ray_capacity,
+      uint32_t num_levels,
+      uint32_t resident_slot_capacity,
+      std::span<const float> scheduling_distances = {}
+  );
+
   /// Clear pending-request state for sources just published by the atlas cache.
   void mark_installed(std::span<const uint32_t> source_indices);
 
@@ -61,8 +71,10 @@ private:
   };
 
   const TerrainCatalogue &catalogue_;
-  std::span<const RayDirection> rays_;
-  const RaytraceParameters &parameters_;
+  size_t ray_capacity_;
+  uint32_t num_levels_;
+  /// Optional per-ray priority independent of the ray-local traversal distance.
+  std::span<const float> scheduling_distances_;
   /// Deferred rays grouped by their next required catalogue source.
   std::vector<SourceBucket> source_buckets_;
   /// Sources with nonempty pending buckets, ordered only by insertion.

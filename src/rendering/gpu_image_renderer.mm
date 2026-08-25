@@ -266,6 +266,7 @@ void GpuImageRenderer::render_synthetic(
     id<MTLBuffer> distances,
     id<MTLBuffer> ray_directions,
     id<MTLBuffer> colour_values,
+    id<MTLBuffer> shadow_visibility,
     const SyntheticRenderOptions &options,
     ScalarColourRange range,
     bool use_surface_normals,
@@ -277,6 +278,7 @@ void GpuImageRenderer::render_synthetic(
   const uint32_t colour_scale = static_cast<uint32_t>(options.colour_scale);
   const bool scalar_colour = options.colour_source != TerrainColourSource::White;
   if ((use_surface_normals && packed_gradients == nil) || distances == nil ||
+      (use_surface_normals && options.raytraced_shadows && shadow_visibility == nil) ||
       (options.feature_outlines && ray_directions == nil) ||
       (scalar_colour && colour_values == nil) || !std::isfinite(options.sun_azimuth) ||
       !std::isfinite(options.sun_elevation) || !std::isfinite(options.ambient_light) ||
@@ -298,6 +300,7 @@ void GpuImageRenderer::render_synthetic(
   }
   const uint32_t normal_lighting = use_surface_normals ? 1U : 0U;
   const uint32_t feature_outlines = options.feature_outlines ? 1U : 0U;
+  const uint32_t use_shadows = use_surface_normals && options.raytraced_shadows ? 1U : 0U;
   const float azimuth = static_cast<float>(options.sun_azimuth);
   const float elevation = static_cast<float>(options.sun_elevation);
   const float horizontal = std::cos(elevation);
@@ -353,10 +356,14 @@ void GpuImageRenderer::render_synthetic(
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:7];
     [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:8];
     [encoder setBytes:&feature_outlines length:sizeof(feature_outlines) atIndex:9];
+    [encoder setBuffer:shadow_visibility offset:0 atIndex:10];
+    [encoder setBytes:&use_shadows length:sizeof(use_shadows) atIndex:11];
   } else {
     [encoder setBytes:&normal_lighting length:sizeof(normal_lighting) atIndex:3];
     [encoder setBytes:&options.diffusivity length:sizeof(options.diffusivity) atIndex:4];
     [encoder setBytes:&feature_outlines length:sizeof(feature_outlines) atIndex:5];
+    [encoder setBuffer:shadow_visibility offset:0 atIndex:6];
+    [encoder setBytes:&use_shadows length:sizeof(use_shadows) atIndex:7];
   }
   [encoder setTexture:state.output atIndex:0];
   [encoder setTexture:state.feature_outline_mask atIndex:1];

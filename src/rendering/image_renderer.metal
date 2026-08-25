@@ -398,6 +398,8 @@ kernel void present_synthetic_terrain(
     constant uint &use_surface_normals [[buffer(3)]],
     constant float &diffusivity [[buffer(4)]],
     constant uint &feature_outlines [[buffer(5)]],
+    device const uchar *shadow_visibility [[buffer(6)]],
+    constant uint &use_shadows [[buffer(7)]],
     texture2d<float, access::write> output [[texture(0)]],
     texture2d<float, access::read> feature_outline_mask [[texture(1)]],
     uint2 position [[thread_position_in_grid]]
@@ -420,8 +422,9 @@ kernel void present_synthetic_terrain(
     return;
   }
 
+  const float visible = use_shadows == 0U ? 1.0F : float(shadow_visibility[index] != 0U);
   const float diffuse =
-      max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
+      visible * max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
   const float linear = sun_and_ambient.w + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
   const float srgb =
       linear <= 0.0031308F ? 12.92F * linear : 1.055F * pow(linear, 1.0F / 2.4F) - 0.055F;
@@ -443,6 +446,8 @@ kernel void present_colourmapped_synthetic_terrain(
     constant uint &use_surface_normals [[buffer(7)]],
     constant float &diffusivity [[buffer(8)]],
     constant uint &feature_outlines [[buffer(9)]],
+    device const uchar *shadow_visibility [[buffer(10)]],
+    constant uint &use_shadows [[buffer(11)]],
     texture2d<float, access::write> output [[texture(0)]],
     texture2d<float, access::read> feature_outline_mask [[texture(1)]],
     uint2 position [[thread_position_in_grid]]
@@ -469,8 +474,9 @@ kernel void present_colourmapped_synthetic_terrain(
     output.write(float4(base_srgb, 1.0F), position);
     return;
   }
+  const float visible = use_shadows == 0U ? 1.0F : float(shadow_visibility[index] != 0U);
   const float diffuse =
-      max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
+      visible * max(0.0F, dot(surface_normal(packed_gradients[index]), sun_and_ambient.xyz));
   const float illumination = sun_and_ambient.w + diffusivity * (1.0F - sun_and_ambient.w) * diffuse;
   output.write(float4(linear_to_srgb(srgb_to_linear(base_srgb) * illumination), 1.0F), position);
 }

@@ -33,6 +33,11 @@ public:
   /// Trace a new view, resizing only ray-dependent GPU buffers when necessary.
   void trace(const RayField &field);
 
+  /// Trace one directional sun ray from each eligible primary collision.
+  /// Angles are radians; azimuth is clockwise from grid north and elevation
+  /// is above the horizontal plane.
+  void trace_shadows(double sun_azimuth, double sun_elevation);
+
   [[nodiscard]] ImageSize image() const;
   /// Return the projected coordinate system shared by the resident terrain.
   [[nodiscard]] Crs crs() const;
@@ -43,6 +48,7 @@ public:
   [[nodiscard]] id<MTLBuffer> distances() const;
   [[nodiscard]] id<MTLBuffer> elevations() const;
   [[nodiscard]] id<MTLBuffer> surface_gradients() const;
+  [[nodiscard]] id<MTLBuffer> shadow_visibility() const;
 
   /// Print cumulative cache, preparation, frontier, and timing statistics.
   void print_statistics() const;

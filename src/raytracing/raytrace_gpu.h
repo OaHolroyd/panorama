@@ -133,6 +133,11 @@ public:
   /// Throws if normal computation was disabled when this object was created.
   [[nodiscard]] id<MTLBuffer> surface_gradients() const;
 
+  /// Immutable catalogue lookup shared with secondary terrain rays.
+  [[nodiscard]] id<MTLBuffer> catalogue_hash() const;
+  [[nodiscard]] uint32_t catalogue_hash_capacity() const;
+  [[nodiscard]] bool traces_quantized() const;
+
   /// Begin an opt-in queue-scoped Metal capture, if requested by the environment.
   void start_capture_if_requested();
 
