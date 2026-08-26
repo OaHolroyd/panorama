@@ -29,6 +29,12 @@ struct TileGrid {
   double width;
 };
 
+/// Complete prepared-data footprint, independent of one observer's trace radius.
+struct TerrainCoverage {
+  TileGrid grid;
+  std::vector<TileKey> tiles;
+};
+
 /// One available prepared-terrain file, grid location, and optional culling bound.
 struct TerrainSource {
   TileKey key;
@@ -51,7 +57,8 @@ public:
       const std::filesystem::path &tile_dir,
       const ObserverLocation &observer,
       float max_distance,
-      uint32_t max_tile_count
+      uint32_t max_tile_count,
+      bool allow_observer_fallback = false
   );
 
   /// Return the shared grid used to locate all catalogue source tiles.
@@ -59,6 +66,12 @@ public:
 
   /// Return the source containing the observer, which always occupies index zero.
   [[nodiscard]] const TerrainSource &origin() const;
+
+  /// Return the requested observer, or the dataset-derived fallback selected during discovery.
+  [[nodiscard]] const ObserverLocation &observer() const;
+
+  /// Return every available tile footprint, including tiles outside the trace radius.
+  [[nodiscard]] const TerrainCoverage &coverage() const;
 
   /// Return all retained sources in stable scheduler order.
   [[nodiscard]] const std::vector<TerrainSource> &sources() const;
@@ -72,10 +85,17 @@ public:
 
 private:
   /// Construct an already validated, indexable catalogue.
-  TerrainCatalogue(TileGrid grid, std::vector<TerrainSource> sources);
+  TerrainCatalogue(
+      TileGrid grid,
+      std::vector<TerrainSource> sources,
+      ObserverLocation observer,
+      std::vector<TileKey> coverage_tiles
+  );
 
   TileGrid grid_;
   std::vector<TerrainSource> sources_;
+  ObserverLocation observer_;
+  TerrainCoverage coverage_;
   std::map<TileKey, uint32_t> source_index_by_key_;
   std::optional<float> maximum_elevation_;
 };

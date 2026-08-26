@@ -4,6 +4,7 @@
 #include "ray_projection.h"
 #include "raytrace_config.h"
 #include "raytrace_gpu.h"
+#include "terrain_catalogue.h"
 
 #import <Metal/Metal.h>
 
@@ -41,6 +42,8 @@ public:
   [[nodiscard]] ImageSize image() const;
   /// Return the projected coordinate system shared by the resident terrain.
   [[nodiscard]] Crs crs() const;
+  [[nodiscard]] ObserverLocation observer() const;
+  [[nodiscard]] const TerrainCoverage &terrain_coverage() const;
   [[nodiscard]] id<MTLDevice> device() const;
   [[nodiscard]] id<MTLCommandQueue> command_queue() const;
   [[nodiscard]] id<MTLLibrary> library() const;

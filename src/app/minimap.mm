@@ -398,6 +398,7 @@ enum class AnnotationKind : NSInteger {
   VisibilityMapView *_visibilityView;
   CompactMapScaleView *_scaleView;
   NSPopUpButton *_mapStyleControl;
+  NSButton *_coverageControl;
   NSButton *_mapFocusControl;
   NSButton *_mapSizeControl;
   MiniMapAnnotation *_observerAnnotation;
@@ -406,6 +407,7 @@ enum class AnnotationKind : NSInteger {
   CLLocationCoordinate2D _northBasisCoordinate;
   id<MKOverlay> _fieldOfViewOverlay;
   id<MKOverlay> _headingOverlay;
+  MKMultiPolygon *_coverageOverlay;
   double _observerEasting;
   double _observerNorthing;
   double _maxDistance;
@@ -414,10 +416,12 @@ enum class AnnotationKind : NSInteger {
   __weak id<MiniMapPanelViewInteractionDelegate> _interactionDelegate;
   CLLocationCoordinate2D _contextCoordinate;
   bool _contentVisible;
+  bool _coverageVisible;
   bool _followInspection;
   bool _largeMap;
 }
 - (void)updateVisibilityTransform;
+- (void)updateCoverageControl;
 - (void)updateMapFocusControl;
 - (void)updateMapSizeControl;
 @end
@@ -430,6 +434,8 @@ enum class AnnotationKind : NSInteger {
 - (instancetype)initWithObserverEasting:(double)easting
                                northing:(double)northing
                         terrainEpsgCode:(uint32_t)epsgCode
+                        terrainCoverage:(const panorama::TerrainCoverage &)coverage
+               coverageInitiallyVisible:(bool)coverageVisible
                             maxDistance:(double)maxDistance
                           pointInfoView:(NSView *)pointInfoView
                             metalDevice:(id<MTLDevice>)metalDevice
@@ -461,6 +467,18 @@ enum class AnnotationKind : NSInteger {
   ]];
   _mapStyleControl.target = self;
   _mapStyleControl.action = @selector(mapStyleChanged:);
+
+  _coverageControl =
+      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"square.grid.3x3"
+                                          accessibilityDescription:@"Show terrain coverage"]
+                         target:self
+                         action:@selector(toggleCoverage:)];
+  _coverageControl.title = @"";
+  _coverageControl.buttonType = NSButtonTypeToggle;
+  _coverageControl.bordered = NO;
+  _coverageControl.imagePosition = NSImageOnly;
+  [_coverageControl.widthAnchor constraintEqualToConstant:22.0].active = YES;
+  [_coverageControl.heightAnchor constraintEqualToConstant:22.0].active = YES;
 
   _mapFocusControl = [NSButton
       buttonWithImage:[NSImage imageWithSystemSymbolName:@"scope"
@@ -495,6 +513,7 @@ enum class AnnotationKind : NSInteger {
     heading,
     _mapStyleControl,
     controlSpacer,
+    _coverageControl,
     _mapFocusControl,
     _mapSizeControl,
   ]];
@@ -569,6 +588,29 @@ enum class AnnotationKind : NSInteger {
   _observerAnnotation.kind = AnnotationKind::Observer;
   _observerAnnotation.coordinate = observerCoordinate;
   [_mapView addAnnotation:_observerAnnotation];
+
+  NSMutableArray<MKPolygon *> *coveragePolygons =
+      [NSMutableArray arrayWithCapacity:coverage.tiles.size()];
+  for (const panorama::TileKey key : coverage.tiles) {
+    const double xMinimum =
+        coverage.grid.origin_x + static_cast<double>(key.column) * coverage.grid.width;
+    const double yMaximum =
+        coverage.grid.origin_y - static_cast<double>(key.row) * coverage.grid.width;
+    const double xMaximum = xMinimum + coverage.grid.width;
+    const double yMinimum = yMaximum - coverage.grid.width;
+    const auto mapCoordinate = [&](double x, double y) {
+      const panorama::LatLon point = terrainCrs.to_lat_lon({x, y});
+      return CLLocationCoordinate2DMake(point.lat, point.lon);
+    };
+    CLLocationCoordinate2D corners[4] = {
+        mapCoordinate(xMinimum, yMinimum),
+        mapCoordinate(xMinimum, yMaximum),
+        mapCoordinate(xMaximum, yMaximum),
+        mapCoordinate(xMaximum, yMinimum),
+    };
+    [coveragePolygons addObject:[MKPolygon polygonWithCoordinates:corners count:4U]];
+  }
+  _coverageOverlay = [[MKMultiPolygon alloc] initWithPolygons:coveragePolygons];
   const panorama::LatLon eastBasis = terrainCrs.to_lat_lon(
       {
           _observerEasting + kVisibilityBasisDistance,
@@ -586,13 +628,39 @@ enum class AnnotationKind : NSInteger {
   [self mapStyleChanged:_mapStyleControl];
 
   _contentVisible = false;
+  _coverageVisible = coverageVisible;
   _followInspection = false;
   _largeMap = false;
+  if (_coverageVisible) {
+    [_mapView addOverlay:_coverageOverlay level:MKOverlayLevelAboveRoads];
+  }
+  [self updateCoverageControl];
   [self updateMapFocusControl];
   [self updateMapSizeControl];
   _mapSection.hidden = YES;
   _pointInfoView.hidden = YES;
   return self;
+}
+
+- (void)updateCoverageControl {
+  NSString *symbol = _coverageVisible ? @"square.grid.3x3.fill" : @"square.grid.3x3";
+  NSString *description = _coverageVisible ? @"Hide terrain coverage" : @"Show terrain coverage";
+  _coverageControl.image = [NSImage imageWithSystemSymbolName:symbol
+                                     accessibilityDescription:description];
+  _coverageControl.state = _coverageVisible ? NSControlStateValueOn : NSControlStateValueOff;
+  _coverageControl.toolTip = description;
+  [_coverageControl setAccessibilityLabel:description];
+}
+
+- (void)toggleCoverage:(id)sender {
+  (void)sender;
+  _coverageVisible = !_coverageVisible;
+  if (_coverageVisible) {
+    [_mapView addOverlay:_coverageOverlay level:MKOverlayLevelAboveRoads];
+  } else {
+    [_mapView removeOverlay:_coverageOverlay];
+  }
+  [self updateCoverageControl];
 }
 
 - (void)layout {
@@ -899,6 +967,14 @@ enum class AnnotationKind : NSInteger {
 
 - (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {
   (void)mapView;
+  if (overlay == _coverageOverlay) {
+    MKMultiPolygonRenderer *renderer =
+        [[MKMultiPolygonRenderer alloc] initWithMultiPolygon:_coverageOverlay];
+    renderer.fillColor = [NSColor.systemRedColor colorWithAlphaComponent:0.22];
+    renderer.strokeColor = NSColor.clearColor;
+    renderer.lineWidth = 0.0;
+    return renderer;
+  }
   if ([overlay isKindOfClass:MKPolygon.class]) {
     MKPolygonRenderer *renderer = [[MKPolygonRenderer alloc] initWithPolygon:(MKPolygon *)overlay];
     renderer.fillColor = [NSColor.systemBlueColor colorWithAlphaComponent:0.14];

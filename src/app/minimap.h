@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ray_projection.h"
+#include "terrain_catalogue.h"
 
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
@@ -39,6 +40,8 @@
 - (instancetype)initWithObserverEasting:(double)easting
                                northing:(double)northing
                         terrainEpsgCode:(uint32_t)epsgCode
+                        terrainCoverage:(const panorama::TerrainCoverage &)coverage
+               coverageInitiallyVisible:(bool)coverageVisible
                             maxDistance:(double)maxDistance
                           pointInfoView:(NSView *)pointInfoView
                             metalDevice:(id<MTLDevice>)metalDevice

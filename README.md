@@ -109,12 +109,16 @@ scroll to zoom. The trailing Render Settings inspector controls resolution,
 lighting, distance/elevation colourmaps and scaling, and optional multiscale
 feature outlines.
 
-The map toolbar button enables the minimap and terrain-point inspection as one
-feature. Hover either the panorama or map to preview a point. Right-click the
-panorama to lock its current point; left-click the minimap to lock a map point
+The minimap and terrain-point inspection are enabled by default; the map
+toolbar button hides or reveals them as one feature. Hover either the panorama
+or map to preview a point. Right-click the panorama to lock its current point;
+left-click the minimap to lock a map point
 and turn the camera toward it. Option-click the minimap, or use its secondary-
 click menu, to move the observer while retaining the current eye height above
-the terrain. The map's scope and expand buttons select its focus and size.
+the terrain. The map's scope and expand buttons select its focus and size; the
+grid button overlays the complete prepared-tile coverage. If the requested
+startup observer is outside that coverage, the viewer opens on a central
+available tile with the coverage overlay already enabled.
 
 Collapse or reveal the inspector with the `sidebar.right` toolbar button. Run
 `./panorama-app --help` for observer, image-size, and field-of-view options.

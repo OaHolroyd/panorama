@@ -125,8 +125,10 @@ struct TerrainTraceSession::State {
         config.tile_dir,
         config.observer,
         config.max_distance,
-        config.max_tile_count
+        config.max_tile_count,
+        config.allow_observer_fallback
     ));
+    config.observer = catalogue->observer();
     const TileGrid &grid = catalogue->grid();
     const TileKey origin_key = catalogue->origin().key;
 
@@ -506,6 +508,12 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
 ImageSize TerrainTraceSession::image() const { return state_->image; }
 
 Crs TerrainTraceSession::crs() const { return state_->origin->crs; }
+
+ObserverLocation TerrainTraceSession::observer() const { return state_->config.observer; }
+
+const TerrainCoverage &TerrainTraceSession::terrain_coverage() const {
+  return state_->catalogue->coverage();
+}
 
 id<MTLDevice> TerrainTraceSession::device() const { return state_->gpu->device(); }
 
