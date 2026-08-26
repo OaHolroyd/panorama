@@ -1578,7 +1578,6 @@ private:
   bool _mouseTurningEnabled;
   bool _cruiseSteeringEnabled;
   bool _viewerPaused;
-  bool _mouseTurningDuringPause;
   bool _lockedPointIndicatorActive;
   bool _lockedPointOnscreen;
   bool _pointIndicatorLocked;
@@ -1663,6 +1662,9 @@ private:
   NSTextField *_skyDetailLabel;
   NSTextField *_debugInfoLabel;
   NSTextField *_debugPointInfoLabel;
+  NSTextField *_observerInfoLabel;
+  NSTextField *_movementInfoLabel;
+  NSStackView *_pointInfoRow;
   NSTextField *_pointInfoHeading;
   NSTextField *_pointInfoLabel;
   NSImageView *_pointVisibilityIcon;
@@ -1760,6 +1762,7 @@ private:
 - (void)setCruiseSteeringX:(double)x y:(double)y;
 - (void)clearCruiseSteering;
 - (void)setPointInfoStatus:(NSString *)status;
+- (void)updateMiniMapTelemetry;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
 - (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point;
 - (void)moveToLockedPoint:(id)sender;
@@ -1925,7 +1928,7 @@ private:
 
 - (void)resetCursorRects {
   [super resetCursorRects];
-  if (_viewerPaused && !_mouseTurningDuringPause) {
+  if (_viewerPaused) {
     [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
   } else if (_cruiseSteeringEnabled) {
     [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
@@ -1969,7 +1972,6 @@ private:
 
 - (void)setViewerPaused:(bool)paused recoveryMessage:(NSString *)recoveryMessage {
   _viewerPaused = paused;
-  _mouseTurningDuringPause = paused && recoveryMessage != nil;
   if (_pauseIndicator == nil) {
     NSImageView *icon =
         [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"pause.fill"
@@ -2043,7 +2045,7 @@ private:
     return;
   }
   [self.panoramaController pointerMovedOverPanorama];
-  if (_cruiseSteeringEnabled) {
+  if (_cruiseSteeringEnabled && !_viewerPaused) {
     const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
     const NSRect bounds = self.bounds;
     if (bounds.size.width > 0.0 && bounds.size.height > 0.0) {
@@ -2053,7 +2055,7 @@ private:
           std::clamp((location.y - NSMidY(bounds)) / (bounds.size.height * 0.5), -1.0, 1.0);
       [self.panoramaController setCruiseSteeringX:x y:y];
     }
-  } else if (_mouseTurningEnabled && (!_viewerPaused || _mouseTurningDuringPause)) {
+  } else if (_mouseTurningEnabled && !_viewerPaused) {
     // NSEvent's vertical mouse delta is positive downwards, unlike camera
     // pitch, so invert it to preserve the existing drag direction.
     [self.panoramaController mouseTurnForCurrentZoomHeading:event.deltaX * 0.003
@@ -2101,7 +2103,7 @@ private:
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-  if (_mouseTurningEnabled || _cruiseSteeringEnabled) {
+  if (!_viewerPaused && (_mouseTurningEnabled || _cruiseSteeringEnabled)) {
     // AppKit changes mouse-move events into drag events while a button is
     // held. Mouse turning should remain continuous without requiring a drag.
     [self mouseMoved:event];
@@ -2637,22 +2639,22 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     if ([self isCruisingEnabled]) {
       [self resolveObserverTimeZone];
     }
-    [self updateMovementStatus];
-  } else {
-    [self updateRoamControls];
   }
+  [self updateRoamControls];
 }
 
 - (void)pauseCruiseForTerrainCollision:(bool)terrainCollision {
   _viewerPaused = true;
   _cruiseRecovery = true;
   [self clearRoamKeys];
+  [self clearCruiseSteering];
   _lastRoamTick = std::chrono::steady_clock::now();
-  NSString *message = terrainCollision ? @"Terrain ahead — steer or climb, then press Space"
-                                       : @"No terrain coverage — turn back, then press Space";
+  NSString *message = terrainCollision
+                          ? @"Terrain ahead — drag to steer or climb, then press Space"
+                          : @"No terrain coverage — drag to turn back, then press Space";
   [_panoramaView setViewerPaused:true recoveryMessage:message];
   [self resolveObserverTimeZone];
-  [self updateMovementStatus];
+  [self updateRoamControls];
 }
 
 - (BOOL)hasPressedRoamKey {
@@ -2716,6 +2718,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   );
   [self updateMovementSpeedControl];
   [self updateMovementStatus];
+  [self updateMiniMapTelemetry];
 }
 
 - (void)setCruiseSteeringX:(double)x y:(double)y {
@@ -2832,7 +2835,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   if (_cruiseRecovery) {
-    _roamStatusLabel.stringValue = @"Blocked • steer/climb or W/S speed • Space resumes";
+    _roamStatusLabel.stringValue = @"Blocked • drag to steer/climb • Space resumes";
   } else if (_viewerPaused) {
     _roamStatusLabel.stringValue = @"Paused • Space resumes";
   } else if ([self isCruisingEnabled]) {
@@ -2880,11 +2883,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _groundClearanceControl.stringValue =
       [NSString stringWithFormat:@"%.1f", _groundClearanceControl.doubleValue];
   [self updateMovementSpeedControl];
-  [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled]];
-  [_panoramaView setCruiseSteeringEnabled:cruising];
+  [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled] && !_viewerPaused];
+  [_panoramaView setCruiseSteeringEnabled:cruising && !_viewerPaused];
   if (![self hasPressedRoamKey]) {
     [self updateMovementStatus];
   }
+  [self updateMiniMapTelemetry];
 }
 
 - (void)movementModeChanged:(id)sender {
@@ -2962,6 +2966,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   _roamSpeedLabel.stringValue =
       format_movement_speed([self isCruisingEnabled] ? _cruiseSpeed : _roamSpeed);
+  [self updateMiniMapTelemetry];
 }
 
 - (void)roamUpdateRateChanged:(id)sender {
@@ -2973,14 +2978,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta {
-  if (_viewerPaused && !_cruiseRecovery) {
-    return;
-  }
   _orientation.heading =
       std::remainder(_orientation.heading + headingDelta, 2.0 * std::numbers::pi);
   constexpr double kPitchLimit = 85.0 * std::numbers::pi / 180.0;
   _orientation.pitch = std::clamp(_orientation.pitch + pitchDelta, -kPitchLimit, kPitchLimit);
   _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+  [self updateMiniMapTelemetry];
 }
 
 - (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta {
@@ -3479,10 +3482,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   _pointInspectionEnabled = true;
   [_panoramaView setPointInspectionEnabled:true];
-  [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled]];
-  [_panoramaView setCruiseSteeringEnabled:[self isCruisingEnabled]];
+  [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled] && !_viewerPaused];
+  [_panoramaView setCruiseSteeringEnabled:[self isCruisingEnabled] && !_viewerPaused];
   [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
   [_overlayView setMapAndPointInfoVisible:true];
+  [self updateMiniMapTelemetry];
+  [_miniMapPanel informationFooterContentDidChange];
 }
 
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
@@ -4668,7 +4673,19 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 36.0)];
   viewController.view = content;
 
-  _pointInfoHeading = [NSTextField labelWithString:@""];
+  _observerInfoLabel = [NSTextField labelWithString:@""];
+  _observerInfoLabel.font = [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightRegular];
+  _observerInfoLabel.textColor = NSColor.secondaryLabelColor;
+  _observerInfoLabel.maximumNumberOfLines = 2;
+  _observerInfoLabel.lineBreakMode = NSLineBreakByClipping;
+  _movementInfoLabel = [NSTextField labelWithString:@""];
+  _movementInfoLabel.font = [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightRegular];
+  _movementInfoLabel.textColor = NSColor.secondaryLabelColor;
+  _movementInfoLabel.maximumNumberOfLines = 2;
+  _movementInfoLabel.lineBreakMode = NSLineBreakByClipping;
+  _movementInfoLabel.hidden = YES;
+
+  _pointInfoHeading = [NSTextField labelWithString:@" "];
   _pointInfoHeading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
   _pointInfoHeading.maximumNumberOfLines = 1;
   _pointInfoHeading.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -4698,7 +4715,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [pointSpacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-  NSStackView *pointInfo = [NSStackView stackViewWithViews:@[
+  _pointInfoRow = [NSStackView stackViewWithViews:@[
     _pointInfoHeading,
     _pointInfoLabel,
     _pointVisibilityIcon,
@@ -4706,15 +4723,29 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     pointSpacer,
     _moveToLockedPointControl,
   ]];
-  pointInfo.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-  pointInfo.alignment = NSLayoutAttributeCenterY;
-  pointInfo.spacing = 7.0;
-  pointInfo.translatesAutoresizingMaskIntoConstraints = NO;
-  [content addSubview:pointInfo];
+  _pointInfoRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  _pointInfoRow.alignment = NSLayoutAttributeCenterY;
+  _pointInfoRow.spacing = 7.0;
+
+  NSStackView *footer = [NSStackView stackViewWithViews:@[
+    _observerInfoLabel,
+    _movementInfoLabel,
+    _pointInfoRow,
+  ]];
+  footer.orientation = NSUserInterfaceLayoutOrientationVertical;
+  footer.alignment = NSLayoutAttributeLeading;
+  footer.spacing = 2.0;
+  footer.translatesAutoresizingMaskIntoConstraints = NO;
+  [content addSubview:footer];
   [NSLayoutConstraint activateConstraints:@[
-    [pointInfo.centerYAnchor constraintEqualToAnchor:content.centerYAnchor],
-    [pointInfo.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
-    [pointInfo.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14.0],
+    [footer.topAnchor constraintEqualToAnchor:content.topAnchor constant:6.0],
+    [footer.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-6.0],
+    [footer.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
+    [footer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14.0],
+    [_observerInfoLabel.widthAnchor constraintEqualToAnchor:footer.widthAnchor],
+    [_movementInfoLabel.widthAnchor constraintEqualToAnchor:footer.widthAnchor],
+    [_pointInfoRow.widthAnchor constraintEqualToAnchor:footer.widthAnchor],
+    [_pointInfoRow.heightAnchor constraintEqualToConstant:24.0],
   ]];
   return viewController;
 }
@@ -4924,10 +4955,68 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   if (_pointInfoHeading == nil) {
     return;
   }
-  _pointInfoHeading.stringValue = status;
+  // Keep one blank glyph in the otherwise empty point row so entering and
+  // leaving hover does not resize the minimap panel beneath the pointer.
+  _pointInfoHeading.stringValue = status.length == 0U ? @" " : status;
   _pointInfoLabel.stringValue = @"";
   _moveToLockedPointControl.hidden = YES;
   [self setPointInfoSymbolsVisible:false locked:false occluded:false];
+}
+
+/// Keep observer state visible independently of the transient hover/lock row.
+/// Compact projected coordinates are more useful here than place names: they
+/// update immediately during movement and match the terrain dataset's grid.
+- (void)updateMiniMapTelemetry {
+  if (_observerInfoLabel == nil) {
+    return;
+  }
+  _observerInfoLabel.stringValue =
+      [NSString stringWithFormat:@"Observer  E %.0f • N %.0f\n%.1f m AGL • %.0f m AMSL",
+                                 _observer.easting,
+                                 _observer.northing,
+                                 _groundClearance,
+                                 _observer.elevation];
+  _observerInfoLabel.toolTip =
+      [NSString stringWithFormat:@"Observer: easting %.1f m, northing %.1f m, %.1f m above ground, "
+                                  "%.1f m above mean sea level",
+                                 _observer.easting,
+                                 _observer.northing,
+                                 _groundClearance,
+                                 _observer.elevation];
+
+  const BOOL roaming = [self isRoamingEnabled];
+  const BOOL cruising = [self isCruisingEnabled];
+  const BOOL movementHidden = !roaming && !cruising;
+  const BOOL movementVisibilityChanged = _movementInfoLabel.hidden != movementHidden;
+  _movementInfoLabel.hidden = movementHidden;
+  if (roaming || cruising) {
+    double heading = std::fmod(_orientation.heading * panorama::app::kRadiansToDegrees, 360.0);
+    if (heading < 0.0) {
+      heading += 360.0;
+    }
+    NSString *mode = _roamAltitudeModeControl.selectedSegment == 0
+                         ? @"Terrain"
+                         : (cruising ? @"Flight" : @"Altitude");
+    NSString *state = cruising ? (_viewerPaused ? @"Cruise paused" : @"Cruise")
+                               : (_viewerPaused ? @"Roam paused" : @"Roam");
+    const double speed = cruising ? _cruiseSpeed : _roamSpeed;
+    _movementInfoLabel.stringValue =
+        cruising ? [NSString stringWithFormat:@"%@ • %@ • %@\nHeading %03.0f° • Pitch %+.0f°",
+                                              state,
+                                              format_movement_speed(speed),
+                                              mode,
+                                              heading,
+                                              _orientation.pitch * panorama::app::kRadiansToDegrees]
+                 : [NSString stringWithFormat:@"%@ • %@ • %@\nHeading %03.0f°",
+                                              state,
+                                              format_movement_speed(speed),
+                                              mode,
+                                              heading];
+    _movementInfoLabel.toolTip = _movementInfoLabel.stringValue;
+  }
+  if (movementVisibilityChanged) {
+    [_miniMapPanel informationFooterContentDidChange];
+  }
 }
 
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded {
@@ -5224,26 +5313,30 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     }
   }
 
+  bool acceptedRoamMove = false;
   if (frame.roam_result_sequence != _displayedRoamResultSequence) {
     _displayedRoamResultSequence = frame.roam_result_sequence;
-    if (frame.roam_result.has_value() && frame.roam_result->request_token == _roamRequestToken) {
+    if (frame.roam_result.has_value()) {
       if (frame.roam_result->accepted) {
+        acceptedRoamMove = true;
         _groundClearance = std::max(
             0.0,
             frame.observer.elevation - static_cast<double>(frame.roam_result->ground_elevation)
         );
-        if (_roamAltitudeModeControl.selectedSegment == 0 &&
-            _groundClearanceControl.currentEditor == nil) {
-          _groundClearanceControl.stringValue =
-              [NSString stringWithFormat:@"%.1f", _groundClearance];
-        } else if (_roamAltitudeModeControl.selectedSegment == 1) {
-          _roamAltitude = frame.observer.elevation;
-          if (_groundClearanceControl.currentEditor == nil) {
+        if (frame.roam_result->request_token == _roamRequestToken) {
+          if (_roamAltitudeModeControl.selectedSegment == 0 &&
+              _groundClearanceControl.currentEditor == nil) {
             _groundClearanceControl.stringValue =
-                [NSString stringWithFormat:@"%.1f", _roamAltitude];
+                [NSString stringWithFormat:@"%.1f", _groundClearance];
+          } else if (_roamAltitudeModeControl.selectedSegment == 1) {
+            _roamAltitude = frame.observer.elevation;
+            if (_groundClearanceControl.currentEditor == nil) {
+              _groundClearanceControl.stringValue =
+                  [NSString stringWithFormat:@"%.1f", _roamAltitude];
+            }
           }
         }
-      } else {
+      } else if (frame.roam_result->request_token == _roamRequestToken) {
         [self clearRoamKeys];
         _roamDesiredPosition = {frame.observer.easting, frame.observer.northing};
         const bool terrainCollision = std::isfinite(frame.roam_result->ground_elevation);
@@ -5252,8 +5345,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         }
         if (_cruiseRecovery) {
           _roamStatusLabel.stringValue =
-              terrainCollision ? @"Blocked by terrain • steer/climb or slow down • Space resumes"
-                               : @"No terrain coverage • turn back • Space resumes";
+              terrainCollision ? @"Blocked by terrain • drag to steer/climb • Space resumes"
+                               : @"No terrain coverage • drag to turn back • Space resumes";
           _roamStatusLabel.textColor = NSColor.systemRedColor;
         } else if (![self isCruisingEnabled]) {
           _roamStatusLabel.stringValue =
@@ -5378,6 +5471,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         _roamDesiredPosition = {_observer.easting, _observer.northing};
       }
       [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
+      if (acceptedRoamMove) {
+        [_miniMapPanel centerOnObserver];
+      }
       if (_pointInspectionLocked && _lockedPoint.has_value()) {
         _lockedPoint->distance = static_cast<float>(std::hypot(
             _lockedPoint->easting - _observer.easting,
@@ -5406,6 +5502,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                     verticalFieldOfView:frame.vertical_field_of_view
                                   image:frame.image];
     [_miniMapPanel setVisibilityPoints:frame.visibility_points image:frame.image];
+    [self updateMiniMapTelemetry];
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",
                          frame.orientation.heading * panorama::app::kRadiansToDegrees,

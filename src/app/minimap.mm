@@ -15,7 +15,7 @@ constexpr CGFloat kCompactMapPanelWidth = 300.0;
 constexpr CGFloat kCompactMapSectionHeight = 286.0;
 constexpr CGFloat kLargeMapPanelWidth = 520.0;
 constexpr CGFloat kLargeMapSectionHeight = 456.0;
-constexpr CGFloat kPointSectionHeight = 36.0;
+constexpr CGFloat kMinimumPointSectionHeight = 36.0;
 constexpr double kInitialMapDistance = 50'000.0;
 constexpr double kVisibilityBasisDistance = 1'000.0;
 
@@ -420,6 +420,7 @@ enum class AnnotationKind : NSInteger {
   double _observerEasting;
   double _observerNorthing;
   double _maxDistance;
+  CGFloat _pointInfoHeight;
   uint32_t _terrainEpsgCode;
   __weak id<MiniMapPanelViewSizeDelegate> _sizeDelegate;
   __weak id<MiniMapPanelViewInteractionDelegate> _interactionDelegate;
@@ -461,6 +462,7 @@ enum class AnnotationKind : NSInteger {
   _observerNorthing = northing;
   _terrainEpsgCode = epsgCode;
   _maxDistance = maxDistance;
+  _pointInfoHeight = kMinimumPointSectionHeight;
   _pointInfoView = pointInfoView;
 
   _mapSection = [[NSView alloc] initWithFrame:NSZeroRect];
@@ -691,9 +693,13 @@ enum class AnnotationKind : NSInteger {
   [_mapView setCenterCoordinate:_observerAnnotation.coordinate animated:YES];
 }
 
+- (void)centerOnObserver {
+  [_mapView setCenterCoordinate:_observerAnnotation.coordinate animated:NO];
+}
+
 - (void)layout {
   [super layout];
-  const CGFloat pointHeight = _contentVisible ? kPointSectionHeight : 0.0;
+  const CGFloat pointHeight = _contentVisible ? _pointInfoHeight : 0.0;
   _pointInfoView.frame = NSMakeRect(0.0, 0.0, self.bounds.size.width, pointHeight);
   _mapSection.frame = NSMakeRect(
       0.0,
@@ -718,7 +724,19 @@ enum class AnnotationKind : NSInteger {
 - (NSSize)preferredPanelSize {
   const CGFloat mapWidth = _largeMap ? kLargeMapPanelWidth : kCompactMapPanelWidth;
   const CGFloat mapHeight = _largeMap ? kLargeMapSectionHeight : kCompactMapSectionHeight;
-  return NSMakeSize(mapWidth, _contentVisible ? mapHeight + kPointSectionHeight : 0.0);
+  return NSMakeSize(mapWidth, _contentVisible ? mapHeight + _pointInfoHeight : 0.0);
+}
+
+- (void)informationFooterContentDidChange {
+  [_pointInfoView layoutSubtreeIfNeeded];
+  const CGFloat nextHeight =
+      std::max(kMinimumPointSectionHeight, _pointInfoView.fittingSize.height);
+  if (std::abs(nextHeight - _pointInfoHeight) < 0.5) {
+    return;
+  }
+  _pointInfoHeight = nextHeight;
+  [self setNeedsLayout:YES];
+  [_sizeDelegate miniMapPanelPreferredSizeDidChange:self];
 }
 
 - (void)updateMapSizeControl {
