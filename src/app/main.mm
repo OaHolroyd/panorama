@@ -891,15 +891,34 @@ public:
     return token;
   }
 
-  /// Rebuild spatial tracing around a sampled map point, preserving eye height.
-  void request_observer_at(TerrainPoint point) {
+  /// Rebuild spatial tracing around a sampled terrain point at the requested
+  /// eye height. Supplying the clearance with the destination keeps map jumps
+  /// and height edits ordered when requests are coalesced.
+  void request_observer_at(TerrainPoint point, double groundClearance) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      observer_ground_clearance_ = groundClearance;
       requested_observer_ = {
           point.easting,
           point.northing,
-          static_cast<double>(point.elevation) + observer_ground_clearance_,
+          static_cast<double>(point.elevation) + groundClearance,
       };
+      requested_revision_++;
+      observer_pending_ = true;
+      trace_pending_ = true;
+      presentation_pending_ = true;
+    }
+    changed_.notify_one();
+  }
+
+  /// Change height above the ground beneath the latest requested position.
+  /// This avoids resampling the current location and also behaves correctly if
+  /// a destination request has not yet completed its trace.
+  void request_ground_clearance(double groundClearance) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requested_observer_.elevation += groundClearance - observer_ground_clearance_;
+      observer_ground_clearance_ = groundClearance;
       requested_revision_++;
       observer_pending_ = true;
       trace_pending_ = true;
@@ -944,6 +963,10 @@ public:
     return trace_->terrain_coverage();
   }
   [[nodiscard]] bool observer_used_fallback() const { return observer_fallback_used_; }
+  [[nodiscard]] double ground_clearance() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return observer_ground_clearance_;
+  }
   [[nodiscard]] double initial_vertical_field_of_view() const {
     return settings_.vertical_field_of_view;
   }
@@ -1430,6 +1453,10 @@ private:
   NSTextField *_pointInfoLabel;
   NSImageView *_pointVisibilityIcon;
   NSImageView *_pointLockIcon;
+  NSButton *_moveToLockedPointControl;
+  NSTextField *_groundClearanceControl;
+  NSButton *_groundClearanceDecreaseControl;
+  NSButton *_groundClearanceIncreaseControl;
   uint64_t _displayedRevision;
   uint64_t _displayedInspectionSequence;
   uint64_t _pointLockRequestToken;
@@ -1443,6 +1470,7 @@ private:
   panorama::app::PointerOwner _pointerOwner;
   double _lockedAspectRatio;
   double _panningSensitivity;
+  double _groundClearance;
   bool _pointInspectionEnabled;
   bool _pointInspectionLocked;
   bool _pointLockPending;
@@ -1469,6 +1497,10 @@ private:
 - (BOOL)isMapAndPointInspectionEnabled;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
+- (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point;
+- (void)moveToLockedPoint:(id)sender;
+- (void)adjustGroundClearance:(NSButton *)sender;
+- (BOOL)commitGroundClearanceControl;
 - (void)resolveObserverTimeZone;
 - (void)setDaylightStatus:(NSString *)status;
 - (BOOL)publishAstronomicalLighting;
@@ -2093,6 +2125,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _image = renderer->initial_image();
     _lockedAspectRatio = static_cast<double>(_image.width) / _image.height;
     _panningSensitivity = 8.0;
+    _groundClearance = renderer->ground_clearance();
     _presentation = renderer->initial_presentation();
     _mapPointAction = panorama::app::MapPointAction::None;
     _pointerOwner = panorama::app::PointerOwner::None;
@@ -2524,6 +2557,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [self publishTerrainControls];
   } else if (field == _astronomicalDateControl) {
     [self astronomicalInputChanged:field];
+  } else if (field == _groundClearanceControl) {
+    [self commitGroundClearanceControl];
   }
 }
 
@@ -2744,6 +2779,33 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self requestMapPointEasting:easting
                       northing:northing
                         action:panorama::app::MapPointAction::MoveObserver];
+}
+
+- (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point {
+  _mapHoverPoint.reset();
+  _pointInspectionLocked = false;
+  _pointLockPending = false;
+  _lockedPoint.reset();
+  [self clearTargetVisibility];
+  [_miniMapPanel clearInspectedPoint];
+  [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
+  [self setPointInfoStatus:@"Moving observer…"];
+  _renderer->request_observer_at(point, _groundClearance);
+}
+
+- (void)moveToLockedPoint:(id)sender {
+  (void)sender;
+  if (!_pointInspectionLocked || !_lockedPoint.has_value()) {
+    NSBeep();
+    return;
+  }
+  const panorama::app::PointInspection point = *_lockedPoint;
+  const panorama::app::TerrainPoint target = {
+      point.easting,
+      point.northing,
+      point.elevation,
+  };
+  [self moveObserverToTerrainPoint:target];
 }
 
 - (void)lookAtTerrainPoint:(panorama::app::TerrainPoint)point {
@@ -3415,7 +3477,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Build the compact hover readout shown while point inspection is enabled.
 - (NSViewController *)makePointInfoViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
-  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 36.0)];
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 70.0)];
   viewController.view = content;
 
   _pointInfoHeading = [NSTextField labelWithString:@""];
@@ -3434,24 +3496,132 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _pointLockIcon.contentTintColor = NSColor.secondaryLabelColor;
   _pointLockIcon.hidden = YES;
 
+  _moveToLockedPointControl = [NSButton buttonWithTitle:@"Move here"
+                                                 target:self
+                                                 action:@selector(moveToLockedPoint:)];
+  _moveToLockedPointControl.controlSize = NSControlSizeSmall;
+  _moveToLockedPointControl.bezelStyle = NSBezelStyleRounded;
+  _moveToLockedPointControl.toolTip = @"Move the observer to the locked terrain point";
+  _moveToLockedPointControl.hidden = YES;
+
+  NSView *pointSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
+  [pointSpacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [pointSpacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+
   NSStackView *pointInfo = [NSStackView stackViewWithViews:@[
     _pointInfoHeading,
     _pointInfoLabel,
     _pointVisibilityIcon,
-    _pointLockIcon
+    _pointLockIcon,
+    pointSpacer,
+    _moveToLockedPointControl,
   ]];
   pointInfo.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   pointInfo.alignment = NSLayoutAttributeCenterY;
-  pointInfo.spacing = 8.0;
-  pointInfo.translatesAutoresizingMaskIntoConstraints = NO;
-  [content addSubview:pointInfo];
+  pointInfo.spacing = 7.0;
+
+  NSTextField *heightLabel = [NSTextField labelWithString:@"Eye height"];
+  heightLabel.toolTip = @"Observer height above the terrain directly beneath it";
+  _groundClearanceDecreaseControl =
+      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"minus"
+                                          accessibilityDescription:@"Lower observer"]
+                         target:self
+                         action:@selector(adjustGroundClearance:)];
+  _groundClearanceDecreaseControl.tag = -1;
+  _groundClearanceDecreaseControl.controlSize = NSControlSizeSmall;
+  _groundClearanceDecreaseControl.bezelStyle = NSBezelStyleTexturedRounded;
+  _groundClearanceDecreaseControl.toolTip = @"Lower eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
+  [_groundClearanceDecreaseControl.widthAnchor constraintEqualToConstant:24.0].active = YES;
+  _groundClearanceControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _groundClearanceControl.delegate = self;
+  _groundClearanceControl.alignment = NSTextAlignmentRight;
+  _groundClearanceControl.font = [NSFont monospacedDigitSystemFontOfSize:12.0
+                                                                  weight:NSFontWeightRegular];
+  _groundClearanceControl.stringValue = [NSString stringWithFormat:@"%.1f", _groundClearance];
+  _groundClearanceControl.toolTip = @"Observer height above the terrain directly beneath it";
+  [_groundClearanceControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
+  NSTextField *heightUnit = [NSTextField labelWithString:@"m AGL"];
+  heightUnit.textColor = NSColor.secondaryLabelColor;
+  heightUnit.toolTip = @"Metres above ground level";
+  _groundClearanceIncreaseControl =
+      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"plus"
+                                          accessibilityDescription:@"Raise observer"]
+                         target:self
+                         action:@selector(adjustGroundClearance:)];
+  _groundClearanceIncreaseControl.tag = 1;
+  _groundClearanceIncreaseControl.controlSize = NSControlSizeSmall;
+  _groundClearanceIncreaseControl.bezelStyle = NSBezelStyleTexturedRounded;
+  _groundClearanceIncreaseControl.toolTip = @"Raise eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
+  [_groundClearanceIncreaseControl.widthAnchor constraintEqualToConstant:24.0].active = YES;
+
+  NSView *heightSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
+  [heightSpacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                           forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [heightSpacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
+  NSStackView *heightControls = [NSStackView stackViewWithViews:@[
+    heightLabel,
+    heightSpacer,
+    _groundClearanceDecreaseControl,
+    _groundClearanceControl,
+    heightUnit,
+    _groundClearanceIncreaseControl,
+  ]];
+  heightControls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  heightControls.alignment = NSLayoutAttributeCenterY;
+  heightControls.spacing = 6.0;
+
+  NSStackView *rows = [NSStackView stackViewWithViews:@[ pointInfo, heightControls ]];
+  rows.orientation = NSUserInterfaceLayoutOrientationVertical;
+  rows.alignment = NSLayoutAttributeLeading;
+  rows.distribution = NSStackViewDistributionFillEqually;
+  rows.spacing = 2.0;
+  rows.translatesAutoresizingMaskIntoConstraints = NO;
+  [content addSubview:rows];
   [NSLayoutConstraint activateConstraints:@[
-    [pointInfo.centerYAnchor constraintEqualToAnchor:content.centerYAnchor],
-    [pointInfo.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
-    [pointInfo.trailingAnchor constraintLessThanOrEqualToAnchor:content.trailingAnchor
-                                                       constant:-14.0],
+    [rows.topAnchor constraintEqualToAnchor:content.topAnchor constant:3.0],
+    [rows.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-3.0],
+    [rows.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
+    [rows.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14.0],
+    [pointInfo.widthAnchor constraintEqualToAnchor:rows.widthAnchor],
+    [heightControls.widthAnchor constraintEqualToAnchor:rows.widthAnchor],
   ]];
   return viewController;
+}
+
+- (void)adjustGroundClearance:(NSButton *)sender {
+  NSEventModifierFlags modifiers = NSApp.currentEvent.modifierFlags;
+  const double step = (modifiers & NSEventModifierFlagShift) != 0U    ? 10.0
+                      : (modifiers & NSEventModifierFlagOption) != 0U ? 0.1
+                                                                      : 1.0;
+  _groundClearanceControl.doubleValue =
+      std::clamp(_groundClearance + static_cast<double>(sender.tag) * step, 0.0, 100'000.0);
+  _groundClearanceControl.stringValue =
+      [NSString stringWithFormat:@"%.1f", _groundClearanceControl.doubleValue];
+  [self commitGroundClearanceControl];
+}
+
+- (BOOL)commitGroundClearanceControl {
+  const std::optional<double> parsed =
+      panorama::app::parse_range_value(_groundClearanceControl.stringValue);
+  const BOOL valid = parsed.has_value() && *parsed >= 0.0 && *parsed <= 100'000.0;
+  _groundClearanceControl.textColor = valid ? NSColor.controlTextColor : NSColor.systemRedColor;
+  _groundClearanceControl.toolTip =
+      valid ? @"Observer height above the terrain directly beneath it"
+            : @"Eye height must be between 0 and 100,000 metres above ground level.";
+  if (!valid) {
+    NSBeep();
+    return NO;
+  }
+  _groundClearanceControl.stringValue = [NSString stringWithFormat:@"%.1f", *parsed];
+  if (std::abs(*parsed - _groundClearance) <= 1e-9) {
+    return YES;
+  }
+  _groundClearance = *parsed;
+  _renderer->request_ground_clearance(_groundClearance);
+  return YES;
 }
 
 - (void)setPointInfoStatus:(NSString *)status {
@@ -3460,6 +3630,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   _pointInfoHeading.stringValue = status;
   _pointInfoLabel.stringValue = @"";
+  _moveToLockedPointControl.hidden = YES;
   [self setPointInfoSymbolsVisible:false locked:false occluded:false];
 }
 
@@ -3469,6 +3640,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   _pointVisibilityIcon.hidden = !visible;
   _pointLockIcon.hidden = !visible;
+  _moveToLockedPointControl.hidden =
+      !(visible && locked && _pointInspectionLocked && _lockedPoint.has_value());
   if (!visible) {
     return;
   }
@@ -3796,15 +3969,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                       verticalFieldOfView:frame.vertical_field_of_view
                                                     image:frame.image];
         } else if (action == panorama::app::MapPointAction::MoveObserver) {
-          _mapHoverPoint.reset();
-          _pointInspectionLocked = false;
-          _pointLockPending = false;
-          _lockedPoint.reset();
-          [self clearTargetVisibility];
-          [_miniMapPanel clearInspectedPoint];
-          [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
-          [self setPointInfoStatus:@"Moving observer…"];
-          _renderer->request_observer_at(*frame.map_point);
+          [self moveObserverToTerrainPoint:*frame.map_point];
         } else {
           _mapHoverPoint.reset();
           _pointInspectionLocked = true;
@@ -3862,7 +4027,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _observer = frame.observer;
     if (observerMoved) {
       [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
-      [self updatePointInfo:std::nullopt];
+      if (_pointInspectionLocked && _lockedPoint.has_value()) {
+        _lockedPoint->distance = static_cast<float>(std::hypot(
+            _lockedPoint->easting - _observer.easting,
+            _lockedPoint->northing - _observer.northing
+        ));
+        [self updatePointInfo:_lockedPoint];
+      } else {
+        [self updatePointInfo:std::nullopt];
+      }
       if (observerPositionMoved) {
         [self resolveObserverTimeZone];
       }

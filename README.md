@@ -112,13 +112,18 @@ feature outlines.
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama
 or map to preview a point. Right-click the panorama to lock its current point;
-left-click the minimap to lock a map point
-and turn the camera toward it. Option-click the minimap, or use its secondary-
-click menu, to move the observer while retaining the current eye height above
-the terrain. The map's scope and expand buttons select its focus and size; the
-grid button overlays the complete prepared-tile coverage. If the requested
-startup observer is outside that coverage, the viewer opens on a central
-available tile with the coverage overlay already enabled.
+left-click the minimap to lock a map point and turn the camera toward it. The
+map can always be panned and zoomed. The location button recentres it on the
+observer without changing scale, while the scope button toggles following the
+panorama mouseover point. Following pauses while the pointer is over the map.
+A locked point can be used as the new observer
+location with **Move here**. Option-click the minimap, or use its secondary-
+click menu, to move immediately. The eye-height controls set the retained
+height above the terrain for jumps and vertical adjustments. The expand button
+changes map size; the grid button overlays the complete prepared-tile
+coverage. If the requested startup observer is outside that coverage, the
+viewer opens on a central available tile with the coverage overlay already
+enabled.
 
 Collapse or reveal the inspector with the `sidebar.right` toolbar button. Run
 `./panorama-app --help` for observer, image-size, and field-of-view options.

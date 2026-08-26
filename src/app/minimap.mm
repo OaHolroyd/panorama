@@ -15,10 +15,8 @@ constexpr CGFloat kCompactMapPanelWidth = 300.0;
 constexpr CGFloat kCompactMapSectionHeight = 286.0;
 constexpr CGFloat kLargeMapPanelWidth = 520.0;
 constexpr CGFloat kLargeMapSectionHeight = 456.0;
-constexpr CGFloat kPointSectionHeight = 36.0;
+constexpr CGFloat kPointSectionHeight = 70.0;
 constexpr double kInitialMapDistance = 50'000.0;
-constexpr double kMinimumMapDistance = 500.0;
-constexpr double kMaximumMapDistance = 2'000'000.0;
 constexpr double kVisibilityBasisDistance = 1'000.0;
 
 /// Scalar-only ABI mirrored by `VisibilityMapParameters` in image_renderer.metal.
@@ -294,6 +292,8 @@ enum class AnnotationKind : NSInteger {
 @end
 
 @interface MiniMapPanelView (MapInteraction)
+- (void)mapPointerDidEnter;
+- (void)mapPointerDidExit;
 - (void)mapDidHoverCoordinate:(CLLocationCoordinate2D)coordinate;
 - (void)mapDidEndHover;
 - (void)mapDidSelectCoordinate:(CLLocationCoordinate2D)coordinate;
@@ -301,22 +301,32 @@ enum class AnnotationKind : NSInteger {
 - (void)showContextMenuForCoordinate:(CLLocationCoordinate2D)coordinate event:(NSEvent *)event;
 @end
 
-/// A north-up map kept on a caller-selected observer or inspection point.
-/// MapKit's normal pan, pitch, and rotation gestures are disabled; scrolling
-/// and pinching change only the stored ground span, so navigation cannot lose
-/// the selected focus.
-@interface FixedCentreMapView : MKMapView {
+/// A freely navigable north-up minimap. MapKit owns panning and zooming; a
+/// click recognizer preserves the separate terrain-point selection gesture.
+@interface InteractiveMiniMapView : MKMapView {
 @private
   NSTrackingArea *_interactionTrackingArea;
   NSPoint _lastHoverPoint;
+  NSEventModifierFlags _mouseDownModifiers;
   bool _hasLastHoverPoint;
 }
-@property(nonatomic) CLLocationCoordinate2D fixedCentre;
-@property(nonatomic) double visibleDistance;
 @property(nonatomic, weak) MiniMapPanelView *interactionOwner;
 @end
 
-@implementation FixedCentreMapView
+@implementation InteractiveMiniMapView
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+  self = [super initWithFrame:frameRect];
+  if (self == nil) {
+    return nil;
+  }
+  NSClickGestureRecognizer *click =
+      [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(primaryClick:)];
+  click.buttonMask = 0x1U;
+  click.numberOfClicksRequired = 1;
+  [self addGestureRecognizer:click];
+  return self;
+}
 
 - (void)updateTrackingAreas {
   [super updateTrackingAreas];
@@ -350,15 +360,32 @@ enum class AnnotationKind : NSInteger {
   [self.interactionOwner mapDidHoverCoordinate:[self coordinateForEvent:event]];
 }
 
+- (void)mouseEntered:(NSEvent *)event {
+  (void)event;
+  [self.interactionOwner mapPointerDidEnter];
+}
+
 - (void)mouseExited:(NSEvent *)event {
   (void)event;
   _hasLastHoverPoint = false;
+  [self.interactionOwner mapPointerDidExit];
   [self.interactionOwner mapDidEndHover];
 }
 
 - (void)mouseDown:(NSEvent *)event {
-  const CLLocationCoordinate2D coordinate = [self coordinateForEvent:event];
-  if ((event.modifierFlags & NSEventModifierFlagOption) != 0U) {
+  _hasLastHoverPoint = false;
+  [self.interactionOwner mapDidEndHover];
+  _mouseDownModifiers = event.modifierFlags;
+  [super mouseDown:event];
+}
+
+- (void)primaryClick:(NSClickGestureRecognizer *)recognizer {
+  if (recognizer.state != NSGestureRecognizerStateEnded) {
+    return;
+  }
+  const NSPoint point = [recognizer locationInView:self];
+  const CLLocationCoordinate2D coordinate = [self convertPoint:point toCoordinateFromView:self];
+  if ((_mouseDownModifiers & NSEventModifierFlagOption) != 0U) {
     [self.interactionOwner mapDidRequestObserverMoveCoordinate:coordinate];
   } else {
     [self.interactionOwner mapDidSelectCoordinate:coordinate];
@@ -369,36 +396,18 @@ enum class AnnotationKind : NSInteger {
   [self.interactionOwner showContextMenuForCoordinate:[self coordinateForEvent:event] event:event];
 }
 
-- (void)applyVisibleDistance {
-  const double distance =
-      std::clamp(self.visibleDistance, kMinimumMapDistance, kMaximumMapDistance);
-  self.visibleDistance = distance;
-  [self setRegion:MKCoordinateRegionMakeWithDistance(self.fixedCentre, distance, distance)
-         animated:NO];
-}
-
-- (void)scrollWheel:(NSEvent *)event {
-  const double coefficient = event.hasPreciseScrollingDeltas ? 0.012 : 0.08;
-  self.visibleDistance *= std::exp(-event.scrollingDeltaY * coefficient);
-  [self applyVisibleDistance];
-}
-
-- (void)magnifyWithEvent:(NSEvent *)event {
-  self.visibleDistance *= std::exp(-event.magnification);
-  [self applyVisibleDistance];
-}
-
 @end
 
 @interface MiniMapPanelView () <MKMapViewDelegate> {
 @private
   NSView *_mapSection;
   NSView *_pointInfoView;
-  FixedCentreMapView *_mapView;
+  InteractiveMiniMapView *_mapView;
   VisibilityMapView *_visibilityView;
   CompactMapScaleView *_scaleView;
   NSPopUpButton *_mapStyleControl;
   NSButton *_coverageControl;
+  NSButton *_returnToObserverControl;
   NSButton *_mapFocusControl;
   NSButton *_mapSizeControl;
   MiniMapAnnotation *_observerAnnotation;
@@ -418,6 +427,7 @@ enum class AnnotationKind : NSInteger {
   bool _contentVisible;
   bool _coverageVisible;
   bool _followInspection;
+  bool _mapPointerInside;
   bool _largeMap;
 }
 - (void)updateVisibilityTransform;
@@ -480,6 +490,19 @@ enum class AnnotationKind : NSInteger {
   [_coverageControl.widthAnchor constraintEqualToConstant:22.0].active = YES;
   [_coverageControl.heightAnchor constraintEqualToConstant:22.0].active = YES;
 
+  _returnToObserverControl =
+      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"location.fill"
+                                          accessibilityDescription:@"Return to observer"]
+                         target:self
+                         action:@selector(returnToObserver:)];
+  _returnToObserverControl.title = @"";
+  _returnToObserverControl.bordered = NO;
+  _returnToObserverControl.imagePosition = NSImageOnly;
+  _returnToObserverControl.toolTip = @"Return to observer without changing map scale";
+  [_returnToObserverControl setAccessibilityLabel:_returnToObserverControl.toolTip];
+  [_returnToObserverControl.widthAnchor constraintEqualToConstant:22.0].active = YES;
+  [_returnToObserverControl.heightAnchor constraintEqualToConstant:22.0].active = YES;
+
   _mapFocusControl = [NSButton
       buttonWithImage:[NSImage imageWithSystemSymbolName:@"scope"
                                 accessibilityDescription:@"Center minimap on mouseover terrain"]
@@ -514,12 +537,13 @@ enum class AnnotationKind : NSInteger {
     _mapStyleControl,
     controlSpacer,
     _coverageControl,
+    _returnToObserverControl,
     _mapFocusControl,
     _mapSizeControl,
   ]];
   controls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   controls.alignment = NSLayoutAttributeCenterY;
-  controls.spacing = 6.0;
+  controls.spacing = 4.0;
   [heading setContentHuggingPriority:NSLayoutPriorityDefaultHigh
                       forOrientation:NSLayoutConstraintOrientationHorizontal];
   [_mapStyleControl setContentHuggingPriority:NSLayoutPriorityDefaultHigh
@@ -527,11 +551,11 @@ enum class AnnotationKind : NSInteger {
   controls.translatesAutoresizingMaskIntoConstraints = NO;
   [_mapSection addSubview:controls];
 
-  _mapView = [[FixedCentreMapView alloc] initWithFrame:NSZeroRect];
+  _mapView = [[InteractiveMiniMapView alloc] initWithFrame:NSZeroRect];
   _mapView.interactionOwner = self;
   _mapView.delegate = self;
-  _mapView.scrollEnabled = NO;
-  _mapView.zoomEnabled = NO;
+  _mapView.scrollEnabled = YES;
+  _mapView.zoomEnabled = YES;
   _mapView.rotateEnabled = NO;
   _mapView.pitchEnabled = NO;
   _mapView.showsCompass = NO;
@@ -565,8 +589,8 @@ enum class AnnotationKind : NSInteger {
 
   // Terrain and ray geometry use the dataset's projected CRS (for example,
   // EPSG:2056 Swiss LV95), whereas MapKit accepts WGS84 latitude/longitude.
-  // The observer is therefore transformed once before it becomes the fixed
-  // map centre. Camera headings must *not* simply be treated as geographic
+  // The observer is therefore transformed before becoming the initial map
+  // centre. Camera headings must *not* simply be treated as geographic
   // bearings: setCameraOrientation constructs endpoints in the terrain CRS
   // first and transforms those complete points to WGS84, preserving the
   // projected grid's local convergence relative to true north.
@@ -575,8 +599,6 @@ enum class AnnotationKind : NSInteger {
       terrainCrs.to_lat_lon({_observerEasting, _observerNorthing});
   const CLLocationCoordinate2D observerCoordinate =
       CLLocationCoordinate2DMake(observerLatLon.lat, observerLatLon.lon);
-  _mapView.fixedCentre = observerCoordinate;
-  _mapView.visibleDistance = kInitialMapDistance;
   [_mapView setRegion:MKCoordinateRegionMakeWithDistance(
                           observerCoordinate,
                           kInitialMapDistance,
@@ -630,6 +652,7 @@ enum class AnnotationKind : NSInteger {
   _contentVisible = false;
   _coverageVisible = coverageVisible;
   _followInspection = false;
+  _mapPointerInside = false;
   _largeMap = false;
   if (_coverageVisible) {
     [_mapView addOverlay:_coverageOverlay level:MKOverlayLevelAboveRoads];
@@ -661,6 +684,11 @@ enum class AnnotationKind : NSInteger {
     [_mapView removeOverlay:_coverageOverlay];
   }
   [self updateCoverageControl];
+}
+
+- (void)returnToObserver:(id)sender {
+  (void)sender;
+  [_mapView setCenterCoordinate:_observerAnnotation.coordinate animated:YES];
 }
 
 - (void)layout {
@@ -704,12 +732,13 @@ enum class AnnotationKind : NSInteger {
 }
 
 - (void)updateMapFocusControl {
-  NSString *symbol = _followInspection ? @"location.fill" : @"scope";
-  NSString *description =
-      _followInspection ? @"Center minimap on observer" : @"Center minimap on mouseover terrain";
-  _mapFocusControl.image = [NSImage imageWithSystemSymbolName:symbol
+  NSString *description = _followInspection ? @"Stop following the panorama mouseover point"
+                                            : @"Follow the panorama mouseover point";
+  _mapFocusControl.image = [NSImage imageWithSystemSymbolName:@"scope"
                                      accessibilityDescription:description];
   _mapFocusControl.state = _followInspection ? NSControlStateValueOn : NSControlStateValueOff;
+  _mapFocusControl.contentTintColor =
+      _followInspection ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
   _mapFocusControl.toolTip = description;
   [_mapFocusControl setAccessibilityLabel:description];
 }
@@ -718,16 +747,9 @@ enum class AnnotationKind : NSInteger {
   (void)sender;
   _followInspection = !_followInspection;
   [self updateMapFocusControl];
-
-  CLLocationCoordinate2D centre = _observerAnnotation.coordinate;
-  if (_followInspection) {
-    if (_inspectionAnnotation == nil) {
-      return;
-    }
-    centre = _inspectionAnnotation.coordinate;
+  if (_followInspection && !_mapPointerInside && _inspectionAnnotation != nil) {
+    [_mapView setCenterCoordinate:_inspectionAnnotation.coordinate animated:NO];
   }
-  _mapView.fixedCentre = centre;
-  [_mapView applyVisibleDistance];
 }
 
 - (void)toggleMapSize:(id)sender {
@@ -853,7 +875,16 @@ enum class AnnotationKind : NSInteger {
   return terrainCrs.from_lat_lon({coordinate.latitude, coordinate.longitude});
 }
 
+- (void)mapPointerDidEnter {
+  _mapPointerInside = true;
+}
+
+- (void)mapPointerDidExit {
+  _mapPointerInside = false;
+}
+
 - (void)mapDidHoverCoordinate:(CLLocationCoordinate2D)coordinate {
+  _mapPointerInside = true;
   if (_interactionDelegate == nil) {
     return;
   }
@@ -908,10 +939,6 @@ enum class AnnotationKind : NSInteger {
       terrainCrs.to_lat_lon({easting, northing + kVisibilityBasisDistance});
   _eastBasisCoordinate = CLLocationCoordinate2DMake(east.lat, east.lon);
   _northBasisCoordinate = CLLocationCoordinate2DMake(north.lat, north.lon);
-  if (!_followInspection || _inspectionAnnotation == nil) {
-    _mapView.fixedCentre = coordinate;
-    [_mapView applyVisibleDistance];
-  }
   [self updateVisibilityTransform];
 }
 
@@ -934,9 +961,11 @@ enum class AnnotationKind : NSInteger {
     view.image = annotation_image(_inspectionAnnotation.kind);
     view.alphaValue = 1.0;
   }
-  if (_followInspection) {
-    _mapView.fixedCentre = coordinate;
-    [_mapView applyVisibleDistance];
+  // Following a point sampled from the panorama is useful; following a point
+  // sampled from the map itself creates a feedback loop because recentering
+  // changes the coordinate beneath the stationary pointer.
+  if (_followInspection && !_mapPointerInside) {
+    [_mapView setCenterCoordinate:coordinate animated:NO];
   }
 }
 
@@ -944,10 +973,6 @@ enum class AnnotationKind : NSInteger {
   if (_inspectionAnnotation != nil) {
     [_mapView removeAnnotation:_inspectionAnnotation];
     _inspectionAnnotation = nil;
-  }
-  if (_followInspection) {
-    _mapView.fixedCentre = _observerAnnotation.coordinate;
-    [_mapView applyVisibleDistance];
   }
 }
 

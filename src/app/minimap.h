@@ -29,7 +29,7 @@
                            northing:(double)northing;
 @end
 
-/// Combined controlled-centre map and terrain-point readout used by the viewer's
+/// Combined freely navigable map and terrain-point readout used by the viewer's
 /// leading overlay. MapKit implementation details remain in minimap.mm so the
 /// application controller only publishes camera and inspected-world state.
 @interface MiniMapPanelView : NSView
