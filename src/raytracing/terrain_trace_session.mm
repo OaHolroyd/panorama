@@ -248,6 +248,24 @@ TerrainTraceSession::TerrainTraceSession(
 
 TerrainTraceSession::~TerrainTraceSession() = default;
 
+bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
+  State &state = *state_;
+  if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing) ||
+      !std::isfinite(observer.elevation)) {
+    throw std::invalid_argument("Terrain relocation requires a finite observer");
+  }
+  const TileKey next_key =
+      tile_key_at(state.catalogue->grid(), observer.easting, observer.northing);
+  if (!(next_key == state.catalogue->origin().key)) {
+    return false;
+  }
+  state.config.observer = observer;
+  state.parameters.observer_elevation = static_cast<float>(observer.elevation);
+  state.cache->rebase_observer(observer);
+  state.shadow_revision = std::numeric_limits<uint64_t>::max();
+  return true;
+}
+
 void TerrainTraceSession::trace(const RayField &field) {
   State &state = *state_;
   const uint32_t ray_count = validate_ray_field(field);

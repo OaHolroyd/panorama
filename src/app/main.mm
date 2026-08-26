@@ -261,7 +261,8 @@ void print_usage(const char *program) {
       "  --help                show this message\n"
       "\n"
       "Viewer controls:\n"
-      "  Drag with the mouse or use WASD/arrow keys to look around; scroll to zoom.\n"
+      "  Browse: drag or use WASD/arrow keys to look around; scroll to zoom.\n"
+      "  Roam: use WASD to move and arrow keys to look; configure it in Position.\n"
       "  Use the toolbar to show the settings inspector, debug data, or minimap.\n",
       program
   );
@@ -384,6 +385,24 @@ enum class MapPointAction : uint8_t {
   MoveObserver,
 };
 
+enum class RoamKey : uint8_t {
+  Forward,
+  Backward,
+  Left,
+  Right,
+};
+
+enum class RoamAltitudeMode : uint8_t {
+  FollowTerrain,
+  HoldAltitude,
+};
+
+struct RoamResult {
+  uint64_t request_token;
+  bool accepted;
+  float ground_elevation;
+};
+
 /// Overlay region currently responsible for point-inspection hover state.
 enum class PointerOwner : uint8_t {
   None,
@@ -501,6 +520,8 @@ struct PresentedFrame {
   uint64_t map_point_request_token;
   std::optional<TargetVisibility> target_visibility;
   uint64_t target_visibility_sequence;
+  std::optional<RoamResult> roam_result;
+  uint64_t roam_result_sequence;
 };
 
 /// Decode one IEEE float16 value emitted by Metal without depending on a SIMD
@@ -905,6 +926,10 @@ public:
           static_cast<double>(point.elevation) + groundClearance,
       };
       requested_revision_++;
+      // A discrete destination supersedes a queued movement sample. An
+      // already-running sample may still finish, but this request is processed
+      // immediately afterwards and becomes the published observer.
+      roam_pending_ = false;
       observer_pending_ = true;
       trace_pending_ = true;
       presentation_pending_ = true;
@@ -921,11 +946,31 @@ public:
       requested_observer_.elevation += groundClearance - observer_ground_clearance_;
       observer_ground_clearance_ = groundClearance;
       requested_revision_++;
+      roam_pending_ = false;
       observer_pending_ = true;
       trace_pending_ = true;
       presentation_pending_ = true;
     }
     changed_.notify_one();
+  }
+
+  /// Coalesce continuous movement to the newest requested horizontal point.
+  /// Ground sampling happens on the render worker so the main thread never
+  /// blocks on tile I/O while keys are held.
+  uint64_t request_roam(MapCoordinate coordinate, RoamAltitudeMode altitudeMode, double height) {
+    uint64_t token = 0U;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requested_roam_coordinate_ = coordinate;
+      requested_roam_altitude_mode_ = altitudeMode;
+      requested_roam_height_ = height;
+      requested_roam_token_++;
+      token = requested_roam_token_;
+      requested_revision_++;
+      roam_pending_ = true;
+    }
+    changed_.notify_one();
+    return token;
   }
 
   [[nodiscard]] PresentedFrame presented_frame() const {
@@ -948,6 +993,8 @@ public:
         .map_point_request_token = presented_map_point_token_,
         .target_visibility = presented_target_visibility_,
         .target_visibility_sequence = presented_target_visibility_sequence_,
+        .roam_result = presented_roam_result_,
+        .roam_result_sequence = presented_roam_result_sequence_,
     };
   }
 
@@ -1091,18 +1138,24 @@ private:
       bool observer_requested = false;
       bool map_point_requested = false;
       bool target_requested = false;
+      bool roam_requested = false;
       std::optional<InspectionPixel> inspection_pixel;
       uint64_t inspection_token = 0U;
       ObserverLocation observer = {};
       MapCoordinate map_coordinate = {};
       uint64_t map_point_token = 0U;
+      MapCoordinate roam_coordinate = {};
+      RoamAltitudeMode roam_altitude_mode = RoamAltitudeMode::FollowTerrain;
+      double roam_height = 0.0;
+      uint64_t roam_token = 0U;
+      double current_ground_clearance = 0.0;
       std::optional<TerrainPoint> target;
       uint64_t target_token = 0U;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock, [this] {
           return stopping_ || trace_pending_ || presentation_pending_ || inspection_pending_ ||
-                 observer_pending_ || map_point_pending_ || target_pending_;
+                 observer_pending_ || map_point_pending_ || target_pending_ || roam_pending_;
         });
         if (stopping_) {
           return;
@@ -1122,6 +1175,12 @@ private:
         map_point_requested = map_point_pending_;
         map_coordinate = requested_map_coordinate_;
         map_point_token = requested_map_point_token_;
+        roam_requested = roam_pending_;
+        roam_coordinate = requested_roam_coordinate_;
+        roam_altitude_mode = requested_roam_altitude_mode_;
+        roam_height = requested_roam_height_;
+        roam_token = requested_roam_token_;
+        current_ground_clearance = observer_ground_clearance_;
         target_requested = target_pending_ || trace_pending_ || presentation_pending_;
         target = requested_target_;
         target_token = requested_target_token_;
@@ -1131,34 +1190,65 @@ private:
         observer_pending_ = false;
         map_point_pending_ = false;
         target_pending_ = false;
+        roam_pending_ = false;
       }
 
       try {
         @autoreleasepool {
           const auto started = std::chrono::steady_clock::now();
+          std::optional<RoamResult> roam_result;
+          double next_ground_clearance = current_ground_clearance;
+          if (roam_requested) {
+            const std::optional<TerrainPoint> ground = sampler_->sample(roam_coordinate);
+            const bool terrain_clear =
+                ground.has_value() && (roam_altitude_mode == RoamAltitudeMode::FollowTerrain ||
+                                       roam_height >= static_cast<double>(ground->elevation) + 0.5);
+            roam_result = RoamResult{
+                .request_token = roam_token,
+                .accepted = terrain_clear,
+                .ground_elevation = ground.has_value() ? ground->elevation
+                                                       : std::numeric_limits<float>::quiet_NaN(),
+            };
+            if (terrain_clear) {
+              observer = {
+                  roam_coordinate.easting,
+                  roam_coordinate.northing,
+                  roam_altitude_mode == RoamAltitudeMode::FollowTerrain
+                      ? static_cast<double>(ground->elevation) + roam_height
+                      : roam_height,
+              };
+              next_ground_clearance = observer.elevation - ground->elevation;
+              observer_requested = true;
+              trace_requested = true;
+              presentation_requested = true;
+              target_requested = true;
+            }
+          }
           if (trace_requested) {
             RayField field = make_view(image, orientation, vertical_field_of_view);
             if (observer_requested) {
-              const RaytraceConfig config = {
-                  settings_.tile_dir,
-                  observer,
-                  settings_.max_distance,
-                  0U,
-                  settings_.tile_cache_size_bytes,
-                  settings_.workers,
-                  !settings_.discard_quantized,
-              };
-              auto replacement = std::make_unique<TerrainTraceSession>(
-                  config,
-                  field,
-                  GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
-              );
-              if (replacement->device() != device_) {
-                throw std::runtime_error("Observer relocation selected a different Metal device");
+              if (!trace_->relocate_observer(observer)) {
+                const RaytraceConfig config = {
+                    settings_.tile_dir,
+                    observer,
+                    settings_.max_distance,
+                    0U,
+                    settings_.tile_cache_size_bytes,
+                    settings_.workers,
+                    !settings_.discard_quantized,
+                };
+                auto replacement = std::make_unique<TerrainTraceSession>(
+                    config,
+                    field,
+                    GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
+                );
+                if (replacement->device() != device_) {
+                  throw std::runtime_error("Observer relocation selected a different Metal device");
+                }
+                trace_ = std::move(replacement);
+                sampler_->recenter(observer);
               }
-              trace_ = std::move(replacement);
               current_observer_ = observer;
-              sampler_->recenter(observer);
             }
             trace_->trace(field);
             current_field_ = std::move(field);
@@ -1255,6 +1345,19 @@ private:
             presented_target_visibility_ = target_visibility;
             presented_target_visibility_sequence_++;
           }
+          if (roam_requested) {
+            presented_roam_result_ = roam_result;
+            presented_roam_result_sequence_++;
+            if (roam_result->accepted) {
+              observer_ground_clearance_ = next_ground_clearance;
+              // Once the latest roam request settles, make it the base for
+              // subsequent discrete height changes.  Do not overwrite a newer
+              // destination which arrived while this frame was tracing.
+              if (requested_roam_token_ == roam_token && !observer_pending_) {
+                requested_observer_ = current_observer_;
+              }
+            }
+          }
         }
       } catch (const std::exception &exception) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1286,6 +1389,9 @@ private:
   TerrainPresentationSettings requested_presentation_ = {};
   std::optional<InspectionPixel> requested_inspection_;
   MapCoordinate requested_map_coordinate_ = {};
+  MapCoordinate requested_roam_coordinate_ = {};
+  RoamAltitudeMode requested_roam_altitude_mode_ = RoamAltitudeMode::FollowTerrain;
+  double requested_roam_height_ = 0.0;
   ObserverLocation requested_observer_ = {};
   std::optional<TerrainPoint> requested_target_;
   CameraOrientation presented_orientation_ = {};
@@ -1295,6 +1401,7 @@ private:
   std::optional<TerrainPoint> presented_map_point_;
   ObserverLocation presented_observer_ = {};
   std::optional<TargetVisibility> presented_target_visibility_;
+  std::optional<RoamResult> presented_roam_result_;
   id<MTLTexture> presented_texture_;
   id<MTLBuffer> current_visibility_points_;
   id<MTLBuffer> presented_visibility_points_;
@@ -1308,6 +1415,8 @@ private:
   uint64_t presented_map_point_token_ = 0U;
   uint64_t requested_target_token_ = 0U;
   uint64_t presented_target_visibility_sequence_ = 0U;
+  uint64_t requested_roam_token_ = 0U;
+  uint64_t presented_roam_result_sequence_ = 0U;
   double observer_ground_clearance_ = 0.0;
   double frame_ms_ = 0.0;
   std::string error_;
@@ -1317,6 +1426,7 @@ private:
   bool observer_pending_ = false;
   bool map_point_pending_ = false;
   bool target_pending_ = false;
+  bool roam_pending_ = false;
   bool observer_fallback_used_ = false;
   bool stopping_ = false;
 };
@@ -1478,6 +1588,21 @@ private:
   NSTextField *_coordinateStatusLabel;
   NSButton *_coordinateMoveControl;
   std::optional<panorama::app::ParsedCoordinateInput> _coordinateDestination;
+  NSSegmentedControl *_movementModeControl;
+  NSSegmentedControl *_roamAltitudeModeControl;
+  NSSlider *_roamSpeedControl;
+  NSTextField *_roamSpeedLabel;
+  NSSlider *_roamUpdateRateControl;
+  NSTextField *_roamUpdateRateLabel;
+  NSTextField *_roamStatusLabel;
+  NSArray<NSView *> *_roamRows;
+  NSTextField *_observerHeightLabel;
+  NSTextField *_observerHeightUnit;
+  NSTimer *_roamTimer;
+  panorama::app::MapCoordinate _roamDesiredPosition;
+  std::chrono::steady_clock::time_point _lastRoamTick;
+  uint64_t _roamRequestToken;
+  uint64_t _displayedRoamResultSequence;
   uint64_t _displayedRevision;
   uint64_t _displayedInspectionSequence;
   uint64_t _pointLockRequestToken;
@@ -1492,6 +1617,11 @@ private:
   double _lockedAspectRatio;
   double _panningSensitivity;
   double _groundClearance;
+  double _roamAltitude;
+  bool _roamForwardPressed;
+  bool _roamBackwardPressed;
+  bool _roamLeftPressed;
+  bool _roamRightPressed;
   bool _pointInspectionEnabled;
   bool _pointInspectionLocked;
   bool _pointLockPending;
@@ -1517,12 +1647,23 @@ private:
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)toggleMapAndPointInspection:(id)sender;
 - (BOOL)isMapAndPointInspectionEnabled;
+- (BOOL)isRoamingEnabled;
+- (void)setRoamKey:(panorama::app::RoamKey)key pressed:(BOOL)pressed;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
 - (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point;
 - (void)moveToLockedPoint:(id)sender;
 - (void)adjustGroundClearance:(NSButton *)sender;
 - (BOOL)commitGroundClearanceControl;
+- (void)movementModeChanged:(id)sender;
+- (void)roamAltitudeModeChanged:(id)sender;
+- (void)roamSpeedChanged:(id)sender;
+- (void)roamUpdateRateChanged:(id)sender;
+- (void)updateRoamControls;
+- (void)scheduleRoamTimer;
+- (void)roamTimerFired:(NSTimer *)timer;
+- (void)clearRoamKeys;
+- (BOOL)hasPressedRoamKey;
 - (void)coordinateSystemChanged:(id)sender;
 - (void)moveToCoordinate:(id)sender;
 - (BOOL)updateCoordinateInputValidation;
@@ -1750,6 +1891,7 @@ private:
 }
 
 - (void)mouseDown:(NSEvent *)event {
+  [self.window makeFirstResponder:self];
   _lastMouseLocation = [self convertPoint:event.locationInWindow fromView:nil];
 }
 
@@ -1783,7 +1925,15 @@ private:
     break;
   default: {
     const NSString *characters = event.charactersIgnoringModifiers.lowercaseString;
-    if ([characters isEqualToString:@"a"]) {
+    if ([self.panoramaController isRoamingEnabled] && [characters isEqualToString:@"w"]) {
+      [self.panoramaController setRoamKey:panorama::app::RoamKey::Forward pressed:YES];
+    } else if ([self.panoramaController isRoamingEnabled] && [characters isEqualToString:@"s"]) {
+      [self.panoramaController setRoamKey:panorama::app::RoamKey::Backward pressed:YES];
+    } else if ([self.panoramaController isRoamingEnabled] && [characters isEqualToString:@"a"]) {
+      [self.panoramaController setRoamKey:panorama::app::RoamKey::Left pressed:YES];
+    } else if ([self.panoramaController isRoamingEnabled] && [characters isEqualToString:@"d"]) {
+      [self.panoramaController setRoamKey:panorama::app::RoamKey::Right pressed:YES];
+    } else if ([characters isEqualToString:@"a"]) {
       [self.panoramaController rotateForCurrentZoomHeading:-kStep pitch:0.0];
     } else if ([characters isEqualToString:@"d"]) {
       [self.panoramaController rotateForCurrentZoomHeading:kStep pitch:0.0];
@@ -1796,6 +1946,25 @@ private:
     }
     break;
   }
+  }
+}
+
+- (void)keyUp:(NSEvent *)event {
+  if (![self.panoramaController isRoamingEnabled]) {
+    [super keyUp:event];
+    return;
+  }
+  const NSString *characters = event.charactersIgnoringModifiers.lowercaseString;
+  if ([characters isEqualToString:@"w"]) {
+    [self.panoramaController setRoamKey:panorama::app::RoamKey::Forward pressed:NO];
+  } else if ([characters isEqualToString:@"s"]) {
+    [self.panoramaController setRoamKey:panorama::app::RoamKey::Backward pressed:NO];
+  } else if ([characters isEqualToString:@"a"]) {
+    [self.panoramaController setRoamKey:panorama::app::RoamKey::Left pressed:NO];
+  } else if ([characters isEqualToString:@"d"]) {
+    [self.panoramaController setRoamKey:panorama::app::RoamKey::Right pressed:NO];
+  } else {
+    [super keyUp:event];
   }
 }
 
@@ -2152,11 +2321,183 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _lockedAspectRatio = static_cast<double>(_image.width) / _image.height;
     _panningSensitivity = 8.0;
     _groundClearance = renderer->ground_clearance();
+    _roamAltitude = _observer.elevation;
+    _roamDesiredPosition = {_observer.easting, _observer.northing};
     _presentation = renderer->initial_presentation();
     _mapPointAction = panorama::app::MapPointAction::None;
     _pointerOwner = panorama::app::PointerOwner::None;
   }
   return self;
+}
+
+- (BOOL)isRoamingEnabled {
+  return _movementModeControl != nil && _movementModeControl.selectedSegment == 1;
+}
+
+- (BOOL)hasPressedRoamKey {
+  return _roamForwardPressed || _roamBackwardPressed || _roamLeftPressed || _roamRightPressed;
+}
+
+- (void)clearRoamKeys {
+  _roamForwardPressed = false;
+  _roamBackwardPressed = false;
+  _roamLeftPressed = false;
+  _roamRightPressed = false;
+}
+
+- (void)setRoamKey:(panorama::app::RoamKey)key pressed:(BOOL)pressed {
+  if (![self isRoamingEnabled]) {
+    return;
+  }
+  const bool wasMoving = [self hasPressedRoamKey];
+  bool *state = nullptr;
+  switch (key) {
+  case panorama::app::RoamKey::Forward:
+    state = &_roamForwardPressed;
+    break;
+  case panorama::app::RoamKey::Backward:
+    state = &_roamBackwardPressed;
+    break;
+  case panorama::app::RoamKey::Left:
+    state = &_roamLeftPressed;
+    break;
+  case panorama::app::RoamKey::Right:
+    state = &_roamRightPressed;
+    break;
+  }
+  *state = pressed;
+  if (pressed && !wasMoving) {
+    _roamDesiredPosition = {_observer.easting, _observer.northing};
+    _pointInspectionLocked = false;
+    _pointLockPending = false;
+    _lockedPoint.reset();
+    _mapHoverPoint.reset();
+    [self clearTargetVisibility];
+    [_miniMapPanel clearInspectedPoint];
+    [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
+  }
+  if (![self hasPressedRoamKey]) {
+    _lastRoamTick = std::chrono::steady_clock::now();
+    if (_roamStatusLabel != nil) {
+      _roamStatusLabel.stringValue = @"WASD move • arrow keys look";
+      _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
+    }
+  }
+}
+
+- (void)scheduleRoamTimer {
+  [_roamTimer invalidate];
+  _roamTimer = nil;
+  if (![self isRoamingEnabled]) {
+    return;
+  }
+  const double rate = std::max(1.0, std::round(_roamUpdateRateControl.doubleValue));
+  _lastRoamTick = std::chrono::steady_clock::now();
+  _roamTimer = [NSTimer timerWithTimeInterval:1.0 / rate
+                                       target:self
+                                     selector:@selector(roamTimerFired:)
+                                     userInfo:nil
+                                      repeats:YES];
+  [NSRunLoop.mainRunLoop addTimer:_roamTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)roamTimerFired:(NSTimer *)timer {
+  (void)timer;
+  const auto now = std::chrono::steady_clock::now();
+  const double requestedRate = std::max(1.0, std::round(_roamUpdateRateControl.doubleValue));
+  const double elapsed = std::chrono::duration<double>(now - _lastRoamTick).count();
+  _lastRoamTick = now;
+  if (![self isRoamingEnabled] || !_window.isKeyWindow || _window.firstResponder != _panoramaView) {
+    [self clearRoamKeys];
+    return;
+  }
+
+  double forward =
+      static_cast<double>(_roamForwardPressed) - static_cast<double>(_roamBackwardPressed);
+  double right = static_cast<double>(_roamRightPressed) - static_cast<double>(_roamLeftPressed);
+  const double magnitude = std::hypot(forward, right);
+  if (!(magnitude > 0.0)) {
+    return;
+  }
+  forward /= magnitude;
+  right /= magnitude;
+  // Do not turn a temporarily stalled main run loop into a large teleport.
+  const double dt = std::min(elapsed, 2.0 / requestedRate);
+  const double distance = _roamSpeedControl.doubleValue * dt;
+  const double heading = _orientation.heading;
+  _roamDesiredPosition.easting +=
+      distance * (forward * std::sin(heading) + right * std::cos(heading));
+  _roamDesiredPosition.northing +=
+      distance * (forward * std::cos(heading) - right * std::sin(heading));
+  const panorama::app::RoamAltitudeMode altitudeMode =
+      _roamAltitudeModeControl.selectedSegment == 0 ? panorama::app::RoamAltitudeMode::FollowTerrain
+                                                    : panorama::app::RoamAltitudeMode::HoldAltitude;
+  const double height = altitudeMode == panorama::app::RoamAltitudeMode::FollowTerrain
+                            ? _groundClearance
+                            : _roamAltitude;
+  _roamRequestToken = _renderer->request_roam(_roamDesiredPosition, altitudeMode, height);
+  _roamStatusLabel.stringValue = @"Moving…";
+  _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
+}
+
+- (void)updateRoamControls {
+  const BOOL roaming = [self isRoamingEnabled];
+  for (NSView *row in _roamRows) {
+    row.hidden = !roaming;
+  }
+  const BOOL holdAltitude = roaming && _roamAltitudeModeControl.selectedSegment == 1;
+  _observerHeightLabel.stringValue = holdAltitude ? @"Altitude" : @"Eye height";
+  _observerHeightUnit.stringValue = holdAltitude ? @"m AMSL" : @"m AGL";
+  _observerHeightLabel.toolTip = holdAltitude
+                                     ? @"Observer elevation above mean sea level"
+                                     : @"Observer height above the terrain directly beneath it";
+  _observerHeightUnit.toolTip =
+      holdAltitude ? @"Metres above mean sea level" : @"Metres above ground level";
+  _groundClearanceControl.toolTip = holdAltitude
+                                        ? @"Observer elevation above mean sea level"
+                                        : @"Observer height above the terrain directly beneath it";
+  _groundClearanceDecreaseControl.toolTip =
+      holdAltitude ? @"Lower altitude by 1 m (Option: 0.1 m; Shift: 10 m)"
+                   : @"Lower eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
+  _groundClearanceIncreaseControl.toolTip =
+      holdAltitude ? @"Raise altitude by 1 m (Option: 0.1 m; Shift: 10 m)"
+                   : @"Raise eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
+  _groundClearanceControl.doubleValue = holdAltitude ? _roamAltitude : _groundClearance;
+  _groundClearanceControl.stringValue =
+      [NSString stringWithFormat:@"%.1f", _groundClearanceControl.doubleValue];
+}
+
+- (void)movementModeChanged:(id)sender {
+  (void)sender;
+  [self clearRoamKeys];
+  _roamDesiredPosition = {_observer.easting, _observer.northing};
+  _roamAltitude = _observer.elevation;
+  [self updateRoamControls];
+  [self scheduleRoamTimer];
+}
+
+- (void)roamAltitudeModeChanged:(id)sender {
+  (void)sender;
+  [self clearRoamKeys];
+  _roamDesiredPosition = {_observer.easting, _observer.northing};
+  if (_roamAltitudeModeControl.selectedSegment == 1) {
+    _roamAltitude = _observer.elevation;
+  }
+  [self updateRoamControls];
+}
+
+- (void)roamSpeedChanged:(id)sender {
+  (void)sender;
+  _roamSpeedLabel.stringValue =
+      [NSString stringWithFormat:@"%.0f m/s", _roamSpeedControl.doubleValue];
+}
+
+- (void)roamUpdateRateChanged:(id)sender {
+  (void)sender;
+  _roamUpdateRateControl.doubleValue = std::round(_roamUpdateRateControl.doubleValue);
+  _roamUpdateRateLabel.stringValue =
+      [NSString stringWithFormat:@"%.0f Hz", _roamUpdateRateControl.doubleValue];
+  [self scheduleRoamTimer];
 }
 
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta {
@@ -2816,6 +3157,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point {
+  [self clearRoamKeys];
   _mapHoverPoint.reset();
   _pointInspectionLocked = false;
   _pointLockPending = false;
@@ -3528,6 +3870,93 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                          ]
                                       defaultsKey:@"panorama.inspector.destination.expanded"];
 
+  const auto makeMovementRow = [](NSString *title, NSView *control) {
+    NSTextField *label = [NSTextField labelWithString:title];
+    [label.widthAnchor constraintEqualToConstant:82.0].active = YES;
+    [control.widthAnchor constraintEqualToConstant:178.0].active = YES;
+    NSStackView *row = [NSStackView stackViewWithViews:@[ label, control ]];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 8.0;
+    return row;
+  };
+
+  _movementModeControl = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
+  _movementModeControl.segmentCount = 2;
+  [_movementModeControl setLabel:@"Browse" forSegment:0];
+  [_movementModeControl setLabel:@"Roam" forSegment:1];
+  _movementModeControl.selectedSegment = 0;
+  _movementModeControl.trackingMode = NSSegmentSwitchTrackingSelectOne;
+  _movementModeControl.target = self;
+  _movementModeControl.action = @selector(movementModeChanged:);
+  _movementModeControl.toolTip =
+      @"Browse retains the existing look controls; Roam uses WASD for movement";
+  NSView *movementModeRow = makeMovementRow(@"Mode", _movementModeControl);
+
+  _roamAltitudeModeControl = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
+  _roamAltitudeModeControl.segmentCount = 2;
+  [_roamAltitudeModeControl setLabel:@"Terrain" forSegment:0];
+  [_roamAltitudeModeControl setLabel:@"Altitude" forSegment:1];
+  _roamAltitudeModeControl.selectedSegment = 0;
+  _roamAltitudeModeControl.trackingMode = NSSegmentSwitchTrackingSelectOne;
+  _roamAltitudeModeControl.target = self;
+  _roamAltitudeModeControl.action = @selector(roamAltitudeModeChanged:);
+  _roamAltitudeModeControl.toolTip =
+      @"Maintain height above terrain or hold absolute elevation while moving";
+  NSView *roamAltitudeRow = makeMovementRow(@"Height mode", _roamAltitudeModeControl);
+
+  _roamSpeedControl = [NSSlider sliderWithValue:20.0
+                                       minValue:1.0
+                                       maxValue:200.0
+                                         target:self
+                                         action:@selector(roamSpeedChanged:)];
+  _roamSpeedControl.continuous = YES;
+  _roamSpeedControl.toolTip = @"Horizontal movement speed";
+  _roamSpeedLabel = [NSTextField labelWithString:@"20 m/s"];
+  _roamSpeedLabel.alignment = NSTextAlignmentRight;
+  [_roamSpeedLabel.widthAnchor constraintEqualToConstant:54.0].active = YES;
+  NSStackView *roamSpeedSetting =
+      [NSStackView stackViewWithViews:@[ _roamSpeedControl, _roamSpeedLabel ]];
+  roamSpeedSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  roamSpeedSetting.alignment = NSLayoutAttributeCenterY;
+  roamSpeedSetting.spacing = 6.0;
+  NSView *roamSpeedRow = makeMovementRow(@"Speed", roamSpeedSetting);
+
+  _roamUpdateRateControl = [NSSlider sliderWithValue:10.0
+                                            minValue:1.0
+                                            maxValue:60.0
+                                              target:self
+                                              action:@selector(roamUpdateRateChanged:)];
+  _roamUpdateRateControl.continuous = YES;
+  _roamUpdateRateControl.toolTip =
+      @"Maximum observer-position requests per second; rendering may complete more slowly";
+  _roamUpdateRateLabel = [NSTextField labelWithString:@"10 Hz"];
+  _roamUpdateRateLabel.alignment = NSTextAlignmentRight;
+  [_roamUpdateRateLabel.widthAnchor constraintEqualToConstant:54.0].active = YES;
+  NSStackView *roamUpdateRateSetting =
+      [NSStackView stackViewWithViews:@[ _roamUpdateRateControl, _roamUpdateRateLabel ]];
+  roamUpdateRateSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  roamUpdateRateSetting.alignment = NSLayoutAttributeCenterY;
+  roamUpdateRateSetting.spacing = 6.0;
+  NSView *roamUpdateRateRow = makeMovementRow(@"Updates", roamUpdateRateSetting);
+
+  _roamStatusLabel = [NSTextField labelWithString:@"WASD move • arrow keys look"];
+  _roamStatusLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
+  [_roamStatusLabel.widthAnchor constraintEqualToConstant:268.0].active = YES;
+  _roamRows = @[ roamAltitudeRow, roamSpeedRow, roamUpdateRateRow, _roamStatusLabel ];
+
+  InspectorSectionView *movementSection =
+      [[InspectorSectionView alloc] initWithTitle:@"Movement"
+                                         controls:@[
+                                           movementModeRow,
+                                           roamAltitudeRow,
+                                           roamSpeedRow,
+                                           roamUpdateRateRow,
+                                           _roamStatusLabel,
+                                         ]
+                                      defaultsKey:@"panorama.inspector.movement.expanded"];
+
   _groundClearanceDecreaseControl =
       [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"minus"
                                           accessibilityDescription:@"Lower observer"]
@@ -3548,9 +3977,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _groundClearanceControl.toolTip = @"Observer height above the terrain directly beneath it";
   [_groundClearanceControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
 
-  NSTextField *heightUnit = [NSTextField labelWithString:@"m AGL"];
-  heightUnit.textColor = NSColor.secondaryLabelColor;
-  heightUnit.toolTip = @"Metres above ground level";
+  _observerHeightUnit = [NSTextField labelWithString:@"m AGL"];
+  _observerHeightUnit.textColor = NSColor.secondaryLabelColor;
+  _observerHeightUnit.toolTip = @"Metres above ground level";
 
   _groundClearanceIncreaseControl =
       [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"plus"
@@ -3566,7 +3995,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSStackView *heightSetting = [NSStackView stackViewWithViews:@[
     _groundClearanceDecreaseControl,
     _groundClearanceControl,
-    heightUnit,
+    _observerHeightUnit,
     _groundClearanceIncreaseControl,
   ]];
   heightSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -3574,10 +4003,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   heightSetting.spacing = 6.0;
   [heightSetting.widthAnchor constraintEqualToConstant:178.0].active = YES;
 
-  NSTextField *heightLabel = [NSTextField labelWithString:@"Eye height"];
-  heightLabel.toolTip = @"Observer height above the terrain directly beneath it";
-  [heightLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
-  NSStackView *heightRow = [NSStackView stackViewWithViews:@[ heightLabel, heightSetting ]];
+  _observerHeightLabel = [NSTextField labelWithString:@"Eye height"];
+  _observerHeightLabel.toolTip = @"Observer height above the terrain directly beneath it";
+  [_observerHeightLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
+  NSStackView *heightRow =
+      [NSStackView stackViewWithViews:@[ _observerHeightLabel, heightSetting ]];
   heightRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   heightRow.alignment = NSLayoutAttributeCenterY;
   heightRow.spacing = 8.0;
@@ -3586,8 +4016,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       [[InspectorSectionView alloc] initWithTitle:@"Observer"
                                          controls:@[ heightRow ]
                                       defaultsKey:@"panorama.inspector.observer.expanded"];
-  NSStackView *settings =
-      [NSStackView stackViewWithViews:@[ heading, destinationSection, observerSection ]];
+  NSStackView *settings = [NSStackView
+      stackViewWithViews:@[ heading, destinationSection, movementSection, observerSection ]];
   settings.orientation = NSUserInterfaceLayoutOrientationVertical;
   settings.alignment = NSLayoutAttributeLeading;
   settings.spacing = 18.0;
@@ -3612,6 +4042,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [settings.bottomAnchor constraintLessThanOrEqualToAnchor:document.bottomAnchor],
   ]];
   [self coordinateSystemChanged:_coordinateSystemControl];
+  [self updateRoamControls];
   return viewController;
 }
 
@@ -3761,8 +4192,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const double step = (modifiers & NSEventModifierFlagShift) != 0U    ? 10.0
                       : (modifiers & NSEventModifierFlagOption) != 0U ? 0.1
                                                                       : 1.0;
+  const bool holdAltitude =
+      [self isRoamingEnabled] && _roamAltitudeModeControl.selectedSegment == 1;
+  const double current = holdAltitude ? _roamAltitude : _groundClearance;
+  const double minimum = holdAltitude ? -500.0 : 0.0;
   _groundClearanceControl.doubleValue =
-      std::clamp(_groundClearance + static_cast<double>(sender.tag) * step, 0.0, 100'000.0);
+      std::clamp(current + static_cast<double>(sender.tag) * step, minimum, 100'000.0);
   _groundClearanceControl.stringValue =
       [NSString stringWithFormat:@"%.1f", _groundClearanceControl.doubleValue];
   [self commitGroundClearanceControl];
@@ -3771,20 +4206,46 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 - (BOOL)commitGroundClearanceControl {
   const std::optional<double> parsed =
       panorama::app::parse_range_value(_groundClearanceControl.stringValue);
-  const BOOL valid = parsed.has_value() && *parsed >= 0.0 && *parsed <= 100'000.0;
+  const bool holdAltitude =
+      [self isRoamingEnabled] && _roamAltitudeModeControl.selectedSegment == 1;
+  const double minimum = holdAltitude ? -500.0 : 0.0;
+  const BOOL valid = parsed.has_value() && *parsed >= minimum && *parsed <= 100'000.0;
   _groundClearanceControl.textColor = valid ? NSColor.controlTextColor : NSColor.systemRedColor;
   _groundClearanceControl.toolTip =
-      valid ? @"Observer height above the terrain directly beneath it"
-            : @"Eye height must be between 0 and 100,000 metres above ground level.";
+      valid
+          ? (holdAltitude ? @"Observer elevation above mean sea level"
+                          : @"Observer height above the terrain directly beneath it")
+          : (holdAltitude ? @"Altitude must be between -500 and 100,000 metres AMSL."
+                          : @"Eye height must be between 0 and 100,000 metres above ground level.");
   if (!valid) {
     NSBeep();
     return NO;
   }
   _groundClearanceControl.stringValue = [NSString stringWithFormat:@"%.1f", *parsed];
+  if (holdAltitude) {
+    if (std::abs(*parsed - _roamAltitude) <= 1e-9) {
+      return YES;
+    }
+    _roamAltitude = *parsed;
+    _roamRequestToken = _renderer->request_roam(
+        _roamDesiredPosition,
+        panorama::app::RoamAltitudeMode::HoldAltitude,
+        _roamAltitude
+    );
+    return YES;
+  }
   if (std::abs(*parsed - _groundClearance) <= 1e-9) {
     return YES;
   }
   _groundClearance = *parsed;
+  if ([self isRoamingEnabled]) {
+    _roamRequestToken = _renderer->request_roam(
+        _roamDesiredPosition,
+        panorama::app::RoamAltitudeMode::FollowTerrain,
+        _groundClearance
+    );
+    return YES;
+  }
   _renderer->request_ground_clearance(_groundClearance);
   return YES;
 }
@@ -4231,6 +4692,32 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     }
   }
 
+  if (frame.roam_result_sequence != _displayedRoamResultSequence) {
+    _displayedRoamResultSequence = frame.roam_result_sequence;
+    if (frame.roam_result.has_value() && frame.roam_result->request_token == _roamRequestToken) {
+      if (frame.roam_result->accepted) {
+        _groundClearance = std::max(
+            0.0,
+            frame.observer.elevation - static_cast<double>(frame.roam_result->ground_elevation)
+        );
+        if (_roamAltitudeModeControl.selectedSegment == 0 &&
+            _groundClearanceControl.currentEditor == nil) {
+          _groundClearanceControl.stringValue =
+              [NSString stringWithFormat:@"%.1f", _groundClearance];
+        }
+      } else {
+        [self clearRoamKeys];
+        _roamDesiredPosition = {frame.observer.easting, frame.observer.northing};
+        const bool terrainCollision = std::isfinite(frame.roam_result->ground_elevation);
+        _roamStatusLabel.stringValue = terrainCollision
+                                           ? @"Movement stopped: terrain reaches the held altitude"
+                                           : @"Movement stopped: no terrain coverage";
+        _roamStatusLabel.textColor = NSColor.systemRedColor;
+        NSBeep();
+      }
+    }
+  }
+
   if (frame.map_point_sequence != _displayedMapPointSequence) {
     _displayedMapPointSequence = frame.map_point_sequence;
     if (frame.map_point_request_token == _mapPointRequestToken &&
@@ -4339,6 +4826,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         observerPositionMoved || frame.observer.elevation != _observer.elevation;
     _observer = frame.observer;
     if (observerMoved) {
+      if (![self hasPressedRoamKey]) {
+        _roamDesiredPosition = {_observer.easting, _observer.northing};
+      }
       [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
       if (_pointInspectionLocked && _lockedPoint.has_value()) {
         _lockedPoint->distance = static_cast<float>(std::hypot(
@@ -4349,7 +4839,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       } else {
         [self updatePointInfo:std::nullopt];
       }
-      if (observerPositionMoved) {
+      if (observerPositionMoved && (![self isRoamingEnabled] || ![self hasPressedRoamKey])) {
         [self resolveObserverTimeZone];
       }
     }

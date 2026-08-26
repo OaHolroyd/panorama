@@ -110,6 +110,13 @@ observer positioning. The Viewer tab controls resolution, lighting,
 distance/elevation colourmaps and scaling, and optional multiscale feature
 outlines.
 
+The Position tab's Movement section can switch from this Browse behaviour to
+keyboard Roam mode. In Roam mode, WASD moves relative to the current heading
+and the arrow keys continue to look around. Movement can maintain either a
+fixed height above terrain or an absolute altitude. Speed and the maximum
+observer-update rate are configurable; movement requests are coalesced when
+terrain rendering completes more slowly than the selected rate.
+
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama
 or map to preview a point. Right-click the panorama to lock its current point;
