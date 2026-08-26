@@ -53,6 +53,10 @@ constexpr double kMinimumMovementSpeed = 1.0;
 constexpr double kMaximumRoamSpeed = 200.0;
 constexpr double kMaximumCruiseSpeed = 10'000.0;
 constexpr double kDefaultMovementSpeed = 20.0;
+constexpr double kCruiseSteeringDeadZone = 0.06;
+constexpr double kCruiseSteeringExponent = 1.5;
+constexpr double kCruiseMaximumYawRate = 90.0 * kDegreesToRadians;
+constexpr double kCruiseMaximumPitchRate = 60.0 * kDegreesToRadians;
 constexpr float kDefaultSkyStrength = 0.28F;
 constexpr float kDefaultSkyDetail = 0.65F;
 constexpr float kDefaultDiffusivity = 1.0F;
@@ -76,10 +80,10 @@ struct ViewerSettings {
               .ambient_light = kDefaultSkyStrength,
               .ambient_detail = kDefaultSkyDetail,
               .diffusivity = kDefaultDiffusivity,
-              .colour_source = TerrainColourSource::White,
-              .colourmap = PresetColourmap::Viridis,
+              .colour_source = TerrainColourSource::Distance,
+              .colourmap = PresetColourmap::Viewfinder,
           },
-      .colour_range = {0.0F, 600'000.0F},
+      .colour_range = {0.0F, 100'000.0F},
       .use_surface_normals = true,
   };
 };
@@ -268,7 +272,7 @@ void print_usage(const char *program) {
       "  Browse: drag or use WASD/arrow keys to look around; scroll to zoom.\n"
       "  Roam: use WASD to move; turn with arrow keys or mouse motion.\n"
       "        Configure movement and turning in the Position tab.\n"
-      "  Cruise: move forward continuously; mouse steers and W/S changes speed.\n"
+      "  Cruise: move continuously; cursor displacement steers and W/S changes speed.\n"
       "  Press Space to pause or resume interactive viewer movement.\n"
       "  Use the toolbar to show the settings inspector, debug data, or minimap.\n",
       program
@@ -1486,6 +1490,20 @@ private:
              : [NSString stringWithFormat:@"%.0f km/s", kilometres_per_second];
 }
 
+[[nodiscard]] static double cruise_steering_response(double displacement) {
+  const double magnitude = std::abs(displacement);
+  if (magnitude <= panorama::app::kCruiseSteeringDeadZone) {
+    return 0.0;
+  }
+  const double normalised = std::clamp(
+      (magnitude - panorama::app::kCruiseSteeringDeadZone) /
+          (1.0 - panorama::app::kCruiseSteeringDeadZone),
+      0.0,
+      1.0
+  );
+  return std::copysign(std::pow(normalised, panorama::app::kCruiseSteeringExponent), displacement);
+}
+
 @class PanoramaController;
 @class ViewerOverlayView;
 @class AspectFitContainerView;
@@ -1512,6 +1530,39 @@ private:
 }
 @end
 
+/// Fixed neutral point for Cruise's virtual-joystick steering.
+@interface CruiseCrosshairView : NSView
+@end
+
+@implementation CruiseCrosshairView
+- (NSView *)hitTest:(NSPoint)point {
+  (void)point;
+  return nil;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+  (void)dirtyRect;
+  const NSPoint centre = NSMakePoint(NSMidX(self.bounds), NSMidY(self.bounds));
+  NSBezierPath *crosshair = [NSBezierPath bezierPath];
+  [crosshair appendBezierPathWithOvalInRect:NSMakeRect(centre.x - 6.0, centre.y - 6.0, 12.0, 12.0)];
+  [crosshair moveToPoint:NSMakePoint(centre.x - 17.0, centre.y)];
+  [crosshair lineToPoint:NSMakePoint(centre.x - 9.0, centre.y)];
+  [crosshair moveToPoint:NSMakePoint(centre.x + 9.0, centre.y)];
+  [crosshair lineToPoint:NSMakePoint(centre.x + 17.0, centre.y)];
+  [crosshair moveToPoint:NSMakePoint(centre.x, centre.y - 17.0)];
+  [crosshair lineToPoint:NSMakePoint(centre.x, centre.y - 9.0)];
+  [crosshair moveToPoint:NSMakePoint(centre.x, centre.y + 9.0)];
+  [crosshair lineToPoint:NSMakePoint(centre.x, centre.y + 17.0)];
+  crosshair.lineCapStyle = NSLineCapStyleRound;
+  [NSColor.blackColor setStroke];
+  crosshair.lineWidth = 3.0;
+  [crosshair stroke];
+  [NSColor.whiteColor setStroke];
+  crosshair.lineWidth = 1.25;
+  [crosshair stroke];
+}
+@end
+
 @interface PanoramaView : MTKView {
 @private
   NSPoint _lastMouseLocation;
@@ -1519,12 +1570,14 @@ private:
   LockedPointMarkerView *_lockedPointMarker;
   ViewerPauseIndicatorView *_pauseIndicator;
   NSTextField *_pauseIndicatorLabel;
+  CruiseCrosshairView *_cruiseCrosshair;
   double _lockedPointPixelX;
   double _lockedPointPixelY;
   double _lockedPointDirectionX;
   double _lockedPointDirectionY;
   bool _pointInspectionEnabled;
   bool _mouseTurningEnabled;
+  bool _cruiseSteeringEnabled;
   bool _viewerPaused;
   bool _mouseTurningDuringPause;
   bool _lockedPointIndicatorActive;
@@ -1535,6 +1588,7 @@ private:
 @property(nonatomic, weak) PanoramaController *panoramaController;
 - (void)setPointInspectionEnabled:(bool)enabled;
 - (void)setMouseTurningEnabled:(bool)enabled;
+- (void)setCruiseSteeringEnabled:(bool)enabled;
 - (void)setViewerPaused:(bool)paused recoveryMessage:(NSString *)recoveryMessage;
 - (void)setTerrainPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection
                           locked:(bool)locked
@@ -1661,6 +1715,8 @@ private:
   double _roamAltitude;
   double _roamSpeed;
   double _cruiseSpeed;
+  double _cruiseSteeringX;
+  double _cruiseSteeringY;
   bool _roamForwardPressed;
   bool _roamBackwardPressed;
   bool _roamLeftPressed;
@@ -1673,6 +1729,8 @@ private:
   bool _invertMousePanning;
   bool _viewerPaused;
   bool _cruiseRecovery;
+  bool _cruiseSteeringActive;
+  bool _cruiseSteeringArmed;
   bool _updatingResolutionControls;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
@@ -1701,6 +1759,8 @@ private:
 - (void)pauseCruiseForTerrainCollision:(bool)terrainCollision;
 - (void)setRoamKey:(panorama::app::RoamKey)key pressed:(BOOL)pressed;
 - (void)adjustCruiseSpeedBy:(double)delta;
+- (void)setCruiseSteeringX:(double)x y:(double)y;
+- (void)clearCruiseSteering;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
 - (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point;
@@ -1853,7 +1913,7 @@ private:
     [self removeTrackingArea:_inspectionTrackingArea];
     _inspectionTrackingArea = nil;
   }
-  if (!_pointInspectionEnabled && !_mouseTurningEnabled) {
+  if (!_pointInspectionEnabled && !_mouseTurningEnabled && !_cruiseSteeringEnabled) {
     return;
   }
   _inspectionTrackingArea =
@@ -1869,6 +1929,8 @@ private:
   [super resetCursorRects];
   if (_viewerPaused && !_mouseTurningDuringPause) {
     [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
+  } else if (_cruiseSteeringEnabled) {
+    [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
   } else if (_pointInspectionEnabled) {
     [self addCursorRect:self.bounds cursor:NSCursor.crosshairCursor];
   }
@@ -1876,15 +1938,35 @@ private:
 
 - (void)setPointInspectionEnabled:(bool)enabled {
   _pointInspectionEnabled = enabled;
-  self.window.acceptsMouseMovedEvents = enabled || _mouseTurningEnabled;
+  self.window.acceptsMouseMovedEvents = enabled || _mouseTurningEnabled || _cruiseSteeringEnabled;
   [self updateTrackingAreas];
   [self.window invalidateCursorRectsForView:self];
 }
 
 - (void)setMouseTurningEnabled:(bool)enabled {
   _mouseTurningEnabled = enabled;
-  self.window.acceptsMouseMovedEvents = enabled || _pointInspectionEnabled;
+  self.window.acceptsMouseMovedEvents =
+      enabled || _pointInspectionEnabled || _cruiseSteeringEnabled;
   [self updateTrackingAreas];
+}
+
+- (void)setCruiseSteeringEnabled:(bool)enabled {
+  _cruiseSteeringEnabled = enabled;
+  if (_cruiseCrosshair == nil) {
+    _cruiseCrosshair = [[CruiseCrosshairView alloc] initWithFrame:NSZeroRect];
+    _cruiseCrosshair.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:_cruiseCrosshair];
+    [NSLayoutConstraint activateConstraints:@[
+      [_cruiseCrosshair.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+      [_cruiseCrosshair.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+      [_cruiseCrosshair.widthAnchor constraintEqualToConstant:40.0],
+      [_cruiseCrosshair.heightAnchor constraintEqualToConstant:40.0],
+    ]];
+  }
+  _cruiseCrosshair.hidden = !enabled;
+  self.window.acceptsMouseMovedEvents = enabled || _pointInspectionEnabled || _mouseTurningEnabled;
+  [self updateTrackingAreas];
+  [self.window invalidateCursorRectsForView:self];
 }
 
 - (void)setViewerPaused:(bool)paused recoveryMessage:(NSString *)recoveryMessage {
@@ -1951,7 +2033,7 @@ private:
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-  if (!_pointInspectionEnabled && !_mouseTurningEnabled) {
+  if (!_pointInspectionEnabled && !_mouseTurningEnabled && !_cruiseSteeringEnabled) {
     [super mouseMoved:event];
     return;
   }
@@ -1963,7 +2045,17 @@ private:
     return;
   }
   [self.panoramaController pointerMovedOverPanorama];
-  if (_mouseTurningEnabled && (!_viewerPaused || _mouseTurningDuringPause)) {
+  if (_cruiseSteeringEnabled) {
+    const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
+    const NSRect bounds = self.bounds;
+    if (bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+      const double x =
+          std::clamp((location.x - NSMidX(bounds)) / (bounds.size.width * 0.5), -1.0, 1.0);
+      const double y =
+          std::clamp((location.y - NSMidY(bounds)) / (bounds.size.height * 0.5), -1.0, 1.0);
+      [self.panoramaController setCruiseSteeringX:x y:y];
+    }
+  } else if (_mouseTurningEnabled && (!_viewerPaused || _mouseTurningDuringPause)) {
     // NSEvent's vertical mouse delta is positive downwards, unlike camera
     // pitch, so invert it to preserve the existing drag direction.
     [self.panoramaController mouseTurnForCurrentZoomHeading:event.deltaX * 0.003
@@ -1996,7 +2088,7 @@ private:
 
 - (void)mouseExited:(NSEvent *)event {
   (void)event;
-  if (_pointInspectionEnabled) {
+  if (_pointInspectionEnabled || _cruiseSteeringEnabled) {
     [self.panoramaController panoramaPointerExited];
   }
 }
@@ -2011,7 +2103,7 @@ private:
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-  if (_mouseTurningEnabled) {
+  if (_mouseTurningEnabled || _cruiseSteeringEnabled) {
     // AppKit changes mouse-move events into drag events while a button is
     // held. Mouse turning should remain continuous without requiring a drag.
     [self mouseMoved:event];
@@ -2033,22 +2125,26 @@ private:
   constexpr double kStep = 2.0 * std::numbers::pi / 180.0;
   switch (event.keyCode) {
   case 123: // Left arrow.
-    if (![self.panoramaController isMouseTurningEnabled]) {
+    if (![self.panoramaController isMouseTurningEnabled] &&
+        ![self.panoramaController isCruisingEnabled]) {
       [self.panoramaController rotateForCurrentZoomHeading:-kStep pitch:0.0];
     }
     break;
   case 124: // Right arrow.
-    if (![self.panoramaController isMouseTurningEnabled]) {
+    if (![self.panoramaController isMouseTurningEnabled] &&
+        ![self.panoramaController isCruisingEnabled]) {
       [self.panoramaController rotateForCurrentZoomHeading:kStep pitch:0.0];
     }
     break;
   case 125: // Down arrow.
-    if (![self.panoramaController isMouseTurningEnabled]) {
+    if (![self.panoramaController isMouseTurningEnabled] &&
+        ![self.panoramaController isCruisingEnabled]) {
       [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:-kStep];
     }
     break;
   case 126: // Up arrow.
-    if (![self.panoramaController isMouseTurningEnabled]) {
+    if (![self.panoramaController isMouseTurningEnabled] &&
+        ![self.panoramaController isCruisingEnabled]) {
       [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:kStep];
     }
     break;
@@ -2493,6 +2589,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                        }
                                        if (![controller isViewerPaused] &&
                                            ![controller isMouseTurningEnabled] &&
+                                           ![controller isCruisingEnabled] &&
                                            controller->_window.firstResponder !=
                                                controller->_panoramaView) {
                                          return event;
@@ -2521,8 +2618,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (BOOL)isMouseTurningEnabled {
-  return [self isCruisingEnabled] || ([self isRoamingEnabled] && _roamTurningModeControl != nil &&
-                                      _roamTurningModeControl.selectedSegment == 1);
+  return [self isRoamingEnabled] && _roamTurningModeControl != nil &&
+         _roamTurningModeControl.selectedSegment == 1;
 }
 
 - (BOOL)isViewerPaused {
@@ -2533,6 +2630,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _viewerPaused = !_viewerPaused;
   _cruiseRecovery = false;
   [self clearRoamKeys];
+  [self clearCruiseSteering];
   _lastRoamTick = std::chrono::steady_clock::now();
   [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
   if (_viewerPaused) {
@@ -2620,6 +2718,31 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self updateMovementStatus];
 }
 
+- (void)setCruiseSteeringX:(double)x y:(double)y {
+  if (![self isCruisingEnabled]) {
+    return;
+  }
+  _cruiseSteeringX = std::clamp(x, -1.0, 1.0);
+  _cruiseSteeringY = std::clamp(y, -1.0, 1.0);
+  _cruiseSteeringActive = true;
+  if (!_cruiseSteeringArmed &&
+      std::hypot(_cruiseSteeringX, _cruiseSteeringY) <= panorama::app::kCruiseSteeringDeadZone) {
+    _cruiseSteeringArmed = true;
+    [self updateMovementStatus];
+  }
+}
+
+- (void)clearCruiseSteering {
+  const bool changed = _cruiseSteeringActive || _cruiseSteeringArmed;
+  _cruiseSteeringX = 0.0;
+  _cruiseSteeringY = 0.0;
+  _cruiseSteeringActive = false;
+  _cruiseSteeringArmed = false;
+  if (changed) {
+    [self updateMovementStatus];
+  }
+}
+
 - (void)scheduleRoamTimer {
   [_roamTimer invalidate];
   _roamTimer = nil;
@@ -2644,9 +2767,23 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _lastRoamTick = now;
   const bool roaming = [self isRoamingEnabled];
   const bool cruising = [self isCruisingEnabled];
-  if (_viewerPaused || (!roaming && !cruising) || !_window.isKeyWindow ||
+  if ((_viewerPaused && !_cruiseRecovery) || (!roaming && !cruising) || !_window.isKeyWindow ||
       (roaming && _window.firstResponder != _panoramaView)) {
     [self clearRoamKeys];
+    return;
+  }
+
+  // Do not turn a temporarily stalled main run loop into a large jump.
+  const double dt = std::min(elapsed, 2.0 / requestedRate);
+  if (cruising && _cruiseSteeringActive && _cruiseSteeringArmed) {
+    const double sensitivity = _roamMouseSensitivityControl.doubleValue;
+    const double direction = _invertMousePanning ? -1.0 : 1.0;
+    [self rotateHeading:cruise_steering_response(_cruiseSteeringX) *
+                        panorama::app::kCruiseMaximumYawRate * sensitivity * direction * dt
+                  pitch:cruise_steering_response(_cruiseSteeringY) *
+                        panorama::app::kCruiseMaximumPitchRate * sensitivity * direction * dt];
+  }
+  if (_cruiseRecovery) {
     return;
   }
 
@@ -2662,8 +2799,6 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   forward /= magnitude;
   right /= magnitude;
-  // Do not turn a temporarily stalled main run loop into a large teleport.
-  const double dt = std::min(elapsed, 2.0 / requestedRate);
   const double movement_speed = cruising ? _cruiseSpeed : _roamSpeed;
   const double distance = movement_speed * dt;
   const double heading = _orientation.heading;
@@ -2699,11 +2834,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   if (_cruiseRecovery) {
-    _roamStatusLabel.stringValue = @"Blocked • steer/climb or W/S speed • Space resumes";
+    _roamStatusLabel.stringValue = _cruiseSteeringArmed
+                                       ? @"Blocked • steer/climb or W/S speed • Space resumes"
+                                       : @"Blocked • centre pointer to enable steering";
   } else if (_viewerPaused) {
     _roamStatusLabel.stringValue = @"Paused • Space resumes";
   } else if ([self isCruisingEnabled]) {
-    _roamStatusLabel.stringValue = @"Cruising • W/S speed • Space pauses";
+    _roamStatusLabel.stringValue = _cruiseSteeringArmed
+                                       ? @"Cruising • W/S speed • Space pauses"
+                                       : @"Cruising • centre pointer to enable steering";
   } else {
     _roamStatusLabel.stringValue =
         [self isMouseTurningEnabled] ? @"WASD move • mouse looks" : @"WASD move • arrow keys look";
@@ -2719,7 +2858,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     row.hidden = !moving;
   }
   _roamTurningModeRow.hidden = !roaming;
-  _roamMouseSensitivityRow.hidden = ![self isMouseTurningEnabled];
+  _roamMouseSensitivityRow.hidden = !cruising && ![self isMouseTurningEnabled];
+  _roamMouseSensitivityControl.toolTip =
+      cruising ? @"Maximum Cruise yaw and pitch rate" : @"Mouse turning sensitivity";
   [_roamAltitudeModeControl setLabel:cruising ? @"Flight" : @"Altitude" forSegment:1];
   _roamAltitudeModeControl.toolTip =
       cruising ? @"Maintain height above terrain, or use pitch to climb and descend in Flight mode"
@@ -2746,6 +2887,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       [NSString stringWithFormat:@"%.1f", _groundClearanceControl.doubleValue];
   [self updateMovementSpeedControl];
   [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled]];
+  [_panoramaView setCruiseSteeringEnabled:cruising];
   if (![self hasPressedRoamKey]) {
     [self updateMovementStatus];
   }
@@ -2754,12 +2896,21 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 - (void)movementModeChanged:(id)sender {
   (void)sender;
   [self clearRoamKeys];
+  [self clearCruiseSteering];
   if (_cruiseRecovery && ![self isCruisingEnabled]) {
     _cruiseRecovery = false;
     [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
   }
   _roamDesiredPosition = {_observer.easting, _observer.northing};
   _roamAltitude = _observer.elevation;
+  if ([self isCruisingEnabled]) {
+    // Cruise is potentially fast and begins under continuous input. Enter it
+    // in the safer absolute-altitude mode and require an explicit resume.
+    _roamAltitudeModeControl.selectedSegment = 1;
+    _viewerPaused = true;
+    _cruiseRecovery = false;
+    [_panoramaView setViewerPaused:true recoveryMessage:nil];
+  }
   [self updateRoamControls];
   [self scheduleRoamTimer];
   if ([self isCruisingEnabled]) {
@@ -3335,6 +3486,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _pointInspectionEnabled = true;
   [_panoramaView setPointInspectionEnabled:true];
   [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled]];
+  [_panoramaView setCruiseSteeringEnabled:[self isCruisingEnabled]];
   [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
   [_overlayView setMapAndPointInfoVisible:true];
 }
@@ -3389,6 +3541,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)beginMinimapPointerOwnership {
+  [self clearCruiseSteering];
   if (_pointerOwner == panorama::app::PointerOwner::Minimap) {
     return;
   }
@@ -3397,6 +3550,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)pointerMovedOverOccludingView:(NSView *)view {
+  [self clearCruiseSteering];
   const bool minimap = view == _miniMapPanel || [view isDescendantOf:_miniMapPanel];
   if (minimap) {
     [self beginMinimapPointerOwnership];
@@ -3413,6 +3567,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)panoramaPointerExited {
+  [self clearCruiseSteering];
   if (_pointerOwner != panorama::app::PointerOwner::Panorama) {
     return;
   }

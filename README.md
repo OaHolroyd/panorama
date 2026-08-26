@@ -121,8 +121,13 @@ more slowly than the selected rate. Press Space to pause navigation and free
 the pointer for other controls; a visible badge remains until Space resumes it.
 Cruise mode moves forward continuously along the mouse-controlled heading;
 its logarithmic speed control spans 1 m/s to 10 km/s, and W/S adjusts the speed
-multiplicatively. Terrain height mode maintains a fixed AGL clearance, while
-Flight mode uses camera pitch to climb or descend.
+multiplicatively. It opens paused in Flight mode, which holds absolute altitude
+and uses camera pitch to climb or descend; Terrain mode instead maintains a
+fixed AGL clearance.
+Cruise steering acts as a virtual joystick: the fixed centre crosshair is
+neutral, and cursor displacement controls continuous yaw and pitch rates. Move
+through the small central dead zone after entering or resuming Cruise to arm
+steering safely.
 If Flight mode meets terrain, forward motion is held while mouse steering and
 W/S speed adjustment remain available; steer or climb clear, then press Space
 to resume.
