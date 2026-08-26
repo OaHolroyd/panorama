@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -102,6 +103,9 @@ struct TerrainTraceSession::State {
   std::unique_ptr<AsyncTilePreparer> preparer;
   std::unique_ptr<GpuTerrainShadowResources> shadows;
   ResidentTileCacheBindings cache_bindings = {};
+  // Source zero remains the catalogue's immutable construction origin; this
+  // index follows the tile currently containing the movable observer.
+  uint32_t observer_source_index = 0U;
   uint64_t deferred_successor_work = 0U;
   uint64_t locally_skipped_tiles = 0U;
   uint64_t globally_skipped_tiles = 0U;
@@ -221,14 +225,14 @@ struct TerrainTraceSession::State {
   }
 
   [[nodiscard]] uint32_t ensure_observer_resident() {
-    uint32_t slot = cache->slot_for_source(0U);
+    uint32_t slot = cache->slot_for_source(observer_source_index);
     const std::vector<uint8_t> no_pinned_slots(cache->slot_capacity(), 0U);
-    // The origin can be evicted after an earlier view. No GPU pass is active
-    // here, so publishing it again may use any cache slot.
+    // The observer tile can be evicted after an earlier view. No GPU pass is
+    // active here, so publishing it again may use any cache slot.
     while (slot == cache->slot_capacity()) {
-      preparer->request(0U, 0.0F);
+      preparer->request(observer_source_index, 0.0F);
       (void)cache->install_prepared(*preparer, no_pinned_slots, timer);
-      slot = cache->slot_for_source(0U);
+      slot = cache->slot_for_source(observer_source_index);
       if (slot == cache->slot_capacity()) {
         timer.start_wall("Tile availability wait");
         preparer->wait_for_prepared();
@@ -256,9 +260,11 @@ bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
   }
   const TileKey next_key =
       tile_key_at(state.catalogue->grid(), observer.easting, observer.northing);
-  if (!(next_key == state.catalogue->origin().key)) {
+  const std::optional<uint32_t> next_source = state.catalogue->find_source(next_key);
+  if (!next_source.has_value()) {
     return false;
   }
+  state.observer_source_index = *next_source;
   state.config.observer = observer;
   state.parameters.observer_elevation = static_cast<float>(observer.elevation);
   state.cache->rebase_observer(observer);

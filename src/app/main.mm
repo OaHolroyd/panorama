@@ -337,8 +337,6 @@ void print_usage(const char *program) {
   if (pixels == 0U || pixels > std::numeric_limits<uint32_t>::max()) {
     throw std::out_of_range("Viewer image dimensions exceed the Metal ray-index range");
   }
-  // The interactive palette defaults to the same useful interval as tracing.
-  settings.presentation.colour_range.maximum = settings.max_distance;
   return settings;
 }
 
@@ -1247,6 +1245,7 @@ private:
                     settings_.tile_cache_size_bytes,
                     settings_.workers,
                     !settings_.discard_quantized,
+                    false,
                 };
                 auto replacement = std::make_unique<TerrainTraceSession>(
                     config,
@@ -1730,7 +1729,6 @@ private:
   bool _viewerPaused;
   bool _cruiseRecovery;
   bool _cruiseSteeringActive;
-  bool _cruiseSteeringArmed;
   bool _updatingResolutionControls;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
@@ -2630,7 +2628,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _viewerPaused = !_viewerPaused;
   _cruiseRecovery = false;
   [self clearRoamKeys];
-  [self clearCruiseSteering];
+  if (_viewerPaused) {
+    [self clearCruiseSteering];
+  }
   _lastRoamTick = std::chrono::steady_clock::now();
   [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
   if (_viewerPaused) {
@@ -2724,20 +2724,18 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   _cruiseSteeringX = std::clamp(x, -1.0, 1.0);
   _cruiseSteeringY = std::clamp(y, -1.0, 1.0);
+  const bool becameActive = !_cruiseSteeringActive;
   _cruiseSteeringActive = true;
-  if (!_cruiseSteeringArmed &&
-      std::hypot(_cruiseSteeringX, _cruiseSteeringY) <= panorama::app::kCruiseSteeringDeadZone) {
-    _cruiseSteeringArmed = true;
+  if (becameActive) {
     [self updateMovementStatus];
   }
 }
 
 - (void)clearCruiseSteering {
-  const bool changed = _cruiseSteeringActive || _cruiseSteeringArmed;
+  const bool changed = _cruiseSteeringActive;
   _cruiseSteeringX = 0.0;
   _cruiseSteeringY = 0.0;
   _cruiseSteeringActive = false;
-  _cruiseSteeringArmed = false;
   if (changed) {
     [self updateMovementStatus];
   }
@@ -2775,7 +2773,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   // Do not turn a temporarily stalled main run loop into a large jump.
   const double dt = std::min(elapsed, 2.0 / requestedRate);
-  if (cruising && _cruiseSteeringActive && _cruiseSteeringArmed) {
+  if (cruising && _cruiseSteeringActive) {
     const double sensitivity = _roamMouseSensitivityControl.doubleValue;
     const double direction = _invertMousePanning ? -1.0 : 1.0;
     [self rotateHeading:cruise_steering_response(_cruiseSteeringX) *
@@ -2834,15 +2832,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   if (_cruiseRecovery) {
-    _roamStatusLabel.stringValue = _cruiseSteeringArmed
-                                       ? @"Blocked • steer/climb or W/S speed • Space resumes"
-                                       : @"Blocked • centre pointer to enable steering";
+    _roamStatusLabel.stringValue = @"Blocked • steer/climb or W/S speed • Space resumes";
   } else if (_viewerPaused) {
     _roamStatusLabel.stringValue = @"Paused • Space resumes";
   } else if ([self isCruisingEnabled]) {
-    _roamStatusLabel.stringValue = _cruiseSteeringArmed
-                                       ? @"Cruising • W/S speed • Space pauses"
-                                       : @"Cruising • centre pointer to enable steering";
+    _roamStatusLabel.stringValue = @"Cruising • W/S speed • Space pauses";
   } else {
     _roamStatusLabel.stringValue =
         [self isMouseTurningEnabled] ? @"WASD move • mouse looks" : @"WASD move • arrow keys look";

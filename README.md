@@ -125,9 +125,8 @@ multiplicatively. It opens paused in Flight mode, which holds absolute altitude
 and uses camera pitch to climb or descend; Terrain mode instead maintains a
 fixed AGL clearance.
 Cruise steering acts as a virtual joystick: the fixed centre crosshair is
-neutral, and cursor displacement controls continuous yaw and pitch rates. Move
-through the small central dead zone after entering or resuming Cruise to arm
-steering safely.
+neutral, cursor displacement controls continuous yaw and pitch rates, and a
+small central dead zone prevents drift.
 If Flight mode meets terrain, forward motion is held while mouse steering and
 W/S speed adjustment remain available; steer or climb clear, then press Space
 to resume.
