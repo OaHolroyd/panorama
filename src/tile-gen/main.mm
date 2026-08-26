@@ -62,12 +62,17 @@ void print_usage(const char *program) {
   std::printf(
       "usage: %s --input DIR [options]\n"
       "\n"
-      "Prepare projected DTM GeoTIFFs for GPU terrain tracing. The input directory\n"
-      "is scanned recursively and rechunked into aligned GeoTIFF or Metal tiles;\n"
-      "the tool does not reproject or resample source data.\n"
+      "Prepare DTM rasters for GPU terrain tracing. The input directory is scanned\n"
+      "recursively for GeoTIFF, raw SRTM HGT, Arc/Info ASC, and ZIP-contained ASC\n"
+      "files, then rechunked into aligned GeoTIFF or Metal tiles without reprojection\n"
+      "or resampling. ZIP archives are read directly without extraction.\n"
       "\n"
-      "All inputs must share one projected CRS, resolution, pixel registration,\n"
-      "and sample-grid alignment. Use --dry-run to validate them before writing.\n"
+      "All inputs must share one projected or geographic CRS, resolution, pixel\n"
+      "registration, and sample-grid alignment. HGT names supply their one-degree\n"
+      "WGS 84 bounds and their file size selects 1- or 3-arcsecond resolution.\n"
+      "ASC inputs require a companion .prj; a packaged .gml can supply an authoritative\n"
+      "EPSG identifier for output Metal tiles.\n"
+      "Use --dry-run to validate inputs before writing.\n"
       "\n"
       "Options:\n"
       "  --output DIR        output directory (default: below data/)\n"
@@ -302,7 +307,7 @@ void validate_dataset_name(const std::string &name) {
 } // namespace
 } // namespace panorama::terrain
 
-/// Discover, rechunk, and write one directory tree of aligned DEM GeoTIFFs.
+/// Discover, rechunk, and write one directory tree of aligned DEM rasters.
 int main(int argc, const char *argv[]) {
   using namespace panorama::terrain;
 
@@ -350,7 +355,7 @@ int main(int argc, const char *argv[]) {
     // filenames play no part in the spatial calculation.
     const RechunkPlan plan = make_rechunk_plan(catalogue, destination);
     std::printf(
-        "Discovered %zu GeoTIFFs below %s.\n"
+        "Discovered %zu DEM rasters below %s.\n"
         "  CRS        : %s\n"
         "  Resolution : %.12g\n"
         "  Output     : %u cells, %u samples (%s, %s)\n"

@@ -7,15 +7,15 @@
 
 namespace panorama::terrain {
 
-/// Metadata-only catalogue of compatible GeoTIFF elevation sources.
+/// Metadata-only catalogue of compatible GeoTIFF, SRTM HGT, and Arc/Info ASC sources.
 ///
-/// Discovery recursively opens candidate TIFF files, validates that they are
-/// single-band north-up rasters on one shared CRS and sample grid, and closes
-/// them without reading their elevation arrays. Rechunking opens only the
-/// sources which overlap the output tile currently being constructed.
+/// Discovery recursively opens loose rasters and ASC members of ZIP archives,
+/// validates that they are single-band north-up rasters on one shared CRS and
+/// sample grid, and closes them without reading their elevation arrays.
+/// Rechunking opens only sources overlapping the tile currently being built.
 class SourceCatalogue {
 public:
-  /// Recursively inspect GeoTIFFs below `input_directory` in stable path order.
+  /// Recursively inspect supported rasters below `input_directory` in stable path order.
   [[nodiscard]] static SourceCatalogue discover(
       const std::filesystem::path &input_directory,
       const std::filesystem::path &excluded_directory

@@ -23,8 +23,8 @@ namespace panorama::terrain {
 /// writer flips it once into atlas order. Float32 output remains version 2;
 /// Uint16 output quantizes onto a global decimetre lattice and stores offsets
 /// from a per-tile integer base. The renderer can expand Uint16 during atlas
-/// installation or retain it through tracing with `--retain-quantized`. Returns
-/// the exact maximum elevation recorded in the tile header.
+/// installation; by default the renderer instead retains it through tracing.
+/// Returns the exact maximum elevation recorded in the tile header.
 [[nodiscard]] float write_metal_tile_chunk(
     const std::filesystem::path &path,
     const TerrainChunk &chunk,

@@ -40,18 +40,18 @@ aligned_index(double coordinate, double origin, double resolution, const char *a
   return quotient;
 }
 
-/// Open a source GeoTIFF for the pixel-reading pass.
-[[nodiscard]] GdalDatasetPointer open_source(const std::filesystem::path &path) {
-  const char *drivers[] = {"GTiff", nullptr};
+/// Open a supported source raster for the pixel-reading pass.
+[[nodiscard]] GdalDatasetPointer open_source(const SourceLocation &location) {
+  const char *drivers[] = {"GTiff", "SRTMHGT", "AAIGrid", nullptr};
   GDALDataset *dataset = static_cast<GDALDataset *>(GDALOpenEx(
-      path.string().c_str(),
+      location.dataset.c_str(),
       GDAL_OF_RASTER | GDAL_OF_READONLY | GDAL_OF_VERBOSE_ERROR,
       drivers,
       nullptr,
       nullptr
   ));
   if (dataset == nullptr) {
-    throw std::runtime_error(gdal_error("Could not open GeoTIFF " + path.string()));
+    throw std::runtime_error(gdal_error("Could not open DEM source " + location.display_name));
   }
   return GdalDatasetPointer(dataset);
 }
@@ -163,7 +163,7 @@ TerrainChunk build_chunk(
   const int64_t chunk_row_end = chunk_row_start + static_cast<int64_t>(side);
 
   // Contributors retain catalogue path order. As in the Python reference,
-  // the first valid source sample wins where source GeoTIFFs overlap.
+  // the first valid source sample wins where source rasters overlap.
   for (uint32_t contributor_index : contributor_indices) {
     if (contributor_index >= plan.sources.size()) {
       throw std::logic_error("Rechunk plan contains an invalid source index");
@@ -184,7 +184,7 @@ TerrainChunk build_chunk(
     const uint32_t height = static_cast<uint32_t>(row_end - row_start);
     const size_t window_count = static_cast<size_t>(width) * height;
     std::vector<float> source_values(window_count);
-    GdalDatasetPointer dataset = open_source(source.path);
+    GdalDatasetPointer dataset = open_source(source.location);
     GDALRasterBand *band = dataset->GetRasterBand(1);
     if (band->RasterIO(
             GF_Read,
@@ -200,7 +200,9 @@ TerrainChunk build_chunk(
             0,
             nullptr
         ) != CE_None) {
-      throw std::runtime_error(gdal_error("Could not read terrain from " + source.path.string()));
+      throw std::runtime_error(
+          gdal_error("Could not read terrain from " + source.location.display_name)
+      );
     }
 
     std::vector<uint8_t> valid_mask;
@@ -222,7 +224,7 @@ TerrainChunk build_chunk(
                                       nullptr
                                   ) != CE_None) {
         throw std::runtime_error(
-            gdal_error("Could not read terrain mask from " + source.path.string())
+            gdal_error("Could not read terrain mask from " + source.location.display_name)
         );
       }
     }
@@ -246,7 +248,8 @@ TerrainChunk build_chunk(
             elevation < static_cast<double>(std::numeric_limits<float>::lowest()) ||
             elevation > static_cast<double>(std::numeric_limits<float>::max())) {
           throw std::runtime_error(
-              "Scaled terrain elevation cannot be represented as Float32 in " + source.path.string()
+              "Scaled terrain elevation cannot be represented as Float32 in " +
+              source.location.display_name
           );
         }
         chunk.elevations[destination_offset] = static_cast<float>(elevation);

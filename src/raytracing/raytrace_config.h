@@ -35,7 +35,8 @@ struct RaytraceConfig {
   uint64_t tile_cache_size_bytes;
   /// Maximum background terrain-preparation workers; zero selects all hardware threads.
   uint32_t max_tile_preparation_workers;
-  /// Keep uint16 custom terrain quantized through atlas residency and tracing.
+  /// Prefer keeping uint16 custom terrain quantized through residency and tracing.
+  /// Other terrain representations continue to use the Float32 atlas path.
   bool retain_quantized;
 };
 

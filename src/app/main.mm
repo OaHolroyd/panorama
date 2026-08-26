@@ -57,7 +57,7 @@ struct ViewerSettings {
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
-  bool retain_quantized = false;
+  bool discard_quantized = false;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
   ImageSize image = {1600U, 900U};
   double vertical_field_of_view = kDefaultVerticalFieldOfView;
@@ -246,7 +246,8 @@ void print_usage(const char *program) {
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
       "  --max-distance M      horizontal range in metres (default: 600000)\n"
-      "  --retain-quantized    keep uint16 terrain quantized in the GPU atlas\n"
+      "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
+      "                        (default: retain uint16)\n"
       "  --easting M           fixed observer easting (default: 2623452.4)\n"
       "  --northing M          fixed observer northing (default: 1100502.2)\n"
       "  --elevation M         fixed observer elevation (default: 3415)\n"
@@ -272,8 +273,8 @@ void print_usage(const char *program) {
       print_usage(argv[0]);
       std::exit(EXIT_SUCCESS);
     }
-    if (option == "--retain-quantized") {
-      settings.retain_quantized = true;
+    if (option == "--discard-quantized") {
+      settings.discard_quantized = true;
       continue;
     }
     const std::string_view value = arguments::option_value(argc, argv, index, option);
@@ -728,7 +729,7 @@ public:
         0U,
         settings_.tile_cache_size_bytes,
         settings_.workers,
-        settings_.retain_quantized,
+        !settings_.discard_quantized,
     };
     trace_ = std::make_unique<TerrainTraceSession>(
         config,
@@ -1085,7 +1086,7 @@ private:
                   0U,
                   settings_.tile_cache_size_bytes,
                   settings_.workers,
-                  settings_.retain_quantized,
+                  !settings_.discard_quantized,
               };
               auto replacement = std::make_unique<TerrainTraceSession>(
                   config,

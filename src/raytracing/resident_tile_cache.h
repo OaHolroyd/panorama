@@ -70,6 +70,7 @@ public:
       const LoadedTile &origin,
       TileKey origin_key,
       const RaytraceConfig &config,
+      bool retain_quantized,
       uint32_t slot_capacity,
       Timer &timer
   );
