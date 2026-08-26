@@ -52,11 +52,18 @@ constexpr double kDefaultSunAltitudeDegrees = 35.0;
 constexpr double kMinimumMovementSpeed = 1.0;
 constexpr double kMaximumRoamSpeed = 200.0;
 constexpr double kMaximumCruiseSpeed = 10'000.0;
-constexpr double kDefaultMovementSpeed = 20.0;
+constexpr double kDefaultRoamSpeed = 20.0;
+// 50 m/s is 180 km/h: representative of a light training aircraft while
+// remaining manageable when Cruise first resumes.
+constexpr double kDefaultCruiseSpeed = 50.0;
 constexpr double kCruiseSteeringDeadZone = 0.06;
 constexpr double kCruiseSteeringExponent = 1.5;
 constexpr double kCruiseMaximumYawRate = 90.0 * kDegreesToRadians;
 constexpr double kCruiseMaximumPitchRate = 60.0 * kDegreesToRadians;
+constexpr double kAircraftMaximumBank = 55.0 * kDegreesToRadians;
+constexpr double kAircraftBankResponseSeconds = 0.5;
+constexpr double kAircraftTrimResponseSeconds = 8.0;
+constexpr double kGravity = 9.80665;
 constexpr float kDefaultSkyStrength = 0.28F;
 constexpr float kDefaultSkyDetail = 0.65F;
 constexpr float kDefaultDiffusivity = 1.0F;
@@ -273,6 +280,7 @@ void print_usage(const char *program) {
       "  Roam: use WASD to move; turn with arrow keys or mouse motion.\n"
       "        Configure movement and turning in the Position tab.\n"
       "  Cruise: move continuously; cursor displacement steers and W/S changes speed.\n"
+      "          Optional Aircraft dynamics adds banked turns and energy exchange.\n"
       "  Press Space to pause or resume interactive viewer movement.\n"
       "  Use the toolbar to show the settings inspector, debug data, or minimap.\n",
       program
@@ -1480,13 +1488,10 @@ private:
 }
 
 [[nodiscard]] static NSString *format_movement_speed(double metres_per_second) {
-  if (metres_per_second < 1'000.0) {
-    return [NSString stringWithFormat:@"%.0f m/s", metres_per_second];
-  }
-  const double kilometres_per_second = metres_per_second / 1'000.0;
-  return kilometres_per_second < 10.0
-             ? [NSString stringWithFormat:@"%.1f km/s", kilometres_per_second]
-             : [NSString stringWithFormat:@"%.0f km/s", kilometres_per_second];
+  const double kilometres_per_hour = metres_per_second * 3.6;
+  return std::abs(kilometres_per_hour) < 100.0
+             ? [NSString stringWithFormat:@"%.1f km/h", kilometres_per_hour]
+             : [NSString stringWithFormat:@"%.0f km/h", kilometres_per_hour];
 }
 
 [[nodiscard]] static double cruise_steering_response(double displacement) {
@@ -1685,7 +1690,10 @@ private:
   NSTextField *_roamMouseSensitivityLabel;
   NSView *_roamMouseSensitivityRow;
   NSSegmentedControl *_roamAltitudeModeControl;
+  NSButton *_aircraftDynamicsControl;
+  NSView *_aircraftDynamicsRow;
   NSSlider *_roamSpeedControl;
+  NSTextField *_roamSpeedRowLabel;
   NSTextField *_roamSpeedLabel;
   NSSlider *_roamUpdateRateControl;
   NSTextField *_roamUpdateRateLabel;
@@ -1716,6 +1724,8 @@ private:
   double _roamAltitude;
   double _roamSpeed;
   double _cruiseSpeed;
+  double _aircraftAirspeed;
+  double _aircraftBank;
   double _cruiseSteeringX;
   double _cruiseSteeringY;
   bool _roamForwardPressed;
@@ -1753,6 +1763,7 @@ private:
 - (BOOL)isMapAndPointInspectionEnabled;
 - (BOOL)isRoamingEnabled;
 - (BOOL)isCruisingEnabled;
+- (BOOL)isAircraftDynamicsEnabled;
 - (BOOL)isMouseTurningEnabled;
 - (BOOL)isViewerPaused;
 - (void)toggleViewerPause;
@@ -1772,6 +1783,8 @@ private:
 - (void)roamTurningModeChanged:(id)sender;
 - (void)roamMouseSensitivityChanged:(id)sender;
 - (void)roamAltitudeModeChanged:(id)sender;
+- (void)aircraftDynamicsChanged:(id)sender;
+- (void)levelAircraft;
 - (void)roamSpeedChanged:(id)sender;
 - (void)updateMovementSpeedControl;
 - (void)roamUpdateRateChanged:(id)sender;
@@ -2560,8 +2573,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _panningSensitivity = 8.0;
     _groundClearance = renderer->ground_clearance();
     _roamAltitude = _observer.elevation;
-    _roamSpeed = panorama::app::kDefaultMovementSpeed;
-    _cruiseSpeed = panorama::app::kDefaultMovementSpeed;
+    _roamSpeed = panorama::app::kDefaultRoamSpeed;
+    _cruiseSpeed = panorama::app::kDefaultCruiseSpeed;
+    _aircraftAirspeed = _cruiseSpeed;
     _roamDesiredPosition = {_observer.easting, _observer.northing};
     _presentation = renderer->initial_presentation();
     _mapPointAction = panorama::app::MapPointAction::None;
@@ -2617,6 +2631,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   return _movementModeControl != nil && _movementModeControl.selectedSegment == 2;
 }
 
+- (BOOL)isAircraftDynamicsEnabled {
+  return [self isCruisingEnabled] && _aircraftDynamicsControl != nil &&
+         _aircraftDynamicsControl.state == NSControlStateValueOn;
+}
+
 - (BOOL)isMouseTurningEnabled {
   return [self isRoamingEnabled] && _roamTurningModeControl != nil &&
          _roamTurningModeControl.selectedSegment == 1;
@@ -2632,6 +2651,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self clearRoamKeys];
   if (_viewerPaused) {
     [self clearCruiseSteering];
+    [self levelAircraft];
   }
   _lastRoamTick = std::chrono::steady_clock::now();
   [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
@@ -2648,6 +2668,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _cruiseRecovery = true;
   [self clearRoamKeys];
   [self clearCruiseSteering];
+  [self levelAircraft];
   _lastRoamTick = std::chrono::steady_clock::now();
   NSString *message = terrainCollision
                           ? @"Terrain ahead — drag to steer or climb, then press Space"
@@ -2744,6 +2765,19 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
 }
 
+/// Pausing stops the flight simulation immediately and returns the camera to
+/// wings-level attitude. Pitch and heading remain available to paused drag
+/// interaction and become the aircraft's new attitude when Cruise resumes.
+- (void)levelAircraft {
+  _aircraftBank = 0.0;
+  if (std::abs(_orientation.roll) <= 1e-12) {
+    return;
+  }
+  _orientation.roll = 0.0;
+  _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+  [self updateMiniMapTelemetry];
+}
+
 - (void)scheduleRoamTimer {
   [_roamTimer invalidate];
   _roamTimer = nil;
@@ -2776,16 +2810,60 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   // Do not turn a temporarily stalled main run loop into a large jump.
   const double dt = std::min(elapsed, 2.0 / requestedRate);
-  if (cruising && _cruiseSteeringActive) {
+  if (_cruiseRecovery) {
+    return;
+  }
+
+  const bool aircraft = cruising && [self isAircraftDynamicsEnabled];
+  if (aircraft) {
+    const double sensitivity = _roamMouseSensitivityControl.doubleValue;
+    const double direction = _invertMousePanning ? -1.0 : 1.0;
+    const double bankCommand =
+        _cruiseSteeringActive
+            ? std::clamp(
+                  cruise_steering_response(_cruiseSteeringX) * sensitivity * direction,
+                  -1.0,
+                  1.0
+              )
+            : 0.0;
+    const double targetBank = bankCommand * panorama::app::kAircraftMaximumBank;
+    const double bankResponse = 1.0 - std::exp(-dt / panorama::app::kAircraftBankResponseSeconds);
+    _aircraftBank += (targetBank - _aircraftBank) * bankResponse;
+
+    const double pitchDelta = _cruiseSteeringActive ? cruise_steering_response(_cruiseSteeringY) *
+                                                          panorama::app::kCruiseMaximumPitchRate *
+                                                          sensitivity * direction * dt
+                                                    : 0.0;
+    constexpr double kPitchLimit = 60.0 * panorama::app::kDegreesToRadians;
+    const double nextPitch = std::clamp(_orientation.pitch + pitchDelta, -kPitchLimit, kPitchLimit);
+    const double horizontalSpeed = std::max(
+        panorama::app::kMinimumMovementSpeed,
+        _aircraftAirspeed * std::max(0.2, std::cos(nextPitch))
+    );
+    const double turnRate = std::clamp(
+        panorama::app::kGravity * std::tan(_aircraftBank) / horizontalSpeed,
+        -panorama::app::kCruiseMaximumYawRate,
+        panorama::app::kCruiseMaximumYawRate
+    );
+    const double headingDelta = turnRate * dt;
+    const bool attitudeChanged = std::abs(headingDelta) > 1e-12 || std::abs(pitchDelta) > 1e-12 ||
+                                 std::abs(_orientation.roll + _aircraftBank) > 1e-12;
+    _orientation.heading =
+        std::remainder(_orientation.heading + headingDelta, 2.0 * std::numbers::pi);
+    _orientation.pitch = nextPitch;
+    // CameraOrientation's positive roll tilts the rendered horizon in the
+    // opposite direction to the physical positive bank used above.
+    _orientation.roll = -_aircraftBank;
+    if (attitudeChanged) {
+      _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+    }
+  } else if (cruising && _cruiseSteeringActive) {
     const double sensitivity = _roamMouseSensitivityControl.doubleValue;
     const double direction = _invertMousePanning ? -1.0 : 1.0;
     [self rotateHeading:cruise_steering_response(_cruiseSteeringX) *
                         panorama::app::kCruiseMaximumYawRate * sensitivity * direction * dt
                   pitch:cruise_steering_response(_cruiseSteeringY) *
                         panorama::app::kCruiseMaximumPitchRate * sensitivity * direction * dt];
-  }
-  if (_cruiseRecovery) {
-    return;
   }
 
   double forward = cruising ? 1.0
@@ -2800,7 +2878,19 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
   forward /= magnitude;
   right /= magnitude;
-  const double movement_speed = cruising ? _cruiseSpeed : _roamSpeed;
+  double movement_speed = cruising ? _cruiseSpeed : _roamSpeed;
+  if (aircraft) {
+    const double previousAirspeed = _aircraftAirspeed;
+    const double trimAcceleration =
+        (_cruiseSpeed - _aircraftAirspeed) / panorama::app::kAircraftTrimResponseSeconds;
+    const double gravityAcceleration = -panorama::app::kGravity * std::sin(_orientation.pitch);
+    _aircraftAirspeed = std::clamp(
+        _aircraftAirspeed + (trimAcceleration + gravityAcceleration) * dt,
+        panorama::app::kMinimumMovementSpeed,
+        panorama::app::kMaximumCruiseSpeed
+    );
+    movement_speed = 0.5 * (previousAirspeed + _aircraftAirspeed);
+  }
   const double distance = movement_speed * dt;
   const double heading = _orientation.heading;
   const bool flight = cruising && _roamAltitudeModeControl.selectedSegment == 1;
@@ -2821,9 +2911,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const double height = altitudeMode == panorama::app::RoamAltitudeMode::FollowTerrain
                             ? _groundClearance
                             : _roamAltitude;
+  // TODO: validate the complete movement segment rather than only its endpoint.
+  // At very high Cruise speeds a single step could otherwise pass through a
+  // narrow terrain ridge before the worker samples the destination elevation.
   _roamRequestToken = _renderer->request_roam(_roamDesiredPosition, altitudeMode, height);
   if (cruising) {
     [self updateMovementStatus];
+    [self updateMiniMapTelemetry];
   } else {
     _roamStatusLabel.stringValue = @"Moving…";
     _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
@@ -2839,7 +2933,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   } else if (_viewerPaused) {
     _roamStatusLabel.stringValue = @"Paused • Space resumes";
   } else if ([self isCruisingEnabled]) {
-    _roamStatusLabel.stringValue = @"Cruising • W/S speed • Space pauses";
+    _roamStatusLabel.stringValue = [self isAircraftDynamicsEnabled]
+                                       ? @"Aircraft • mouse banks/pitches • W/S trim speed"
+                                       : @"Cruising • W/S speed • Space pauses";
   } else {
     _roamStatusLabel.stringValue =
         [self isMouseTurningEnabled] ? @"WASD move • mouse looks" : @"WASD move • arrow keys look";
@@ -2855,9 +2951,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     row.hidden = !moving;
   }
   _roamTurningModeRow.hidden = !roaming;
+  _aircraftDynamicsRow.hidden = !cruising;
   _roamMouseSensitivityRow.hidden = !cruising && ![self isMouseTurningEnabled];
   _roamMouseSensitivityControl.toolTip =
-      cruising ? @"Maximum Cruise yaw and pitch rate" : @"Mouse turning sensitivity";
+      [self isAircraftDynamicsEnabled]
+          ? @"Aircraft bank and pitch sensitivity"
+          : (cruising ? @"Maximum Cruise yaw and pitch rate" : @"Mouse turning sensitivity");
   [_roamAltitudeModeControl setLabel:cruising ? @"Flight" : @"Altitude" forSegment:1];
   _roamAltitudeModeControl.toolTip =
       cruising ? @"Maintain height above terrain, or use pitch to climb and descend in Flight mode"
@@ -2895,6 +2994,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   (void)sender;
   [self clearRoamKeys];
   [self clearCruiseSteering];
+  [self levelAircraft];
   if (_cruiseRecovery && ![self isCruisingEnabled]) {
     _cruiseRecovery = false;
     [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
@@ -2905,6 +3005,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     // Cruise is potentially fast and begins under continuous input. Enter it
     // in the safer absolute-altitude mode and require an explicit resume.
     _roamAltitudeModeControl.selectedSegment = 1;
+    if ([self isAircraftDynamicsEnabled]) {
+      _aircraftAirspeed = _cruiseSpeed;
+    }
     _viewerPaused = true;
     _cruiseRecovery = false;
     [_panoramaView setViewerPaused:true recoveryMessage:nil];
@@ -2930,10 +3033,32 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 - (void)roamAltitudeModeChanged:(id)sender {
   (void)sender;
   [self clearRoamKeys];
+  if (_roamAltitudeModeControl.selectedSegment == 0 && [self isAircraftDynamicsEnabled]) {
+    _cruiseSpeed = _aircraftAirspeed;
+    _aircraftDynamicsControl.state = NSControlStateValueOff;
+    [self levelAircraft];
+  }
   _roamDesiredPosition = {_observer.easting, _observer.northing};
   if (_roamAltitudeModeControl.selectedSegment == 1) {
     _roamAltitude = _observer.elevation;
   }
+  [self updateRoamControls];
+}
+
+- (void)aircraftDynamicsChanged:(id)sender {
+  (void)sender;
+  if (_aircraftDynamicsControl.state == NSControlStateValueOn) {
+    // Coordinated flight uses pitch to change absolute altitude and is not
+    // compatible with the terrain-hugging Cruise mode.
+    _roamAltitudeModeControl.selectedSegment = 1;
+    _roamAltitude = _observer.elevation;
+    _aircraftAirspeed = _cruiseSpeed;
+    _aircraftBank = 0.0;
+  } else {
+    _cruiseSpeed = _aircraftAirspeed;
+    [self levelAircraft];
+  }
+  _roamDesiredPosition = {_observer.easting, _observer.northing};
   [self updateRoamControls];
 }
 
@@ -2942,12 +3067,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   if ([self isCruisingEnabled]) {
+    const BOOL aircraft = [self isAircraftDynamicsEnabled];
     _roamSpeedControl.minValue = std::log10(panorama::app::kMinimumMovementSpeed);
     _roamSpeedControl.maxValue = std::log10(panorama::app::kMaximumCruiseSpeed);
     _roamSpeedControl.doubleValue = std::log10(_cruiseSpeed);
-    _roamSpeedControl.toolTip = @"Logarithmic cruise speed from 1 m/s to 10 km/s";
+    _roamSpeedRowLabel.stringValue = aircraft ? @"Trim speed" : @"Speed";
+    _roamSpeedControl.toolTip =
+        aircraft ? @"Logarithmic target airspeed; climbs and dives change the actual airspeed"
+                 : @"Logarithmic cruise speed from 3.6 km/h to 36,000 km/h";
     _roamSpeedLabel.stringValue = format_movement_speed(_cruiseSpeed);
   } else {
+    _roamSpeedRowLabel.stringValue = @"Speed";
     _roamSpeedControl.minValue = panorama::app::kMinimumMovementSpeed;
     _roamSpeedControl.maxValue = panorama::app::kMaximumRoamSpeed;
     _roamSpeedControl.doubleValue = _roamSpeed;
@@ -4433,14 +4563,21 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       @"Maintain height above terrain or hold absolute elevation while moving";
   NSView *roamAltitudeRow = makeMovementRow(@"Height mode", _roamAltitudeModeControl);
 
-  _roamSpeedControl = [NSSlider sliderWithValue:panorama::app::kDefaultMovementSpeed
+  _aircraftDynamicsControl = [NSButton checkboxWithTitle:@"Enabled"
+                                                  target:self
+                                                  action:@selector(aircraftDynamicsChanged:)];
+  _aircraftDynamicsControl.toolTip =
+      @"Use coordinated banked turns and exchange airspeed with climbs and dives";
+  _aircraftDynamicsRow = makeMovementRow(@"Aircraft", _aircraftDynamicsControl);
+
+  _roamSpeedControl = [NSSlider sliderWithValue:panorama::app::kDefaultRoamSpeed
                                        minValue:panorama::app::kMinimumMovementSpeed
                                        maxValue:panorama::app::kMaximumRoamSpeed
                                          target:self
                                          action:@selector(roamSpeedChanged:)];
   _roamSpeedControl.continuous = YES;
   _roamSpeedControl.toolTip = @"Horizontal roaming speed";
-  _roamSpeedLabel = [NSTextField labelWithString:@"20 m/s"];
+  _roamSpeedLabel = [NSTextField labelWithString:@"72.0 km/h"];
   _roamSpeedLabel.alignment = NSTextAlignmentRight;
   [_roamSpeedLabel.widthAnchor constraintEqualToConstant:62.0].active = YES;
   NSStackView *roamSpeedSetting =
@@ -4448,7 +4585,14 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   roamSpeedSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   roamSpeedSetting.alignment = NSLayoutAttributeCenterY;
   roamSpeedSetting.spacing = 6.0;
-  NSView *roamSpeedRow = makeMovementRow(@"Speed", roamSpeedSetting);
+  _roamSpeedRowLabel = [NSTextField labelWithString:@"Speed"];
+  [_roamSpeedRowLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
+  [roamSpeedSetting.widthAnchor constraintEqualToConstant:178.0].active = YES;
+  NSStackView *roamSpeedRow =
+      [NSStackView stackViewWithViews:@[ _roamSpeedRowLabel, roamSpeedSetting ]];
+  roamSpeedRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  roamSpeedRow.alignment = NSLayoutAttributeCenterY;
+  roamSpeedRow.spacing = 8.0;
 
   _roamUpdateRateControl = [NSSlider sliderWithValue:10.0
                                             minValue:1.0
@@ -4476,6 +4620,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _roamTurningModeRow,
     _roamMouseSensitivityRow,
     roamAltitudeRow,
+    _aircraftDynamicsRow,
     roamSpeedRow,
     roamUpdateRateRow,
     _roamStatusLabel,
@@ -4488,6 +4633,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                            _roamTurningModeRow,
                                            _roamMouseSensitivityRow,
                                            roamAltitudeRow,
+                                           _aircraftDynamicsRow,
                                            roamSpeedRow,
                                            roamUpdateRateRow,
                                            _roamStatusLabel,
@@ -4990,6 +5136,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const BOOL movementVisibilityChanged = _movementInfoLabel.hidden != movementHidden;
   _movementInfoLabel.hidden = movementHidden;
   if (roaming || cruising) {
+    const BOOL aircraft = [self isAircraftDynamicsEnabled];
     double heading = std::fmod(_orientation.heading * panorama::app::kRadiansToDegrees, 360.0);
     if (heading < 0.0) {
       heading += 360.0;
@@ -4997,21 +5144,32 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     NSString *mode = _roamAltitudeModeControl.selectedSegment == 0
                          ? @"Terrain"
                          : (cruising ? @"Flight" : @"Altitude");
-    NSString *state = cruising ? (_viewerPaused ? @"Cruise paused" : @"Cruise")
-                               : (_viewerPaused ? @"Roam paused" : @"Roam");
-    const double speed = cruising ? _cruiseSpeed : _roamSpeed;
+    NSString *state = aircraft ? (_viewerPaused ? @"Aircraft paused" : @"Aircraft")
+                               : (cruising ? (_viewerPaused ? @"Cruise paused" : @"Cruise")
+                                           : (_viewerPaused ? @"Roam paused" : @"Roam"));
+    const double speed = aircraft ? _aircraftAirspeed : (cruising ? _cruiseSpeed : _roamSpeed);
     _movementInfoLabel.stringValue =
-        cruising ? [NSString stringWithFormat:@"%@ • %@ • %@\nHeading %03.0f° • Pitch %+.0f°",
-                                              state,
-                                              format_movement_speed(speed),
-                                              mode,
-                                              heading,
-                                              _orientation.pitch * panorama::app::kRadiansToDegrees]
-                 : [NSString stringWithFormat:@"%@ • %@ • %@\nHeading %03.0f°",
-                                              state,
-                                              format_movement_speed(speed),
-                                              mode,
-                                              heading];
+        aircraft
+            ? [NSString
+                  stringWithFormat:@"%@ • %@ • %@\nHeading %03.0f° • Pitch %+.0f° • Bank %+.0f°",
+                                   state,
+                                   format_movement_speed(speed),
+                                   mode,
+                                   heading,
+                                   _orientation.pitch * panorama::app::kRadiansToDegrees,
+                                   _aircraftBank * panorama::app::kRadiansToDegrees]
+        : cruising
+            ? [NSString stringWithFormat:@"%@ • %@ • %@\nHeading %03.0f° • Pitch %+.0f°",
+                                         state,
+                                         format_movement_speed(speed),
+                                         mode,
+                                         heading,
+                                         _orientation.pitch * panorama::app::kRadiansToDegrees]
+            : [NSString stringWithFormat:@"%@ • %@ • %@\nHeading %03.0f°",
+                                         state,
+                                         format_movement_speed(speed),
+                                         mode,
+                                         heading];
     _movementInfoLabel.toolTip = _movementInfoLabel.stringValue;
   }
   if (movementVisibilityChanged) {
