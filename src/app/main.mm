@@ -51,6 +51,7 @@ constexpr double kDefaultSunAltitudeDegrees = 35.0;
 constexpr float kDefaultSkyStrength = 0.28F;
 constexpr float kDefaultSkyDetail = 0.65F;
 constexpr float kDefaultDiffusivity = 1.0F;
+constexpr double kFallbackEyeHeight = 2.0;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
@@ -722,20 +723,61 @@ public:
         presented_image_(settings_.image) {
     RayField initial_field =
         make_view(settings_.image, settings_.orientation, settings_.vertical_field_of_view);
-    const RaytraceConfig config = {
-        settings_.tile_dir,
-        settings_.observer,
-        settings_.max_distance,
-        0U,
-        settings_.tile_cache_size_bytes,
-        settings_.workers,
-        !settings_.discard_quantized,
+    const auto traceConfig = [&](ObserverLocation observer, bool allowFallback) {
+      return RaytraceConfig{
+          settings_.tile_dir,
+          observer,
+          settings_.max_distance,
+          0U,
+          settings_.tile_cache_size_bytes,
+          settings_.workers,
+          !settings_.discard_quantized,
+          allowFallback,
+      };
     };
+    const ObserverLocation requestedObserver = settings_.observer;
     trace_ = std::make_unique<TerrainTraceSession>(
-        config,
+        traceConfig(requestedObserver, true),
         initial_field,
         GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
     );
+    settings_.observer = trace_->observer();
+    observer_fallback_used_ = settings_.observer.easting != requestedObserver.easting ||
+                              settings_.observer.northing != requestedObserver.northing;
+    device_ = trace_->device();
+    sampler_ = std::make_unique<TerrainPointSampler>(
+        device_,
+        settings_.tile_dir,
+        settings_.observer,
+        settings_.max_distance
+    );
+    if (const std::optional<TerrainPoint> ground =
+            sampler_->sample({settings_.observer.easting, settings_.observer.northing})) {
+      if (observer_fallback_used_) {
+        settings_.observer.elevation = static_cast<double>(ground->elevation) + kFallbackEyeHeight;
+        trace_ = std::make_unique<TerrainTraceSession>(
+            traceConfig(settings_.observer, false),
+            initial_field,
+            GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
+        );
+        if (trace_->device() != device_) {
+          throw std::runtime_error("Observer fallback selected a different Metal device");
+        }
+        observer_ground_clearance_ = kFallbackEyeHeight;
+      } else {
+        observer_ground_clearance_ =
+            std::max(0.0, settings_.observer.elevation - ground->elevation);
+      }
+    }
+    if (observer_fallback_used_) {
+      std::fprintf(
+          stderr,
+          "Requested observer is outside the prepared terrain; starting at (%.3f, %.3f, %.1f).\n",
+          settings_.observer.easting,
+          settings_.observer.northing,
+          settings_.observer.elevation
+      );
+    }
     device_ = trace_->device();
     display_queue_ = [device_ newCommandQueue];
     library_ = trace_->library();
@@ -757,16 +799,6 @@ public:
         MTLPixelFormatBGRA8Unorm
     );
     visibility_ = std::make_unique<GpuVisibilityPointProjector>(device_, display_queue_, library_);
-    sampler_ = std::make_unique<TerrainPointSampler>(
-        device_,
-        settings_.tile_dir,
-        settings_.observer,
-        settings_.max_distance
-    );
-    if (const std::optional<TerrainPoint> ground =
-            sampler_->sample({settings_.observer.easting, settings_.observer.northing})) {
-      observer_ground_clearance_ = std::max(0.0, settings_.observer.elevation - ground->elevation);
-    }
     current_field_ = std::move(initial_field);
     current_observer_ = settings_.observer;
     current_orientation_ = settings_.orientation;
@@ -908,6 +940,10 @@ public:
     return presented_observer_;
   }
   [[nodiscard]] Crs terrain_crs() const { return trace_->crs(); }
+  [[nodiscard]] const TerrainCoverage &terrain_coverage() const {
+    return trace_->terrain_coverage();
+  }
+  [[nodiscard]] bool observer_used_fallback() const { return observer_fallback_used_; }
   [[nodiscard]] double initial_vertical_field_of_view() const {
     return settings_.vertical_field_of_view;
   }
@@ -1257,6 +1293,7 @@ private:
   bool observer_pending_ = false;
   bool map_point_pending_ = false;
   bool target_pending_ = false;
+  bool observer_fallback_used_ = false;
   bool stopping_ = false;
 };
 
@@ -1429,6 +1466,7 @@ private:
 - (void)panoramaPointerExited;
 - (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
 - (void)toggleMapAndPointInspection:(id)sender;
+- (BOOL)isMapAndPointInspectionEnabled;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
 - (void)resolveObserverTimeZone;
@@ -2543,6 +2581,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _aspectFitView = aspectFitView;
   _miniMapPanel = miniMapPanel;
   _miniMapPanel.interactionDelegate = self;
+
+  _pointInspectionEnabled = true;
+  [_panoramaView setPointInspectionEnabled:true];
+  [_overlayView setMapAndPointInfoVisible:true];
 }
 
 - (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
@@ -2742,6 +2784,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       item.style = _pointInspectionEnabled ? NSToolbarItemStyleProminent : NSToolbarItemStylePlain;
     }
   }
+}
+
+- (BOOL)isMapAndPointInspectionEnabled {
+  return _pointInspectionEnabled;
 }
 
 /// Build the controls shown in the trailing render-settings inspector.
@@ -3936,6 +3982,10 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
     item.image = [NSImage imageWithSystemSymbolName:@"map"
                            accessibilityDescription:@"Toggle Map and Point Inspection"];
     item.action = @selector(toggleMapAndPointInspection:);
+    if (@available(macOS 26.0, *)) {
+      item.style = [_controller isMapAndPointInspectionEnabled] ? NSToolbarItemStyleProminent
+                                                                : NSToolbarItemStylePlain;
+    }
   }
   return item;
 }
@@ -3983,6 +4033,8 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
       [[MiniMapPanelView alloc] initWithObserverEasting:observer.easting
                                                northing:observer.northing
                                         terrainEpsgCode:_renderer->terrain_crs().epsg_code()
+                                        terrainCoverage:_renderer->terrain_coverage()
+                               coverageInitiallyVisible:_renderer->observer_used_fallback()
                                             maxDistance:_renderer->max_distance()
                                           pointInfoView:pointInfoController.view
                                             metalDevice:_renderer->device()

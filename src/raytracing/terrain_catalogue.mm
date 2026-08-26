@@ -156,8 +156,14 @@ double tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLo
   return std::hypot(dx, dy);
 }
 
-TerrainCatalogue::TerrainCatalogue(TileGrid grid, std::vector<TerrainSource> sources)
-    : grid_(grid), sources_(std::move(sources)) {
+TerrainCatalogue::TerrainCatalogue(
+    TileGrid grid,
+    std::vector<TerrainSource> sources,
+    ObserverLocation observer,
+    std::vector<TileKey> coverage_tiles
+)
+    : grid_(grid), sources_(std::move(sources)), observer_(observer),
+      coverage_{grid, std::move(coverage_tiles)} {
   float maximum_elevation = std::numeric_limits<float>::lowest();
   bool has_complete_maxima = true;
   for (uint32_t index = 0U; index < sources_.size(); index++) {
@@ -179,7 +185,8 @@ TerrainCatalogue TerrainCatalogue::discover(
     const std::filesystem::path &tile_dir,
     const ObserverLocation &observer,
     float max_distance,
-    uint32_t max_tile_count
+    uint32_t max_tile_count,
+    bool allow_observer_fallback
 ) {
   if (!std::filesystem::is_directory(tile_dir)) {
     throw std::invalid_argument("Prepared terrain path is not a directory: " + tile_dir.string());
@@ -233,11 +240,66 @@ TerrainCatalogue TerrainCatalogue::discover(
   );
 
   const TileGrid grid = infer_tile_grid(available_sources.front());
-  const TileKey origin_key = tile_key_at(grid, observer.easting, observer.northing);
+  std::vector<TileKey> coverage_tiles;
+  coverage_tiles.reserve(available_sources.size());
+  for (const TerrainSource &source : available_sources) {
+    coverage_tiles.push_back(source.key);
+  }
+
+  ObserverLocation resolved_observer = observer;
+  TileKey origin_key = tile_key_at(grid, observer.easting, observer.northing);
+  const auto has_origin = [&] {
+    const auto found = std::lower_bound(
+        available_sources.begin(),
+        available_sources.end(),
+        origin_key,
+        [](const auto &source, const auto &key) { return source.key < key; }
+    );
+    return found != available_sources.end() && found->key == origin_key;
+  };
+  if (!has_origin()) {
+    if (!allow_observer_fallback) {
+      throw std::runtime_error("No prepared terrain tile contains the observer");
+    }
+
+    // Prefer a real tile nearest the centre of the dataset's key-space bounds.
+    // This avoids selecting a missing tile in a coverage hole and gives sparse
+    // or irregular datasets a deterministic, broadly representative start.
+    int64_t minimum_row = available_sources.front().key.row;
+    int64_t maximum_row = minimum_row;
+    int64_t minimum_column = available_sources.front().key.column;
+    int64_t maximum_column = minimum_column;
+    for (const TerrainSource &source : available_sources) {
+      minimum_row = std::min(minimum_row, source.key.row);
+      maximum_row = std::max(maximum_row, source.key.row);
+      minimum_column = std::min(minimum_column, source.key.column);
+      maximum_column = std::max(maximum_column, source.key.column);
+    }
+    const double centre_row =
+        0.5 * static_cast<double>(minimum_row) + 0.5 * static_cast<double>(maximum_row);
+    const double centre_column =
+        0.5 * static_cast<double>(minimum_column) + 0.5 * static_cast<double>(maximum_column);
+    const TerrainSource *fallback = &available_sources.front();
+    double fallback_distance = std::numeric_limits<double>::infinity();
+    for (const TerrainSource &source : available_sources) {
+      const double row_offset = static_cast<double>(source.key.row) - centre_row;
+      const double column_offset = static_cast<double>(source.key.column) - centre_column;
+      const double distance = row_offset * row_offset + column_offset * column_offset;
+      if (distance < fallback_distance) {
+        fallback = &source;
+        fallback_distance = distance;
+      }
+    }
+    origin_key = fallback->key;
+    resolved_observer.easting =
+        grid.origin_x + (static_cast<double>(origin_key.column) + 0.5) * grid.width;
+    resolved_observer.northing =
+        grid.origin_y - (static_cast<double>(origin_key.row) + 0.5) * grid.width;
+  }
   std::vector<TerrainSource> sources;
   for (TerrainSource &source : available_sources) {
     if (source.key == origin_key ||
-        tile_minimum_distance(grid, source.key, observer) <= max_distance) {
+        tile_minimum_distance(grid, source.key, resolved_observer) <= max_distance) {
       sources.push_back(std::move(source));
     }
   }
@@ -261,13 +323,15 @@ TerrainCatalogue TerrainCatalogue::discover(
     sources.resize(max_tile_count);
   }
   if (sources.empty() || !(sources.front().key == origin_key)) {
-    throw std::runtime_error("No prepared terrain tile contains the observer");
+    throw std::logic_error("Terrain catalogue lost its resolved observer tile");
   }
-  return TerrainCatalogue(grid, std::move(sources));
+  return TerrainCatalogue(grid, std::move(sources), resolved_observer, std::move(coverage_tiles));
 }
 
 const TileGrid &TerrainCatalogue::grid() const { return grid_; }
 const TerrainSource &TerrainCatalogue::origin() const { return sources_.front(); }
+const ObserverLocation &TerrainCatalogue::observer() const { return observer_; }
+const TerrainCoverage &TerrainCatalogue::coverage() const { return coverage_; }
 const std::vector<TerrainSource> &TerrainCatalogue::sources() const { return sources_; }
 std::optional<float> TerrainCatalogue::maximum_elevation() const { return maximum_elevation_; }
 

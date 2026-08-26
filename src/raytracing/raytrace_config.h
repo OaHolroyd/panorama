@@ -38,6 +38,8 @@ struct RaytraceConfig {
   /// Prefer keeping uint16 custom terrain quantized through residency and tracing.
   /// Other terrain representations continue to use the Float32 atlas path.
   bool retain_quantized;
+  /// Move an unavailable observer to a dataset-derived default instead of failing.
+  bool allow_observer_fallback = false;
 };
 
 } // namespace panorama
