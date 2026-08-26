@@ -111,11 +111,14 @@ distance/elevation colourmaps and scaling, and optional multiscale feature
 outlines.
 
 The Position tab's Movement section can switch from this Browse behaviour to
-keyboard Roam mode. In Roam mode, WASD moves relative to the current heading
-and the arrow keys continue to look around. Movement can maintain either a
-fixed height above terrain or an absolute altitude. Speed and the maximum
-observer-update rate are configurable; movement requests are coalesced when
-terrain rendering completes more slowly than the selected rate.
+keyboard Roam mode. In Roam mode, WASD moves relative to the current heading;
+turning can use either the arrow keys or pointer motion over the panorama.
+Mouse turning replaces click-and-drag rotation while selected and has its own
+sensitivity control. Movement can maintain either a fixed height above terrain
+or an absolute altitude. Speed and the maximum observer-update rate are
+configurable; movement requests are coalesced when terrain rendering completes
+more slowly than the selected rate. Press Space to pause navigation and free
+the pointer for other controls; a visible badge remains until Space resumes it.
 
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama

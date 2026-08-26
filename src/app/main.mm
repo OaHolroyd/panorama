@@ -262,7 +262,9 @@ void print_usage(const char *program) {
       "\n"
       "Viewer controls:\n"
       "  Browse: drag or use WASD/arrow keys to look around; scroll to zoom.\n"
-      "  Roam: use WASD to move and arrow keys to look; configure it in Position.\n"
+      "  Roam: use WASD to move; turn with arrow keys or mouse motion.\n"
+      "        Configure movement and turning in the Position tab.\n"
+      "  Press Space to pause or resume interactive viewer movement.\n"
       "  Use the toolbar to show the settings inspector, debug data, or minimap.\n",
       program
   );
@@ -1484,16 +1486,30 @@ private:
 }
 @end
 
+/// A pause badge must never take pointer ownership away from the panorama.
+@interface ViewerPauseIndicatorView : NSStackView
+@end
+
+@implementation ViewerPauseIndicatorView
+- (NSView *)hitTest:(NSPoint)point {
+  (void)point;
+  return nil;
+}
+@end
+
 @interface PanoramaView : MTKView {
 @private
   NSPoint _lastMouseLocation;
   NSTrackingArea *_inspectionTrackingArea;
   LockedPointMarkerView *_lockedPointMarker;
+  ViewerPauseIndicatorView *_pauseIndicator;
   double _lockedPointPixelX;
   double _lockedPointPixelY;
   double _lockedPointDirectionX;
   double _lockedPointDirectionY;
   bool _pointInspectionEnabled;
+  bool _mouseTurningEnabled;
+  bool _viewerPaused;
   bool _lockedPointIndicatorActive;
   bool _lockedPointOnscreen;
   bool _pointIndicatorLocked;
@@ -1501,6 +1517,8 @@ private:
 }
 @property(nonatomic, weak) PanoramaController *panoramaController;
 - (void)setPointInspectionEnabled:(bool)enabled;
+- (void)setMouseTurningEnabled:(bool)enabled;
+- (void)setViewerPaused:(bool)paused;
 - (void)setTerrainPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection
                           locked:(bool)locked
                         occluded:(bool)occluded;
@@ -1589,6 +1607,10 @@ private:
   NSButton *_coordinateMoveControl;
   std::optional<panorama::app::ParsedCoordinateInput> _coordinateDestination;
   NSSegmentedControl *_movementModeControl;
+  NSSegmentedControl *_roamTurningModeControl;
+  NSSlider *_roamMouseSensitivityControl;
+  NSTextField *_roamMouseSensitivityLabel;
+  NSView *_roamMouseSensitivityRow;
   NSSegmentedControl *_roamAltitudeModeControl;
   NSSlider *_roamSpeedControl;
   NSTextField *_roamSpeedLabel;
@@ -1598,6 +1620,7 @@ private:
   NSArray<NSView *> *_roamRows;
   NSTextField *_observerHeightLabel;
   NSTextField *_observerHeightUnit;
+  id _pauseKeyMonitor;
   NSTimer *_roamTimer;
   panorama::app::MapCoordinate _roamDesiredPosition;
   std::chrono::steady_clock::time_point _lastRoamTick;
@@ -1628,6 +1651,7 @@ private:
   bool _lockedPointOccluded;
   bool _coordinateMovePending;
   bool _invertMousePanning;
+  bool _viewerPaused;
   bool _updatingResolutionControls;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
@@ -1635,6 +1659,7 @@ private:
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (void)panForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
+- (void)mouseTurnForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (void)zoomWithScrollDelta:(double)delta precise:(bool)precise;
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView
@@ -1648,6 +1673,9 @@ private:
 - (void)toggleMapAndPointInspection:(id)sender;
 - (BOOL)isMapAndPointInspectionEnabled;
 - (BOOL)isRoamingEnabled;
+- (BOOL)isMouseTurningEnabled;
+- (BOOL)isViewerPaused;
+- (void)toggleViewerPause;
 - (void)setRoamKey:(panorama::app::RoamKey)key pressed:(BOOL)pressed;
 - (void)setPointInfoStatus:(NSString *)status;
 - (void)setPointInfoSymbolsVisible:(bool)visible locked:(bool)locked occluded:(bool)occluded;
@@ -1656,6 +1684,8 @@ private:
 - (void)adjustGroundClearance:(NSButton *)sender;
 - (BOOL)commitGroundClearanceControl;
 - (void)movementModeChanged:(id)sender;
+- (void)roamTurningModeChanged:(id)sender;
+- (void)roamMouseSensitivityChanged:(id)sender;
 - (void)roamAltitudeModeChanged:(id)sender;
 - (void)roamSpeedChanged:(id)sender;
 - (void)roamUpdateRateChanged:(id)sender;
@@ -1797,7 +1827,7 @@ private:
     [self removeTrackingArea:_inspectionTrackingArea];
     _inspectionTrackingArea = nil;
   }
-  if (!_pointInspectionEnabled) {
+  if (!_pointInspectionEnabled && !_mouseTurningEnabled) {
     return;
   }
   _inspectionTrackingArea =
@@ -1811,15 +1841,61 @@ private:
 
 - (void)resetCursorRects {
   [super resetCursorRects];
-  if (_pointInspectionEnabled) {
+  if (_viewerPaused) {
+    [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
+  } else if (_pointInspectionEnabled) {
     [self addCursorRect:self.bounds cursor:NSCursor.crosshairCursor];
   }
 }
 
 - (void)setPointInspectionEnabled:(bool)enabled {
   _pointInspectionEnabled = enabled;
-  self.window.acceptsMouseMovedEvents = enabled;
+  self.window.acceptsMouseMovedEvents = enabled || _mouseTurningEnabled;
   [self updateTrackingAreas];
+  [self.window invalidateCursorRectsForView:self];
+}
+
+- (void)setMouseTurningEnabled:(bool)enabled {
+  _mouseTurningEnabled = enabled;
+  self.window.acceptsMouseMovedEvents = enabled || _pointInspectionEnabled;
+  [self updateTrackingAreas];
+}
+
+- (void)setViewerPaused:(bool)paused {
+  _viewerPaused = paused;
+  if (_pauseIndicator == nil) {
+    NSImageView *icon =
+        [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"pause.fill"
+                                                  accessibilityDescription:@"Viewer paused"]];
+    icon.contentTintColor = NSColor.labelColor;
+    NSTextField *label = [NSTextField labelWithString:@"Paused — Space to resume"];
+    label.font = [NSFont systemFontOfSize:NSFont.systemFontSize weight:NSFontWeightSemibold];
+    _pauseIndicator = [[ViewerPauseIndicatorView alloc] initWithFrame:NSZeroRect];
+    [_pauseIndicator addArrangedSubview:icon];
+    [_pauseIndicator addArrangedSubview:label];
+    _pauseIndicator.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    _pauseIndicator.alignment = NSLayoutAttributeCenterY;
+    _pauseIndicator.spacing = 8.0;
+    _pauseIndicator.edgeInsets = NSEdgeInsetsMake(8.0, 12.0, 8.0, 12.0);
+    _pauseIndicator.wantsLayer = YES;
+    _pauseIndicator.layer.backgroundColor =
+        [NSColor.windowBackgroundColor colorWithAlphaComponent:0.88].CGColor;
+    _pauseIndicator.layer.cornerRadius = 10.0;
+    _pauseIndicator.layer.borderColor =
+        [NSColor.separatorColor colorWithAlphaComponent:0.6].CGColor;
+    _pauseIndicator.layer.borderWidth = 1.0;
+    _pauseIndicator.layer.shadowColor = NSColor.blackColor.CGColor;
+    _pauseIndicator.layer.shadowOpacity = 0.35F;
+    _pauseIndicator.layer.shadowRadius = 5.0;
+    _pauseIndicator.layer.shadowOffset = CGSizeMake(0.0, -1.0);
+    _pauseIndicator.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:_pauseIndicator];
+    [NSLayoutConstraint activateConstraints:@[
+      [_pauseIndicator.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+      [_pauseIndicator.topAnchor constraintEqualToAnchor:self.topAnchor constant:16.0],
+    ]];
+  }
+  _pauseIndicator.hidden = !paused;
   [self.window invalidateCursorRectsForView:self];
 }
 
@@ -1845,7 +1921,7 @@ private:
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-  if (!_pointInspectionEnabled) {
+  if (!_pointInspectionEnabled && !_mouseTurningEnabled) {
     [super mouseMoved:event];
     return;
   }
@@ -1857,6 +1933,15 @@ private:
     return;
   }
   [self.panoramaController pointerMovedOverPanorama];
+  if (_mouseTurningEnabled && !_viewerPaused) {
+    // NSEvent's vertical mouse delta is positive downwards, unlike camera
+    // pitch, so invert it to preserve the existing drag direction.
+    [self.panoramaController mouseTurnForCurrentZoomHeading:event.deltaX * 0.003
+                                                      pitch:-event.deltaY * 0.003];
+  }
+  if (!_pointInspectionEnabled) {
+    return;
+  }
   uint32_t x = 0U;
   uint32_t y = 0U;
   if (![self inspectionPixelForEvent:event x:&x y:&y]) {
@@ -1865,8 +1950,8 @@ private:
   [self.panoramaController inspectPixelX:x y:y];
 }
 
-/// Right-click locks the current terrain sample without consuming the
-/// left-button drag gesture used to rotate the camera.
+/// Right-click locks the current terrain sample without consuming ordinary
+/// left-button interaction.
 - (void)rightMouseDown:(NSEvent *)event {
   if (!_pointInspectionEnabled) {
     [super rightMouseDown:event];
@@ -1896,6 +1981,12 @@ private:
 }
 
 - (void)mouseDragged:(NSEvent *)event {
+  if (_mouseTurningEnabled) {
+    // AppKit changes mouse-move events into drag events while a button is
+    // held. Mouse turning should remain continuous without requiring a drag.
+    [self mouseMoved:event];
+    return;
+  }
   const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
   const double heading = (location.x - _lastMouseLocation.x) * 0.003;
   const double pitch = (location.y - _lastMouseLocation.y) * 0.003;
@@ -1912,16 +2003,24 @@ private:
   constexpr double kStep = 2.0 * std::numbers::pi / 180.0;
   switch (event.keyCode) {
   case 123: // Left arrow.
-    [self.panoramaController rotateForCurrentZoomHeading:-kStep pitch:0.0];
+    if (![self.panoramaController isMouseTurningEnabled]) {
+      [self.panoramaController rotateForCurrentZoomHeading:-kStep pitch:0.0];
+    }
     break;
   case 124: // Right arrow.
-    [self.panoramaController rotateForCurrentZoomHeading:kStep pitch:0.0];
+    if (![self.panoramaController isMouseTurningEnabled]) {
+      [self.panoramaController rotateForCurrentZoomHeading:kStep pitch:0.0];
+    }
     break;
   case 125: // Down arrow.
-    [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:-kStep];
+    if (![self.panoramaController isMouseTurningEnabled]) {
+      [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:-kStep];
+    }
     break;
   case 126: // Up arrow.
-    [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:kStep];
+    if (![self.panoramaController isMouseTurningEnabled]) {
+      [self.panoramaController rotateForCurrentZoomHeading:0.0 pitch:kStep];
+    }
     break;
   default: {
     const NSString *characters = event.charactersIgnoringModifiers.lowercaseString;
@@ -2326,12 +2425,72 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _presentation = renderer->initial_presentation();
     _mapPointAction = panorama::app::MapPointAction::None;
     _pointerOwner = panorama::app::PointerOwner::None;
+
+    __weak PanoramaController *weakSelf = self;
+    _pauseKeyMonitor = [NSEvent
+        addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                     handler:^NSEvent *(NSEvent *event) {
+                                       PanoramaController *controller = weakSelf;
+                                       if (controller == nil ||
+                                           event.window != controller->_window ||
+                                           event.keyCode != 49) {
+                                         return event;
+                                       }
+                                       const NSEventModifierFlags modifiers =
+                                           event.modifierFlags &
+                                           NSEventModifierFlagDeviceIndependentFlagsMask;
+                                       if ((modifiers & (NSEventModifierFlagCommand |
+                                                         NSEventModifierFlagControl |
+                                                         NSEventModifierFlagOption)) != 0U ||
+                                           [controller->_window.firstResponder
+                                               isKindOfClass:NSTextView.class]) {
+                                         return event;
+                                       }
+                                       if (![controller isViewerPaused] &&
+                                           ![controller isMouseTurningEnabled] &&
+                                           controller->_window.firstResponder !=
+                                               controller->_panoramaView) {
+                                         return event;
+                                       }
+                                       if (!event.isARepeat) {
+                                         [controller toggleViewerPause];
+                                       }
+                                       return nil;
+                                     }];
   }
   return self;
 }
 
+- (void)dealloc {
+  if (_pauseKeyMonitor != nil) {
+    [NSEvent removeMonitor:_pauseKeyMonitor];
+  }
+}
+
 - (BOOL)isRoamingEnabled {
   return _movementModeControl != nil && _movementModeControl.selectedSegment == 1;
+}
+
+- (BOOL)isMouseTurningEnabled {
+  return [self isRoamingEnabled] && _roamTurningModeControl != nil &&
+         _roamTurningModeControl.selectedSegment == 1;
+}
+
+- (BOOL)isViewerPaused {
+  return _viewerPaused;
+}
+
+- (void)toggleViewerPause {
+  _viewerPaused = !_viewerPaused;
+  [self clearRoamKeys];
+  _lastRoamTick = std::chrono::steady_clock::now();
+  [_panoramaView setViewerPaused:_viewerPaused];
+  if (_viewerPaused) {
+    _roamStatusLabel.stringValue = @"Paused • Space resumes";
+    _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
+  } else {
+    [self updateRoamControls];
+  }
 }
 
 - (BOOL)hasPressedRoamKey {
@@ -2346,7 +2505,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)setRoamKey:(panorama::app::RoamKey)key pressed:(BOOL)pressed {
-  if (![self isRoamingEnabled]) {
+  if (![self isRoamingEnabled] || _viewerPaused) {
     return;
   }
   const bool wasMoving = [self hasPressedRoamKey];
@@ -2379,7 +2538,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   if (![self hasPressedRoamKey]) {
     _lastRoamTick = std::chrono::steady_clock::now();
     if (_roamStatusLabel != nil) {
-      _roamStatusLabel.stringValue = @"WASD move • arrow keys look";
+      _roamStatusLabel.stringValue = [self isMouseTurningEnabled] ? @"WASD move • mouse looks"
+                                                                  : @"WASD move • arrow keys look";
       _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
     }
   }
@@ -2407,7 +2567,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const double requestedRate = std::max(1.0, std::round(_roamUpdateRateControl.doubleValue));
   const double elapsed = std::chrono::duration<double>(now - _lastRoamTick).count();
   _lastRoamTick = now;
-  if (![self isRoamingEnabled] || !_window.isKeyWindow || _window.firstResponder != _panoramaView) {
+  if (_viewerPaused || ![self isRoamingEnabled] || !_window.isKeyWindow ||
+      _window.firstResponder != _panoramaView) {
     [self clearRoamKeys];
     return;
   }
@@ -2445,6 +2606,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   for (NSView *row in _roamRows) {
     row.hidden = !roaming;
   }
+  _roamMouseSensitivityRow.hidden = ![self isMouseTurningEnabled];
   const BOOL holdAltitude = roaming && _roamAltitudeModeControl.selectedSegment == 1;
   _observerHeightLabel.stringValue = holdAltitude ? @"Altitude" : @"Eye height";
   _observerHeightUnit.stringValue = holdAltitude ? @"m AMSL" : @"m AGL";
@@ -2465,6 +2627,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _groundClearanceControl.doubleValue = holdAltitude ? _roamAltitude : _groundClearance;
   _groundClearanceControl.stringValue =
       [NSString stringWithFormat:@"%.1f", _groundClearanceControl.doubleValue];
+  [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled]];
+  if (_viewerPaused) {
+    _roamStatusLabel.stringValue = @"Paused • Space resumes";
+    _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
+  } else if (![self hasPressedRoamKey]) {
+    _roamStatusLabel.stringValue =
+        [self isMouseTurningEnabled] ? @"WASD move • mouse looks" : @"WASD move • arrow keys look";
+    _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
+  }
 }
 
 - (void)movementModeChanged:(id)sender {
@@ -2474,6 +2645,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _roamAltitude = _observer.elevation;
   [self updateRoamControls];
   [self scheduleRoamTimer];
+}
+
+- (void)roamTurningModeChanged:(id)sender {
+  (void)sender;
+  [self updateRoamControls];
+}
+
+- (void)roamMouseSensitivityChanged:(id)sender {
+  (void)sender;
+  _roamMouseSensitivityLabel.stringValue =
+      [NSString stringWithFormat:@"%.2f×", _roamMouseSensitivityControl.doubleValue];
 }
 
 - (void)roamAltitudeModeChanged:(id)sender {
@@ -2501,6 +2683,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta {
+  if (_viewerPaused) {
+    return;
+  }
   _orientation.heading =
       std::remainder(_orientation.heading + headingDelta, 2.0 * std::numbers::pi);
   constexpr double kPitchLimit = 85.0 * std::numbers::pi / 180.0;
@@ -2522,6 +2707,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 - (void)panForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta {
   const double direction = _invertMousePanning ? -1.0 : 1.0;
   [self rotateForCurrentZoomHeading:headingDelta * direction pitch:pitchDelta * direction];
+}
+
+- (void)mouseTurnForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta {
+  const double direction = _invertMousePanning ? -1.0 : 1.0;
+  const double zoom_scale = _verticalFieldOfView / panorama::app::kDefaultVerticalFieldOfView;
+  const double sensitivity =
+      _roamMouseSensitivityControl == nil ? 1.0 : _roamMouseSensitivityControl.doubleValue;
+  [self rotateHeading:headingDelta * direction * zoom_scale * sensitivity
+                pitch:pitchDelta * direction * zoom_scale * sensitivity];
 }
 
 - (void)updateZoomControls {
@@ -2963,6 +3157,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)zoomWithScrollDelta:(double)delta precise:(bool)precise {
+  if (_viewerPaused) {
+    return;
+  }
   // Exponential scaling makes equal scroll motion feel proportional at wide
   // and narrow fields of view. Trackpads report much finer-grained deltas
   // than traditional mouse wheels and therefore use a gentler coefficient.
@@ -2992,6 +3189,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   _pointInspectionEnabled = true;
   [_panoramaView setPointInspectionEnabled:true];
+  [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled]];
+  [_panoramaView setViewerPaused:_viewerPaused];
   [_overlayView setMapAndPointInfoVisible:true];
 }
 
@@ -3269,7 +3468,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _panningSensitivityControl.continuous = YES;
   _panningSensitivityControl.numberOfTickMarks = 10;
   _panningSensitivityControl.allowsTickMarkValuesOnly = YES;
-  _panningSensitivityControl.toolTip = @"Mouse and keyboard panning sensitivity";
+  _panningSensitivityControl.toolTip = @"Browse-mode drag and keyboard turning sensitivity";
   _panningSensitivityLabel = [NSTextField labelWithString:@"8"];
   _panningSensitivityLabel.alignment = NSTextAlignmentRight;
   [_panningSensitivityLabel.widthAnchor constraintEqualToConstant:18.0].active = YES;
@@ -3893,6 +4092,35 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       @"Browse retains the existing look controls; Roam uses WASD for movement";
   NSView *movementModeRow = makeMovementRow(@"Mode", _movementModeControl);
 
+  _roamTurningModeControl = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
+  _roamTurningModeControl.segmentCount = 2;
+  [_roamTurningModeControl setLabel:@"Arrow keys" forSegment:0];
+  [_roamTurningModeControl setLabel:@"Mouse" forSegment:1];
+  _roamTurningModeControl.selectedSegment = 0;
+  _roamTurningModeControl.trackingMode = NSSegmentSwitchTrackingSelectOne;
+  _roamTurningModeControl.target = self;
+  _roamTurningModeControl.action = @selector(roamTurningModeChanged:);
+  _roamTurningModeControl.toolTip =
+      @"Turn with the arrow keys or by moving the pointer over the panorama";
+  NSView *roamTurningModeRow = makeMovementRow(@"Turning", _roamTurningModeControl);
+
+  _roamMouseSensitivityControl = [NSSlider sliderWithValue:1.0
+                                                  minValue:0.25
+                                                  maxValue:3.0
+                                                    target:self
+                                                    action:@selector(roamMouseSensitivityChanged:)];
+  _roamMouseSensitivityControl.continuous = YES;
+  _roamMouseSensitivityControl.toolTip = @"Mouse turning sensitivity";
+  _roamMouseSensitivityLabel = [NSTextField labelWithString:@"1.00×"];
+  _roamMouseSensitivityLabel.alignment = NSTextAlignmentRight;
+  [_roamMouseSensitivityLabel.widthAnchor constraintEqualToConstant:54.0].active = YES;
+  NSStackView *roamMouseSensitivitySetting = [NSStackView
+      stackViewWithViews:@[ _roamMouseSensitivityControl, _roamMouseSensitivityLabel ]];
+  roamMouseSensitivitySetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  roamMouseSensitivitySetting.alignment = NSLayoutAttributeCenterY;
+  roamMouseSensitivitySetting.spacing = 6.0;
+  _roamMouseSensitivityRow = makeMovementRow(@"Sensitivity", roamMouseSensitivitySetting);
+
   _roamAltitudeModeControl = [[NSSegmentedControl alloc] initWithFrame:NSZeroRect];
   _roamAltitudeModeControl.segmentCount = 2;
   [_roamAltitudeModeControl setLabel:@"Terrain" forSegment:0];
@@ -3944,12 +4172,21 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _roamStatusLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
   _roamStatusLabel.textColor = NSColor.secondaryLabelColor;
   [_roamStatusLabel.widthAnchor constraintEqualToConstant:268.0].active = YES;
-  _roamRows = @[ roamAltitudeRow, roamSpeedRow, roamUpdateRateRow, _roamStatusLabel ];
+  _roamRows = @[
+    roamTurningModeRow,
+    _roamMouseSensitivityRow,
+    roamAltitudeRow,
+    roamSpeedRow,
+    roamUpdateRateRow,
+    _roamStatusLabel,
+  ];
 
   InspectorSectionView *movementSection =
       [[InspectorSectionView alloc] initWithTitle:@"Movement"
                                          controls:@[
                                            movementModeRow,
+                                           roamTurningModeRow,
+                                           _roamMouseSensitivityRow,
                                            roamAltitudeRow,
                                            roamSpeedRow,
                                            roamUpdateRateRow,
