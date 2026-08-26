@@ -28,6 +28,9 @@ namespace {
 
 /// Extract the projected EPSG authority code recorded in the source WKT.
 [[nodiscard]] uint32_t epsg_code(const SourceGrid &source_grid) {
+  if (source_grid.epsg_code.has_value()) {
+    return *source_grid.epsg_code;
+  }
   OGRSpatialReference reference;
   if (reference.importFromWkt(source_grid.projection_wkt.c_str()) != OGRERR_NONE) {
     throw std::runtime_error("Could not parse the source CRS for a Metal tile");

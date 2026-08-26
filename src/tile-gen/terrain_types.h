@@ -24,9 +24,19 @@ enum class RasterRegistration {
   PixelIsPoint,
 };
 
+/// One GDAL-openable source, optionally nested inside a physical container.
+struct SourceLocation {
+  // Filesystem path or GDAL VSI dataset name used to open the raster.
+  std::string dataset;
+  // Stable archive-aware name used in diagnostics.
+  std::string display_name;
+  // Optional companion GML containing an authoritative CRS identifier.
+  std::optional<std::string> gml_dataset;
+};
+
 /// Metadata collected without reading the elevation pixels from one DEM source.
 struct SourceRaster {
-  std::filesystem::path path;
+  SourceLocation location;
   // North-up affine transform whose origin is the centre of source sample
   // (0, 0). GDAL's corner-based transform is normalised during discovery for
   // PixelIsPoint rasters such as SRTM HGT.
@@ -46,6 +56,7 @@ struct SourceGrid {
   std::string projection_wkt;
   std::string coordinate_system_name;
   std::string elevation_unit;
+  std::optional<uint32_t> epsg_code;
   double x_resolution;
   double y_resolution;
   double reference_x;

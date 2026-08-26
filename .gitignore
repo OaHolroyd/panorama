@@ -11,6 +11,12 @@
 *.tif
 *.bin
 *.hgt
+*.zip
+*.asc
+*.asc.aux.xml
+*.gml
+*.prj
+*.xml
 
 # Image data
 *.png
