@@ -119,6 +119,13 @@ or an absolute altitude. Speed and the maximum observer-update rate are
 configurable; movement requests are coalesced when terrain rendering completes
 more slowly than the selected rate. Press Space to pause navigation and free
 the pointer for other controls; a visible badge remains until Space resumes it.
+Cruise mode moves forward continuously along the mouse-controlled heading;
+its logarithmic speed control spans 1 m/s to 10 km/s, and W/S adjusts the speed
+multiplicatively. Terrain height mode maintains a fixed AGL clearance, while
+Flight mode uses camera pitch to climb or descend.
+If Flight mode meets terrain, forward motion is held while mouse steering and
+W/S speed adjustment remain available; steer or climb clear, then press Space
+to resume.
 
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama
