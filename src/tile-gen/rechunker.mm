@@ -40,9 +40,9 @@ aligned_index(double coordinate, double origin, double resolution, const char *a
   return quotient;
 }
 
-/// Open a source GeoTIFF for the pixel-reading pass.
+/// Open a supported source raster for the pixel-reading pass.
 [[nodiscard]] GdalDatasetPointer open_source(const std::filesystem::path &path) {
-  const char *drivers[] = {"GTiff", nullptr};
+  const char *drivers[] = {"GTiff", "SRTMHGT", nullptr};
   GDALDataset *dataset = static_cast<GDALDataset *>(GDALOpenEx(
       path.string().c_str(),
       GDAL_OF_RASTER | GDAL_OF_READONLY | GDAL_OF_VERBOSE_ERROR,
@@ -51,7 +51,7 @@ aligned_index(double coordinate, double origin, double resolution, const char *a
       nullptr
   ));
   if (dataset == nullptr) {
-    throw std::runtime_error(gdal_error("Could not open GeoTIFF " + path.string()));
+    throw std::runtime_error(gdal_error("Could not open DEM source " + path.string()));
   }
   return GdalDatasetPointer(dataset);
 }
@@ -163,7 +163,7 @@ TerrainChunk build_chunk(
   const int64_t chunk_row_end = chunk_row_start + static_cast<int64_t>(side);
 
   // Contributors retain catalogue path order. As in the Python reference,
-  // the first valid source sample wins where source GeoTIFFs overlap.
+  // the first valid source sample wins where source rasters overlap.
   for (uint32_t contributor_index : contributor_indices) {
     if (contributor_index >= plan.sources.size()) {
       throw std::logic_error("Rechunk plan contains an invalid source index");

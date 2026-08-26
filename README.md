@@ -10,7 +10,8 @@ automatically or explore the terrain interactively.
 
 Building the project produces three executables:
 
-- `panorama-tile-gen` prepares a directory of aligned DTM GeoTIFFs for tracing.
+- `panorama-tile-gen` prepares aligned DTM GeoTIFF or raw SRTM HGT inputs for
+  tracing.
   It can write conventional rechunked GeoTIFFs or compact, optionally compressed
   Metal tiles intended for fast GPU loading.
 - `panorama` is the batch renderer. It traces an angular panorama or a pinhole
@@ -49,9 +50,17 @@ gdal_translate -a_srs EPSG:27700 \
 ```
 
 Repeat the conversion for the tiles covering the area of interest. All input
-GeoTIFFs supplied to one tile-generation run must use the same projected CRS,
-resolution, pixel registration, and aligned sample grid. Tile generation
-rechunks the data without reprojecting or resampling it.
+rasters supplied to one tile-generation run must use the same projected or
+geographic CRS, resolution, pixel registration, and aligned sample grid. Tile
+generation rechunks the data without reprojecting or resampling it.
+
+For SRTM, place the raw `.hgt` files below one input directory; nested
+directories are supported. The filename supplies each tile's one-degree WGS 84
+bounds, while its 3601- or 1201-sample side selects one- or three-arcsecond
+spacing. HGT elevations are decoded as signed, big-endian 16-bit metres and the
+standard `-32768` void value is treated as no-data. The current renderer still
+requires one of its supported projected CRSs; accepting native geographic
+tiles there is part of the planned multi-source ray-tracing work.
 
 ### Prepare tracing tiles
 

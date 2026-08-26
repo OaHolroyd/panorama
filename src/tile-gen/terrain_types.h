@@ -24,9 +24,12 @@ enum class RasterRegistration {
   PixelIsPoint,
 };
 
-/// Metadata collected without reading the elevation pixels from one GeoTIFF.
+/// Metadata collected without reading the elevation pixels from one DEM source.
 struct SourceRaster {
   std::filesystem::path path;
+  // North-up affine transform whose origin is the centre of source sample
+  // (0, 0). GDAL's corner-based transform is normalised during discovery for
+  // PixelIsPoint rasters such as SRTM HGT.
   std::array<double, 6> transform;
   uint32_t width;
   uint32_t height;
@@ -38,7 +41,7 @@ struct SourceRaster {
   RasterRegistration registration;
 };
 
-/// Common grid metadata shared by every accepted input GeoTIFF.
+/// Common grid metadata shared by every accepted input raster.
 struct SourceGrid {
   std::string projection_wkt;
   std::string coordinate_system_name;

@@ -21,13 +21,13 @@
 namespace panorama::terrain {
 namespace {
 
-/// Return whether a path has a case-insensitive TIFF filename extension.
-[[nodiscard]] bool has_tiff_extension(const std::filesystem::path &path) {
+/// Return whether a path has one of the supported DEM filename extensions.
+[[nodiscard]] bool has_source_extension(const std::filesystem::path &path) {
   std::string extension = path.extension().string();
   std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
     return static_cast<char>(std::tolower(value));
   });
-  return extension == ".tif" || extension == ".tiff";
+  return extension == ".tif" || extension == ".tiff" || extension == ".hgt";
 }
 
 /// Return an absolute, lexically normal path without requiring it to exist.
@@ -57,7 +57,7 @@ is_within(const std::filesystem::path &candidate, const std::filesystem::path &d
 /// Convert a positive GDAL raster dimension to the tool's fixed-width type.
 [[nodiscard]] uint32_t checked_dimension(int value, const std::filesystem::path &path) {
   if (value <= 0 || static_cast<uintmax_t>(value) > std::numeric_limits<uint32_t>::max()) {
-    throw std::runtime_error("GeoTIFF has an invalid dimension: " + path.string());
+    throw std::runtime_error("DEM source has an invalid dimension: " + path.string());
   }
   return static_cast<uint32_t>(value);
 }
@@ -73,7 +73,7 @@ void validate_grid_alignment(
   const double index = (coordinate - reference) / resolution;
   if (!approximately_equal(index, std::round(index))) {
     throw std::runtime_error(
-        "GeoTIFF " + path.string() + " is not aligned with the shared " + axis + " sample grid"
+        "DEM source " + path.string() + " is not aligned with the shared " + axis + " sample grid"
     );
   }
 }
@@ -87,9 +87,28 @@ void validate_grid_alignment(
   return RasterRegistration::PixelIsArea;
 }
 
-/// Open one candidate through GDAL's GeoTIFF driver only.
-[[nodiscard]] GdalDatasetPointer open_geotiff(const std::filesystem::path &path) {
-  const char *drivers[] = {"GTiff", nullptr};
+/// Compare CRS definitions independently of GDAL's dataset axis-to-SRS mapping.
+///
+/// SRTMHGT exposes conventional raster X/Y as longitude/latitude while EPSG:4326
+/// declares latitude/longitude authority order. Parsing its WKT alone therefore
+/// produces a different data-axis mapping even though the underlying CRS is the
+/// same. Terrain arrays consistently use conventional GIS X/Y, so normalise both
+/// sides before comparison.
+[[nodiscard]] bool
+same_spatial_reference(const OGRSpatialReference &candidate, const std::string &shared_wkt) {
+  OGRSpatialReference shared;
+  if (shared.SetFromUserInput(shared_wkt.c_str()) != OGRERR_NONE) {
+    throw std::runtime_error("Could not parse the shared DEM coordinate reference system");
+  }
+  OGRSpatialReference normalised_candidate(candidate);
+  normalised_candidate.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+  shared.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+  return normalised_candidate.IsSame(&shared) != 0;
+}
+
+/// Open one candidate through the explicitly supported GDAL raster drivers.
+[[nodiscard]] GdalDatasetPointer open_source(const std::filesystem::path &path) {
+  const char *drivers[] = {"GTiff", "SRTMHGT", nullptr};
   GDALDataset *dataset = static_cast<GDALDataset *>(GDALOpenEx(
       path.string().c_str(),
       GDAL_OF_RASTER | GDAL_OF_READONLY | GDAL_OF_VERBOSE_ERROR,
@@ -98,43 +117,54 @@ void validate_grid_alignment(
       nullptr
   ));
   if (dataset == nullptr) {
-    throw std::runtime_error(gdal_error("Could not open GeoTIFF " + path.string()));
+    throw std::runtime_error(gdal_error("Could not open DEM source " + path.string()));
   }
   return GdalDatasetPointer(dataset);
 }
 
-/// Parse and validate one GeoTIFF without reading its elevation pixels.
+/// Parse and validate one DEM source without reading its elevation pixels.
 [[nodiscard]] SourceRaster
 inspect_source(const std::filesystem::path &path, SourceGrid *shared_grid, bool first_source) {
-  GdalDatasetPointer dataset = open_geotiff(path);
+  GdalDatasetPointer dataset = open_source(path);
   if (dataset->GetRasterCount() != 1) {
-    throw std::runtime_error("DEM GeoTIFF must have exactly one raster band: " + path.string());
+    throw std::runtime_error("DEM source must have exactly one raster band: " + path.string());
   }
 
   std::array<double, 6> transform = {};
   if (dataset->GetGeoTransform(transform.data()) != CE_None) {
-    throw std::runtime_error("GeoTIFF has no affine geotransform: " + path.string());
+    throw std::runtime_error("DEM source has no affine geotransform: " + path.string());
   }
   if (transform[1] <= 0.0 || transform[5] >= 0.0 || transform[2] != 0.0 || transform[4] != 0.0 ||
       !approximately_equal(transform[1], -transform[5])) {
     throw std::runtime_error(
-        "GeoTIFF must be a north-up, unrotated grid with square pixels: " + path.string()
+        "DEM source must be a north-up, unrotated grid with square pixels: " + path.string()
     );
   }
 
+  const RasterRegistration registration = registration_from_dataset(*dataset);
+  if (registration == RasterRegistration::PixelIsPoint) {
+    // GDAL always reports an outer pixel-corner geotransform, including for
+    // point-registered rasters. Rechunking reasons about sample positions, so
+    // move the origin to the centre of sample (0, 0). For N46E007.hgt this
+    // converts (6.999861..., 47.000138...) to the stated (7, 47) HGT bounds.
+    transform[0] += 0.5 * transform[1] + 0.5 * transform[2];
+    transform[3] += 0.5 * transform[4] + 0.5 * transform[5];
+  }
+
   const OGRSpatialReference *reference = dataset->GetSpatialRef();
-  if (reference == nullptr || reference->IsProjected() == 0) {
-    throw std::runtime_error("GeoTIFF must declare a projected CRS: " + path.string());
+  if (reference == nullptr || (reference->IsProjected() == 0 && reference->IsGeographic() == 0)) {
+    throw std::runtime_error(
+        "DEM source must declare a projected or geographic CRS: " + path.string()
+    );
   }
   char *projection_text = nullptr;
   if (reference->exportToWkt(&projection_text) != OGRERR_NONE || projection_text == nullptr) {
-    throw std::runtime_error("Could not serialise GeoTIFF CRS: " + path.string());
+    throw std::runtime_error("Could not serialise DEM source CRS: " + path.string());
   }
   const std::string projection_wkt(projection_text);
   CPLFree(projection_text);
 
   GDALRasterBand *band = dataset->GetRasterBand(1);
-  const RasterRegistration registration = registration_from_dataset(*dataset);
   const char *unit_text = band->GetUnitType();
   const std::string elevation_unit = unit_text == nullptr ? "" : unit_text;
 
@@ -149,25 +179,23 @@ inspect_source(const std::filesystem::path &path, SourceGrid *shared_grid, bool 
     shared_grid->reference_y = transform[3];
     shared_grid->registration = registration;
   } else {
-    OGRSpatialReference shared_reference;
-    if (shared_reference.SetFromUserInput(shared_grid->projection_wkt.c_str()) != OGRERR_NONE ||
-        reference->IsSame(&shared_reference) == 0) {
-      throw std::runtime_error("GeoTIFF CRS does not match the first source: " + path.string());
+    if (!same_spatial_reference(*reference, shared_grid->projection_wkt)) {
+      throw std::runtime_error("DEM source CRS does not match the first source: " + path.string());
     }
     if (!approximately_equal(transform[1], shared_grid->x_resolution) ||
         !approximately_equal(-transform[5], shared_grid->y_resolution)) {
       throw std::runtime_error(
-          "GeoTIFF resolution does not match the first source: " + path.string()
+          "DEM source resolution does not match the first source: " + path.string()
       );
     }
     if (registration != shared_grid->registration) {
       throw std::runtime_error(
-          "GeoTIFF pixel registration does not match the first source: " + path.string()
+          "DEM source pixel registration does not match the first source: " + path.string()
       );
     }
     if (elevation_unit != shared_grid->elevation_unit) {
       throw std::runtime_error(
-          "GeoTIFF elevation unit does not match the first source: " + path.string()
+          "DEM source elevation unit does not match the first source: " + path.string()
       );
     }
     validate_grid_alignment(
@@ -240,7 +268,7 @@ SourceCatalogue SourceCatalogue::discover(
     const std::filesystem::path candidate = normal_path(entry.path());
     if (!excluded.empty() && entry.is_directory() && is_within(candidate, excluded)) {
       iterator.disable_recursion_pending();
-    } else if (entry.is_regular_file() && has_tiff_extension(candidate)) {
+    } else if (entry.is_regular_file() && has_source_extension(candidate)) {
       paths.push_back(candidate);
     }
     iterator.increment(iteration_error);
@@ -252,7 +280,7 @@ SourceCatalogue SourceCatalogue::discover(
   }
   std::sort(paths.begin(), paths.end());
   if (paths.empty()) {
-    throw std::runtime_error("No GeoTIFF files were found below " + input.string());
+    throw std::runtime_error("No GeoTIFF or HGT files were found below " + input.string());
   }
 
   SourceGrid grid = {};
