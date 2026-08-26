@@ -78,20 +78,20 @@ overwrite options.
 Observer eastings and northings are always expressed in the prepared dataset's
 projected CRS. The executable defaults describe the Swiss example, so supply
 British National Grid coordinates with `--easting`, `--northing`, and
-`--elevation` when using OS data. Use `--retain-quantized` only with Metal tiles
-created using `--sample-type uint16`.
+`--elevation` when using OS data. Uint16 Metal tiles remain quantized in the GPU
+atlas by default; `--discard-quantized` expands them to Float32 during loading.
 
 The resulting directory can be opened interactively:
 
 ```sh
-./panorama-app --tile-dir data/swissalti3d-2m-metal --retain-quantized
+./panorama-app --tile-dir data/swissalti3d-2m-metal
 ```
 
 or rendered non-interactively:
 
 ```sh
 ./panorama \
-  --tile-dir data/swissalti3d-2m-metal --retain-quantized \
+  --tile-dir data/swissalti3d-2m-metal \
   --synthetic-output
 ```
 
@@ -101,7 +101,7 @@ Build the project, then launch the interactive viewer with:
 
 ```sh
 make
-./panorama-app --tile-dir data/swissalti3d-2m-metal --retain-quantized
+./panorama-app --tile-dir data/swissalti3d-2m-metal
 ```
 
 Drag with the mouse or use the arrow/WASD keys to change heading and pitch;

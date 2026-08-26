@@ -146,16 +146,12 @@ struct TerrainTraceSession::State {
 
     bool trace_quantized = false;
     QuantizedMetalTileRecordLayout quantized_layout = {};
-    if (config.retain_quantized) {
-      if (!custom_origin) {
-        throw std::invalid_argument("--retain-quantized requires uint16 custom terrain tiles");
-      }
+    if (config.retain_quantized && custom_origin) {
       const MetalTileHeader header = read_metal_tile_header(catalogue->origin().path);
-      if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
-        throw std::invalid_argument("--retain-quantized requires uint16 custom terrain tiles");
+      if (header.sample_type == MetalTileSampleType::Uint16Decimeters) {
+        quantized_layout = quantized_metal_tile_record_layout(header);
+        trace_quantized = true;
       }
-      quantized_layout = quantized_metal_tile_record_layout(header);
-      trace_quantized = true;
     }
 
     const std::vector<TerrainSource> &sources = catalogue->sources();
@@ -163,7 +159,9 @@ struct TerrainTraceSession::State {
         std::any_of(sources.begin(), sources.end(), [](const TerrainSource &source) {
           return !is_metal_tile_path(source.path);
         })) {
-      throw std::invalid_argument("--retain-quantized requires a custom-only terrain directory");
+      throw std::invalid_argument(
+          "Retaining quantized terrain requires a custom-only terrain directory"
+      );
     }
 
     const size_t mip_count = static_cast<size_t>(metal_tile_mipmap_value_count(origin->size));
@@ -196,8 +194,16 @@ struct TerrainTraceSession::State {
         trace_quantized,
         outputs
     );
-    cache = std::make_unique<
-        ResidentTileCache>(gpu->device(), sources, *origin, origin_key, config, atlas_slots, timer);
+    cache = std::make_unique<ResidentTileCache>(
+        gpu->device(),
+        sources,
+        *origin,
+        origin_key,
+        config,
+        trace_quantized,
+        atlas_slots,
+        timer
+    );
     preparer = std::make_unique<AsyncTilePreparer>(
         gpu->device(),
         sources,

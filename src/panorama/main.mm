@@ -26,12 +26,12 @@ constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 
 /// Runtime-selectable settings for one panorama invocation.
 struct EntrypointSettings {
-  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
+  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-u16-none";
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t max_tile_preparation_workers = 8U;
   uint32_t max_tile_count = 0U;
   float max_distance = 600'000.0F;
-  bool retain_quantized = false;
+  bool discard_quantized = false;
   bool elevations_enabled = true;
   bool normals_enabled = true;
   bool write_diagnostics = true;
@@ -195,7 +195,8 @@ void print_usage(const char *program) {
       "  --no-diagnostic-output\n"
       "                        skip diagnostic field PNGs\n"
       "  --synthetic-output    write a shaded synthetic.png (default: disabled)\n"
-      "  --retain-quantized    keep uint16 terrain quantized in the GPU atlas\n"
+      "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
+      "                        (default: retain uint16)\n"
       "  --no-elevations       skip collision-elevation storage and elevations.png\n"
       "  --no-normals          skip collision-normal computation and normals.png\n"
       "\n"
@@ -236,8 +237,8 @@ void print_usage(const char *program) {
       print_usage(argv[0]);
       std::exit(EXIT_SUCCESS);
     }
-    if (option == "--retain-quantized") {
-      settings.retain_quantized = true;
+    if (option == "--discard-quantized") {
+      settings.discard_quantized = true;
       continue;
     }
     if (option == "--no-normals") {
@@ -387,7 +388,7 @@ int main(int argc, const char *argv[]) {
         settings.max_tile_count,
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
-        settings.retain_quantized,
+        !settings.discard_quantized,
     };
     const panorama::RayField rays = settings.projection.make_ray_field();
     const panorama::ScalarColourRange colour_range = scalar_colour_range(settings);
@@ -420,7 +421,7 @@ int main(int argc, const char *argv[]) {
         "elevations %s, normals %s, outputs %s.\n",
         settings.max_distance,
         panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
-        settings.retain_quantized ? "retained" : "disabled",
+        settings.discard_quantized ? "discarded" : "retained when available",
         outputs.requires_elevations() ? "enabled" : "disabled",
         outputs.requires_normals() ? "enabled" : "disabled",
         settings.write_diagnostics

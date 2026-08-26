@@ -414,6 +414,7 @@ ResidentTileCache::ResidentTileCache(
     const LoadedTile &origin,
     TileKey origin_key,
     const RaytraceConfig &config,
+    bool retain_quantized,
     uint32_t slot_capacity,
     Timer &timer
 ) {
@@ -452,7 +453,6 @@ ResidentTileCache::ResidentTileCache(
                           kMetalTileFloat32HeaderSize,
                           static_cast<uint64_t>(vertex_count) * sizeof(float),
                       };
-  const bool retain_quantized = config.retain_quantized;
   if (retain_quantized &&
       (!custom_origin || header_template.sample_type != MetalTileSampleType::Uint16Decimeters)) {
     throw std::invalid_argument("Quantized atlas retention requires uint16 custom terrain");
