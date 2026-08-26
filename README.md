@@ -105,9 +105,10 @@ make
 ```
 
 Drag with the mouse or use the arrow/WASD keys to change heading and pitch;
-scroll to zoom. The trailing Render Settings inspector controls resolution,
-lighting, distance/elevation colourmaps and scaling, and optional multiscale
-feature outlines.
+scroll to zoom. The trailing tabbed inspector separates viewer controls from
+observer positioning. The Viewer tab controls resolution, lighting,
+distance/elevation colourmaps and scaling, and optional multiscale feature
+outlines.
 
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama
@@ -116,14 +117,19 @@ left-click the minimap to lock a map point and turn the camera toward it. The
 map can always be panned and zoomed. The location button recentres it on the
 observer without changing scale, while the scope button toggles following the
 panorama mouseover point. Following pauses while the pointer is over the map.
-A locked point can be used as the new observer
-location with **Move here**. Option-click the minimap, or use its secondary-
-click menu, to move immediately. The eye-height controls set the retained
+A locked point can be used as the new observer location with **Move here**.
+Option-click the minimap, or use its secondary-click menu, to move immediately.
+The Position tab also accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
+easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
+`NG907598`, or `190716, 859877`. Its coordinate-system menu defaults to Auto,
+which uses distinctive syntax and prepared-terrain coverage to resolve the
+input. If several interpretations remain plausible, it names them and waits
+for an explicit menu selection. Prefixes such as `WGS84`, `LV95`, `BNG`, and
+`DATASET` are also accepted in Auto mode. Eye-height controls set the retained
 height above the terrain for jumps and vertical adjustments. The expand button
-changes map size; the grid button overlays the complete prepared-tile
-coverage. If the requested startup observer is outside that coverage, the
-viewer opens on a central available tile with the coverage overlay already
-enabled.
+changes map size; the grid button overlays the complete prepared-tile coverage.
+If the requested startup observer is outside that coverage, the viewer opens on
+a central available tile with the coverage overlay already enabled.
 
 Collapse or reveal the inspector with the `sidebar.right` toolbar button. Run
 `./panorama-app --help` for observer, image-size, and field-of-view options.

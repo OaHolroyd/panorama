@@ -15,7 +15,7 @@ constexpr CGFloat kCompactMapPanelWidth = 300.0;
 constexpr CGFloat kCompactMapSectionHeight = 286.0;
 constexpr CGFloat kLargeMapPanelWidth = 520.0;
 constexpr CGFloat kLargeMapSectionHeight = 456.0;
-constexpr CGFloat kPointSectionHeight = 70.0;
+constexpr CGFloat kPointSectionHeight = 36.0;
 constexpr double kInitialMapDistance = 50'000.0;
 constexpr double kVisibilityBasisDistance = 1'000.0;
 

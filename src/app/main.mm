@@ -1,4 +1,5 @@
 #include "arguments.h"
+#include "coordinate_input.h"
 #include "gpu_image_renderer.h"
 #include "loaded_tile.h"
 #include "metal_tile.h"
@@ -1323,6 +1324,21 @@ private:
 } // namespace
 } // namespace panorama::app
 
+/// Auto-detection may yield several syntactically valid grids. Prefer an
+/// interpretation which lands on a prepared tile, while leaving genuine ties
+/// for the user to resolve explicitly in the coordinate-system selector.
+[[nodiscard]] static bool coordinate_has_terrain_coverage(
+    const panorama::TerrainCoverage &coverage,
+    panorama::Coord coordinate
+) {
+  try {
+    const panorama::TileKey key = panorama::tile_key_at(coverage.grid, coordinate.x, coordinate.y);
+    return std::binary_search(coverage.tiles.begin(), coverage.tiles.end(), key);
+  } catch (const std::out_of_range &) {
+    return false;
+  }
+}
+
 /// Keep the compact point footer readable without sacrificing useful precision
 /// for nearby terrain samples.
 [[nodiscard]] static NSString *format_point_distance(double metres) {
@@ -1457,6 +1473,11 @@ private:
   NSTextField *_groundClearanceControl;
   NSButton *_groundClearanceDecreaseControl;
   NSButton *_groundClearanceIncreaseControl;
+  NSPopUpButton *_coordinateSystemControl;
+  NSTextField *_coordinateInputControl;
+  NSTextField *_coordinateStatusLabel;
+  NSButton *_coordinateMoveControl;
+  std::optional<panorama::app::ParsedCoordinateInput> _coordinateDestination;
   uint64_t _displayedRevision;
   uint64_t _displayedInspectionSequence;
   uint64_t _pointLockRequestToken;
@@ -1475,6 +1496,7 @@ private:
   bool _pointInspectionLocked;
   bool _pointLockPending;
   bool _lockedPointOccluded;
+  bool _coordinateMovePending;
   bool _invertMousePanning;
   bool _updatingResolutionControls;
 }
@@ -1501,12 +1523,16 @@ private:
 - (void)moveToLockedPoint:(id)sender;
 - (void)adjustGroundClearance:(NSButton *)sender;
 - (BOOL)commitGroundClearanceControl;
+- (void)coordinateSystemChanged:(id)sender;
+- (void)moveToCoordinate:(id)sender;
+- (BOOL)updateCoordinateInputValidation;
 - (void)resolveObserverTimeZone;
 - (void)setDaylightStatus:(NSString *)status;
 - (BOOL)publishAstronomicalLighting;
 - (BOOL)publishTerrainControls;
 - (BOOL)commitResolutionControls;
 - (NSViewController *)makeSettingsViewController;
+- (NSViewController *)makePositioningViewController;
 - (NSViewController *)makeDebugViewController;
 - (NSViewController *)makePointInfoViewController;
 @end
@@ -2524,10 +2550,14 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Maintain the captured aspect ratio while either dimension is edited. The
 /// paired field changes immediately; editing completion commits both values.
 - (void)controlTextDidChange:(NSNotification *)notification {
+  NSTextField *changed = notification.object;
+  if (changed == _coordinateInputControl) {
+    [self updateCoordinateInputValidation];
+    return;
+  }
   if (_updatingResolutionControls || _aspectLockControl.state != NSControlStateValueOn) {
     return;
   }
-  NSTextField *changed = notification.object;
   if (changed != _imageWidthControl && changed != _imageHeightControl) {
     return;
   }
@@ -2559,6 +2589,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [self astronomicalInputChanged:field];
   } else if (field == _groundClearanceControl) {
     [self commitGroundClearanceControl];
+  } else if (field == _coordinateInputControl) {
+    [self updateCoordinateInputValidation];
   }
 }
 
@@ -2749,7 +2781,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 - (void)requestMapPointEasting:(double)easting
                       northing:(double)northing
                         action:(panorama::app::MapPointAction)action {
-  if (!_pointInspectionEnabled) {
+  if (!_pointInspectionEnabled && action != panorama::app::MapPointAction::MoveObserver) {
     return;
   }
   _mapPointAction = action;
@@ -2765,6 +2797,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     didSelectEasting:(double)easting
             northing:(double)northing {
   (void)panel;
+  _coordinateMovePending = false;
   [self beginMinimapPointerOwnership];
   [self requestMapPointEasting:easting
                       northing:northing
@@ -2775,6 +2808,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     didRequestObserverMoveToEasting:(double)easting
                            northing:(double)northing {
   (void)panel;
+  _coordinateMovePending = false;
   [self beginMinimapPointerOwnership];
   [self requestMapPointEasting:easting
                       northing:northing
@@ -3390,6 +3424,197 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   return viewController;
 }
 
+/// Build observer-position controls separately from camera and presentation
+/// settings. This pane is intentionally small for now; roaming controls can be
+/// added here without crowding the minimap or the viewer tab.
+- (NSViewController *)makePositioningViewController {
+  NSViewController *viewController = [[NSViewController alloc] init];
+  NSScrollView *scrollView =
+      [[NSScrollView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 270.0, 400.0)];
+  scrollView.borderType = NSNoBorder;
+  scrollView.drawsBackground = NO;
+  scrollView.hasHorizontalScroller = NO;
+  scrollView.hasVerticalScroller = YES;
+  scrollView.autohidesScrollers = YES;
+  scrollView.scrollerStyle = NSScrollerStyleOverlay;
+  viewController.view = scrollView;
+
+  NSTextField *heading = [NSTextField labelWithString:@"Position & Movement"];
+  heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+
+  _coordinateSystemControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+  [_coordinateSystemControl addItemWithTitle:@"Auto"];
+  _coordinateSystemControl.lastItem.tag = -1;
+  [_coordinateSystemControl.menu addItem:NSMenuItem.separatorItem];
+  [_coordinateSystemControl addItemWithTitle:@"Latitude / longitude"];
+  _coordinateSystemControl.lastItem.tag =
+      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Wgs84);
+  [_coordinateSystemControl addItemWithTitle:@"Swiss LV95"];
+  _coordinateSystemControl.lastItem.tag =
+      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::SwissLv95);
+  [_coordinateSystemControl addItemWithTitle:@"OS National Grid"];
+  _coordinateSystemControl.lastItem.tag =
+      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::BritishNationalGrid);
+  [_coordinateSystemControl.menu addItem:NSMenuItem.separatorItem];
+  [_coordinateSystemControl
+      addItemWithTitle:[NSString
+                           stringWithFormat:@"Dataset grid — %s", _renderer->terrain_crs().name()]];
+  _coordinateSystemControl.lastItem.tag =
+      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Terrain);
+  _coordinateSystemControl.target = self;
+  _coordinateSystemControl.action = @selector(coordinateSystemChanged:);
+  _coordinateSystemControl.toolTip =
+      @"Auto detects the coordinate system; choose one explicitly to resolve ambiguity";
+  // Cap the row at the inspector's 268-point content width. Pop-up buttons use
+  // their longest menu item as an intrinsic width; without this constraint the
+  // dataset-grid title can force the whole inset stack beyond the panel edge.
+  [_coordinateSystemControl.widthAnchor constraintEqualToConstant:178.0].active = YES;
+  NSTextField *coordinateSystemLabel = [NSTextField labelWithString:@"System"];
+  [coordinateSystemLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
+  NSStackView *coordinateSystemRow =
+      [NSStackView stackViewWithViews:@[ coordinateSystemLabel, _coordinateSystemControl ]];
+  coordinateSystemRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  coordinateSystemRow.alignment = NSLayoutAttributeCenterY;
+  coordinateSystemRow.spacing = 8.0;
+
+  _coordinateInputControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _coordinateInputControl.delegate = self;
+  _coordinateInputControl.placeholderString = @"Enter or paste a coordinate";
+  _coordinateInputControl.toolTip = @"The coordinate system will be detected automatically";
+  _coordinateInputControl.target = self;
+  _coordinateInputControl.action = @selector(moveToCoordinate:);
+  [_coordinateInputControl.widthAnchor constraintEqualToConstant:178.0].active = YES;
+  NSTextField *coordinateLabel = [NSTextField labelWithString:@"Coordinate"];
+  [coordinateLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
+  NSStackView *coordinateRow =
+      [NSStackView stackViewWithViews:@[ coordinateLabel, _coordinateInputControl ]];
+  coordinateRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  coordinateRow.alignment = NSLayoutAttributeCenterY;
+  coordinateRow.spacing = 8.0;
+
+  _coordinateStatusLabel = [NSTextField labelWithString:@"Format will be detected automatically"];
+  _coordinateStatusLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
+  _coordinateStatusLabel.maximumNumberOfLines = 2;
+  _coordinateStatusLabel.lineBreakMode = NSLineBreakByWordWrapping;
+  [_coordinateStatusLabel.widthAnchor constraintEqualToConstant:268.0].active = YES;
+
+  _coordinateMoveControl = [NSButton buttonWithTitle:@"Move"
+                                              target:self
+                                              action:@selector(moveToCoordinate:)];
+  _coordinateMoveControl.image = [NSImage imageWithSystemSymbolName:@"location.fill"
+                                           accessibilityDescription:@"Move observer to coordinate"];
+  _coordinateMoveControl.imagePosition = NSImageLeading;
+  _coordinateMoveControl.enabled = NO;
+  NSView *coordinateSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
+  [coordinateSpacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                               forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [coordinateSpacer
+      setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                               forOrientation:NSLayoutConstraintOrientationHorizontal];
+  NSStackView *coordinateActionRow =
+      [NSStackView stackViewWithViews:@[ coordinateSpacer, _coordinateMoveControl ]];
+  coordinateActionRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  coordinateActionRow.alignment = NSLayoutAttributeCenterY;
+  [coordinateActionRow.widthAnchor constraintEqualToConstant:268.0].active = YES;
+
+  InspectorSectionView *destinationSection =
+      [[InspectorSectionView alloc] initWithTitle:@"Destination"
+                                         controls:@[
+                                           coordinateSystemRow,
+                                           coordinateRow,
+                                           _coordinateStatusLabel,
+                                           coordinateActionRow,
+                                         ]
+                                      defaultsKey:@"panorama.inspector.destination.expanded"];
+
+  _groundClearanceDecreaseControl =
+      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"minus"
+                                          accessibilityDescription:@"Lower observer"]
+                         target:self
+                         action:@selector(adjustGroundClearance:)];
+  _groundClearanceDecreaseControl.tag = -1;
+  _groundClearanceDecreaseControl.controlSize = NSControlSizeSmall;
+  _groundClearanceDecreaseControl.bezelStyle = NSBezelStyleTexturedRounded;
+  _groundClearanceDecreaseControl.toolTip = @"Lower eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
+  [_groundClearanceDecreaseControl.widthAnchor constraintEqualToConstant:24.0].active = YES;
+
+  _groundClearanceControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _groundClearanceControl.delegate = self;
+  _groundClearanceControl.alignment = NSTextAlignmentRight;
+  _groundClearanceControl.font = [NSFont monospacedDigitSystemFontOfSize:12.0
+                                                                  weight:NSFontWeightRegular];
+  _groundClearanceControl.stringValue = [NSString stringWithFormat:@"%.1f", _groundClearance];
+  _groundClearanceControl.toolTip = @"Observer height above the terrain directly beneath it";
+  [_groundClearanceControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
+
+  NSTextField *heightUnit = [NSTextField labelWithString:@"m AGL"];
+  heightUnit.textColor = NSColor.secondaryLabelColor;
+  heightUnit.toolTip = @"Metres above ground level";
+
+  _groundClearanceIncreaseControl =
+      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"plus"
+                                          accessibilityDescription:@"Raise observer"]
+                         target:self
+                         action:@selector(adjustGroundClearance:)];
+  _groundClearanceIncreaseControl.tag = 1;
+  _groundClearanceIncreaseControl.controlSize = NSControlSizeSmall;
+  _groundClearanceIncreaseControl.bezelStyle = NSBezelStyleTexturedRounded;
+  _groundClearanceIncreaseControl.toolTip = @"Raise eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
+  [_groundClearanceIncreaseControl.widthAnchor constraintEqualToConstant:24.0].active = YES;
+
+  NSStackView *heightSetting = [NSStackView stackViewWithViews:@[
+    _groundClearanceDecreaseControl,
+    _groundClearanceControl,
+    heightUnit,
+    _groundClearanceIncreaseControl,
+  ]];
+  heightSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  heightSetting.alignment = NSLayoutAttributeCenterY;
+  heightSetting.spacing = 6.0;
+  [heightSetting.widthAnchor constraintEqualToConstant:178.0].active = YES;
+
+  NSTextField *heightLabel = [NSTextField labelWithString:@"Eye height"];
+  heightLabel.toolTip = @"Observer height above the terrain directly beneath it";
+  [heightLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
+  NSStackView *heightRow = [NSStackView stackViewWithViews:@[ heightLabel, heightSetting ]];
+  heightRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  heightRow.alignment = NSLayoutAttributeCenterY;
+  heightRow.spacing = 8.0;
+
+  InspectorSectionView *observerSection =
+      [[InspectorSectionView alloc] initWithTitle:@"Observer"
+                                         controls:@[ heightRow ]
+                                      defaultsKey:@"panorama.inspector.observer.expanded"];
+  NSStackView *settings =
+      [NSStackView stackViewWithViews:@[ heading, destinationSection, observerSection ]];
+  settings.orientation = NSUserInterfaceLayoutOrientationVertical;
+  settings.alignment = NSLayoutAttributeLeading;
+  settings.spacing = 18.0;
+  settings.edgeInsets = NSEdgeInsetsMake(20.0, 16.0, 20.0, 16.0);
+  settings.translatesAutoresizingMaskIntoConstraints = NO;
+
+  InspectorDocumentView *document = [[InspectorDocumentView alloc] initWithFrame:NSZeroRect];
+  document.translatesAutoresizingMaskIntoConstraints = NO;
+  [document addSubview:settings];
+  scrollView.documentView = document;
+  NSLayoutConstraint *viewportHeight =
+      [document.heightAnchor constraintEqualToAnchor:scrollView.contentView.heightAnchor];
+  viewportHeight.priority = NSLayoutPriorityDefaultLow;
+  [NSLayoutConstraint activateConstraints:@[
+    [document.widthAnchor constraintEqualToAnchor:scrollView.contentView.widthAnchor],
+    [document.heightAnchor
+        constraintGreaterThanOrEqualToAnchor:scrollView.contentView.heightAnchor],
+    viewportHeight,
+    [settings.topAnchor constraintEqualToAnchor:document.topAnchor],
+    [settings.leadingAnchor constraintEqualToAnchor:document.leadingAnchor],
+    [settings.trailingAnchor constraintEqualToAnchor:document.trailingAnchor],
+    [settings.bottomAnchor constraintLessThanOrEqualToAnchor:document.bottomAnchor],
+  ]];
+  [self coordinateSystemChanged:_coordinateSystemControl];
+  return viewController;
+}
+
 /// Build the read-only diagnostics displayed over the leading side of the
 /// rendered scene. Camera values change with completed revisions; inspected
 /// point details update independently as hover samples arrive.
@@ -3477,7 +3702,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Build the compact hover readout shown while point inspection is enabled.
 - (NSViewController *)makePointInfoViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
-  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 70.0)];
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 230.0, 36.0)];
   viewController.view = content;
 
   _pointInfoHeading = [NSTextField labelWithString:@""];
@@ -3521,72 +3746,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   pointInfo.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   pointInfo.alignment = NSLayoutAttributeCenterY;
   pointInfo.spacing = 7.0;
-
-  NSTextField *heightLabel = [NSTextField labelWithString:@"Eye height"];
-  heightLabel.toolTip = @"Observer height above the terrain directly beneath it";
-  _groundClearanceDecreaseControl =
-      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"minus"
-                                          accessibilityDescription:@"Lower observer"]
-                         target:self
-                         action:@selector(adjustGroundClearance:)];
-  _groundClearanceDecreaseControl.tag = -1;
-  _groundClearanceDecreaseControl.controlSize = NSControlSizeSmall;
-  _groundClearanceDecreaseControl.bezelStyle = NSBezelStyleTexturedRounded;
-  _groundClearanceDecreaseControl.toolTip = @"Lower eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
-  [_groundClearanceDecreaseControl.widthAnchor constraintEqualToConstant:24.0].active = YES;
-  _groundClearanceControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
-  _groundClearanceControl.delegate = self;
-  _groundClearanceControl.alignment = NSTextAlignmentRight;
-  _groundClearanceControl.font = [NSFont monospacedDigitSystemFontOfSize:12.0
-                                                                  weight:NSFontWeightRegular];
-  _groundClearanceControl.stringValue = [NSString stringWithFormat:@"%.1f", _groundClearance];
-  _groundClearanceControl.toolTip = @"Observer height above the terrain directly beneath it";
-  [_groundClearanceControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
-  NSTextField *heightUnit = [NSTextField labelWithString:@"m AGL"];
-  heightUnit.textColor = NSColor.secondaryLabelColor;
-  heightUnit.toolTip = @"Metres above ground level";
-  _groundClearanceIncreaseControl =
-      [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"plus"
-                                          accessibilityDescription:@"Raise observer"]
-                         target:self
-                         action:@selector(adjustGroundClearance:)];
-  _groundClearanceIncreaseControl.tag = 1;
-  _groundClearanceIncreaseControl.controlSize = NSControlSizeSmall;
-  _groundClearanceIncreaseControl.bezelStyle = NSBezelStyleTexturedRounded;
-  _groundClearanceIncreaseControl.toolTip = @"Raise eye height by 1 m (Option: 0.1 m; Shift: 10 m)";
-  [_groundClearanceIncreaseControl.widthAnchor constraintEqualToConstant:24.0].active = YES;
-
-  NSView *heightSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
-  [heightSpacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
-                           forOrientation:NSLayoutConstraintOrientationHorizontal];
-  [heightSpacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
-  NSStackView *heightControls = [NSStackView stackViewWithViews:@[
-    heightLabel,
-    heightSpacer,
-    _groundClearanceDecreaseControl,
-    _groundClearanceControl,
-    heightUnit,
-    _groundClearanceIncreaseControl,
-  ]];
-  heightControls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-  heightControls.alignment = NSLayoutAttributeCenterY;
-  heightControls.spacing = 6.0;
-
-  NSStackView *rows = [NSStackView stackViewWithViews:@[ pointInfo, heightControls ]];
-  rows.orientation = NSUserInterfaceLayoutOrientationVertical;
-  rows.alignment = NSLayoutAttributeLeading;
-  rows.distribution = NSStackViewDistributionFillEqually;
-  rows.spacing = 2.0;
-  rows.translatesAutoresizingMaskIntoConstraints = NO;
-  [content addSubview:rows];
+  pointInfo.translatesAutoresizingMaskIntoConstraints = NO;
+  [content addSubview:pointInfo];
   [NSLayoutConstraint activateConstraints:@[
-    [rows.topAnchor constraintEqualToAnchor:content.topAnchor constant:3.0],
-    [rows.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-3.0],
-    [rows.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
-    [rows.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14.0],
-    [pointInfo.widthAnchor constraintEqualToAnchor:rows.widthAnchor],
-    [heightControls.widthAnchor constraintEqualToAnchor:rows.widthAnchor],
+    [pointInfo.centerYAnchor constraintEqualToAnchor:content.centerYAnchor],
+    [pointInfo.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14.0],
+    [pointInfo.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14.0],
   ]];
   return viewController;
 }
@@ -3622,6 +3787,144 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _groundClearance = *parsed;
   _renderer->request_ground_clearance(_groundClearance);
   return YES;
+}
+
+- (void)coordinateSystemChanged:(id)sender {
+  (void)sender;
+  const NSInteger tag = _coordinateSystemControl.selectedItem.tag;
+  switch (tag) {
+  case -1:
+    _coordinateInputControl.placeholderString = @"Enter or paste a coordinate";
+    _coordinateInputControl.toolTip = @"The coordinate system will be detected automatically";
+    break;
+  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Wgs84):
+    _coordinateInputControl.placeholderString = @"46.948, 7.447";
+    _coordinateInputControl.toolTip = @"Latitude, longitude in decimal WGS 84 degrees";
+    break;
+  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::SwissLv95):
+    _coordinateInputControl.placeholderString = @"2600000, 1200000";
+    _coordinateInputControl.toolTip = @"LV95 easting, northing in metres";
+    break;
+  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::BritishNationalGrid):
+    _coordinateInputControl.placeholderString = @"NG 90716 59877";
+    _coordinateInputControl.toolTip =
+        @"OS grid reference, or British National Grid easting, northing in metres";
+    break;
+  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Terrain):
+    _coordinateInputControl.placeholderString =
+        _renderer->terrain_crs().id() == panorama::CrsId::FrenchLambert93 ? @"700000, 6600000"
+        : _renderer->terrain_crs().id() == panorama::CrsId::SwissLv95     ? @"2600000, 1200000"
+                                                                          : @"400000, 300000";
+    _coordinateInputControl.toolTip = [NSString
+        stringWithFormat:@"Easting, northing in %s metres", _renderer->terrain_crs().name()];
+    break;
+  default:
+    throw std::logic_error("Unknown coordinate-system menu item");
+  }
+  [self updateCoordinateInputValidation];
+}
+
+- (BOOL)updateCoordinateInputValidation {
+  if (_coordinateSystemControl == nil || _coordinateInputControl == nil ||
+      _coordinateStatusLabel == nil || _coordinateMoveControl == nil) {
+    return NO;
+  }
+  _coordinateDestination.reset();
+  NSString *input = [_coordinateInputControl.stringValue
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (input.length == 0U) {
+    _coordinateInputControl.textColor = NSColor.controlTextColor;
+    const NSInteger tag = _coordinateSystemControl.selectedItem.tag;
+    _coordinateStatusLabel.stringValue =
+        tag == -1
+            ? @"Format will be detected automatically"
+            : [NSString
+                  stringWithFormat:@"Enter coordinates as %s",
+                                   tag == static_cast<NSInteger>(
+                                              panorama::app::CoordinateInputSystem::Terrain
+                                          )
+                                       ? _renderer->terrain_crs().name()
+                                       : _coordinateSystemControl.titleOfSelectedItem.UTF8String];
+    _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
+    _coordinateMoveControl.enabled = NO;
+    return NO;
+  }
+
+  try {
+    panorama::app::ParsedCoordinateInput parsed;
+    const NSInteger tag = _coordinateSystemControl.selectedItem.tag;
+    if (tag == -1) {
+      std::vector<panorama::app::ParsedCoordinateInput> candidates =
+          panorama::app::detect_coordinate_inputs(input.UTF8String, _renderer->terrain_crs());
+      if (candidates.size() > 1U) {
+        std::vector<panorama::app::ParsedCoordinateInput> covered;
+        for (const auto &candidate : candidates) {
+          if (coordinate_has_terrain_coverage(_renderer->terrain_coverage(), candidate.projected)) {
+            covered.push_back(candidate);
+          }
+        }
+        if (!covered.empty()) {
+          candidates = std::move(covered);
+        }
+      }
+      if (candidates.size() > 1U) {
+        NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:candidates.size()];
+        for (const auto &candidate : candidates) {
+          [names addObject:[NSString stringWithUTF8String:candidate.source_name.c_str()]];
+        }
+        NSString *possibilities = [names componentsJoinedByString:@" or "];
+        _coordinateStatusLabel.stringValue =
+            [NSString stringWithFormat:@"Could be %@ — choose a system above", possibilities];
+        _coordinateStatusLabel.textColor = NSColor.systemOrangeColor;
+        _coordinateInputControl.textColor = NSColor.controlTextColor;
+        _coordinateInputControl.toolTip = _coordinateStatusLabel.stringValue;
+        _coordinateMoveControl.enabled = NO;
+        return NO;
+      }
+      parsed = candidates.front();
+    } else {
+      parsed = panorama::app::parse_coordinate_input(
+          input.UTF8String,
+          _renderer->terrain_crs(),
+          static_cast<panorama::app::CoordinateInputSystem>(tag)
+      );
+    }
+    _coordinateDestination = parsed;
+    NSString *source = [NSString stringWithUTF8String:parsed.source_name.c_str()];
+    _coordinateStatusLabel.stringValue = [NSString stringWithFormat:@"%@ • %.5f°, %.5f°",
+                                                                    source,
+                                                                    parsed.geographic.lat,
+                                                                    parsed.geographic.lon];
+    _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
+    _coordinateInputControl.textColor = NSColor.controlTextColor;
+    _coordinateInputControl.toolTip = _coordinateStatusLabel.stringValue;
+    _coordinateMoveControl.enabled = YES;
+    return YES;
+  } catch (const std::exception &exception) {
+    NSString *error = [NSString stringWithUTF8String:exception.what()];
+    _coordinateStatusLabel.stringValue = error;
+    _coordinateStatusLabel.textColor = NSColor.systemRedColor;
+    _coordinateInputControl.textColor = NSColor.systemRedColor;
+    _coordinateInputControl.toolTip = error;
+    _coordinateMoveControl.enabled = NO;
+    return NO;
+  }
+}
+
+- (void)moveToCoordinate:(id)sender {
+  (void)sender;
+  if (![self updateCoordinateInputValidation] || !_coordinateDestination.has_value()) {
+    NSBeep();
+    return;
+  }
+  const panorama::app::ParsedCoordinateInput parsed = *_coordinateDestination;
+  _coordinateMovePending = true;
+  _coordinateStatusLabel.stringValue =
+      [NSString stringWithFormat:@"%s • locating terrain…", parsed.source_name.c_str()];
+  _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
+  [self requestMapPointEasting:parsed.projected.x
+                      northing:parsed.projected.y
+                        action:panorama::app::MapPointAction::MoveObserver];
 }
 
 - (void)setPointInfoStatus:(NSString *)status {
@@ -3933,7 +4236,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     if (frame.map_point_request_token == _mapPointRequestToken &&
         _mapPointAction != panorama::app::MapPointAction::None) {
       const panorama::app::MapPointAction action = _mapPointAction;
+      const bool coordinateMove =
+          action == panorama::app::MapPointAction::MoveObserver && _coordinateMovePending;
       _mapPointAction = panorama::app::MapPointAction::None;
+      _coordinateMovePending = false;
       if (!frame.map_point.has_value()) {
         _mapHoverPoint.reset();
         if (action == panorama::app::MapPointAction::Hover) {
@@ -3944,6 +4250,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         } else {
           NSBeep();
           [self setPointInfoStatus:@"No terrain coverage"];
+          if (coordinateMove) {
+            _coordinateStatusLabel.stringValue = @"No terrain coverage at that coordinate";
+            _coordinateStatusLabel.textColor = NSColor.systemRedColor;
+          }
         }
       } else {
         const double distance = std::hypot(
@@ -3969,6 +4279,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                       verticalFieldOfView:frame.vertical_field_of_view
                                                     image:frame.image];
         } else if (action == panorama::app::MapPointAction::MoveObserver) {
+          if (coordinateMove) {
+            [self updateCoordinateInputValidation];
+          }
           [self moveObserverToTerrainPoint:*frame.map_point];
         } else {
           _mapHoverPoint.reset();
@@ -4077,6 +4390,7 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
   std::unique_ptr<panorama::app::ViewerRenderer> _renderer;
   NSWindow *_window;
   PanoramaController *_controller;
+  NSTabViewController *_inspectorController;
   ViewerOverlayView *_overlayView;
 }
 - (instancetype)initWithSettings:(panorama::app::ViewerSettings)settings;
@@ -4199,6 +4513,13 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
                                         aspectRatio:imageAspect];
 
   NSViewController *settingsController = [_controller makeSettingsViewController];
+  settingsController.title = @"Viewer";
+  NSViewController *positioningController = [_controller makePositioningViewController];
+  positioningController.title = @"Position";
+  _inspectorController = [[NSTabViewController alloc] init];
+  _inspectorController.tabStyle = NSTabViewControllerTabStyleSegmentedControlOnTop;
+  [_inspectorController addChildViewController:settingsController];
+  [_inspectorController addChildViewController:positioningController];
   NSViewController *debugController = [_controller makeDebugViewController];
   NSViewController *pointInfoController = [_controller makePointInfoViewController];
   const panorama::ObserverLocation observer = _renderer->observer();
@@ -4215,7 +4536,7 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
                                                 library:_renderer->library()];
   _overlayView = [[ViewerOverlayView alloc] initWithFrame:imageFrame
                                               contentView:imageContainer
-                                             settingsView:settingsController.view
+                                             settingsView:_inspectorController.view
                                            inspectorWidth:kInspectorWidth
                                                 debugView:debugController.view
                                                 debugSize:kDebugSize
