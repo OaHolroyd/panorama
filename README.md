@@ -105,20 +105,56 @@ make
 ```
 
 Drag with the mouse or use the arrow/WASD keys to change heading and pitch;
-scroll to zoom. The trailing Render Settings inspector controls resolution,
-lighting, distance/elevation colourmaps and scaling, and optional multiscale
-feature outlines.
+scroll to zoom. The trailing tabbed inspector separates viewer controls from
+observer positioning. The Viewer tab controls resolution, lighting,
+distance/elevation colourmaps and scaling, and optional multiscale feature
+outlines.
+
+The Position tab's Movement section can switch from this Browse behaviour to
+keyboard Roam mode. In Roam mode, WASD moves relative to the current heading;
+turning can use either the arrow keys or pointer motion over the panorama.
+Mouse turning replaces click-and-drag rotation while selected and has its own
+sensitivity control. Movement can maintain either a fixed height above terrain
+or an absolute altitude. Speed and the maximum observer-update rate are
+configurable; movement requests are coalesced when terrain rendering completes
+more slowly than the selected rate. Press Space to pause navigation and free
+the pointer for other controls; a visible badge remains until Space resumes it.
+Cruise mode moves forward continuously along the mouse-controlled heading;
+its logarithmic speed control spans 3.6 km/h to 36,000 km/h, and W/S adjusts
+the speed multiplicatively. It opens paused in Flight mode, which holds
+absolute altitude and uses camera pitch to climb or descend; Terrain mode
+instead maintains a fixed AGL clearance.
+Cruise steering acts as a virtual joystick: the central HUD's fixed boresight
+is neutral, cursor displacement controls continuous yaw and pitch rates, and a
+small central dead zone prevents drift. Its compass ribbon, pitch ladder, and
+artificial horizon show the current view attitude; Aircraft mode also adds a
+bank indicator.
+The optional Aircraft toggle changes horizontal steering into coordinated
+banked turns. Its speed setting becomes a trim speed, while climbs lose
+airspeed and dives gain it; pausing restores a wings-level attitude.
+If Flight mode meets terrain, forward motion is held. Drag to steer or climb,
+use W/S to adjust speed, then press Space to resume.
 
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama
 or map to preview a point. Right-click the panorama to lock its current point;
-left-click the minimap to lock a map point
-and turn the camera toward it. Option-click the minimap, or use its secondary-
-click menu, to move the observer while retaining the current eye height above
-the terrain. The map's scope and expand buttons select its focus and size; the
-grid button overlays the complete prepared-tile coverage. If the requested
-startup observer is outside that coverage, the viewer opens on a central
-available tile with the coverage overlay already enabled.
+left-click the minimap to lock a map point and turn the camera toward it. The
+map can always be panned and zoomed. The location button recentres it on the
+observer without changing scale, while the scope button toggles following the
+panorama mouseover point. Following pauses while the pointer is over the map.
+A locked point can be used as the new observer location with **Move here**.
+Option-click the minimap, or use its secondary-click menu, to move immediately.
+The Position tab also accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
+easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
+`NG907598`, or `190716, 859877`. Its coordinate-system menu defaults to Auto,
+which uses distinctive syntax and prepared-terrain coverage to resolve the
+input. If several interpretations remain plausible, it names them and waits
+for an explicit menu selection. Prefixes such as `WGS84`, `LV95`, `BNG`, and
+`DATASET` are also accepted in Auto mode. Eye-height controls set the retained
+height above the terrain for jumps and vertical adjustments. The expand button
+changes map size; the grid button overlays the complete prepared-tile coverage.
+If the requested startup observer is outside that coverage, the viewer opens on
+a central available tile with the coverage overlay already enabled.
 
 Collapse or reveal the inspector with the `sidebar.right` toolbar button. Run
 `./panorama-app --help` for observer, image-size, and field-of-view options.

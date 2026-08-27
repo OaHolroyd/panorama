@@ -29,7 +29,7 @@
                            northing:(double)northing;
 @end
 
-/// Combined controlled-centre map and terrain-point readout used by the viewer's
+/// Combined freely navigable map and terrain-point readout used by the viewer's
 /// leading overlay. MapKit implementation details remain in minimap.mm so the
 /// application controller only publishes camera and inspected-world state.
 @interface MiniMapPanelView : NSView
@@ -48,10 +48,12 @@
                            commandQueue:(id<MTLCommandQueue>)commandQueue
                                 library:(id<MTLLibrary>)library;
 
-/// Show or hide the map and point footer as one coupled interaction surface.
+/// Show or hide the map and information footer as one coupled surface.
 - (void)setMapAndPointInfoVisible:(bool)visible;
-/// Return the compact or expanded size, including the coupled point footer.
+/// Return the compact or expanded size, including the information footer.
 - (NSSize)preferredPanelSize;
+/// Re-measure the footer after its observer, movement, or point rows change.
+- (void)informationFooterContentDidChange;
 
 /// Update the projected heading wedge to match the displayed camera view.
 - (void)setCameraOrientation:(panorama::CameraOrientation)orientation
@@ -63,6 +65,8 @@
 
 /// Move all observer-relative map graphics after an interactive relocation.
 - (void)setObserverEasting:(double)easting northing:(double)northing;
+/// Recenter on the observer without changing the current map scale.
+- (void)centerOnObserver;
 
 /// Display the hover or locked point using the viewer's blue/orange convention.
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked;

@@ -798,6 +798,34 @@ void ResidentTileCache::record_slot_use(std::span<const uint32_t> slots) {
   }
 }
 
+void ResidentTileCache::rebase_observer(ObserverLocation observer) {
+  State &state = *state_;
+  if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing)) {
+    throw std::invalid_argument("Resident terrain rebase requires a finite observer");
+  }
+  for (uint32_t slot = 0U; slot < state.slot_capacity; slot++) {
+    const uint32_t source_index = state.source_by_slot[slot];
+    if (source_index == state.sources.size()) {
+      continue;
+    }
+    const TerrainSource &source = state.sources[source_index];
+    const double lower_left_x =
+        state.grid_origin_x + static_cast<double>(source.key.column) * state.tile_width;
+    const double lower_left_y =
+        state.grid_origin_y - static_cast<double>(source.key.row + 1) * state.tile_width;
+    const double relative_x = lower_left_x - observer.easting;
+    const double relative_y = lower_left_y - observer.northing;
+    if (relative_x < static_cast<double>(std::numeric_limits<float>::lowest()) ||
+        relative_x > static_cast<double>(std::numeric_limits<float>::max()) ||
+        relative_y < static_cast<double>(std::numeric_limits<float>::lowest()) ||
+        relative_y > static_cast<double>(std::numeric_limits<float>::max())) {
+      throw std::overflow_error("Rebased resident tile origin does not fit float32");
+    }
+    state.metadata[slot].tile_x_min = static_cast<float>(relative_x);
+    state.metadata[slot].tile_y_min = static_cast<float>(relative_y);
+  }
+}
+
 ResidentTileCacheBindings ResidentTileCache::bindings() const {
   const State &state = *state_;
   return {

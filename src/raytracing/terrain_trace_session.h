@@ -16,9 +16,9 @@ namespace panorama {
 ///
 /// Catalogue discovery, Metal pipelines, preparation workers, and the
 /// resident terrain/mipmap atlas live for the complete session. Each call to
-/// `trace` replaces only the ray field and transient frontier, allowing turns
-/// and resolution changes to reuse cached terrain. A moved observer uses a new
-/// session because it changes the finite source catalogue and tracing origin.
+/// `trace` replaces only the ray field and transient frontier, allowing turns,
+/// resolution changes, and movement across retained catalogue tiles to reuse
+/// cached terrain.
 class TerrainTraceSession {
 public:
   TerrainTraceSession(
@@ -33,6 +33,12 @@ public:
 
   /// Trace a new view, resizing only ray-dependent GPU buffers when necessary.
   void trace(const RayField &field);
+
+  /// Move the observer without rebuilding terrain resources when the new
+  /// position belongs to any source retained by this session's catalogue.
+  /// Returns false when the caller must construct a catalogue and session
+  /// centred on terrain outside the current finite source set.
+  [[nodiscard]] bool relocate_observer(ObserverLocation observer);
 
   /// Trace one directional sun ray from each eligible primary collision.
   /// Angles are radians; azimuth is clockwise from grid north and elevation

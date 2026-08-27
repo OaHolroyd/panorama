@@ -94,6 +94,10 @@ public:
   /// Mark the supplied resident slots as recently used by the GPU frontier.
   void record_slot_use(std::span<const uint32_t> slots);
 
+  /// Rebase every resident tile's GPU metadata around a moved observer while
+  /// retaining all atlas payloads and residency state.
+  void rebase_observer(ObserverLocation observer);
+
   /// Return the atlas buffers and layout metadata for the next GPU dispatch.
   [[nodiscard]] ResidentTileCacheBindings bindings() const;
 
