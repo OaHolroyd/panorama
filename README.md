@@ -124,9 +124,11 @@ its logarithmic speed control spans 3.6 km/h to 36,000 km/h, and W/S adjusts
 the speed multiplicatively. It opens paused in Flight mode, which holds
 absolute altitude and uses camera pitch to climb or descend; Terrain mode
 instead maintains a fixed AGL clearance.
-Cruise steering acts as a virtual joystick: the fixed centre crosshair is
-neutral, cursor displacement controls continuous yaw and pitch rates, and a
-small central dead zone prevents drift.
+Cruise steering acts as a virtual joystick: the central HUD's fixed boresight
+is neutral, cursor displacement controls continuous yaw and pitch rates, and a
+small central dead zone prevents drift. Its compass ribbon, pitch ladder, and
+artificial horizon show the current view attitude; Aircraft mode also adds a
+bank indicator.
 The optional Aircraft toggle changes horizontal steering into coordinated
 banked turns. Its speed setting becomes a trim speed, while climbs lose
 airspeed and dives gain it; pausing restores a wings-level attitude.

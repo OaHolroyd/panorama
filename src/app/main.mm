@@ -1534,36 +1534,237 @@ private:
 }
 @end
 
-/// Fixed neutral point for Cruise's virtual-joystick steering.
-@interface CruiseCrosshairView : NSView
+static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
+  path.lineCapStyle = NSLineCapStyleRound;
+  path.lineJoinStyle = NSLineJoinStyleRound;
+  [NSColor.blackColor setStroke];
+  path.lineWidth = foregroundWidth + 2.0;
+  [path stroke];
+  [NSColor.whiteColor setStroke];
+  path.lineWidth = foregroundWidth;
+  [path stroke];
+}
+
+[[nodiscard]] static NSString *heading_label(int unwrappedDegrees) {
+  const int degrees = (unwrappedDegrees % 360 + 360) % 360;
+  switch (degrees) {
+  case 0:
+    return @"N";
+  case 90:
+    return @"E";
+  case 180:
+    return @"S";
+  case 270:
+    return @"W";
+  default:
+    return [NSString stringWithFormat:@"%03d", degrees];
+  }
+}
+
+/// Pointer-transparent attitude HUD centred on Cruise's neutral steering point.
+@interface CruiseHUDView : NSView {
+@private
+  double _heading;
+  double _pitch;
+  double _bank;
+  double _verticalFieldOfView;
+  bool _aircraftMode;
+}
+- (void)setHeading:(double)heading
+                  pitch:(double)pitch
+                   bank:(double)bank
+    verticalFieldOfView:(double)verticalFieldOfView
+           aircraftMode:(bool)aircraftMode;
 @end
 
-@implementation CruiseCrosshairView
+@implementation CruiseHUDView
 - (NSView *)hitTest:(NSPoint)point {
   (void)point;
   return nil;
 }
 
+- (void)setHeading:(double)heading
+                  pitch:(double)pitch
+                   bank:(double)bank
+    verticalFieldOfView:(double)verticalFieldOfView
+           aircraftMode:(bool)aircraftMode {
+  _heading = heading;
+  _pitch = pitch;
+  _bank = bank;
+  _verticalFieldOfView = verticalFieldOfView;
+  _aircraftMode = aircraftMode;
+  self.needsDisplay = YES;
+}
+
 - (void)drawRect:(NSRect)dirtyRect {
   (void)dirtyRect;
+  if (!(self.bounds.size.width > 0.0) || !(self.bounds.size.height > 0.0) ||
+      !(_verticalFieldOfView > 0.0)) {
+    return;
+  }
+
   const NSPoint centre = NSMakePoint(NSMidX(self.bounds), NSMidY(self.bounds));
-  NSBezierPath *crosshair = [NSBezierPath bezierPath];
-  [crosshair appendBezierPathWithOvalInRect:NSMakeRect(centre.x - 6.0, centre.y - 6.0, 12.0, 12.0)];
-  [crosshair moveToPoint:NSMakePoint(centre.x - 17.0, centre.y)];
-  [crosshair lineToPoint:NSMakePoint(centre.x - 9.0, centre.y)];
-  [crosshair moveToPoint:NSMakePoint(centre.x + 9.0, centre.y)];
-  [crosshair lineToPoint:NSMakePoint(centre.x + 17.0, centre.y)];
-  [crosshair moveToPoint:NSMakePoint(centre.x, centre.y - 17.0)];
-  [crosshair lineToPoint:NSMakePoint(centre.x, centre.y - 9.0)];
-  [crosshair moveToPoint:NSMakePoint(centre.x, centre.y + 9.0)];
-  [crosshair lineToPoint:NSMakePoint(centre.x, centre.y + 17.0)];
-  crosshair.lineCapStyle = NSLineCapStyleRound;
+  const double bank = _aircraftMode ? _bank : 0.0;
+  const double sinBank = std::sin(bank);
+  const double cosBank = std::cos(bank);
+  const double focalLength =
+      self.bounds.size.height * 0.5 / std::tan(std::clamp(_verticalFieldOfView, 0.01, 3.0) * 0.5);
+  const auto attitudePoint = [&](double x, double y) {
+    return NSMakePoint(centre.x + x * cosBank - y * sinBank, centre.y + x * sinBank + y * cosBank);
+  };
+
+  NSShadow *textShadow = [[NSShadow alloc] init];
+  textShadow.shadowColor = NSColor.blackColor;
+  textShadow.shadowBlurRadius = 2.0;
+  textShadow.shadowOffset = NSMakeSize(0.0, -1.0);
+  NSDictionary<NSAttributedStringKey, id> *textAttributes = @{
+    NSFontAttributeName : [NSFont monospacedDigitSystemFontOfSize:10.0 weight:NSFontWeightSemibold],
+    NSForegroundColorAttributeName : NSColor.whiteColor,
+    NSShadowAttributeName : textShadow,
+  };
+  const auto drawCentredText = [&](NSString *text, NSPoint point) {
+    const NSSize size = [text sizeWithAttributes:textAttributes];
+    [text drawAtPoint:NSMakePoint(point.x - size.width * 0.5, point.y - size.height * 0.5)
+        withAttributes:textAttributes];
+  };
+
+  // The pitch ladder is expressed in world elevation angles. It moves behind
+  // the fixed boresight and rotates with the apparent horizon as the aircraft
+  // banks. Clipping keeps the overlay useful without obscuring much terrain.
+  [NSGraphicsContext saveGraphicsState];
+  [NSBezierPath clipRect:NSMakeRect(centre.x - 135.0, centre.y - 82.0, 270.0, 164.0)];
+  for (int pitchDegrees = -60; pitchDegrees <= 60; pitchDegrees += 10) {
+    const double pitchRadians =
+        static_cast<double>(pitchDegrees) * panorama::app::kDegreesToRadians;
+    const double y = std::tan(pitchRadians - _pitch) * focalLength;
+    if (std::abs(y) > 100.0) {
+      continue;
+    }
+
+    const bool horizon = pitchDegrees == 0;
+    const double halfWidth = horizon ? 112.0 : (pitchDegrees % 20 == 0 ? 43.0 : 34.0);
+    const double centreGap = horizon ? 20.0 : 9.0;
+    NSBezierPath *line = [NSBezierPath bezierPath];
+    [line moveToPoint:attitudePoint(-halfWidth, y)];
+    [line lineToPoint:attitudePoint(-centreGap, y)];
+    [line moveToPoint:attitudePoint(centreGap, y)];
+    [line lineToPoint:attitudePoint(halfWidth, y)];
+    if (pitchDegrees < 0) {
+      const CGFloat dash[] = {4.0, 3.0};
+      [line setLineDash:dash count:2 phase:0.0];
+    }
+    stroke_hud_path(line, horizon ? 1.6 : 1.0);
+
+    if (!horizon) {
+      NSString *label = [NSString stringWithFormat:@"%d", std::abs(pitchDegrees)];
+      drawCentredText(label, attitudePoint(-halfWidth - 13.0, y));
+      drawCentredText(label, attitudePoint(halfWidth + 13.0, y));
+    }
+  }
+  [NSGraphicsContext restoreGraphicsState];
+
+  if (_aircraftMode) {
+    constexpr double kBankRadius = 70.0;
+    NSBezierPath *bankArc = [NSBezierPath bezierPath];
+    [bankArc appendBezierPathWithArcWithCenter:centre
+                                        radius:kBankRadius
+                                    startAngle:30.0
+                                      endAngle:150.0];
+    for (const int degrees : {-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60}) {
+      const double radians = static_cast<double>(degrees) * panorama::app::kDegreesToRadians;
+      const double innerRadius = kBankRadius - (degrees % 30 == 0 ? 7.0 : 4.0);
+      [bankArc moveToPoint:NSMakePoint(
+                               centre.x + innerRadius * std::sin(radians),
+                               centre.y + innerRadius * std::cos(radians)
+                           )];
+      [bankArc lineToPoint:NSMakePoint(
+                               centre.x + kBankRadius * std::sin(radians),
+                               centre.y + kBankRadius * std::cos(radians)
+                           )];
+    }
+    stroke_hud_path(bankArc, 1.0);
+
+    const double indicatedBank = std::clamp(
+        bank,
+        -60.0 * panorama::app::kDegreesToRadians,
+        60.0 * panorama::app::kDegreesToRadians
+    );
+    const double tangentX = std::cos(indicatedBank);
+    const double tangentY = -std::sin(indicatedBank);
+    const double radialX = std::sin(indicatedBank);
+    const double radialY = std::cos(indicatedBank);
+    NSBezierPath *bankPointer = [NSBezierPath bezierPath];
+    [bankPointer moveToPoint:NSMakePoint(
+                                 centre.x + radialX * (kBankRadius - 6.0),
+                                 centre.y + radialY * (kBankRadius - 6.0)
+                             )];
+    [bankPointer lineToPoint:NSMakePoint(
+                                 centre.x + radialX * (kBankRadius + 4.0) + tangentX * 4.0,
+                                 centre.y + radialY * (kBankRadius + 4.0) + tangentY * 4.0
+                             )];
+    [bankPointer lineToPoint:NSMakePoint(
+                                 centre.x + radialX * (kBankRadius + 4.0) - tangentX * 4.0,
+                                 centre.y + radialY * (kBankRadius + 4.0) - tangentY * 4.0
+                             )];
+    [bankPointer closePath];
+    [NSColor.blackColor setStroke];
+    bankPointer.lineWidth = 3.0;
+    [bankPointer stroke];
+    [NSColor.whiteColor setFill];
+    [bankPointer fill];
+  }
+
+  // A short compass ribbon makes heading readable without moving the user's
+  // attention to a corner of the view.
+  const double headingDegrees = std::remainder(_heading * panorama::app::kRadiansToDegrees, 360.0);
+  constexpr double kHeadingPixelsPerDegree = 2.35;
+  const double tapeY = centre.y + 108.0;
+  [NSGraphicsContext saveGraphicsState];
+  [NSBezierPath clipRect:NSMakeRect(centre.x - 108.0, tapeY - 4.0, 216.0, 35.0)];
+  NSBezierPath *headingTape = [NSBezierPath bezierPath];
+  [headingTape moveToPoint:NSMakePoint(centre.x - 108.0, tapeY)];
+  [headingTape lineToPoint:NSMakePoint(centre.x + 108.0, tapeY)];
+  const int firstTick = static_cast<int>(std::floor((headingDegrees - 50.0) / 10.0)) * 10;
+  for (int tick = firstTick; tick <= headingDegrees + 50.0; tick += 10) {
+    const double x =
+        centre.x + (static_cast<double>(tick) - headingDegrees) * kHeadingPixelsPerDegree;
+    const int normalisedTick = (tick % 360 + 360) % 360;
+    const bool labelled = normalisedTick % 30 == 0;
+    [headingTape moveToPoint:NSMakePoint(x, tapeY)];
+    [headingTape lineToPoint:NSMakePoint(x, tapeY + (labelled ? 9.0 : 5.0))];
+    if (labelled) {
+      drawCentredText(heading_label(tick), NSMakePoint(x, tapeY + 18.0));
+    }
+  }
+  stroke_hud_path(headingTape, 1.0);
+  [NSGraphicsContext restoreGraphicsState];
+
+  NSBezierPath *headingPointer = [NSBezierPath bezierPath];
+  [headingPointer moveToPoint:NSMakePoint(centre.x, tapeY - 1.0)];
+  [headingPointer lineToPoint:NSMakePoint(centre.x - 4.0, tapeY - 7.0)];
+  [headingPointer lineToPoint:NSMakePoint(centre.x + 4.0, tapeY - 7.0)];
+  [headingPointer closePath];
   [NSColor.blackColor setStroke];
-  crosshair.lineWidth = 3.0;
-  [crosshair stroke];
-  [NSColor.whiteColor setStroke];
-  crosshair.lineWidth = 1.25;
-  [crosshair stroke];
+  headingPointer.lineWidth = 3.0;
+  [headingPointer stroke];
+  [NSColor.whiteColor setFill];
+  [headingPointer fill];
+  const int displayedHeading = (static_cast<int>(std::lround(headingDegrees)) % 360 + 360) % 360;
+  drawCentredText(
+      [NSString stringWithFormat:@"%03d°", displayedHeading],
+      NSMakePoint(centre.x, tapeY - 17.0)
+  );
+
+  // Draw the boresight last so it remains the dominant, fixed steering datum.
+  NSBezierPath *boresight = [NSBezierPath bezierPath];
+  [boresight appendBezierPathWithOvalInRect:NSMakeRect(centre.x - 5.0, centre.y - 5.0, 10.0, 10.0)];
+  [boresight moveToPoint:NSMakePoint(centre.x - 23.0, centre.y)];
+  [boresight lineToPoint:NSMakePoint(centre.x - 9.0, centre.y)];
+  [boresight moveToPoint:NSMakePoint(centre.x + 9.0, centre.y)];
+  [boresight lineToPoint:NSMakePoint(centre.x + 23.0, centre.y)];
+  [boresight moveToPoint:NSMakePoint(centre.x, centre.y - 16.0)];
+  [boresight lineToPoint:NSMakePoint(centre.x, centre.y - 9.0)];
+  stroke_hud_path(boresight, 1.3);
 }
 @end
 
@@ -1574,7 +1775,7 @@ private:
   LockedPointMarkerView *_lockedPointMarker;
   ViewerPauseIndicatorView *_pauseIndicator;
   NSTextField *_pauseIndicatorLabel;
-  CruiseCrosshairView *_cruiseCrosshair;
+  CruiseHUDView *_cruiseHUD;
   double _lockedPointPixelX;
   double _lockedPointPixelY;
   double _lockedPointDirectionX;
@@ -1592,6 +1793,11 @@ private:
 - (void)setPointInspectionEnabled:(bool)enabled;
 - (void)setMouseTurningEnabled:(bool)enabled;
 - (void)setCruiseSteeringEnabled:(bool)enabled;
+- (void)setCruiseHUDHeading:(double)heading
+                      pitch:(double)pitch
+                       bank:(double)bank
+        verticalFieldOfView:(double)verticalFieldOfView
+               aircraftMode:(bool)aircraftMode;
 - (void)setViewerPaused:(bool)paused recoveryMessage:(NSString *)recoveryMessage;
 - (void)setTerrainPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection
                           locked:(bool)locked
@@ -1789,6 +1995,7 @@ private:
 - (void)updateMovementSpeedControl;
 - (void)roamUpdateRateChanged:(id)sender;
 - (void)updateRoamControls;
+- (void)updateCruiseHUD;
 - (void)updateMovementStatus;
 - (void)scheduleRoamTimer;
 - (void)roamTimerFired:(NSTimer *)timer;
@@ -1966,21 +2173,33 @@ private:
 
 - (void)setCruiseSteeringEnabled:(bool)enabled {
   _cruiseSteeringEnabled = enabled;
-  if (_cruiseCrosshair == nil) {
-    _cruiseCrosshair = [[CruiseCrosshairView alloc] initWithFrame:NSZeroRect];
-    _cruiseCrosshair.translatesAutoresizingMaskIntoConstraints = NO;
-    [self addSubview:_cruiseCrosshair];
+  if (_cruiseHUD == nil) {
+    _cruiseHUD = [[CruiseHUDView alloc] initWithFrame:NSZeroRect];
+    _cruiseHUD.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:_cruiseHUD];
     [NSLayoutConstraint activateConstraints:@[
-      [_cruiseCrosshair.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
-      [_cruiseCrosshair.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-      [_cruiseCrosshair.widthAnchor constraintEqualToConstant:40.0],
-      [_cruiseCrosshair.heightAnchor constraintEqualToConstant:40.0],
+      [_cruiseHUD.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+      [_cruiseHUD.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+      [_cruiseHUD.topAnchor constraintEqualToAnchor:self.topAnchor],
+      [_cruiseHUD.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
     ]];
   }
-  _cruiseCrosshair.hidden = !enabled;
+  _cruiseHUD.hidden = !enabled;
   self.window.acceptsMouseMovedEvents = enabled || _pointInspectionEnabled || _mouseTurningEnabled;
   [self updateTrackingAreas];
   [self.window invalidateCursorRectsForView:self];
+}
+
+- (void)setCruiseHUDHeading:(double)heading
+                      pitch:(double)pitch
+                       bank:(double)bank
+        verticalFieldOfView:(double)verticalFieldOfView
+               aircraftMode:(bool)aircraftMode {
+  [_cruiseHUD setHeading:heading
+                    pitch:pitch
+                     bank:bank
+      verticalFieldOfView:verticalFieldOfView
+             aircraftMode:aircraftMode];
 }
 
 - (void)setViewerPaused:(bool)paused recoveryMessage:(NSString *)recoveryMessage {
@@ -2771,10 +2990,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 - (void)levelAircraft {
   _aircraftBank = 0.0;
   if (std::abs(_orientation.roll) <= 1e-12) {
+    [self updateCruiseHUD];
     return;
   }
   _orientation.roll = 0.0;
   _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+  [self updateCruiseHUD];
   [self updateMiniMapTelemetry];
 }
 
@@ -2854,6 +3075,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     // CameraOrientation's positive roll tilts the rendered horizon in the
     // opposite direction to the physical positive bank used above.
     _orientation.roll = -_aircraftBank;
+    [self updateCruiseHUD];
     if (attitudeChanged) {
       _renderer->request_view(_orientation, _verticalFieldOfView, _image);
     }
@@ -2984,10 +3206,19 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self updateMovementSpeedControl];
   [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled] && !_viewerPaused];
   [_panoramaView setCruiseSteeringEnabled:cruising && !_viewerPaused];
+  [self updateCruiseHUD];
   if (![self hasPressedRoamKey]) {
     [self updateMovementStatus];
   }
   [self updateMiniMapTelemetry];
+}
+
+- (void)updateCruiseHUD {
+  [_panoramaView setCruiseHUDHeading:_orientation.heading
+                               pitch:_orientation.pitch
+                                bank:_aircraftBank
+                 verticalFieldOfView:_verticalFieldOfView
+                        aircraftMode:[self isAircraftDynamicsEnabled]];
 }
 
 - (void)movementModeChanged:(id)sender {
@@ -3113,6 +3344,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   constexpr double kPitchLimit = 85.0 * std::numbers::pi / 180.0;
   _orientation.pitch = std::clamp(_orientation.pitch + pitchDelta, -kPitchLimit, kPitchLimit);
   _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+  [self updateCruiseHUD];
   [self updateMiniMapTelemetry];
 }
 
@@ -3163,6 +3395,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _verticalFieldOfView = next;
   [self updateZoomControls];
   _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+  [self updateCruiseHUD];
 }
 
 - (void)zoomControlChanged:(NSSlider *)sender {
@@ -3614,6 +3847,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_panoramaView setPointInspectionEnabled:true];
   [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled] && !_viewerPaused];
   [_panoramaView setCruiseSteeringEnabled:[self isCruisingEnabled] && !_viewerPaused];
+  [self updateCruiseHUD];
   [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
   [_overlayView setMapAndPointInfoVisible:true];
   [self updateMiniMapTelemetry];
@@ -3824,6 +4058,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _orientation.heading = std::atan2(east, north);
   _orientation.pitch = std::atan2(apparentUp, horizontal);
   _renderer->request_view(_orientation, _verticalFieldOfView, _image);
+  [self updateCruiseHUD];
 }
 
 - (void)toggleMapAndPointInspection:(id)sender {
