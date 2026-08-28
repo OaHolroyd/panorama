@@ -4314,10 +4314,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   const double initialLodScale = _renderer->initial_lod_scale();
   _lodScaleControl = [NSSlider sliderWithValue:initialLodScale
                                       minValue:0.0
-                                      maxValue:50.0
+                                      maxValue:8.0
                                         target:self
                                         action:@selector(lodScaleChanged:)];
-  _lodScaleControl.continuous = YES;
+  _lodScaleControl.numberOfTickMarks = 17; // 0.0, 0.2, 0.4, ... 8.0
+  _lodScaleControl.allowsTickMarkValuesOnly = YES;
+  // _lodScaleControl.continuous = YES;
   _lodScaleControl.toolTip =
       @"Use coarser independently stored terrain where a cell is smaller than a pixel";
   _lodScaleLabel =
