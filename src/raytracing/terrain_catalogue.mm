@@ -290,7 +290,7 @@ TerrainCatalogue TerrainCatalogue::discover(
   );
   if (custom_source != available_sources.end()) {
     const MetalTileHeader header = read_metal_tile_header(custom_source->path);
-    const uint32_t lod_count = header.version == kMetalTileLodVersion ? header.lod_count : 1U;
+    const uint32_t lod_count = header.lod_count;
     for (TerrainSource &source : available_sources) {
       if (is_metal_tile_path(source.path)) {
         source.lod_count = lod_count;

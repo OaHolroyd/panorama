@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -163,6 +164,15 @@ struct ResidentTileCache::State {
       Timer &timer
   );
 
+  /// Work around compressed Metal I/O implementations which cannot begin a
+  /// load in the small header/table prefix of a compressed LOD stream.
+  void load_compressed_lod_ranges(
+      std::span<const MetalTileBufferLoad> loads,
+      std::span<const NSUInteger> destination_offsets,
+      id<MTLBuffer> destination,
+      Timer &timer
+  );
+
   /// Build mipmaps synchronously where the observer tile requires them now.
   void generate_mipmaps(
       std::span<const uint32_t> slots,
@@ -225,7 +235,11 @@ void ResidentTileCache::State::load_custom_vertices(
 
   if (header_template.sample_type == MetalTileSampleType::Float32 || retain_quantized) {
     std::vector<MetalTileBufferLoad> direct_loads;
+    std::vector<MetalTileBufferLoad> prefixed_loads;
+    std::vector<NSUInteger> prefixed_destinations;
     direct_loads.reserve(loads.size());
+    prefixed_loads.reserve(loads.size());
+    prefixed_destinations.reserve(loads.size());
     for (size_t index = 0U; index < loads.size(); index++) {
       MetalTileBufferLoad load = loads[index];
       load.destination_offset +=
@@ -233,7 +247,14 @@ void ResidentTileCache::State::load_custom_vertices(
               ? static_cast<NSUInteger>(slots[index]) * quantized_record.stride +
                     quantized_record.vertex_offset
               : static_cast<NSUInteger>(slots[index]) * header_template.vertex_byte_count;
-      direct_loads.push_back(load);
+      const size_t compression_chunk = metal_tile_compression_chunk_size();
+      if (metal_tile_compression(load.path) != MetalTileCompression::None &&
+          load.source_offset % compression_chunk != 0U) {
+        prefixed_destinations.push_back(load.destination_offset);
+        prefixed_loads.push_back(load);
+      } else {
+        direct_loads.push_back(load);
+      }
       if (retain_quantized) {
         auto *record = static_cast<std::byte *>(vertex_atlas.contents) +
                        static_cast<size_t>(slots[index]) * quantized_record.stride;
@@ -244,9 +265,20 @@ void ResidentTileCache::State::load_custom_vertices(
         );
       }
     }
-    timer.start_wall("Metal tile I/O");
-    load_metal_tiles_into_buffer(device, io_queue, direct_loads, vertex_atlas, vertex_atlas.length);
-    timer.stop("Metal tile I/O");
+    if (!direct_loads.empty()) {
+      timer.start_wall("Metal tile I/O");
+      load_metal_tiles_into_buffer(
+          device,
+          io_queue,
+          direct_loads,
+          vertex_atlas,
+          vertex_atlas.length
+      );
+      timer.stop("Metal tile I/O");
+    }
+    if (!prefixed_loads.empty()) {
+      load_compressed_lod_ranges(prefixed_loads, prefixed_destinations, vertex_atlas, timer);
+    }
     return;
   }
   if (header_template.sample_type != MetalTileSampleType::Uint16Decimeters ||
@@ -260,13 +292,22 @@ void ResidentTileCache::State::load_custom_vertices(
     const size_t wave_size =
         std::min(static_cast<size_t>(wave_capacity), loads.size() - wave_start);
     std::vector<MetalTileBufferLoad> staged_loads;
+    std::vector<MetalTileBufferLoad> prefixed_loads;
+    std::vector<NSUInteger> prefixed_destinations;
     staged_loads.reserve(wave_size);
     for (size_t index = 0U; index < wave_size; index++) {
       const MetalTileBufferLoad &load = loads[wave_start + index];
       MetalTileBufferLoad staged = load;
       staged.destination_offset =
           static_cast<NSUInteger>(index) * quantized_record.stride + quantized_record.vertex_offset;
-      staged_loads.push_back(staged);
+      const size_t compression_chunk = metal_tile_compression_chunk_size();
+      if (metal_tile_compression(staged.path) != MetalTileCompression::None &&
+          staged.source_offset % compression_chunk != 0U) {
+        prefixed_destinations.push_back(staged.destination_offset);
+        prefixed_loads.push_back(staged);
+      } else {
+        staged_loads.push_back(staged);
+      }
       auto *record = static_cast<std::byte *>(quantized_staging.contents) +
                      static_cast<size_t>(index) * quantized_record.stride;
       std::memcpy(
@@ -276,15 +317,20 @@ void ResidentTileCache::State::load_custom_vertices(
       );
     }
 
-    timer.start_wall("Metal tile I/O");
-    load_metal_tiles_into_buffer(
-        device,
-        io_queue,
-        staged_loads,
-        quantized_staging,
-        quantized_staging.length
-    );
-    timer.stop("Metal tile I/O");
+    if (!staged_loads.empty()) {
+      timer.start_wall("Metal tile I/O");
+      load_metal_tiles_into_buffer(
+          device,
+          io_queue,
+          staged_loads,
+          quantized_staging,
+          quantized_staging.length
+      );
+      timer.stop("Metal tile I/O");
+    }
+    if (!prefixed_loads.empty()) {
+      load_compressed_lod_ranges(prefixed_loads, prefixed_destinations, quantized_staging, timer);
+    }
 
     const std::span<const uint32_t> wave_slots = slots.subspan(wave_start, wave_size);
     write_preparation_slots(wave_slots);
@@ -323,6 +369,79 @@ void ResidentTileCache::State::load_custom_vertices(
     }
     timer.add_work("GPU vertex conversion", 1'000.0 * (command.GPUEndTime - command.GPUStartTime));
     timer.stop("GPU vertex conversion");
+  }
+}
+
+void ResidentTileCache::State::load_compressed_lod_ranges(
+    std::span<const MetalTileBufferLoad> loads,
+    std::span<const NSUInteger> destination_offsets,
+    id<MTLBuffer> destination,
+    Timer &timer
+) {
+  if (loads.empty() || loads.size() != destination_offsets.size() || destination == nil ||
+      mipmap_queue == nil) {
+    throw std::invalid_argument("Compressed LOD loading requires matching valid buffers");
+  }
+
+  // Metal I/O compressed handles normally translate a logical byte offset to
+  // their compressed chunks. Some driver versions stall for the small offset
+  // introduced by the LOD table, though. Read the required prefix from zero,
+  // which is universally supported, then trim it with a GPU-local copy. This
+  // preserves compatibility with already-generated unaligned LOD files.
+  std::vector<id<MTLBuffer>> staging;
+  staging.reserve(loads.size());
+  for (const MetalTileBufferLoad &load : loads) {
+    if (load.source_offset > std::numeric_limits<uint64_t>::max() - load.byte_count ||
+        load.source_offset + load.byte_count >
+            static_cast<uint64_t>(std::numeric_limits<NSUInteger>::max())) {
+      throw std::overflow_error("Compressed Metal tile range exceeds NSUInteger");
+    }
+    const NSUInteger prefix_size = static_cast<NSUInteger>(load.source_offset + load.byte_count);
+    id<MTLBuffer> buffer = [device newBufferWithLength:prefix_size
+                                               options:MTLResourceStorageModeShared];
+    if (buffer == nil) {
+      throw std::runtime_error("Could not allocate compressed LOD staging buffer");
+    }
+    const MetalTileBufferLoad prefixed = {
+        load.path,
+        0U,
+        load.file,
+        0U,
+        static_cast<uint64_t>(prefix_size),
+    };
+    timer.start_wall("Metal tile I/O");
+    load_metal_tiles_into_buffer(
+        device,
+        io_queue,
+        std::span<const MetalTileBufferLoad>(&prefixed, 1U),
+        buffer,
+        buffer.length
+    );
+    timer.stop("Metal tile I/O");
+    staging.push_back(buffer);
+  }
+
+  id<MTLCommandBuffer> command = [mipmap_queue commandBuffer];
+  id<MTLBlitCommandEncoder> encoder = [command blitCommandEncoder];
+  if (command == nil || encoder == nil) {
+    throw std::runtime_error("Could not create compressed LOD copy command");
+  }
+  for (size_t index = 0U; index < loads.size(); index++) {
+    const MetalTileBufferLoad &load = loads[index];
+    [encoder copyFromBuffer:staging[index]
+               sourceOffset:static_cast<NSUInteger>(load.source_offset)
+                   toBuffer:destination
+          destinationOffset:destination_offsets[index]
+                       size:static_cast<NSUInteger>(load.byte_count)];
+  }
+  [encoder endEncoding];
+  timer.start_wall("GPU compressed LOD copy");
+  [command commit];
+  [command waitUntilCompleted];
+  timer.stop("GPU compressed LOD copy");
+  if (command.status == MTLCommandBufferStatusError) {
+    print_error(@"Compressed LOD copy failed", command.error);
+    throw std::runtime_error("Could not trim compressed Metal tile LOD payload");
   }
 }
 
@@ -461,9 +580,9 @@ ResidentTileCache::ResidentTileCache(
   const MetalTileHeader header_template =
       custom_origin ? read_metal_tile_header(sources.front().path)
                     : MetalTileHeader{
-                          kMetalTileFloat32Magic,
-                          kMetalTileFloat32Version,
-                          kMetalTileFloat32HeaderSize,
+                          kMetalTileLodMagic,
+                          kMetalTileLodVersion,
+                          kMetalTileLodHeaderSize,
                           MetalTileCompression::None,
                           origin.crs.epsg_code(),
                           origin.size,
@@ -477,12 +596,12 @@ ResidentTileCache::ResidentTileCache(
                           origin.lower_left_x,
                           origin.lower_left_y,
                           origin.delta,
-                          kMetalTileFloat32HeaderSize,
+                          kMetalTileLodHeaderSize + sizeof(MetalTileLod),
                           static_cast<uint64_t>(vertex_count) * sizeof(float),
-                          0U,
-                          0U,
-                          0U,
-                          0U,
+                          1U,
+                          static_cast<uint32_t>(sizeof(MetalTileLod)),
+                          kMetalTileLodHeaderSize,
+                          sizeof(MetalTileLod),
                       };
   if (retain_quantized &&
       (!custom_origin || header_template.sample_type != MetalTileSampleType::Uint16Decimeters)) {

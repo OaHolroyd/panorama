@@ -502,8 +502,7 @@ int main(int argc, const char *argv[]) {
             key,
             catalogue.grid(),
             options.compression,
-            options.sample_type,
-            options.lod_sampling
+            options.sample_type
         );
         manifest_entries.push_back({key.row, key.column, maximum});
       }

@@ -11,14 +11,6 @@
 
 namespace panorama {
 
-inline constexpr std::array<char, 8> kMetalTileFloat32Magic =
-    {'P', 'N', 'T', 'I', 'L', 'E', '0', '2'};
-inline constexpr uint32_t kMetalTileFloat32Version = 2U;
-inline constexpr uint32_t kMetalTileFloat32HeaderSize = 96U;
-inline constexpr std::array<char, 8> kMetalTileUint16Magic =
-    {'P', 'N', 'T', 'I', 'L', 'E', '0', '3'};
-inline constexpr uint32_t kMetalTileUint16Version = 3U;
-inline constexpr uint32_t kMetalTileUint16HeaderSize = 104U;
 inline constexpr std::array<char, 8> kMetalTileLodMagic = {'P', 'N', 'T', 'I', 'L', 'E', '0', '4'};
 inline constexpr uint32_t kMetalTileLodVersion = 4U;
 inline constexpr uint32_t kMetalTileLodHeaderSize = 128U;
@@ -40,10 +32,9 @@ enum class MetalTileSampleType : uint32_t {
 
 /// Fixed little-endian header at decompressed stream offset zero.
 ///
-/// All offsets address the logical decompressed stream understood by Metal
-/// I/O. Version 2 stores Float32 vertices directly; version 3 stores Uint16
-/// decimetre offsets from `elevation_base_decimeters`. Readers normalize both
-/// versions into this in-memory structure.
+/// All offsets address the logical decompressed stream understood by Metal I/O.
+/// Every tile uses this version-4 layout, with one or more independently
+/// addressable terrain LOD payloads.
 struct MetalTileHeader {
   std::array<char, 8> magic;
   uint32_t version;
@@ -132,21 +123,7 @@ void write_metal_tile_lods(
     std::span<const std::byte> payload
 );
 
-/// Write one raw or Metal-compressed logical tile stream.
-void write_metal_tile(
-    const std::filesystem::path &path,
-    const MetalTileHeader &header,
-    std::span<const float> vertices
-);
-
-/// Write one fixed-point raw or Metal-compressed logical tile stream.
-void write_metal_tile(
-    const std::filesystem::path &path,
-    const MetalTileHeader &header,
-    std::span<const uint16_t> vertices
-);
-
-/// Read and validate only the versioned header, without retaining terrain data.
+/// Read and validate the current-format header, without retaining terrain data.
 ///
 /// Compressed files use a small Metal I/O request because their header is
 /// part of the compressed logical stream. Raw files use an ordinary read.
@@ -161,6 +138,9 @@ open_metal_tile_file(id<MTLDevice> device, const std::filesystem::path &path);
 
 /// Return the number of command buffers accepted concurrently by our I/O queue.
 [[nodiscard]] NSUInteger metal_tile_io_concurrency();
+
+/// Return the logical alignment of independently readable compressed blocks.
+[[nodiscard]] size_t metal_tile_compression_chunk_size();
 
 /// Load independently selected logical byte ranges into a Metal buffer.
 ///

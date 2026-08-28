@@ -20,10 +20,10 @@ namespace panorama::terrain {
 /// Convert one level-0 chunk into a Float32 or fixed-point Metal terrain tile.
 ///
 /// The source chunk is north-to-south for conventional GIS writers. This
-/// writer flips it once into atlas order. Float32 output remains version 2;
-/// Uint16 output quantizes onto a global decimetre lattice and stores offsets
-/// from a per-tile integer base. The renderer can expand Uint16 during atlas
-/// installation; by default the renderer instead retains it through tracing.
+/// writer flips it once into atlas order. Uint16 output quantizes onto a global
+/// decimetre lattice and stores offsets from a per-tile integer base. The
+/// renderer can expand Uint16 during atlas installation; by default the
+/// renderer instead retains it through tracing.
 /// Returns the exact maximum elevation recorded in the tile header.
 [[nodiscard]] float write_metal_tile_chunk(
     const std::filesystem::path &path,
@@ -32,8 +32,7 @@ namespace panorama::terrain {
     ChunkKey key,
     const SourceGrid &source_grid,
     MetalTileCompression compression,
-    MetalTileSampleType sample_type,
-    LodSampling lod_sampling
+    MetalTileSampleType sample_type
 );
 
 } // namespace panorama::terrain
