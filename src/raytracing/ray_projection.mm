@@ -66,17 +66,25 @@ struct Coordinate2 {
 
 /// Estimate the smallest angle between adjacent camera pixels without an
 /// inverse cosine. For the small pixel angles used here, the chord length
-/// `sqrt(2 * (1 - dot))` equals the angle to first order.
+/// between unit directions equals the angle to first order. Computing that
+/// chord from component differences avoids the cancellation in `1 - dot` at
+/// narrow fields of view, where adjacent Float32 directions can round their
+/// dot product to exactly one.
 [[nodiscard]] float minimum_camera_pixel_angle(const RayField &field, double fallback) {
   double minimum = std::numeric_limits<double>::infinity();
   const auto compare = [&](const RayDirection &left, const RayDirection &right) {
     const double left_length = std::sqrt(1.0 + static_cast<double>(left.slope) * left.slope);
     const double right_length = std::sqrt(1.0 + static_cast<double>(right.slope) * right.slope);
-    const double dot =
-        (static_cast<double>(left.x) * right.x + static_cast<double>(left.y) * right.y +
-         static_cast<double>(left.slope) * right.slope) /
-        (left_length * right_length);
-    minimum = std::min(minimum, std::sqrt(std::max(0.0, 2.0 * (1.0 - dot))));
+    const double east =
+        static_cast<double>(left.x) / left_length - static_cast<double>(right.x) / right_length;
+    const double north =
+        static_cast<double>(left.y) / left_length - static_cast<double>(right.y) / right_length;
+    const double up = static_cast<double>(left.slope) / left_length -
+                      static_cast<double>(right.slope) / right_length;
+    const double chord = std::hypot(east, north, up);
+    if (std::isfinite(chord) && chord > 0.0) {
+      minimum = std::min(minimum, chord);
+    }
   };
   for (uint32_t row = 0U; row < field.image.height; row++) {
     for (uint32_t column = 0U; column < field.image.width; column++) {
@@ -89,9 +97,12 @@ struct Coordinate2 {
       }
     }
   }
-  // A one-pixel image has no adjacent pair. Its calibrated focal length still
-  // supplies the local pixel angle needed by the LOD planner.
-  if (!std::isfinite(minimum)) {
+  // A one-pixel image has no adjacent pair. At extremely narrow fields of
+  // view Float32 ray storage can also make every adjacent pair identical.
+  // The calibrated focal length still supplies a finite local pixel angle for
+  // LOD planning in both cases; retaining more detail is preferable to
+  // rejecting an otherwise valid camera projection.
+  if (!std::isfinite(minimum) || minimum <= 0.0) {
     minimum = fallback;
   }
   if (minimum <= 0.0 || minimum > std::numeric_limits<float>::max()) {
