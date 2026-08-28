@@ -23,6 +23,7 @@ public:
       const TerrainCatalogue &catalogue,
       std::span<const RayDirection> rays,
       const RaytraceParameters &parameters,
+      std::span<const uint32_t> lod_by_source,
       uint32_t resident_slot_capacity,
       uint32_t observer_slot
   );
@@ -33,12 +34,13 @@ public:
       const TerrainCatalogue &catalogue,
       size_t ray_capacity,
       uint32_t num_levels,
+      std::span<const uint32_t> lod_by_source,
       uint32_t resident_slot_capacity,
       std::span<const float> scheduling_distances = {}
   );
 
-  /// Clear pending-request state for sources just published by the atlas cache.
-  void mark_installed(std::span<const uint32_t> source_indices);
+  /// Clear pending-request state for matching variants published by the atlas cache.
+  void mark_installed(std::span<const TerrainTileVariant> variants);
 
   /// Consume new GPU continuations, activate nearby work, and request sources.
   [[nodiscard]] uint32_t activate_resident(
@@ -73,6 +75,8 @@ private:
   const TerrainCatalogue &catalogue_;
   size_t ray_capacity_;
   uint32_t num_levels_;
+  /// Immutable per-source terrain LOD plan selected by the owning session.
+  std::span<const uint32_t> lod_by_source_;
   /// Optional per-ray priority independent of the ray-local traversal distance.
   std::span<const float> scheduling_distances_;
   /// Deferred rays grouped by their next required catalogue source.

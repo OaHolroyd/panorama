@@ -40,6 +40,8 @@ struct TerrainSource {
   TileKey key;
   std::filesystem::path path;
   std::optional<float> maximum_elevation;
+  /// Independently loadable terrain representations, including LOD 1.
+  uint32_t lod_count = 1U;
 };
 
 /// A finite, indexed catalogue of terrain sources relevant to one render.
@@ -106,5 +108,18 @@ private:
 /// Return the shortest horizontal distance from an observer to one tile square.
 [[nodiscard]] double
 tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLocation &observer);
+
+/// Return the one-based terrain LOD selected for this tile. `pixel_angle` is
+/// the conservative angular span of one output pixel in radians; `lod_scale`
+/// of zero disables selection and returns LOD 1.
+[[nodiscard]] uint32_t tile_lod(
+    const TileGrid &grid,
+    TileKey key,
+    const ObserverLocation &observer,
+    float base_cell_size,
+    float pixel_angle,
+    float lod_scale,
+    uint32_t available_lod_count
+);
 
 } // namespace panorama

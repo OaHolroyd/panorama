@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -21,37 +22,46 @@ namespace {
 
 static_assert(std::endian::native == std::endian::little);
 static_assert(std::is_trivially_copyable_v<MetalTileHeader>);
-static_assert(sizeof(MetalTileHeader) == kMetalTileUint16HeaderSize);
+static_assert(sizeof(MetalTileHeader) == kMetalTileLodHeaderSize);
+static_assert(std::is_trivially_copyable_v<MetalTileLod>);
+static_assert(sizeof(MetalTileLod) == 40U);
 
-/// Exact version-2 disk header retained for Float32 compatibility.
-struct MetalTileFloat32Header {
-  std::array<char, 8> magic;
-  uint32_t version;
-  uint32_t header_size;
-  MetalTileCompression compression;
-  uint32_t epsg_code;
-  uint32_t cell_count;
-  uint32_t level_count;
-  float maximum_elevation;
-  MetalTileSampleType sample_type;
-  int64_t row;
-  int64_t column;
-  double lower_left_x;
-  double lower_left_y;
-  double cell_size;
-  uint64_t vertex_offset;
-  uint64_t vertex_byte_count;
-};
-
-static_assert(std::is_trivially_copyable_v<MetalTileFloat32Header>);
-static_assert(sizeof(MetalTileFloat32Header) == kMetalTileFloat32HeaderSize);
-
-using MetalTileHeaderBytes = std::array<std::byte, kMetalTileUint16HeaderSize>;
+using MetalTileHeaderBytes = std::array<std::byte, kMetalTileLodHeaderSize>;
 
 // Keep one I/O wave within the queue's explicit command-buffer and command
 // concurrency limits. Later waves reuse the same queue after the previous
 // commands have completed.
 constexpr NSUInteger kMetalIoConcurrency = 8U;
+
+// Compressed metadata is small, but Metal I/O uses the same decompression
+// machinery as payload reads. Some drivers do not complete several independent
+// short prefix reads reliably when tile-preparation workers issue them at once.
+// Keep that control-plane work serial; bulk vertex ranges still use the cache's
+// concurrent queue. Raw tiles bypass this mutex and retain ordinary filesystem
+// parallelism.
+std::mutex compressed_metadata_io_mutex;
+
+/// Reuse one queue for the serialized compressed control-plane reads. Creating
+/// a new compressed queue for every header or LOD table can exhaust or wedge
+/// the driver's short-lived decompression contexts even when calls are made
+/// one at a time.
+struct CompressedMetadataIo {
+  id<MTLDevice> device = nil;
+  id<MTLIOCommandQueue> queue = nil;
+};
+
+[[nodiscard]] const CompressedMetadataIo &compressed_metadata_io() {
+  static const CompressedMetadataIo io = [] {
+    CompressedMetadataIo value = {};
+    value.device = MTLCreateSystemDefaultDevice();
+    if (value.device == nil) {
+      throw std::runtime_error("No Metal device is available for compressed tile metadata");
+    }
+    value.queue = make_metal_io_queue(value.device);
+    return value;
+  }();
+  return io;
+}
 
 /// Convert the stable on-disk enum to Metal's compression API value.
 [[nodiscard]] MTLIOCompressionMethod compression_method(MetalTileCompression compression) {
@@ -103,38 +113,9 @@ void complete_io(id<MTLIOCommandBuffer> command, const std::filesystem::path &pa
 
 /// Decode either on-disk header version into the common in-memory structure.
 [[nodiscard]] MetalTileHeader decode_header(const MetalTileHeaderBytes &bytes) {
-  std::array<char, 8> magic = {};
-  std::memcpy(magic.data(), bytes.data(), magic.size());
-  if (magic == kMetalTileUint16Magic) {
-    MetalTileHeader header = {};
-    std::memcpy(&header, bytes.data(), sizeof(header));
-    return header;
-  }
-  if (magic == kMetalTileFloat32Magic) {
-    MetalTileFloat32Header disk = {};
-    std::memcpy(&disk, bytes.data(), sizeof(disk));
-    return {
-        disk.magic,
-        disk.version,
-        disk.header_size,
-        disk.compression,
-        disk.epsg_code,
-        disk.cell_count,
-        disk.level_count,
-        disk.maximum_elevation,
-        disk.sample_type,
-        0,
-        0U,
-        disk.row,
-        disk.column,
-        disk.lower_left_x,
-        disk.lower_left_y,
-        disk.cell_size,
-        disk.vertex_offset,
-        disk.vertex_byte_count,
-    };
-  }
-  throw std::runtime_error("Metal tile has an unsupported header or version");
+  MetalTileHeader header = {};
+  std::memcpy(&header, bytes.data(), sizeof(header));
+  return header;
 }
 
 /// Read and normalize a raw header without requiring a Metal device.
@@ -145,28 +126,6 @@ void complete_io(id<MTLIOCommandBuffer> command, const std::filesystem::path &pa
     throw std::runtime_error("Could not read Metal tile header " + path.string());
   }
   return decode_header(bytes);
-}
-
-/// Return the exact version-2 disk representation of a normalized header.
-[[nodiscard]] MetalTileFloat32Header float32_disk_header(const MetalTileHeader &header) {
-  return {
-      header.magic,
-      header.version,
-      header.header_size,
-      header.compression,
-      header.epsg_code,
-      header.cell_count,
-      header.level_count,
-      header.maximum_elevation,
-      header.sample_type,
-      header.row,
-      header.column,
-      header.lower_left_x,
-      header.lower_left_y,
-      header.cell_size,
-      header.vertex_offset,
-      header.vertex_byte_count,
-  };
 }
 
 void publish_temporary_file(
@@ -317,15 +276,10 @@ void validate_metal_tile_header(
     const MetalTileHeader &header,
     MetalTileCompression expected_compression
 ) {
-  const bool float32 = header.magic == kMetalTileFloat32Magic &&
-                       header.version == kMetalTileFloat32Version &&
-                       header.header_size == kMetalTileFloat32HeaderSize &&
-                       header.sample_type == MetalTileSampleType::Float32;
-  const bool uint16 = header.magic == kMetalTileUint16Magic &&
-                      header.version == kMetalTileUint16Version &&
-                      header.header_size == kMetalTileUint16HeaderSize &&
-                      header.sample_type == MetalTileSampleType::Uint16Decimeters;
-  if (!float32 && !uint16) {
+  if (header.magic != kMetalTileLodMagic || header.version != kMetalTileLodVersion ||
+      header.header_size != kMetalTileLodHeaderSize ||
+      (header.sample_type != MetalTileSampleType::Float32 &&
+       header.sample_type != MetalTileSampleType::Uint16Decimeters)) {
     throw std::runtime_error("Metal tile has an unsupported header or version");
   }
   if (header.compression != expected_compression || header.epsg_code == 0U ||
@@ -338,17 +292,24 @@ void validate_metal_tile_header(
   }
 
   const uint64_t vertex_side = static_cast<uint64_t>(header.cell_count) + 1U;
-  const uint64_t sample_bytes = float32 ? sizeof(float) : sizeof(uint16_t);
+  const uint64_t sample_bytes =
+      header.sample_type == MetalTileSampleType::Float32 ? sizeof(float) : sizeof(uint16_t);
   if (vertex_side > std::numeric_limits<uint64_t>::max() / vertex_side ||
       vertex_side * vertex_side > std::numeric_limits<uint64_t>::max() / sample_bytes) {
     throw std::runtime_error("Metal tile payload dimensions overflow its byte count");
   }
   const uint64_t vertex_bytes = vertex_side * vertex_side * sample_bytes;
-  if (header.vertex_offset != header.header_size || header.vertex_byte_count != vertex_bytes) {
+  if (header.lod_count == 0U || header.lod_count > header.level_count ||
+      header.lod_entry_size != sizeof(MetalTileLod) ||
+      header.lod_table_offset != header.header_size ||
+      header.lod_table_byte_count !=
+          static_cast<uint64_t>(header.lod_count) * sizeof(MetalTileLod) ||
+      header.vertex_offset < header.lod_table_offset + header.lod_table_byte_count ||
+      header.vertex_byte_count != vertex_bytes) {
     throw std::runtime_error("Metal tile payload layout does not match its dimensions");
   }
 
-  if (uint16) {
+  if (header.sample_type == MetalTileSampleType::Uint16Decimeters) {
     const double minimum_elevation = static_cast<double>(header.elevation_base_decimeters) / 10.0;
     const double maximum_representable =
         static_cast<double>(header.elevation_base_decimeters) / 10.0 +
@@ -360,46 +321,109 @@ void validate_metal_tile_header(
   }
 }
 
-void write_metal_tile(
-    const std::filesystem::path &path,
-    const MetalTileHeader &header,
-    std::span<const float> vertices
-) {
-  validate_metal_tile_header(header, header.compression);
-  if (header.sample_type != MetalTileSampleType::Float32 ||
-      vertices.size_bytes() != header.vertex_byte_count) {
-    throw std::invalid_argument("Float32 Metal tile payload does not match its header");
+std::vector<MetalTileLod>
+read_metal_tile_lods(const std::filesystem::path &path, const MetalTileHeader &header) {
+  validate_metal_tile_header(header, metal_tile_compression(path));
+  std::vector<MetalTileLod> lods(header.lod_count);
+  if (header.compression == MetalTileCompression::None) {
+    std::ifstream stream(path, std::ios::binary);
+    stream.seekg(static_cast<std::streamoff>(header.lod_table_offset));
+    if (!stream.read(
+            reinterpret_cast<char *>(lods.data()),
+            static_cast<std::streamsize>(header.lod_table_byte_count)
+        )) {
+      throw std::runtime_error("Could not read Metal tile LOD table " + path.string());
+    }
+  } else {
+    const std::scoped_lock lock(compressed_metadata_io_mutex);
+    const CompressedMetadataIo &io = compressed_metadata_io();
+    id<MTLIOFileHandle> file = open_metal_file(io.device, path, header.compression);
+    // Keep metadata at the beginning of the logical stream. This avoids the
+    // small nonzero source offset that some compressed Metal I/O drivers do
+    // not complete reliably for an otherwise valid compression-context file.
+    std::vector<std::byte> prefix(
+        static_cast<size_t>(header.lod_table_offset + header.lod_table_byte_count)
+    );
+    id<MTLIOCommandBuffer> command = [io.queue commandBuffer];
+    [command loadBytes:prefix.data()
+                      size:static_cast<NSUInteger>(prefix.size())
+              sourceHandle:file
+        sourceHandleOffset:0U];
+    complete_io(command, path);
+    std::memcpy(
+        lods.data(),
+        prefix.data() + header.lod_table_offset,
+        static_cast<size_t>(header.lod_table_byte_count)
+    );
   }
-  const MetalTileFloat32Header disk = float32_disk_header(header);
-  write_tile_bytes(
-      path,
-      header.compression,
-      &disk,
-      sizeof(disk),
-      vertices.data(),
-      vertices.size_bytes()
-  );
+  uint64_t expected_offset = header.lod_table_offset + header.lod_table_byte_count;
+  for (uint32_t index = 0U; index < lods.size(); index++) {
+    const MetalTileLod &lod = lods[index];
+    const uint32_t expected_cell_count = header.cell_count >> index;
+    const uint64_t side = static_cast<uint64_t>(expected_cell_count) + 1U;
+    const uint64_t bytes =
+        side * side *
+        (header.sample_type == MetalTileSampleType::Float32 ? sizeof(float) : sizeof(uint16_t));
+    if (lod.lod != index + 1U || lod.cell_count != expected_cell_count ||
+        lod.level_count != std::countr_zero(expected_cell_count) + 1U ||
+        !std::isfinite(lod.maximum_elevation) || lod.vertex_byte_count != bytes ||
+        lod.vertex_offset < expected_offset) {
+      throw std::runtime_error("Metal tile LOD table contains an invalid representation");
+    }
+    if (lod.vertex_byte_count > std::numeric_limits<uint64_t>::max() - expected_offset) {
+      throw std::runtime_error("Metal tile LOD payload offsets overflow");
+    }
+    expected_offset = lod.vertex_offset + lod.vertex_byte_count;
+  }
+  const MetalTileLod &base = lods.front();
+  if (base.vertex_offset != header.vertex_offset ||
+      base.vertex_byte_count != header.vertex_byte_count ||
+      base.maximum_elevation != header.maximum_elevation ||
+      base.elevation_base_decimeters != header.elevation_base_decimeters) {
+    throw std::runtime_error("Metal tile base LOD disagrees with its header");
+  }
+  return lods;
 }
 
-void write_metal_tile(
+void write_metal_tile_lods(
     const std::filesystem::path &path,
     const MetalTileHeader &header,
-    std::span<const uint16_t> vertices
+    std::span<const MetalTileLod> lods,
+    std::span<const std::byte> payload
 ) {
   validate_metal_tile_header(header, header.compression);
-  if (header.sample_type != MetalTileSampleType::Uint16Decimeters ||
-      vertices.size_bytes() != header.vertex_byte_count) {
-    throw std::invalid_argument("Uint16 Metal tile payload does not match its header");
+  if (header.version != kMetalTileLodVersion || lods.size() != header.lod_count) {
+    throw std::invalid_argument("Metal LOD tile header does not match its LOD table");
   }
-  MetalTileHeader disk = header;
-  disk.reserved = 0U;
+  uint64_t expected_payload_size = 0U;
+  uint64_t expected_offset = header.lod_table_offset + header.lod_table_byte_count;
+  for (const MetalTileLod &lod : lods) {
+    if (lod.vertex_offset < expected_offset ||
+        lod.vertex_byte_count > std::numeric_limits<uint64_t>::max() - expected_payload_size) {
+      throw std::invalid_argument("Metal LOD tile payload layout is invalid");
+    }
+    expected_payload_size += lod.vertex_offset - expected_offset;
+    expected_payload_size += lod.vertex_byte_count;
+    expected_offset += lod.vertex_byte_count;
+    expected_offset = lod.vertex_offset + lod.vertex_byte_count;
+  }
+  if (payload.size_bytes() != expected_payload_size) {
+    throw std::invalid_argument("Metal LOD tile payload size does not match its table");
+  }
+  std::vector<std::byte> stream_payload(header.lod_table_byte_count + payload.size_bytes());
+  std::memcpy(stream_payload.data(), lods.data(), static_cast<size_t>(header.lod_table_byte_count));
+  std::memcpy(
+      stream_payload.data() + header.lod_table_byte_count,
+      payload.data(),
+      payload.size_bytes()
+  );
   write_tile_bytes(
       path,
       header.compression,
-      &disk,
-      sizeof(disk),
-      vertices.data(),
-      vertices.size_bytes()
+      &header,
+      sizeof(header),
+      stream_payload.data(),
+      stream_payload.size()
   );
 }
 
@@ -424,6 +448,8 @@ id<MTLIOFileHandle> open_metal_tile_file(id<MTLDevice> device, const std::filesy
 
 NSUInteger metal_tile_io_concurrency() { return kMetalIoConcurrency; }
 
+size_t metal_tile_compression_chunk_size() { return MTLIOCompressionContextDefaultChunkSize(); }
+
 MetalTileHeader read_metal_tile_header(const std::filesystem::path &path) {
   const MetalTileCompression compression = metal_tile_compression(path);
   if (compression == MetalTileCompression::None) {
@@ -432,14 +458,11 @@ MetalTileHeader read_metal_tile_header(const std::filesystem::path &path) {
     return header;
   }
 
-  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-  if (device == nil) {
-    throw std::runtime_error("No Metal device is available to inspect " + path.string());
-  }
-  id<MTLIOCommandQueue> queue = make_metal_io_queue(device);
-  id<MTLIOFileHandle> handle = open_metal_file(device, path, compression);
+  const std::scoped_lock lock(compressed_metadata_io_mutex);
+  const CompressedMetadataIo &io = compressed_metadata_io();
+  id<MTLIOFileHandle> handle = open_metal_file(io.device, path, compression);
   MetalTileHeaderBytes header_bytes = {};
-  id<MTLIOCommandBuffer> command = [queue commandBuffer];
+  id<MTLIOCommandBuffer> command = [io.queue commandBuffer];
   [command loadBytes:header_bytes.data()
                     size:header_bytes.size()
             sourceHandle:handle
@@ -454,20 +477,32 @@ void load_metal_tiles_into_buffer(
     id<MTLDevice> device,
     id<MTLIOCommandQueue> queue,
     std::span<const MetalTileBufferLoad> loads,
-    uint64_t vertex_offset,
-    uint64_t vertex_byte_count,
     id<MTLBuffer> vertex_buffer,
     NSUInteger vertex_buffer_length
 ) {
-  if (vertex_byte_count > static_cast<uint64_t>(std::numeric_limits<NSUInteger>::max())) {
-    throw std::overflow_error("Metal tile vertex payload exceeds NSUInteger range");
-  }
-  const NSUInteger load_size = static_cast<NSUInteger>(vertex_byte_count);
   for (const MetalTileBufferLoad &load : loads) {
+    if (load.byte_count > static_cast<uint64_t>(std::numeric_limits<NSUInteger>::max())) {
+      throw std::overflow_error("Metal tile vertex payload exceeds NSUInteger range");
+    }
+    const NSUInteger load_size = static_cast<NSUInteger>(load.byte_count);
     if (load.destination_offset > vertex_buffer_length ||
         load_size > vertex_buffer_length - load.destination_offset) {
       throw std::out_of_range("Metal tile load exceeds the vertex atlas buffer");
     }
+  }
+
+  // Do not overlap a compressed payload command with a compressed metadata
+  // command created by a preparation worker. The payload batch itself remains
+  // concurrent; this only shares the driver's compression context safely with
+  // the small header and LOD-table reads above. A raw-only batch avoids the
+  // mutex completely.
+  const bool contains_compressed_load =
+      std::any_of(loads.begin(), loads.end(), [](const MetalTileBufferLoad &load) {
+        return metal_tile_compression(load.path) != MetalTileCompression::None;
+      });
+  std::unique_lock<std::mutex> compressed_lock(compressed_metadata_io_mutex, std::defer_lock);
+  if (contains_compressed_load) {
+    compressed_lock.lock();
   }
 
   // Separate command buffers allow a concurrent queue to decompress several
@@ -490,9 +525,9 @@ void load_metal_tiles_into_buffer(
       }
       [command loadBuffer:vertex_buffer
                       offset:load.destination_offset
-                        size:load_size
+                        size:static_cast<NSUInteger>(load.byte_count)
                 sourceHandle:file
-          sourceHandleOffset:vertex_offset];
+          sourceHandleOffset:load.source_offset];
       [command commit];
       files.push_back(file);
       commands.push_back(command);

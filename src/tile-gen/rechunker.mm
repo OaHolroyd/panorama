@@ -70,6 +70,76 @@ aligned_index(double coordinate, double origin, double resolution, const char *a
 
 } // namespace
 
+/// Build one coarser grid, retaining edge vertices exactly for tile seams.
+[[nodiscard]] TerrainChunk::LodVariant
+downsample_lod(const TerrainChunk::LodVariant &fine, LodSampling sampling, float no_data) {
+  if (fine.sample_side < 3U || (fine.sample_side - 1U) % 2U != 0U) {
+    throw std::invalid_argument("Terrain LOD requires an even positive cell count");
+  }
+  const uint32_t side = (fine.sample_side + 1U) / 2U;
+  TerrainChunk::LodVariant coarse = {
+      side,
+      std::vector<float>(static_cast<size_t>(side) * side, no_data),
+      std::vector<uint8_t>(static_cast<size_t>(side) * side, 0U),
+  };
+  for (uint32_t y = 0U; y < side; y++) {
+    for (uint32_t x = 0U; x < side; x++) {
+      const uint32_t fine_x = 2U * x;
+      const uint32_t fine_y = 2U * y;
+      const size_t output = static_cast<size_t>(y) * side + x;
+      const size_t centre = static_cast<size_t>(fine_y) * fine.sample_side + fine_x;
+      // Adjacent level-0 tiles share boundary samples but not their exterior
+      // neighbours. Retaining those samples exactly avoids LOD seam cracks.
+      if (sampling == LodSampling::Point || x == 0U || y == 0U || x + 1U == side ||
+          y + 1U == side) {
+        coarse.elevations[output] = fine.elevations[centre];
+        coarse.covered[output] = fine.covered[centre];
+        continue;
+      }
+
+      float maximum = -std::numeric_limits<float>::infinity();
+      double weighted_sum = 0.0;
+      uint32_t weight_sum = 0U;
+      for (int32_t offset_y = -1; offset_y <= 1; offset_y++) {
+        for (int32_t offset_x = -1; offset_x <= 1; offset_x++) {
+          const uint32_t sample_x = static_cast<uint32_t>(static_cast<int32_t>(fine_x) + offset_x);
+          const uint32_t sample_y = static_cast<uint32_t>(static_cast<int32_t>(fine_y) + offset_y);
+          const size_t sample = static_cast<size_t>(sample_y) * fine.sample_side + sample_x;
+          if (fine.covered[sample] == 0U) {
+            continue;
+          }
+          const uint32_t weight = offset_x == 0 && offset_y == 0     ? 4U
+                                  : (offset_x == 0 || offset_y == 0) ? 2U
+                                                                     : 1U;
+          maximum = std::max(maximum, fine.elevations[sample]);
+          weighted_sum += static_cast<double>(weight) * fine.elevations[sample];
+          weight_sum += weight;
+        }
+      }
+      if (weight_sum != 0U) {
+        coarse.elevations[output] = sampling == LodSampling::Maximum
+                                        ? maximum
+                                        : static_cast<float>(weighted_sum / weight_sum);
+        coarse.covered[output] = 1U;
+      }
+    }
+  }
+  return coarse;
+}
+
+/// Add all successively halved vertex grids requested for one chunk.
+void build_lod_variants(TerrainChunk &chunk, LodSampling sampling, float no_data) {
+  if (sampling == LodSampling::None) {
+    return;
+  }
+  TerrainChunk::LodVariant previous = {chunk.sample_side, chunk.elevations, chunk.covered};
+  while (previous.sample_side > 2U) {
+    TerrainChunk::LodVariant next = downsample_lod(previous, sampling, no_data);
+    chunk.lod_variants.push_back(next);
+    previous = std::move(next);
+  }
+}
+
 uint32_t sample_side(const DestinationGrid &grid) {
   if (grid.tile_cell_count == 0U) {
     throw std::invalid_argument("Destination tile cell count must be positive");
@@ -143,7 +213,8 @@ TerrainChunk build_chunk(
     const SourceCatalogue &catalogue,
     const RechunkPlan &plan,
     ChunkKey key,
-    std::span<const uint32_t> contributor_indices
+    std::span<const uint32_t> contributor_indices,
+    LodSampling lod_sampling
 ) {
   const uint32_t side = sample_side(plan.grid);
   if (static_cast<size_t>(side) > std::numeric_limits<size_t>::max() / side) {
@@ -154,6 +225,7 @@ TerrainChunk build_chunk(
       side,
       std::vector<float>(sample_count, plan.grid.no_data),
       std::vector<uint8_t>(sample_count, 0U),
+      {},
   };
 
   const int64_t stride = static_cast<int64_t>(plan.grid.tile_cell_count);
@@ -257,6 +329,7 @@ TerrainChunk build_chunk(
       }
     }
   }
+  build_lod_variants(chunk, lod_sampling, plan.grid.no_data);
   return chunk;
 }
 

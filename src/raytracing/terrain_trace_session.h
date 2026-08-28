@@ -40,6 +40,10 @@ public:
   /// centred on terrain outside the current finite source set.
   [[nodiscard]] bool relocate_observer(ObserverLocation observer);
 
+  /// Change the adaptive terrain-LOD scale for subsequent traces. Zero keeps
+  /// the original terrain resolution for every source.
+  void set_lod_scale(float lod_scale);
+
   /// Trace one directional sun ray from each eligible primary collision.
   /// Angles are radians; azimuth is clockwise from grid north and elevation
   /// is above the horizontal plane.

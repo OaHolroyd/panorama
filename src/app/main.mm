@@ -74,6 +74,7 @@ struct ViewerSettings {
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
+  float lod_scale = 0.0F;
   bool discard_quantized = false;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
   ImageSize image = {1600U, 900U};
@@ -263,6 +264,8 @@ void print_usage(const char *program) {
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
       "  --max-distance M      horizontal range in metres (default: 600000)\n"
+      "  --lod-scale V         terrain cell footprint multiplier; 0 keeps full detail\n"
+      "                        (default: 0)\n"
       "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
       "                        (default: retain uint16)\n"
       "  --easting M           fixed observer easting (default: 2623452.4)\n"
@@ -312,6 +315,12 @@ void print_usage(const char *program) {
       settings.workers = arguments::parse_uint32(value, option, true);
     } else if (option == "--max-distance") {
       settings.max_distance = parse_positive_float(value, option);
+    } else if (option == "--lod-scale") {
+      const double scale = arguments::parse_finite_double(value, option);
+      if (scale < 0.0 || scale > std::numeric_limits<float>::max()) {
+        throw std::out_of_range("LOD scale must be a nonnegative float32 value");
+      }
+      settings.lod_scale = static_cast<float>(scale);
     } else if (option == "--easting") {
       settings.observer.easting = arguments::parse_finite_double(value, option);
     } else if (option == "--northing") {
@@ -709,13 +718,17 @@ private:
     if (payload == nil || payload.contents == nullptr) {
       throw std::runtime_error("Could not allocate terrain point sample buffer");
     }
-    const MetalTileBufferLoad load = {source.path, 0U, nil};
+    const MetalTileBufferLoad load = {
+        source.path,
+        0U,
+        nil,
+        header.vertex_offset,
+        header.vertex_byte_count,
+    };
     load_metal_tiles_into_buffer(
         device_,
         io_queue_,
         std::span<const MetalTileBufferLoad>(&load, 1U),
-        header.vertex_offset,
-        header.vertex_byte_count,
         payload,
         payload.length
     );
@@ -772,6 +785,7 @@ public:
           settings_.workers,
           !settings_.discard_quantized,
           allowFallback,
+          settings_.lod_scale,
       };
     };
     const ObserverLocation requestedObserver = settings_.observer;
@@ -843,6 +857,7 @@ public:
     current_orientation_ = settings_.orientation;
     current_vertical_field_of_view_ = settings_.vertical_field_of_view;
     requested_observer_ = settings_.observer;
+    requested_lod_scale_ = settings_.lod_scale;
     presented_observer_ = settings_.observer;
     worker_ = std::thread([this] { render_loop(); });
     request_view(settings_.orientation, settings_.vertical_field_of_view, settings_.image);
@@ -882,6 +897,23 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       requested_presentation_ = presentation;
       requested_revision_++;
+      presentation_pending_ = true;
+    }
+    changed_.notify_one();
+  }
+
+  /// Re-trace with a new per-tile terrain LOD policy. The render worker owns
+  /// the session, so the UI only publishes the newest scale here.
+  void request_lod_scale(float lodScale) {
+    if (!std::isfinite(lodScale) || lodScale < 0.0F) {
+      throw std::invalid_argument("Terrain LOD scale must be finite and nonnegative");
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requested_lod_scale_ = lodScale;
+      requested_revision_++;
+      lod_scale_pending_ = true;
+      trace_pending_ = true;
       presentation_pending_ = true;
     }
     changed_.notify_one();
@@ -1036,6 +1068,7 @@ public:
     return settings_.vertical_field_of_view;
   }
   [[nodiscard]] float max_distance() const { return settings_.max_distance; }
+  [[nodiscard]] float initial_lod_scale() const { return settings_.lod_scale; }
   [[nodiscard]] CameraOrientation initial_orientation() const { return settings_.orientation; }
   [[nodiscard]] TerrainPresentationSettings initial_presentation() const {
     return settings_.presentation;
@@ -1156,6 +1189,8 @@ private:
       bool map_point_requested = false;
       bool target_requested = false;
       bool roam_requested = false;
+      bool lod_scale_requested = false;
+      float lod_scale = 0.0F;
       std::optional<InspectionPixel> inspection_pixel;
       uint64_t inspection_token = 0U;
       ObserverLocation observer = {};
@@ -1198,6 +1233,8 @@ private:
         roam_height = requested_roam_height_;
         roam_token = requested_roam_token_;
         current_ground_clearance = observer_ground_clearance_;
+        lod_scale_requested = lod_scale_pending_;
+        lod_scale = requested_lod_scale_;
         target_requested = target_pending_ || trace_pending_ || presentation_pending_;
         target = requested_target_;
         target_token = requested_target_token_;
@@ -1208,6 +1245,7 @@ private:
         map_point_pending_ = false;
         target_pending_ = false;
         roam_pending_ = false;
+        lod_scale_pending_ = false;
       }
 
       try {
@@ -1243,6 +1281,9 @@ private:
           }
           if (trace_requested) {
             RayField field = make_view(image, orientation, vertical_field_of_view);
+            if (lod_scale_requested) {
+              trace_->set_lod_scale(lod_scale);
+            }
             if (observer_requested) {
               if (!trace_->relocate_observer(observer)) {
                 const RaytraceConfig config = {
@@ -1254,6 +1295,7 @@ private:
                     settings_.workers,
                     !settings_.discard_quantized,
                     false,
+                    lod_scale,
                 };
                 auto replacement = std::make_unique<TerrainTraceSession>(
                     config,
@@ -1437,6 +1479,7 @@ private:
   uint64_t presented_roam_result_sequence_ = 0U;
   double observer_ground_clearance_ = 0.0;
   double frame_ms_ = 0.0;
+  float requested_lod_scale_ = 0.0F;
   std::string error_;
   bool trace_pending_ = false;
   bool presentation_pending_ = false;
@@ -1445,6 +1488,7 @@ private:
   bool map_point_pending_ = false;
   bool target_pending_ = false;
   bool roam_pending_ = false;
+  bool lod_scale_pending_ = false;
   bool observer_fallback_used_ = false;
   bool stopping_ = false;
 };
@@ -1839,6 +1883,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   NSButton *_featureOutlinesControl;
   NSSlider *_featureOutlineDetailControl;
   NSTextField *_featureOutlineDetailLabel;
+  NSSlider *_lodScaleControl;
+  NSTextField *_lodScaleLabel;
   NSSlider *_sunAzimuthControl;
   NSTextField *_sunAzimuthLabel;
   NSSlider *_sunAltitudeControl;
@@ -3718,6 +3764,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self publishFeatureOutlineControls];
 }
 
+/// LOD is a trace setting: zero retains LOD 1 everywhere, while positive
+/// values permit a tile representation no wider than this pixel-footprint
+/// multiplier.
+- (void)lodScaleChanged:(NSSlider *)sender {
+  const double scale = sender.doubleValue;
+  _lodScaleLabel.stringValue = scale == 0.0 ? @"Off" : [NSString stringWithFormat:@"%.1f×", scale];
+  _renderer->request_lod_scale(static_cast<float>(scale));
+}
+
 - (void)updateAspectLockAppearance {
   const BOOL locked = _aspectLockControl.state == NSControlStateValueOn;
   _aspectLockControl.image = [NSImage
@@ -4256,6 +4311,29 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   featureOutlineDetailSetting.alignment = NSLayoutAttributeCenterY;
   featureOutlineDetailSetting.spacing = 6.0;
 
+  const double initialLodScale = _renderer->initial_lod_scale();
+  _lodScaleControl = [NSSlider sliderWithValue:initialLodScale
+                                      minValue:0.0
+                                      maxValue:8.0
+                                        target:self
+                                        action:@selector(lodScaleChanged:)];
+  _lodScaleControl.numberOfTickMarks = 17; // 0.0, 0.2, 0.4, ... 8.0
+  _lodScaleControl.allowsTickMarkValuesOnly = YES;
+  // _lodScaleControl.continuous = YES;
+  _lodScaleControl.toolTip =
+      @"Use coarser independently stored terrain where a cell is smaller than a pixel";
+  _lodScaleLabel =
+      [NSTextField labelWithString:initialLodScale == 0.0
+                                       ? @"Off"
+                                       : [NSString stringWithFormat:@"%.1f×", initialLodScale]];
+  _lodScaleLabel.alignment = NSTextAlignmentRight;
+  [_lodScaleLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  NSStackView *lodScaleSetting =
+      [NSStackView stackViewWithViews:@[ _lodScaleControl, _lodScaleLabel ]];
+  lodScaleSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  lodScaleSetting.alignment = NSLayoutAttributeCenterY;
+  lodScaleSetting.spacing = 6.0;
+
   _normalLightingControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _normalLightingControl.buttonType = NSButtonTypeSwitch;
   _normalLightingControl.title = @"Surface shading";
@@ -4534,6 +4612,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSView *colourRangeRow = make_row(@"Range (m)", rangeSetting);
   _scalarColourRows = @[ colourmapRow, colourScaleRow, colourRangeRow ];
   _featureOutlineDetailRow = make_row(@"Detail", featureOutlineDetailSetting);
+  NSView *lodScaleRow = make_row(@"LOD scale", lodScaleSetting);
 
   NSView *sunModeRow = make_row(@"Sun", _sunModeControl);
   NSView *dateRow = make_row(@"Date", _astronomicalDateControl);
@@ -4574,6 +4653,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                            colourmapRow,
                                            colourScaleRow,
                                            colourRangeRow,
+                                           lodScaleRow,
                                            _featureOutlinesControl,
                                            _featureOutlineDetailRow,
                                          ]

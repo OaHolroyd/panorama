@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <deque>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
@@ -16,7 +17,7 @@
 namespace panorama {
 namespace {
 
-/// Host-side lifecycle for one source in the finite terrain catalogue.
+/// Host-side lifecycle for one independently loadable terrain variant.
 enum class TileLoadState : uint8_t {
   Unrequested,
   Queued,
@@ -28,7 +29,7 @@ enum class TileLoadState : uint8_t {
 /// One priority-ordered request to prepare a source tile.
 struct TileLoadRequest {
   float priority;
-  uint32_t source_index;
+  TerrainTileVariant variant;
 };
 
 /// Put smaller ray-entry distances at the front of the request queue.
@@ -83,9 +84,9 @@ struct AsyncTilePreparer::State {
   std::condition_variable prepared_space_available;
   std::priority_queue<TileLoadRequest, std::vector<TileLoadRequest>, TileLoadRequestGreater>
       requests;
-  std::vector<TileLoadState> states;
-  std::vector<float> queued_priorities;
-  std::vector<uint8_t> requested_before;
+  std::map<TerrainTileVariant, TileLoadState> states;
+  std::map<TerrainTileVariant, float> queued_priorities;
+  std::map<TerrainTileVariant, uint8_t> requested_before;
   std::deque<PreparedTile> prepared;
   std::vector<std::thread> workers;
   std::exception_ptr error;
@@ -129,10 +130,7 @@ AsyncTilePreparer::AsyncTilePreparer(
     throw std::invalid_argument("Tile preparer requires sources and prepared-tile capacity");
   }
 
-  state_->states.assign(sources.size(), TileLoadState::Unrequested);
-  state_->states[0] = TileLoadState::Resident;
-  state_->queued_priorities.assign(sources.size(), std::numeric_limits<float>::infinity());
-  state_->requested_before.assign(sources.size(), 0U);
+  state_->states[{0U, 1U}] = TileLoadState::Resident;
 
   const uint32_t hardware_threads = std::thread::hardware_concurrency();
   const uint32_t available_workers =
@@ -177,26 +175,40 @@ void AsyncTilePreparer::start() {
           // A later request may have lowered this source's priority while its
           // older heap entry waited. Ignore the stale entry; the replacement
           // remains in the queue at the current priority.
-          if (worker_state.states[request.source_index] != TileLoadState::Queued ||
-              request.priority != worker_state.queued_priorities[request.source_index]) {
+          if (worker_state.states.at(request.variant) != TileLoadState::Queued ||
+              request.priority != worker_state.queued_priorities.at(request.variant)) {
             continue;
           }
-          worker_state.states[request.source_index] = TileLoadState::Loading;
+          worker_state.states[request.variant] = TileLoadState::Loading;
         }
 
         try {
-          const TerrainSource &source = worker_state.sources[request.source_index];
+          const TerrainSource &source = worker_state.sources[request.variant.source_index];
 
           // A custom tile's terrain payload already stores vertices in atlas
           // order and contains no mipmap. Keep the payload out of host memory;
           // opening its Metal handle here also keeps work off the scheduler.
           std::unique_ptr<LoadedTile> tile;
           id<MTLIOFileHandle> metal_file;
+          std::optional<MetalTileLod> metal_lod;
           if (is_metal_tile_path(source.path)) {
+            const MetalTileHeader header = read_metal_tile_header(source.path);
+            const std::vector<MetalTileLod> lods = read_metal_tile_lods(source.path, header);
+            const auto selected =
+                std::find_if(lods.begin(), lods.end(), [&](const MetalTileLod &lod) {
+                  return lod.lod == request.variant.lod;
+                });
+            if (selected == lods.end()) {
+              throw std::out_of_range("Requested terrain LOD is unavailable in the Metal tile");
+            }
             worker_state.timer.start_work("Metal tile open");
             metal_file = open_metal_tile_file(worker_state.device, source.path);
             worker_state.timer.stop("Metal tile open");
+            metal_lod = *selected;
           } else {
+            if (request.variant.lod != 1U) {
+              throw std::runtime_error("GeoTIFF terrain does not provide LOD variants");
+            }
             // Load and prepare GeoTIFFs outside the mutex. Timer work time
             // intentionally sums concurrent worker effort, unlike wall time.
             worker_state.timer.start_work("Tile load");
@@ -228,8 +240,10 @@ void AsyncTilePreparer::start() {
           if (worker_state.stop.load(std::memory_order_relaxed)) {
             break;
           }
-          worker_state.states[request.source_index] = TileLoadState::Prepared;
-          worker_state.prepared.push_back({request.source_index, std::move(tile), metal_file});
+          worker_state.states[request.variant] = TileLoadState::Prepared;
+          worker_state.prepared.push_back(
+              {request.variant, std::move(tile), metal_file, metal_lod}
+          );
           worker_lock.unlock();
           worker_state.prepared_available.notify_one();
         } catch (...) {
@@ -250,29 +264,33 @@ void AsyncTilePreparer::start() {
   }
 }
 
-void AsyncTilePreparer::request(uint32_t source_index, float priority) {
+void AsyncTilePreparer::request(uint32_t source_index, uint32_t lod, float priority) {
   State &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
   if (source_index >= state.sources.size()) {
     throw std::out_of_range("Tile preparation request refers to an unknown source");
   }
+  if (lod == 0U || !std::isfinite(priority)) {
+    throw std::invalid_argument("Tile preparation request requires a valid LOD and priority");
+  }
+  const TerrainTileVariant variant = {source_index, lod};
   state.request_count++;
-  if (state.requested_before[source_index] == 0U) {
-    state.requested_before[source_index] = 1U;
+  if (state.requested_before[variant] == 0U) {
+    state.requested_before[variant] = 1U;
     state.unique_request_count++;
   } else {
     state.duplicate_request_count++;
   }
-  TileLoadState &source_state = state.states[source_index];
-  if (source_state == TileLoadState::Unrequested) {
-    source_state = TileLoadState::Queued;
-    state.queued_priorities[source_index] = priority;
-    state.requests.push({priority, source_index});
+  TileLoadState &variant_state = state.states[variant];
+  if (variant_state == TileLoadState::Unrequested) {
+    variant_state = TileLoadState::Queued;
+    state.queued_priorities[variant] = priority;
+    state.requests.push({priority, variant});
     state.request_available.notify_one();
-  } else if (source_state == TileLoadState::Queued &&
-             priority < state.queued_priorities[source_index]) {
-    state.queued_priorities[source_index] = priority;
-    state.requests.push({priority, source_index});
+  } else if (variant_state == TileLoadState::Queued &&
+             priority < state.queued_priorities[variant]) {
+    state.queued_priorities[variant] = priority;
+    state.requests.push({priority, variant});
     state.request_available.notify_one();
   }
 }
@@ -308,16 +326,16 @@ void AsyncTilePreparer::rethrow_if_failed() const {
   }
 }
 
-void AsyncTilePreparer::mark_resident(uint32_t source_index) {
+void AsyncTilePreparer::mark_resident(TerrainTileVariant variant) {
   State &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
-  state.states.at(source_index) = TileLoadState::Resident;
+  state.states.at(variant) = TileLoadState::Resident;
 }
 
-void AsyncTilePreparer::mark_evicted(uint32_t source_index) {
+void AsyncTilePreparer::mark_evicted(TerrainTileVariant variant) {
   State &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
-  state.states.at(source_index) = TileLoadState::Unrequested;
+  state.states.at(variant) = TileLoadState::Unrequested;
 }
 
 void AsyncTilePreparer::stop_and_join() {

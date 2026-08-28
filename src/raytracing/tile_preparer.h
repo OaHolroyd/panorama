@@ -1,6 +1,7 @@
 #pragma once
 
 #include "loaded_tile.h"
+#include "metal_tile.h"
 #include "terrain_catalogue.h"
 #include "timer.h"
 
@@ -15,22 +16,35 @@
 
 namespace panorama {
 
+/// Identity of one independently loadable representation of a catalogue source.
+struct TerrainTileVariant {
+  uint32_t source_index;
+  uint32_t lod;
+
+  /// Order variants by source and then LOD for small scheduler maps.
+  [[nodiscard]] bool operator<(const TerrainTileVariant &other) const {
+    return source_index != other.source_index ? source_index < other.source_index : lod < other.lod;
+  }
+};
+
 /// One source awaiting installation in the resident atlas.
 ///
 /// GeoTIFF sources carry a fully prepared CPU tile. A custom source instead
 /// carries a pre-opened Metal file handle but no CPU payload. Opening handles
 /// on workers keeps that cost outside synchronous atlas installation.
 struct PreparedTile {
-  uint32_t source_index;
+  TerrainTileVariant variant;
   std::unique_ptr<LoadedTile> tile;
   id<MTLIOFileHandle> metal_file;
+  /// Logical range and quantization base of a custom tile's selected LOD.
+  std::optional<MetalTileLod> metal_lod;
 };
 
 /// Final counters describing background tile preparation work.
 struct TilePreparationStatistics {
   /// All scheduler request calls; the two following counters partition this total.
   uint64_t requests;
-  /// First request for a source during this preparer's lifetime.
+  /// First request for a source/LOD variant during this preparer's lifetime.
   uint64_t unique_requests;
   /// Repeat request, whether deduplicated or requeued after an eviction.
   uint64_t duplicate_requests;
@@ -69,8 +83,8 @@ public:
   /// Start the configured background workers exactly once.
   void start();
 
-  /// Record a request and queue a nonresident source at its smallest priority.
-  void request(uint32_t source_index, float priority);
+  /// Record a request and queue one selected terrain LOD at its smallest priority.
+  void request(uint32_t source_index, uint32_t lod, float priority);
 
   /// Return and remove one completed prepared source, or no value when none is ready.
   [[nodiscard]] std::optional<PreparedTile> try_take_prepared();
@@ -81,11 +95,11 @@ public:
   /// Rethrow the first worker failure, if a worker has encountered one.
   void rethrow_if_failed() const;
 
-  /// Record that the atlas has installed one prepared source.
-  void mark_resident(uint32_t source_index);
+  /// Record that the atlas has installed one prepared source/LOD variant.
+  void mark_resident(TerrainTileVariant variant);
 
-  /// Record that an atlas eviction makes a source eligible for reloading.
-  void mark_evicted(uint32_t source_index);
+  /// Record that an atlas eviction makes a source/LOD variant eligible for reloading.
+  void mark_evicted(TerrainTileVariant variant);
 
   /// Stop workers, wake all waiters, and join every worker thread.
   void stop_and_join();

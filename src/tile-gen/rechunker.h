@@ -20,7 +20,8 @@ make_rechunk_plan(const SourceCatalogue &catalogue, const DestinationGrid &desti
     const SourceCatalogue &catalogue,
     const RechunkPlan &plan,
     ChunkKey key,
-    std::span<const uint32_t> contributor_indices
+    std::span<const uint32_t> contributor_indices,
+    LodSampling lod_sampling = LodSampling::None
 );
 
 } // namespace panorama::terrain
