@@ -31,6 +31,7 @@ struct EntrypointSettings {
   uint32_t max_tile_preparation_workers = 8U;
   uint32_t max_tile_count = 0U;
   float max_distance = 600'000.0F;
+  float lod_scale = 0.0F;
   bool discard_quantized = false;
   bool elevations_enabled = true;
   bool normals_enabled = true;
@@ -185,6 +186,8 @@ void print_usage(const char *program) {
       "  --workers N           preparation workers; 0 uses all hardware threads (default: 8)\n"
       "  --max-tiles N         limit available source tiles; 0 is unlimited (default: 0)\n"
       "  --max-distance M      horizontal trace range in metres (default: 600000)\n"
+      "  --lod-scale V         terrain cell footprint multiplier; 0 keeps full detail\n"
+      "                        (default: 0)\n"
       "\n",
       program
   );
@@ -292,6 +295,12 @@ void print_usage(const char *program) {
         throw std::out_of_range("Maximum distance must be a positive float32 value");
       }
       settings.max_distance = parsed;
+    } else if (option == "--lod-scale") {
+      const float parsed = parse_float32(value, option);
+      if (parsed < 0.0F) {
+        throw std::out_of_range("LOD scale must be a nonnegative float32 value");
+      }
+      settings.lod_scale = parsed;
     } else if (option == "--easting") {
       settings.easting = panorama::arguments::parse_finite_double(value, option);
     } else if (option == "--northing") {
@@ -389,6 +398,8 @@ int main(int argc, const char *argv[]) {
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
         !settings.discard_quantized,
+        false,
+        settings.lod_scale,
     };
     const panorama::RayField rays = settings.projection.make_ray_field();
     const panorama::ScalarColourRange colour_range = scalar_colour_range(settings);
@@ -417,9 +428,10 @@ int main(int argc, const char *argv[]) {
     );
     settings.projection.print_settings();
     std::printf(
-        ", range %.0f m, curvature %.4f m/mile^2, quantized atlas %s, "
+        ", range %.0f m, LOD scale %.6g, curvature %.4f m/mile^2, quantized atlas %s, "
         "elevations %s, normals %s, outputs %s.\n",
         settings.max_distance,
+        settings.lod_scale,
         panorama::kCurvatureCoefficient * 1609.344 * 1609.344,
         settings.discard_quantized ? "discarded" : "retained when available",
         outputs.requires_elevations() ? "enabled" : "disabled",

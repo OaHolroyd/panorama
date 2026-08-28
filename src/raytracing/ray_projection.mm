@@ -64,6 +64,42 @@ struct Coordinate2 {
   );
 }
 
+/// Estimate the smallest angle between adjacent camera pixels without an
+/// inverse cosine. For the small pixel angles used here, the chord length
+/// `sqrt(2 * (1 - dot))` equals the angle to first order.
+[[nodiscard]] float minimum_camera_pixel_angle(const RayField &field, double fallback) {
+  double minimum = std::numeric_limits<double>::infinity();
+  const auto compare = [&](const RayDirection &left, const RayDirection &right) {
+    const double left_length = std::sqrt(1.0 + static_cast<double>(left.slope) * left.slope);
+    const double right_length = std::sqrt(1.0 + static_cast<double>(right.slope) * right.slope);
+    const double dot =
+        (static_cast<double>(left.x) * right.x + static_cast<double>(left.y) * right.y +
+         static_cast<double>(left.slope) * right.slope) /
+        (left_length * right_length);
+    minimum = std::min(minimum, std::sqrt(std::max(0.0, 2.0 * (1.0 - dot))));
+  };
+  for (uint32_t row = 0U; row < field.image.height; row++) {
+    for (uint32_t column = 0U; column < field.image.width; column++) {
+      const size_t index = static_cast<size_t>(row) * field.image.width + column;
+      if (column + 1U < field.image.width) {
+        compare(field.rays[index], field.rays[index + 1U]);
+      }
+      if (row + 1U < field.image.height) {
+        compare(field.rays[index], field.rays[index + field.image.width]);
+      }
+    }
+  }
+  // A one-pixel image has no adjacent pair. Its calibrated focal length still
+  // supplies the local pixel angle needed by the LOD planner.
+  if (!std::isfinite(minimum)) {
+    minimum = fallback;
+  }
+  if (minimum <= 0.0 || minimum > std::numeric_limits<float>::max()) {
+    throw std::invalid_argument("Camera projection must give every pixel a finite angular span");
+  }
+  return static_cast<float>(minimum);
+}
+
 [[nodiscard]] Coordinate2
 distort(Coordinate2 undistorted, const BrownConradyDistortion &distortion) {
   const double x2 = undistorted.x * undistorted.x;
@@ -201,10 +237,15 @@ RayField make_angular_ray_field(ImageSize image, const AngularProjection &projec
       !std::isfinite(projection.elevation_start) || !std::isfinite(projection.elevation_end)) {
     throw std::invalid_argument("Angular projection ranges must be finite");
   }
-  RayField field = {image, std::vector<RayDirection>(ray_count)};
   const double azimuth_step = (projection.azimuth_end - projection.azimuth_start) / image.width;
   const double elevation_step =
       (projection.elevation_end - projection.elevation_start) / image.height;
+  const double pixel_angle = std::min(std::abs(azimuth_step), std::abs(elevation_step));
+  if (!std::isfinite(pixel_angle) || pixel_angle <= 0.0 ||
+      pixel_angle > std::numeric_limits<float>::max()) {
+    throw std::invalid_argument("Angular projection must give every pixel a finite angular span");
+  }
+  RayField field = {image, std::vector<RayDirection>(ray_count), static_cast<float>(pixel_angle)};
   for (uint32_t row = 0U; row < image.height; row++) {
     const double elevation =
         projection.elevation_start + (static_cast<double>(row) + 0.5) * elevation_step;
@@ -228,7 +269,7 @@ RayField make_angular_ray_field(ImageSize image, const AngularProjection &projec
 RayField make_camera_ray_field(ImageSize image, const CameraProjection &projection) {
   const size_t ray_count = checked_pixel_count(image);
   validate_camera_projection(projection);
-  RayField field = {image, std::vector<RayDirection>(ray_count)};
+  RayField field = {image, std::vector<RayDirection>(ray_count), 0.0F};
 
   const CameraOrientation &orientation = projection.orientation;
   const double sin_heading = std::sin(orientation.heading);
@@ -276,6 +317,10 @@ RayField make_camera_ray_field(ImageSize image, const CameraProjection &projecti
       field.rays[static_cast<size_t>(row) * image.width + column] = make_ray_direction(world);
     }
   }
+  field.minimum_pixel_angle = minimum_camera_pixel_angle(
+      field,
+      1.0 / std::max(projection.intrinsics.focal_x, projection.intrinsics.focal_y)
+  );
   return field;
 }
 

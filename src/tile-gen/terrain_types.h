@@ -18,6 +18,14 @@ enum class RasterLayout {
   Level1,
 };
 
+/// Method used to derive progressively coarser vertex grids for a Metal tile.
+enum class LodSampling {
+  None,
+  Point,
+  Mean,
+  Maximum,
+};
+
 /// Pixel registration declared by a source raster's AREA_OR_POINT metadata.
 enum class RasterRegistration {
   PixelIsArea,
@@ -107,6 +115,13 @@ struct TerrainChunk {
   uint32_t sample_side;
   std::vector<float> elevations;
   std::vector<uint8_t> covered;
+  /// LOD 2 onwards, each with a complete overlapping vertex grid.
+  struct LodVariant {
+    uint32_t sample_side;
+    std::vector<float> elevations;
+    std::vector<uint8_t> covered;
+  };
+  std::vector<LodVariant> lod_variants;
 };
 
 } // namespace panorama::terrain

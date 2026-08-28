@@ -30,7 +30,7 @@ void validate_configuration(const RaytraceConfig &config) {
   }
   if (!std::isfinite(config.observer.easting) || !std::isfinite(config.observer.northing) ||
       !std::isfinite(config.observer.elevation) || !std::isfinite(config.max_distance) ||
-      config.max_distance <= 0.0F) {
+      config.max_distance <= 0.0F || !std::isfinite(config.lod_scale) || config.lod_scale < 0.0F) {
     throw std::invalid_argument("Raytrace configuration must be finite");
   }
 }
@@ -40,6 +40,9 @@ void validate_configuration(const RaytraceConfig &config) {
   if (ray_count == 0U || ray_count > std::numeric_limits<uint32_t>::max() ||
       field.rays.size() != ray_count) {
     throw std::invalid_argument("Ray field has invalid dimensions or storage");
+  }
+  if (!std::isfinite(field.minimum_pixel_angle) || field.minimum_pixel_angle <= 0.0F) {
+    throw std::invalid_argument("Ray field has no finite positive pixel angle");
   }
   for (const RayDirection &ray : field.rays) {
     const float horizontal_length = std::hypot(ray.x, ray.y);
@@ -114,6 +117,41 @@ struct TerrainTraceSession::State {
   uint64_t shadow_revision = std::numeric_limits<uint64_t>::max();
   double shadow_azimuth = 0.0;
   double shadow_elevation = 0.0;
+  std::vector<uint32_t> lod_by_source;
+  float lod_pixel_angle = 0.0F;
+
+  /// Select one terrain representation for every catalogue source. The plan
+  /// belongs to the session because it depends on the movable observer, not
+  /// the catalogue's immutable inventory of prepared files.
+  void rebuild_lod_plan(float pixel_angle) {
+    if (!std::isfinite(pixel_angle) || pixel_angle <= 0.0F) {
+      throw std::invalid_argument("Terrain LOD planning requires a positive pixel angle");
+    }
+    if (origin == nullptr || !std::isfinite(origin->delta) || origin->delta <= 0.0 ||
+        origin->delta > static_cast<double>(std::numeric_limits<float>::max())) {
+      throw std::logic_error("Terrain LOD planning requires the loaded origin cell size");
+    }
+    const std::vector<TerrainSource> &sources = catalogue->sources();
+    lod_by_source.resize(sources.size());
+    for (uint32_t source_index = 0U; source_index < static_cast<uint32_t>(sources.size());
+         source_index++) {
+      const TerrainSource &source = sources[source_index];
+      const uint32_t lod = tile_lod(
+          catalogue->grid(),
+          source.key,
+          config.observer,
+          static_cast<float>(origin->delta),
+          pixel_angle,
+          config.lod_scale,
+          source.lod_count
+      );
+      if (lod == 0U) {
+        throw std::logic_error("Terrain LOD policy returned zero");
+      }
+      lod_by_source[source_index] = lod;
+    }
+    lod_pixel_angle = pixel_angle;
+  }
 
   State(
       const RaytraceConfig &config_value,
@@ -149,6 +187,7 @@ struct TerrainTraceSession::State {
       timer.stop("Mipmap generation");
     }
     validate_terrain_tile_position(*origin, origin_key, grid);
+    rebuild_lod_plan(initial_field.minimum_pixel_angle);
 
     bool trace_quantized = false;
     QuantizedMetalTileRecordLayout quantized_layout = {};
@@ -225,14 +264,15 @@ struct TerrainTraceSession::State {
   }
 
   [[nodiscard]] uint32_t ensure_observer_resident() {
-    uint32_t slot = cache->slot_for_source(observer_source_index);
+    const uint32_t observer_lod = lod_by_source.at(observer_source_index);
+    uint32_t slot = cache->slot_for_variant({observer_source_index, observer_lod});
     const std::vector<uint8_t> no_pinned_slots(cache->slot_capacity(), 0U);
     // The observer tile can be evicted after an earlier view. No GPU pass is
     // active here, so publishing it again may use any cache slot.
     while (slot == cache->slot_capacity()) {
-      preparer->request(observer_source_index, 0.0F);
+      preparer->request(observer_source_index, lod_by_source.at(observer_source_index), 0.0F);
       (void)cache->install_prepared(*preparer, no_pinned_slots, timer);
-      slot = cache->slot_for_source(observer_source_index);
+      slot = cache->slot_for_variant({observer_source_index, observer_lod});
       if (slot == cache->slot_capacity()) {
         timer.start_wall("Tile availability wait");
         preparer->wait_for_prepared();
@@ -266,15 +306,30 @@ bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
   }
   state.observer_source_index = *next_source;
   state.config.observer = observer;
+  state.rebuild_lod_plan(state.lod_pixel_angle);
   state.parameters.observer_elevation = static_cast<float>(observer.elevation);
   state.cache->rebase_observer(observer);
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
   return true;
 }
 
+void TerrainTraceSession::set_lod_scale(float lod_scale) {
+  if (!std::isfinite(lod_scale) || lod_scale < 0.0F) {
+    throw std::invalid_argument("Terrain LOD scale must be finite and nonnegative");
+  }
+  State &state = *state_;
+  if (state.config.lod_scale == lod_scale) {
+    return;
+  }
+  state.config.lod_scale = lod_scale;
+  state.rebuild_lod_plan(state.lod_pixel_angle);
+  state.shadow_revision = std::numeric_limits<uint64_t>::max();
+}
+
 void TerrainTraceSession::trace(const RayField &field) {
   State &state = *state_;
   const uint32_t ray_count = validate_ray_field(field);
+  state.rebuild_lod_plan(field.minimum_pixel_angle);
   const bool dimensions_changed = field.image.width != state.image.width ||
                                   field.image.height != state.image.height ||
                                   ray_count != state.ray_count;
@@ -296,6 +351,7 @@ void TerrainTraceSession::trace(const RayField &field) {
       *state.catalogue,
       field.rays,
       state.parameters,
+      state.lod_by_source,
       state.cache->slot_capacity(),
       observer_slot
   );
@@ -455,6 +511,7 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
       *state.catalogue,
       state.ray_count,
       state.parameters.num_levels,
+      state.lod_by_source,
       state.cache->slot_capacity(),
       std::span<const float>(primary_distances, state.ray_count)
   );

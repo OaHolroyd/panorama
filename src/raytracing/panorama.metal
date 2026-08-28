@@ -38,7 +38,7 @@ struct ResidentTile {
   float tile_x_min;
   float tile_y_min;
   float maximum_elevation;
-  uint padding;
+  uint lod;
   long row;
   long column;
 };
@@ -664,6 +664,36 @@ inline uint mipmap_finest_side(uint num_levels) { return 1U << (num_levels - 1U)
 /// Return the row-major side length of a one-indexed mipmap level.
 inline uint mipmap_level_side(uint cell_count, uint level) { return cell_count >> (level - 1U); }
 
+/// Return the number of values in a flattened complete maximum-mipmap.
+inline uint mipmap_value_count(uint cell_count) {
+  uint count = 0U;
+  for (uint side = cell_count; side != 0U; side >>= 1U) {
+    count += side * side;
+  }
+  return count;
+}
+
+/// Derive the geometry of a resident tile from the dispatch's LOD-1 reference
+/// values. Every higher LOD doubles cell spacing but keeps the tile extent.
+inline bool resident_lod_geometry(
+    ResidentTile tile,
+    RaytraceParameters params,
+    thread uint &cell_count,
+    thread uint &num_levels,
+    thread float &cell_size,
+    thread uint &lod_mipmap_value_count
+) {
+  if (tile.lod == 0U || tile.lod > params.num_levels) {
+    return false;
+  }
+  const uint lod_shift = tile.lod - 1U;
+  num_levels = params.num_levels - lod_shift;
+  cell_count = mipmap_finest_side(num_levels);
+  cell_size = params.cell_size * float(1U << lod_shift);
+  lod_mipmap_value_count = mipmap_value_count(cell_count);
+  return true;
+}
+
 /// Move a periodic DDA boundary to the first occurrence strictly after the
 /// current segment entry. Refinement can begin part-way through a child cell,
 /// so its nominal aligned boundary may already be behind `entry_distance`.
@@ -721,7 +751,6 @@ inline float trace_tile_frontier_impl(
     RayWorkItem input,
     device const ResidentTile *tiles,
     RaytraceParameters params,
-    uint mipmap_value_count,
     device float *distances,
     device float *elevations,
     device uint *surface_gradients,
@@ -736,8 +765,22 @@ inline float trace_tile_frontier_impl(
   }
   const uint output_index = input.ray_index;
 
-  // All resident slots share dimensions.
-  const uint num_cell = mipmap_finest_side(params.num_levels);
+  // Slots retain an LOD-1 stride, while metadata describes the coarser
+  // representation stored at the beginning of this slot.
+  uint num_cell = 0U;
+  uint num_levels = 0U;
+  float cell_size = 0.0F;
+  uint lod_mipmap_value_count = 0U;
+  if (!resident_lod_geometry(
+          resident_tile,
+          params,
+          num_cell,
+          num_levels,
+          cell_size,
+          lod_mipmap_value_count
+      )) {
+    return INFINITY;
+  }
 
   // Get ray parameters. Horizontal directions use the compass convention:
   // x is eastward, y is northward, and `dz` is the vertical slope.
@@ -745,7 +788,7 @@ inline float trace_tile_frontier_impl(
   const float2 direction = horizontal_direction.xy;
   const int stepx = int(direction.x > 0.0F) - int(direction.x < 0.0F);
   const int stepy = int(direction.y > 0.0F) - int(direction.y < 0.0F);
-  const float delta = params.cell_size;
+  const float delta = cell_size;
   const float inverse_delta = 1.0F / delta;
   const float dtx = stepx == 0 ? INFINITY : delta * fabs(horizontal_direction.z);
   const float dty = stepy == 0 ? INFINITY : delta * fabs(horizontal_direction.w);
@@ -758,12 +801,12 @@ inline float trace_tile_frontier_impl(
 
   // The observer tile begins at level 1; incoming tiles begin at their
   // coarsest maximum so clear terrain can be rejected immediately.
-  uint level = input.start_level;
+  uint level = clamp(input.start_level, 1U, num_levels);
   uint scale = 1 << (level - 1);
   // Host-created items start at either the full level-1 field or the final
   // one-value level, whose flattened offsets are known without rebuilding the
   // intervening geometric series in every ray.
-  uint offset = level == 1U ? 0U : mipmap_value_count - 1U;
+  uint offset = level == 1U ? 0U : lod_mipmap_value_count - 1U;
 
   // The exact near boundary of the active DDA segment. It remains separate
   // from points nudged only to assign deterministic cell ownership.
@@ -808,7 +851,7 @@ inline float trace_tile_frontier_impl(
   const float tile_exit = tile_exit_distance(
       tile_x_min - ray_origin.x,
       tile_y_min - ray_origin.y,
-      params.cell_size,
+      delta,
       num_cell,
       horizontal_direction,
       t_start
@@ -1060,7 +1103,6 @@ kernel void trace_tile_frontier(
       input,
       tiles,
       shared_parameters,
-      mipmap_value_count,
       distances,
       elevations,
       surface_gradients,
@@ -1099,7 +1141,6 @@ kernel void trace_tile_frontier_quantized(
       input,
       tiles,
       shared_parameters,
-      mipmap_value_count,
       distances,
       elevations,
       surface_gradients,
@@ -1171,7 +1212,6 @@ inline void trace_shadow_frontier_impl(
     device const RayWorkItem *work_items,
     device const ResidentTile *tiles,
     constant ShadowTraceParameters &params,
-    uint mipmap_value_count,
     device const ShadowRay *shadow_rays,
     device uchar *visibility,
     device float *continuations,
@@ -1186,7 +1226,6 @@ inline void trace_shadow_frontier_impl(
       input,
       tiles,
       params.trace,
-      mipmap_value_count,
       nullptr,
       nullptr,
       nullptr,
@@ -1216,7 +1255,6 @@ kernel void trace_shadow_tile_frontier(
       work_items,
       tiles,
       params,
-      mipmap_value_count,
       shadow_rays,
       visibility,
       continuations,
@@ -1250,7 +1288,6 @@ kernel void trace_shadow_tile_frontier_quantized(
       work_items,
       tiles,
       params,
-      mipmap_value_count,
       shadow_rays,
       visibility,
       continuations,

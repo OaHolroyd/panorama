@@ -3,9 +3,11 @@
 #import <Metal/Metal.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <vector>
 
 namespace panorama {
 
@@ -17,6 +19,9 @@ inline constexpr std::array<char, 8> kMetalTileUint16Magic =
     {'P', 'N', 'T', 'I', 'L', 'E', '0', '3'};
 inline constexpr uint32_t kMetalTileUint16Version = 3U;
 inline constexpr uint32_t kMetalTileUint16HeaderSize = 104U;
+inline constexpr std::array<char, 8> kMetalTileLodMagic = {'P', 'N', 'T', 'I', 'L', 'E', '0', '4'};
+inline constexpr uint32_t kMetalTileLodVersion = 4U;
+inline constexpr uint32_t kMetalTileLodHeaderSize = 128U;
 
 /// Compression applied to the complete logical Metal tile stream.
 enum class MetalTileCompression : uint32_t {
@@ -58,6 +63,22 @@ struct MetalTileHeader {
   double cell_size;
   uint64_t vertex_offset;
   uint64_t vertex_byte_count;
+  uint32_t lod_count;
+  uint32_t lod_entry_size;
+  uint64_t lod_table_offset;
+  uint64_t lod_table_byte_count;
+};
+
+/// One independently addressable vertex payload within a version-4 tile.
+struct MetalTileLod {
+  uint32_t lod;
+  uint32_t cell_count;
+  uint32_t level_count;
+  int32_t elevation_base_decimeters;
+  float maximum_elevation;
+  uint32_t reserved;
+  uint64_t vertex_offset;
+  uint64_t vertex_byte_count;
 };
 
 /// Aligned GPU layout for one complete uint16 logical tile record.
@@ -68,11 +89,13 @@ struct QuantizedMetalTileRecordLayout {
   uint32_t elevation_base_offset;
 };
 
-/// One source file and destination for a shared logical byte-range load.
+/// One source file, logical byte range, and destination for a Metal I/O load.
 struct MetalTileBufferLoad {
   std::filesystem::path path;
   NSUInteger destination_offset;
   id<MTLIOFileHandle> file;
+  uint64_t source_offset;
+  uint64_t byte_count;
 };
 
 /// Return whether a path has one of the custom tile format's suffixes.
@@ -95,6 +118,18 @@ quantized_metal_tile_record_layout(const MetalTileHeader &header);
 void validate_metal_tile_header(
     const MetalTileHeader &header,
     MetalTileCompression expected_compression
+);
+
+/// Read and validate the complete LOD table of a version-4 Metal tile.
+[[nodiscard]] std::vector<MetalTileLod>
+read_metal_tile_lods(const std::filesystem::path &path, const MetalTileHeader &header);
+
+/// Write a version-4 logical stream containing a table and all LOD payloads.
+void write_metal_tile_lods(
+    const std::filesystem::path &path,
+    const MetalTileHeader &header,
+    std::span<const MetalTileLod> lods,
+    std::span<const std::byte> payload
 );
 
 /// Write one raw or Metal-compressed logical tile stream.
@@ -127,18 +162,16 @@ open_metal_tile_file(id<MTLDevice> device, const std::filesystem::path &path);
 /// Return the number of command buffers accepted concurrently by our I/O queue.
 [[nodiscard]] NSUInteger metal_tile_io_concurrency();
 
-/// Load equal logical byte ranges into reserved Metal-buffer ranges.
+/// Load independently selected logical byte ranges into a Metal buffer.
 ///
 /// Independent I/O command buffers allow the concurrent queue to service
 /// several files at once. Metal I/O decompresses compressed sources; raw
 /// sources are copied directly. The caller selects the common source range and
-/// each load supplies its destination byte offset.
+/// each load supplies its source range and destination byte offset.
 void load_metal_tiles_into_buffer(
     id<MTLDevice> device,
     id<MTLIOCommandQueue> queue,
     std::span<const MetalTileBufferLoad> loads,
-    uint64_t vertex_offset,
-    uint64_t vertex_byte_count,
     id<MTLBuffer> vertex_buffer,
     NSUInteger vertex_buffer_length
 );

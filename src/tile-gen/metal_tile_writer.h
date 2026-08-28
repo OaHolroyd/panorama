@@ -32,7 +32,8 @@ namespace panorama::terrain {
     ChunkKey key,
     const SourceGrid &source_grid,
     MetalTileCompression compression,
-    MetalTileSampleType sample_type
+    MetalTileSampleType sample_type,
+    LodSampling lod_sampling
 );
 
 } // namespace panorama::terrain

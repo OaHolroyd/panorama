@@ -156,6 +156,43 @@ double tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLo
   return std::hypot(dx, dy);
 }
 
+/// Return the one-based terrain LOD selected for one source tile.
+uint32_t tile_lod(
+    const TileGrid &grid,
+    TileKey key,
+    const ObserverLocation &observer,
+    float base_cell_size,
+    float pixel_angle,
+    float lod_scale,
+    uint32_t available_lod_count
+) {
+  if (!std::isfinite(base_cell_size) || base_cell_size <= 0.0F || !std::isfinite(pixel_angle) ||
+      pixel_angle <= 0.0F || !std::isfinite(lod_scale) || lod_scale < 0.0F ||
+      available_lod_count == 0U) {
+    throw std::invalid_argument("Terrain LOD parameters must be finite and valid");
+  }
+  if (lod_scale == 0.0F) {
+    return 1U;
+  }
+
+  // A level is doubled in cell spacing. With sin(a) ~= a, a pixel subtends
+  // d * pixel_angle metres at the nearest point of this tile. Select the
+  // coarsest representation no wider than lod_scale times that footprint.
+  const double footprint = tile_minimum_distance(grid, key, observer) * pixel_angle;
+  const double ratio = static_cast<double>(lod_scale) * footprint / base_cell_size;
+  if (ratio < 1.0) {
+    return 1U;
+  }
+  if (!std::isfinite(ratio)) {
+    return available_lod_count;
+  }
+  const double logarithm = std::floor(std::log2(ratio));
+  if (logarithm >= static_cast<double>(std::numeric_limits<uint32_t>::max() - 1U)) {
+    return available_lod_count;
+  }
+  return std::min(available_lod_count, 1U + static_cast<uint32_t>(logarithm));
+}
+
 TerrainCatalogue::TerrainCatalogue(
     TileGrid grid,
     std::vector<TerrainSource> sources,
@@ -217,13 +254,15 @@ TerrainCatalogue TerrainCatalogue::discover(
     try {
       const TileKey key = parse_tile_name(entry.path());
       const auto maximum = maximum_elevation_by_key.find(key);
+      const bool metal = is_metal_tile_path(entry.path());
       available_sources.push_back(
           {
               key,
               entry.path(),
-              !is_metal_tile_path(entry.path()) || maximum == maximum_elevation_by_key.end()
+              !metal || maximum == maximum_elevation_by_key.end()
                   ? std::nullopt
                   : std::optional<float>(maximum->second),
+              1U,
           }
       );
     } catch (const std::invalid_argument &) {
@@ -240,6 +279,24 @@ TerrainCatalogue TerrainCatalogue::discover(
   );
 
   const TileGrid grid = infer_tile_grid(available_sources.front());
+  // Every tile directory is one tile-generation output and therefore has one
+  // common set of LOD representations. Reading a compressed header requires a
+  // synchronous Metal I/O decompression, so inspect one representative custom
+  // file instead of serially opening every source before tracing can begin.
+  const auto custom_source = std::find_if(
+      available_sources.begin(),
+      available_sources.end(),
+      [](const TerrainSource &source) { return is_metal_tile_path(source.path); }
+  );
+  if (custom_source != available_sources.end()) {
+    const MetalTileHeader header = read_metal_tile_header(custom_source->path);
+    const uint32_t lod_count = header.version == kMetalTileLodVersion ? header.lod_count : 1U;
+    for (TerrainSource &source : available_sources) {
+      if (is_metal_tile_path(source.path)) {
+        source.lod_count = lod_count;
+      }
+    }
+  }
   std::vector<TileKey> coverage_tiles;
   coverage_tiles.reserve(available_sources.size());
   for (const TerrainSource &source : available_sources) {

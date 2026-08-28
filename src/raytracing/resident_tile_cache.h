@@ -20,7 +20,7 @@ struct ResidentTile {
   float tile_x_min;
   float tile_y_min;
   float maximum_elevation;
-  uint32_t padding;
+  uint32_t lod;
   int64_t row;
   int64_t column;
 };
@@ -53,8 +53,8 @@ struct ResidentTileCacheStatistics {
 
 /// A bounded fixed-stride terrain atlas with synchronous LRU replacement.
 ///
-/// The cache owns the GPU-visible vertex/mipmap buffers and source-to-slot
-/// maps. Between completed frontier commands it installs all currently
+/// The cache owns the GPU-visible vertex/mipmap buffers and variant-to-slot
+/// map. Between completed frontier commands it installs all currently
 /// prepared tiles, waiting for custom I/O, optional fixed-point conversion,
 /// and GPU mipmap generation before publishing resident entries.
 class ResidentTileCache {
@@ -81,11 +81,11 @@ public:
   /// Release atlas and command resources after synchronous installation work.
   ~ResidentTileCache();
 
-  /// Return the resident slot for a source, or `slot_capacity()` if absent.
-  [[nodiscard]] uint32_t slot_for_source(uint32_t source_index) const;
+  /// Return the slot holding this source/LOD variant, or `slot_capacity()`.
+  [[nodiscard]] uint32_t slot_for_variant(TerrainTileVariant variant) const;
 
-  /// Install prepared tiles and return the source indices published to safe slots.
-  [[nodiscard]] std::vector<uint32_t> install_prepared(
+  /// Install prepared tiles and return the source/LOD variants published to safe slots.
+  [[nodiscard]] std::vector<TerrainTileVariant> install_prepared(
       AsyncTilePreparer &preparer,
       std::span<const uint8_t> pinned_slots,
       Timer &timer

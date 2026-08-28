@@ -53,6 +53,7 @@ struct Options {
   OutputFormat format = OutputFormat::GeoTiff;
   MetalTileCompression compression = MetalTileCompression::Lz4;
   MetalTileSampleType sample_type = MetalTileSampleType::Float32;
+  LodSampling lod_sampling = LodSampling::None;
   bool explicit_compression = false;
   bool explicit_sample_type = false;
 };
@@ -86,6 +87,7 @@ void print_usage(const char *program) {
       "  --nodata VALUE      output no-data value, including nan (default: 0)\n"
       "  --format NAME       geotiff or metal (default: geotiff)\n"
       "  --sample-type NAME  float32 or uint16 (Metal tiles; default: float32)\n"
+      "  --lod NAME          none, point, mean, or max (Metal tiles; default: none)\n"
       "  --compression NAME  none, zlib, lz4, lzma, or lzbitmap\n"
       "                      (Metal tiles only; default: lz4)\n"
       "  --max-tiles N       stop after N output chunks; zero is unlimited\n"
@@ -127,6 +129,19 @@ void print_usage(const char *program) {
   throw std::invalid_argument("Compression must be none, zlib, lz4, lzma, or lzbitmap");
 }
 
+/// Parse the construction method for independently loadable terrain LODs.
+[[nodiscard]] LodSampling parse_lod_sampling(std::string_view text) {
+  if (text == "none")
+    return LodSampling::None;
+  if (text == "point")
+    return LodSampling::Point;
+  if (text == "mean")
+    return LodSampling::Mean;
+  if (text == "max")
+    return LodSampling::Maximum;
+  throw std::invalid_argument("LOD method must be none, point, mean, or max");
+}
+
 /// Return the human-readable output representation used in progress reports.
 [[nodiscard]] const char *format_name(OutputFormat format) {
   return format == OutputFormat::GeoTiff ? "GeoTIFF" : "Metal tile";
@@ -147,6 +162,21 @@ void print_usage(const char *program) {
     return "lzbitmap";
   }
   throw std::logic_error("Unknown Metal tile compression method");
+}
+
+/// Return the command-line spelling used in output names and progress reports.
+[[nodiscard]] const char *lod_sampling_name(LodSampling sampling) {
+  switch (sampling) {
+  case LodSampling::None:
+    return "none";
+  case LodSampling::Point:
+    return "point";
+  case LodSampling::Mean:
+    return "mean";
+  case LodSampling::Maximum:
+    return "max";
+  }
+  throw std::logic_error("Unknown LOD sampling method");
 }
 
 /// Parse a Float32 output sentinel, allowing NaN for collision-free no-data.
@@ -240,6 +270,8 @@ void validate_dataset_name(const std::string &name) {
     } else if (option == "--sample-type") {
       options.sample_type = parse_sample_type(arguments::option_value(argc, argv, index, option));
       options.explicit_sample_type = true;
+    } else if (option == "--lod") {
+      options.lod_sampling = parse_lod_sampling(arguments::option_value(argc, argv, index, option));
     } else if (option == "--max-tiles") {
       options.max_tiles = arguments::parse_uint32(
           arguments::option_value(argc, argv, index, option),
@@ -278,6 +310,9 @@ void validate_dataset_name(const std::string &name) {
   }
   if (options.format == OutputFormat::GeoTiff && options.explicit_sample_type) {
     throw std::invalid_argument("--sample-type applies only to --format metal");
+  }
+  if (options.format == OutputFormat::GeoTiff && options.lod_sampling != LodSampling::None) {
+    throw std::invalid_argument("--lod applies only to --format metal");
   }
   if (options.format == OutputFormat::MetalTile && options.layout != RasterLayout::Level0) {
     throw std::invalid_argument("Metal tiles currently support only --layout level-0");
@@ -330,6 +365,10 @@ int main(int argc, const char *argv[]) {
                               ? "-metal-"
                               : "-metal-u16-";
         directory_name += compression_name(options.compression);
+        if (options.lod_sampling != LodSampling::None) {
+          directory_name += "-lod-";
+          directory_name += lod_sampling_name(options.lod_sampling);
+        }
       }
       options.output_directory = std::filesystem::path("data") / directory_name;
     }
@@ -358,7 +397,7 @@ int main(int argc, const char *argv[]) {
         "Discovered %zu DEM rasters below %s.\n"
         "  CRS        : %s\n"
         "  Resolution : %.12g\n"
-        "  Output     : %u cells, %u samples (%s, %s)\n"
+        "  Output     : %u cells, %u samples (%s, %s%s%s)\n"
         "  Directory  : %s\n"
         "  Candidates : %zu chunks\n",
         catalogue.sources().size(),
@@ -369,6 +408,8 @@ int main(int argc, const char *argv[]) {
         sample_side(destination),
         layout_name(destination.layout),
         format_name(options.format),
+        options.lod_sampling == LodSampling::None ? "" : ", LOD ",
+        options.lod_sampling == LodSampling::None ? "" : lod_sampling_name(options.lod_sampling),
         options.output_directory.c_str(),
         plan.contributors.size()
     );
@@ -427,7 +468,8 @@ int main(int argc, const char *argv[]) {
         continue;
       }
 
-      const TerrainChunk chunk = build_chunk(catalogue, plan, key, contributors);
+      const TerrainChunk chunk =
+          build_chunk(catalogue, plan, key, contributors, options.lod_sampling);
       const bool has_coverage =
           std::any_of(chunk.covered.begin(), chunk.covered.end(), [](uint8_t value) {
             return value != 0U;
@@ -460,7 +502,8 @@ int main(int argc, const char *argv[]) {
             key,
             catalogue.grid(),
             options.compression,
-            options.sample_type
+            options.sample_type,
+            options.lod_sampling
         );
         manifest_entries.push_back({key.row, key.column, maximum});
       }

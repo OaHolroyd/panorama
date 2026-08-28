@@ -7,15 +7,29 @@
 #include <string>
 
 namespace panorama {
+namespace {
+
+/// Convert a one-based terrain LOD into the deepest valid maximum-mipmap
+/// level for that representation. LOD 1 keeps the reference tile unchanged.
+[[nodiscard]] uint32_t mipmap_levels_for_lod(uint32_t base_levels, uint32_t lod) {
+  if (base_levels == 0U || lod == 0U || lod > base_levels) {
+    throw std::out_of_range("Terrain LOD exceeds the available mipmap hierarchy");
+  }
+  return base_levels - (lod - 1U);
+}
+
+} // namespace
+
 HostFrontier::HostFrontier(
     const TerrainCatalogue &catalogue,
     std::span<const RayDirection> rays,
     const RaytraceParameters &parameters,
+    std::span<const uint32_t> lod_by_source,
     uint32_t resident_slot_capacity,
     uint32_t observer_slot
 )
     : catalogue_(catalogue), ray_capacity_(rays.size()), num_levels_(parameters.num_levels),
-      scheduling_distances_(),
+      lod_by_source_(lod_by_source), scheduling_distances_(),
       source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
       source_is_pending_(catalogue.sources().size(), 0U),
       request_outstanding_(catalogue.sources().size(), 0U),
@@ -27,7 +41,8 @@ HostFrontier::HostFrontier(
       claimed_ray_(rays.size(), 0U)
 #endif
 {
-  if (rays.empty() || rays.size() != parameters.ray_count || resident_slot_capacity == 0U ||
+  if (rays.empty() || rays.size() != parameters.ray_count ||
+      lod_by_source_.size() != catalogue.sources().size() || resident_slot_capacity == 0U ||
       observer_slot >= resident_slot_capacity) {
     throw std::invalid_argument("Host frontier requires one direction per output ray");
   }
@@ -41,11 +56,12 @@ HostFrontier::HostFrontier(
     const TerrainCatalogue &catalogue,
     size_t ray_capacity,
     uint32_t num_levels,
+    std::span<const uint32_t> lod_by_source,
     uint32_t resident_slot_capacity,
     std::span<const float> scheduling_distances
 )
     : catalogue_(catalogue), ray_capacity_(ray_capacity), num_levels_(num_levels),
-      scheduling_distances_(scheduling_distances),
+      lod_by_source_(lod_by_source), scheduling_distances_(scheduling_distances),
       source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
       source_is_pending_(catalogue.sources().size(), 0U),
       request_outstanding_(catalogue.sources().size(), 0U),
@@ -57,14 +73,22 @@ HostFrontier::HostFrontier(
       claimed_ray_(ray_capacity, 0U)
 #endif
 {
-  if (ray_capacity == 0U || num_levels == 0U || resident_slot_capacity == 0U ||
+  if (ray_capacity == 0U || num_levels == 0U ||
+      lod_by_source_.size() != catalogue.sources().size() || resident_slot_capacity == 0U ||
       (!scheduling_distances.empty() && scheduling_distances.size() != ray_capacity)) {
     throw std::invalid_argument("Host frontier requires a valid ray and terrain capacity");
   }
 }
 
-void HostFrontier::mark_installed(std::span<const uint32_t> source_indices) {
-  for (uint32_t source_index : source_indices) {
+void HostFrontier::mark_installed(std::span<const TerrainTileVariant> variants) {
+  for (TerrainTileVariant variant : variants) {
+    const uint32_t source_index = variant.source_index;
+    if (source_index >= lod_by_source_.size() || variant.lod != lod_by_source_[source_index]) {
+      // A persistent preparer can complete an obsolete variant after the
+      // observer has moved. It is valid cache content, but not this
+      // frontier's pending request.
+      continue;
+    }
     request_outstanding_.at(source_index) = 0U;
     SourceBucket &bucket = source_buckets_.at(source_index);
     if (bucket.waiting.empty()) {
@@ -128,7 +152,7 @@ uint32_t HostFrontier::activate_resident(
   const auto slot_for_source = [&](uint32_t source_index) {
     uint32_t &slot = activation_slots_[source_index];
     if (slot == std::numeric_limits<uint32_t>::max()) {
-      slot = cache.slot_for_source(source_index);
+      slot = cache.slot_for_variant({source_index, lod_by_source_[source_index]});
       if (slot != cache.slot_capacity()) {
         if (slot >= active_slot_seen_.size()) {
           throw std::logic_error("Active frontier references an invalid resident slot");
@@ -194,7 +218,12 @@ uint32_t HostFrontier::activate_resident(
         if (count >= ray_capacity_) {
           throw std::runtime_error("GPU frontier exceeds the ray frontier capacity");
         }
-        items[count] = {slot, work.ray_index, num_levels_, work.entry_distance};
+        items[count] = {
+            slot,
+            work.ray_index,
+            mipmap_levels_for_lod(num_levels_, lod_by_source_[source_index]),
+            work.entry_distance,
+        };
         count++;
       }
     }
@@ -234,11 +263,16 @@ uint32_t HostFrontier::activate_resident(
     if (count >= ray_capacity_) {
       throw std::runtime_error("GPU frontier exceeds the ray frontier capacity");
     }
-    items[count] = {slot, work.ray_index, num_levels_, work.entry_distance};
+    items[count] = {
+        slot,
+        work.ray_index,
+        mipmap_levels_for_lod(num_levels_, lod_by_source_[work.source_index]),
+        work.entry_distance,
+    };
     count++;
   }
   for (uint32_t source_index : request_sources_) {
-    preparer.request(source_index, request_distances_[source_index]);
+    preparer.request(source_index, lod_by_source_[source_index], request_distances_[source_index]);
     request_outstanding_[source_index] = 1U;
     request_distances_[source_index] = std::numeric_limits<float>::infinity();
   }

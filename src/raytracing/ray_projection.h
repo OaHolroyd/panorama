@@ -125,6 +125,10 @@ struct RayDirection {
 struct RayField {
   ImageSize image;
   std::vector<RayDirection> rays;
+  /// Conservative angular span of one output pixel, in radians. This is kept
+  /// beside the generated rays so terrain LOD planning does not need to know
+  /// which projection produced them.
+  float minimum_pixel_angle;
 };
 
 /// Generate the existing equally spaced angular ray field.

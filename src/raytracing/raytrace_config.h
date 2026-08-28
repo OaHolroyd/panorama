@@ -40,6 +40,9 @@ struct RaytraceConfig {
   bool retain_quantized;
   /// Move an unavailable observer to a dataset-derived default instead of failing.
   bool allow_observer_fallback = false;
+  /// Scale used by the per-source terrain LOD policy. Zero disables LOD
+  /// selection and retains the original, LOD-1 terrain everywhere.
+  float lod_scale = 0.0F;
 };
 
 } // namespace panorama
