@@ -4,10 +4,6 @@
 #include "tile_geometry.h"
 #include "tile_manager_gpu.h"
 
-#include "metal_tile.h"
-
-#import <Metal/Metal.h>
-
 #include <memory>
 #include <optional>
 #include <span>
@@ -48,15 +44,6 @@ struct TileManagerStatistics {
   uint32_t slot_capacity;
 };
 
-/// A selected LOD whose file handle has been opened by a TileManager worker.
-/// The payload remains on disk until TileManager reaches a safe atlas-install
-/// point between frontier dispatches.
-struct PreparedTile {
-  TileVariant variant;
-  id<MTLIOFileHandle> metal_file;
-  MetalTileLod metal_lod;
-};
-
 /// Own prepared-terrain discovery, LOD selection, residency, and loading.
 ///
 /// Discovery is deliberately separate from `attach_gpu`: ray resources need
@@ -84,7 +71,10 @@ public:
   [[nodiscard]] const TerrainCatalogue &catalogue() const;
   [[nodiscard]] const std::vector<TerrainSource> &sources() const;
   [[nodiscard]] const TileGeometry &origin_geometry() const;
-  [[nodiscard]] const std::vector<uint32_t> &lod_by_source() const;
+  /// Return the selected representation for one catalogue source.
+  [[nodiscard]] uint32_t lod_for_source(uint32_t source_index) const;
+  /// Width of one catalogue tile in the shared projected coordinate system.
+  [[nodiscard]] float tile_width() const;
   [[nodiscard]] uint32_t observer_source_index() const;
   [[nodiscard]] float pixel_angle() const;
   [[nodiscard]] uint32_t mipmap_value_count() const;
@@ -99,6 +89,11 @@ public:
   void wait_for_available();
   void record_slot_use(std::span<const uint32_t> slots);
   [[nodiscard]] uint32_t ensure_observer_resident(Timer &timer);
+
+  /// Bilinearly sample full-resolution terrain at one projected coordinate.
+  /// A resident LOD-1 atlas slot is used when possible; otherwise the manager
+  /// loads and retains one LOD-1 payload through its existing Metal-I/O queue.
+  [[nodiscard]] std::optional<float> sample_terrain(double easting, double northing);
   void stop();
 
   [[nodiscard]] TileManagerStatistics statistics() const;

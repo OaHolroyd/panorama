@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 
 #include <memory>
+#include <optional>
 
 namespace panorama {
 
@@ -54,6 +55,8 @@ public:
   [[nodiscard]] Crs crs() const;
   [[nodiscard]] ObserverLocation observer() const;
   [[nodiscard]] const TerrainCoverage &terrain_coverage() const;
+  /// Sample full-resolution terrain through this session's TileManager.
+  [[nodiscard]] std::optional<float> sample_terrain(double easting, double northing);
   [[nodiscard]] id<MTLDevice> device() const;
   [[nodiscard]] id<MTLCommandQueue> command_queue() const;
   [[nodiscard]] id<MTLLibrary> library() const;

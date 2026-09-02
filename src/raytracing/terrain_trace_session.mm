@@ -392,6 +392,10 @@ const TerrainCoverage &TerrainTraceSession::terrain_coverage() const {
   return state_->tiles->catalogue().coverage();
 }
 
+std::optional<float> TerrainTraceSession::sample_terrain(double easting, double northing) {
+  return state_->tiles->sample_terrain(easting, northing);
+}
+
 id<MTLDevice> TerrainTraceSession::device() const { return state_->gpu->device(); }
 
 id<MTLCommandQueue> TerrainTraceSession::command_queue() const {

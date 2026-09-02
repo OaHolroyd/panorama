@@ -1,7 +1,6 @@
 #include "arguments.h"
 #include "coordinate_input.h"
 #include "gpu_image_renderer.h"
-#include "metal_tile.h"
 #include "minimap.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
@@ -640,116 +639,6 @@ private:
   id<MTLComputePipelineState> pipeline_;
 };
 
-/// Small, one-tile CPU cache used for elevation-correct minimap interaction.
-/// Custom terrain stays on its normal compressed Metal-I/O path; only the
-/// tile under the pointer is copied into shared memory for bilinear sampling.
-class TerrainPointSampler {
-public:
-  TerrainPointSampler(
-      id<MTLDevice> device,
-      const std::filesystem::path &tile_dir,
-      ObserverLocation observer,
-      float max_distance
-  )
-      : device_(device), tile_dir_(tile_dir), max_distance_(max_distance),
-        catalogue_(TerrainCatalogue::discover(tile_dir, observer, max_distance, 0U)),
-        io_queue_(make_metal_io_queue(device)) {}
-
-  void recenter(ObserverLocation observer) {
-    catalogue_ = TerrainCatalogue::discover(tile_dir_, observer, max_distance_, 0U);
-    cached_vertices_.clear();
-    cached_key_.reset();
-  }
-
-  [[nodiscard]] std::optional<TerrainPoint> sample(MapCoordinate coordinate) {
-    const TileKey key = tile_key_at(catalogue_.grid(), coordinate.easting, coordinate.northing);
-    const std::optional<uint32_t> source_index = catalogue_.find_source(key);
-    if (!source_index.has_value()) {
-      return std::nullopt;
-    }
-    if (!cached_key_.has_value() || !(*cached_key_ == key)) {
-      load(catalogue_.sources()[*source_index]);
-      cached_key_ = key;
-    }
-
-    const double x = (coordinate.easting - cached_lower_left_x_) / cached_cell_size_;
-    const double y = (coordinate.northing - cached_lower_left_y_) / cached_cell_size_;
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.0 || y < 0.0 || x > cached_cell_count_ ||
-        y > cached_cell_count_) {
-      return std::nullopt;
-    }
-    const uint32_t x0 = std::min(cached_cell_count_ - 1U, static_cast<uint32_t>(std::floor(x)));
-    const uint32_t y0 = std::min(cached_cell_count_ - 1U, static_cast<uint32_t>(std::floor(y)));
-    const double tx = std::clamp(x - x0, 0.0, 1.0);
-    const double ty = std::clamp(y - y0, 0.0, 1.0);
-    const size_t side = static_cast<size_t>(cached_cell_count_) + 1U;
-    const auto vertex = [&](uint32_t column, uint32_t row) {
-      return static_cast<double>(cached_vertices_[static_cast<size_t>(row) * side + column]);
-    };
-    const double south = std::lerp(vertex(x0, y0), vertex(x0 + 1U, y0), tx);
-    const double north = std::lerp(vertex(x0, y0 + 1U), vertex(x0 + 1U, y0 + 1U), tx);
-    const double elevation = std::lerp(south, north, ty);
-    return TerrainPoint{coordinate.easting, coordinate.northing, static_cast<float>(elevation)};
-  }
-
-private:
-  void load(const TerrainSource &source) {
-    const MetalTileHeader header = read_metal_tile_header(source.path);
-    if (header.vertex_byte_count > std::numeric_limits<NSUInteger>::max()) {
-      throw std::overflow_error("Terrain point tile is too large for Metal");
-    }
-    id<MTLBuffer> payload =
-        [device_ newBufferWithLength:static_cast<NSUInteger>(header.vertex_byte_count)
-                             options:MTLResourceStorageModeShared];
-    if (payload == nil || payload.contents == nullptr) {
-      throw std::runtime_error("Could not allocate terrain point sample buffer");
-    }
-    const MetalTileBufferLoad load = {
-        source.path,
-        0U,
-        nil,
-        header.vertex_offset,
-        header.vertex_byte_count,
-    };
-    load_metal_tiles_into_buffer(
-        device_,
-        io_queue_,
-        std::span<const MetalTileBufferLoad>(&load, 1U),
-        payload,
-        payload.length
-    );
-    const size_t count = (static_cast<size_t>(header.cell_count) + 1U) *
-                         (static_cast<size_t>(header.cell_count) + 1U);
-    cached_vertices_.resize(count);
-    if (header.sample_type == MetalTileSampleType::Float32) {
-      const auto *source_values = static_cast<const float *>(payload.contents);
-      std::copy_n(source_values, count, cached_vertices_.begin());
-    } else {
-      const auto *source_values = static_cast<const uint16_t *>(payload.contents);
-      const float base = static_cast<float>(header.elevation_base_decimeters) / 10.0F;
-      for (size_t index = 0U; index < count; index++) {
-        cached_vertices_[index] = base + static_cast<float>(source_values[index]) / 10.0F;
-      }
-    }
-    cached_cell_count_ = header.cell_count;
-    cached_cell_size_ = header.cell_size;
-    cached_lower_left_x_ = header.lower_left_x;
-    cached_lower_left_y_ = header.lower_left_y;
-  }
-
-  id<MTLDevice> device_;
-  std::filesystem::path tile_dir_;
-  float max_distance_;
-  TerrainCatalogue catalogue_;
-  id<MTLIOCommandQueue> io_queue_;
-  std::optional<TileKey> cached_key_;
-  std::vector<float> cached_vertices_;
-  uint32_t cached_cell_count_ = 0U;
-  double cached_cell_size_ = 0.0;
-  double cached_lower_left_x_ = 0.0;
-  double cached_lower_left_y_ = 0.0;
-};
-
 /// Serial background renderer which coalesces input to the latest camera view.
 class ViewerRenderer {
 public:
@@ -784,16 +673,10 @@ public:
     observer_fallback_used_ = settings_.observer.easting != requestedObserver.easting ||
                               settings_.observer.northing != requestedObserver.northing;
     device_ = trace_->device();
-    sampler_ = std::make_unique<TerrainPointSampler>(
-        device_,
-        settings_.tile_dir,
-        settings_.observer,
-        settings_.max_distance
-    );
-    if (const std::optional<TerrainPoint> ground =
-            sampler_->sample({settings_.observer.easting, settings_.observer.northing})) {
+    if (const std::optional<float> ground =
+            trace_->sample_terrain(settings_.observer.easting, settings_.observer.northing)) {
       if (observer_fallback_used_) {
-        settings_.observer.elevation = static_cast<double>(ground->elevation) + kFallbackEyeHeight;
+        settings_.observer.elevation = static_cast<double>(*ground) + kFallbackEyeHeight;
         trace_ = std::make_unique<TerrainTraceSession>(
             traceConfig(settings_.observer, false),
             initial_field,
@@ -804,8 +687,7 @@ public:
         }
         observer_ground_clearance_ = kFallbackEyeHeight;
       } else {
-        observer_ground_clearance_ =
-            std::max(0.0, settings_.observer.elevation - ground->elevation);
+        observer_ground_clearance_ = std::max(0.0, settings_.observer.elevation - *ground);
       }
     }
     if (observer_fallback_used_) {
@@ -1240,25 +1122,26 @@ private:
           std::optional<RoamResult> roam_result;
           double next_ground_clearance = current_ground_clearance;
           if (roam_requested) {
-            const std::optional<TerrainPoint> ground = sampler_->sample(roam_coordinate);
+            const std::optional<float> ground =
+                trace_->sample_terrain(roam_coordinate.easting, roam_coordinate.northing);
             const bool terrain_clear =
                 ground.has_value() && (roam_altitude_mode == RoamAltitudeMode::FollowTerrain ||
-                                       roam_height >= static_cast<double>(ground->elevation) + 0.5);
+                                       roam_height >= static_cast<double>(*ground) + 0.5);
             roam_result = RoamResult{
                 .request_token = roam_token,
                 .accepted = terrain_clear,
-                .ground_elevation = ground.has_value() ? ground->elevation
-                                                       : std::numeric_limits<float>::quiet_NaN(),
+                .ground_elevation =
+                    ground.has_value() ? *ground : std::numeric_limits<float>::quiet_NaN(),
             };
             if (terrain_clear) {
               observer = {
                   roam_coordinate.easting,
                   roam_coordinate.northing,
                   roam_altitude_mode == RoamAltitudeMode::FollowTerrain
-                      ? static_cast<double>(ground->elevation) + roam_height
+                      ? static_cast<double>(*ground) + roam_height
                       : roam_height,
               };
-              next_ground_clearance = observer.elevation - ground->elevation;
+              next_ground_clearance = observer.elevation - *ground;
               observer_requested = true;
               trace_requested = true;
               presentation_requested = true;
@@ -1292,7 +1175,6 @@ private:
                   throw std::runtime_error("Observer relocation selected a different Metal device");
                 }
                 trace_ = std::move(replacement);
-                sampler_->recenter(observer);
               }
               current_observer_ = observer;
             }
@@ -1347,7 +1229,14 @@ private:
           }
           std::optional<TerrainPoint> map_point;
           if (map_point_requested) {
-            map_point = sampler_->sample(map_coordinate);
+            if (const std::optional<float> elevation =
+                    trace_->sample_terrain(map_coordinate.easting, map_coordinate.northing)) {
+              map_point = TerrainPoint{
+                  map_coordinate.easting,
+                  map_coordinate.northing,
+                  *elevation,
+              };
+            }
           }
           std::optional<TargetVisibility> target_visibility;
           if (target_requested && target.has_value()) {
@@ -1417,7 +1306,6 @@ private:
   std::unique_ptr<TerrainTraceSession> trace_;
   std::unique_ptr<GpuImageRenderer> presentation_;
   std::unique_ptr<GpuVisibilityPointProjector> visibility_;
-  std::unique_ptr<TerrainPointSampler> sampler_;
   id<MTLDevice> device_;
   id<MTLCommandQueue> display_queue_;
   id<MTLLibrary> library_;

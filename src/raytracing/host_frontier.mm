@@ -79,9 +79,9 @@ HostFrontier::HostFrontier(
 void HostFrontier::mark_installed(std::span<const TileVariant> variants) {
   for (TileVariant variant : variants) {
     const uint32_t source_index = variant.source_index;
-    if (source_index >= tiles_.lod_by_source().size() ||
-        variant.lod != tiles_.lod_by_source()[source_index]) {
-      // A persistent preparer can complete an obsolete variant after the
+    if (source_index >= tiles_.sources().size() ||
+        variant.lod != tiles_.lod_for_source(source_index)) {
+      // A persistent loading worker can complete an obsolete variant after the
       // observer has moved. It is valid cache content, but not this
       // frontier's pending request.
       continue;
@@ -131,8 +131,7 @@ uint32_t HostFrontier::activate_resident(
   // Keep independently advancing rays within one tile width of the nearest
   // work. This limits cache churn without restoring any projection-specific
   // column grouping.
-  const float activation_limit =
-      nearest_entry + static_cast<float>(tiles_.catalogue().grid().width);
+  const float activation_limit = nearest_entry + tiles_.tile_width();
   if (count == 0U) {
     for (uint32_t slot : active_slots_) {
       active_slot_seen_[slot] = 0U;
@@ -217,7 +216,7 @@ uint32_t HostFrontier::activate_resident(
         items[count] = {
             slot,
             work.ray_index,
-            mipmap_levels_for_lod(num_levels_, tiles_.lod_by_source()[source_index]),
+            mipmap_levels_for_lod(num_levels_, tiles_.lod_for_source(source_index)),
             work.entry_distance,
         };
         count++;
@@ -262,7 +261,7 @@ uint32_t HostFrontier::activate_resident(
     items[count] = {
         slot,
         work.ray_index,
-        mipmap_levels_for_lod(num_levels_, tiles_.lod_by_source()[work.source_index]),
+        mipmap_levels_for_lod(num_levels_, tiles_.lod_for_source(work.source_index)),
         work.entry_distance,
     };
     count++;

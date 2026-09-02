@@ -1,8 +1,7 @@
 #include "tile_manager.h"
 
 #include "metal_tile.h"
-#include "resident_tile_cache.h"
-#include "tile_preparer.h"
+#include "tile_manager_state.h"
 #include "timer.h"
 
 #include <algorithm>
@@ -38,42 +37,180 @@ void validate_tile_position(const TileGeometry &tile, TileKey key, const TileGri
 
 } // namespace
 
-struct TileManager::State {
-  RaytraceConfig config;
-  std::unique_ptr<TerrainCatalogue> catalogue;
-  std::unique_ptr<TileGeometry> origin;
-  std::vector<uint32_t> lod_by_source;
-  float pixel_angle = 0.0F;
-  uint32_t observer_source_index = 0U;
-  uint32_t mipmap_values = 0U;
-  bool trace_quantized = false;
-  // TileManager owns both stages of tile lifetime.  The loader prepares an
-  // independently selectable file payload; the atlas installs it only at the
-  // frontier's explicit safe point.
-  std::unique_ptr<ResidentTileCache> atlas;
-  std::unique_ptr<AsyncTilePreparer> loader;
-
-  void rebuild_lod_plan(float angle) {
-    if (!std::isfinite(angle) || angle <= 0.0F) {
-      throw std::invalid_argument("Terrain LOD planning requires a positive pixel angle");
-    }
-    const std::vector<TerrainSource> &source_values = catalogue->sources();
-    lod_by_source.resize(source_values.size());
-    for (uint32_t source_index = 0U; source_index < static_cast<uint32_t>(source_values.size());
-         source_index++) {
-      lod_by_source[source_index] = tile_lod(
-          catalogue->grid(),
-          source_values[source_index].key,
-          config.observer,
-          static_cast<float>(origin->cell_size),
-          angle,
-          config.lod_scale,
-          source_values[source_index].lod_count
-      );
-    }
-    pixel_angle = angle;
+void TileManager::State::rebuild_lod_plan(float angle) {
+  if (!std::isfinite(angle) || angle <= 0.0F) {
+    throw std::invalid_argument("Terrain LOD planning requires a positive pixel angle");
   }
-};
+  const std::vector<TerrainSource> &source_values = catalogue->sources();
+  lod_by_source.resize(source_values.size());
+  for (uint32_t source_index = 0U; source_index < static_cast<uint32_t>(source_values.size());
+       source_index++) {
+    lod_by_source[source_index] = tile_lod(
+        catalogue->grid(),
+        source_values[source_index].key,
+        config.observer,
+        static_cast<float>(origin->cell_size),
+        angle,
+        config.lod_scale,
+        source_values[source_index].lod_count
+    );
+  }
+  pixel_angle = angle;
+}
+
+void TileManager::State::start_workers(uint32_t configured_workers) {
+  if (catalogue->sources().empty() || prepared_capacity == 0U || device == nil ||
+      loader_timer == nullptr) {
+    throw std::logic_error("TileManager loading resources are unavailable");
+  }
+  std::lock_guard<std::mutex> lock(loader_mutex);
+  if (workers_started) {
+    throw std::logic_error("TileManager workers have already started");
+  }
+  workers_started = true;
+  load_states[{0U, 1U}] = TileLoadState::Resident;
+
+  const uint32_t hardware_threads = std::thread::hardware_concurrency();
+  const uint32_t available_workers =
+      configured_workers == 0U ? std::max(1U, hardware_threads)
+                               : std::min(configured_workers, std::max(1U, hardware_threads));
+  worker_count =
+      std::min(static_cast<uint32_t>(catalogue->sources().size() - 1U), available_workers);
+  workers.reserve(worker_count);
+
+  for (uint32_t worker = 0U; worker < worker_count; worker++) {
+    workers.emplace_back([this] {
+      while (true) {
+        TileLoadRequest request = {};
+        {
+          std::unique_lock<std::mutex> lock(loader_mutex);
+          request_available.wait(lock, [&] {
+            return stop_requested.load(std::memory_order_relaxed) || !requests.empty();
+          });
+          if (stop_requested.load(std::memory_order_relaxed)) {
+            return;
+          }
+          request = requests.top();
+          requests.pop();
+          if (load_states.at(request.variant) != TileLoadState::Queued ||
+              request.priority != queued_priorities.at(request.variant)) {
+            continue;
+          }
+          load_states[request.variant] = TileLoadState::Loading;
+        }
+
+        try {
+          const TerrainSource &source = catalogue->sources()[request.variant.source_index];
+          const MetalTileHeader header = read_metal_tile_header(source.path);
+          const std::vector<MetalTileLod> lods = read_metal_tile_lods(source.path, header);
+          const auto selected =
+              std::find_if(lods.begin(), lods.end(), [&](const MetalTileLod &lod) {
+                return lod.lod == request.variant.lod;
+              });
+          if (selected == lods.end()) {
+            throw std::out_of_range("Requested terrain LOD is unavailable in the Metal tile");
+          }
+          loader_timer->start_work("Metal tile open");
+          id<MTLIOFileHandle> file = open_metal_tile_file(device, source.path);
+          loader_timer->stop("Metal tile open");
+
+          std::unique_lock<std::mutex> lock(loader_mutex);
+          prepared_space_available.wait(lock, [&] {
+            return stop_requested.load(std::memory_order_relaxed) ||
+                   prepared_tiles.size() < prepared_capacity;
+          });
+          if (stop_requested.load(std::memory_order_relaxed)) {
+            return;
+          }
+          load_states[request.variant] = TileLoadState::Prepared;
+          prepared_tiles.push_back({request.variant, file, *selected});
+          lock.unlock();
+          prepared_available.notify_one();
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(loader_mutex);
+          if (loader_error == nullptr) {
+            loader_error = std::current_exception();
+          }
+          stop_requested.store(true, std::memory_order_relaxed);
+          request_available.notify_all();
+          prepared_available.notify_all();
+          prepared_space_available.notify_all();
+          return;
+        }
+      }
+    });
+  }
+}
+
+void TileManager::State::request_tile(uint32_t source_index, uint32_t lod, float priority) {
+  std::lock_guard<std::mutex> lock(loader_mutex);
+  if (source_index >= catalogue->sources().size()) {
+    throw std::out_of_range("Tile request refers to an unknown source");
+  }
+  if (lod == 0U || !std::isfinite(priority)) {
+    throw std::invalid_argument("Tile request requires a valid LOD and priority");
+  }
+  const TileVariant variant = {source_index, lod};
+  request_count++;
+  if (requested_before[variant] == 0U) {
+    requested_before[variant] = 1U;
+    unique_request_count++;
+  } else {
+    duplicate_request_count++;
+  }
+  TileLoadState &state = load_states[variant];
+  if (state == TileLoadState::Unrequested) {
+    state = TileLoadState::Queued;
+    queued_priorities[variant] = priority;
+    requests.push({priority, variant});
+    request_available.notify_one();
+  } else if (state == TileLoadState::Queued && priority < queued_priorities[variant]) {
+    queued_priorities[variant] = priority;
+    requests.push({priority, variant});
+    request_available.notify_one();
+  }
+}
+
+std::optional<PreparedTile> TileManager::State::try_take_prepared() {
+  std::lock_guard<std::mutex> lock(loader_mutex);
+  if (prepared_tiles.empty()) {
+    return std::nullopt;
+  }
+  PreparedTile tile = std::move(prepared_tiles.front());
+  prepared_tiles.pop_front();
+  prepared_space_available.notify_one();
+  return tile;
+}
+
+void TileManager::State::wait_for_prepared() {
+  std::unique_lock<std::mutex> lock(loader_mutex);
+  prepared_available.wait(lock, [&] {
+    return loader_error != nullptr || !prepared_tiles.empty() ||
+           stop_requested.load(std::memory_order_relaxed);
+  });
+  if (loader_error != nullptr) {
+    std::rethrow_exception(loader_error);
+  }
+}
+
+void TileManager::State::rethrow_if_failed() const {
+  std::lock_guard<std::mutex> lock(loader_mutex);
+  if (loader_error != nullptr) {
+    std::rethrow_exception(loader_error);
+  }
+}
+
+void TileManager::State::stop_workers() {
+  stop_requested.store(true, std::memory_order_relaxed);
+  request_available.notify_all();
+  prepared_available.notify_all();
+  prepared_space_available.notify_all();
+  for (std::thread &worker : workers) {
+    if (worker.joinable()) {
+      worker.join();
+    }
+  }
+}
 
 TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle)
     : state_(std::make_unique<State>()) {
@@ -105,7 +242,7 @@ TileManager::~TileManager() { stop(); }
 
 void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
   State &state = *state_;
-  if (state.atlas != nullptr || device == nil) {
+  if (state.atlas_attached || device == nil) {
     throw std::logic_error("Tile manager GPU residency is already attached or invalid");
   }
   const MetalTileHeader header = read_metal_tile_header(state.catalogue->origin().path);
@@ -126,24 +263,10 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
   const uint32_t slots = static_cast<uint32_t>(
       std::min<uint64_t>(capacity, static_cast<uint64_t>(state.catalogue->sources().size()))
   );
-  state.atlas = std::make_unique<ResidentTileCache>(
-      device,
-      state.catalogue->sources(),
-      *state.origin,
-      state.catalogue->origin().key,
-      state.config,
-      state.trace_quantized,
-      slots,
-      timer
-  );
-  state.loader = std::make_unique<AsyncTilePreparer>(
-      device,
-      state.catalogue->sources(),
-      slots,
-      state.config.max_tile_preparation_workers,
-      timer
-  );
-  state.loader->start();
+  state.attach_atlas(device, slots, timer);
+  state.loader_timer = &timer;
+  state.prepared_capacity = slots;
+  state.start_workers(state.config.max_tile_preparation_workers);
 }
 
 void TileManager::set_pixel_angle(float pixel_angle) { state_->rebuild_lod_plan(pixel_angle); }
@@ -166,8 +289,8 @@ bool TileManager::relocate_observer(ObserverLocation observer) {
   state.config.observer = observer;
   state.observer_source_index = *source;
   state.rebuild_lod_plan(state.pixel_angle);
-  if (state.atlas != nullptr) {
-    state.atlas->rebase_observer(observer);
+  if (state.atlas_attached) {
+    state.rebase_observer(observer);
   }
   return true;
 }
@@ -177,27 +300,32 @@ const std::vector<TerrainSource> &TileManager::sources() const {
   return state_->catalogue->sources();
 }
 const TileGeometry &TileManager::origin_geometry() const { return *state_->origin; }
-const std::vector<uint32_t> &TileManager::lod_by_source() const { return state_->lod_by_source; }
+uint32_t TileManager::lod_for_source(uint32_t source_index) const {
+  return state_->lod_by_source.at(source_index);
+}
+float TileManager::tile_width() const {
+  return static_cast<float>(state_->catalogue->grid().width);
+}
 uint32_t TileManager::observer_source_index() const { return state_->observer_source_index; }
 float TileManager::pixel_angle() const { return state_->pixel_angle; }
 uint32_t TileManager::mipmap_value_count() const { return state_->mipmap_values; }
 bool TileManager::traces_quantized() const { return state_->trace_quantized; }
-uint32_t TileManager::slot_capacity() const { return state_->atlas->slot_capacity(); }
-TileManagerBindings TileManager::bindings() const { return state_->atlas->bindings(); }
+uint32_t TileManager::slot_capacity() const { return state_->slot_capacity; }
+TileManagerBindings TileManager::bindings() const { return state_->bindings(); }
 
 uint32_t TileManager::slot_for_source(uint32_t source_index) const {
-  return state_->atlas->slot_for_variant({source_index, state_->lod_by_source.at(source_index)});
+  return state_->slot_for_variant({source_index, lod_for_source(source_index)});
 }
 void TileManager::request(uint32_t source_index, float priority) {
-  state_->loader->request(source_index, state_->lod_by_source.at(source_index), priority);
+  state_->request_tile(source_index, lod_for_source(source_index), priority);
 }
 std::vector<TileVariant>
 TileManager::install_available(std::span<const uint8_t> pinned_slots, Timer &timer) {
-  return state_->atlas->install_prepared(*state_->loader, pinned_slots, timer);
+  return state_->install_prepared(pinned_slots, timer);
 }
-void TileManager::wait_for_available() { state_->loader->wait_for_prepared(); }
+void TileManager::wait_for_available() { state_->wait_for_prepared(); }
 void TileManager::record_slot_use(std::span<const uint32_t> slots) {
-  state_->atlas->record_slot_use(slots);
+  state_->record_slot_use(slots);
 }
 uint32_t TileManager::ensure_observer_resident(Timer &timer) {
   const uint32_t source = state_->observer_source_index;
@@ -215,19 +343,14 @@ uint32_t TileManager::ensure_observer_resident(Timer &timer) {
   }
   return slot;
 }
+std::optional<float> TileManager::sample_terrain(double easting, double northing) {
+  return state_->sample_terrain(easting, northing);
+}
 void TileManager::stop() {
-  if (state_ != nullptr && state_->loader != nullptr) {
-    state_->loader->stop_and_join();
+  if (state_ != nullptr) {
+    state_->stop_workers();
   }
 }
-TileManagerStatistics TileManager::statistics() const {
-  TileManagerStatistics value = state_->atlas->statistics();
-  const TilePreparationStatistics preparation = state_->loader->statistics();
-  value.requests = preparation.requests;
-  value.unique_requests = preparation.unique_requests;
-  value.duplicate_requests = preparation.duplicate_requests;
-  value.worker_count = preparation.worker_count;
-  return value;
-}
+TileManagerStatistics TileManager::statistics() const { return state_->statistics(); }
 
 } // namespace panorama
