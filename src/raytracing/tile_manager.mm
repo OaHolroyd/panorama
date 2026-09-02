@@ -84,6 +84,9 @@ TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle
   ));
   state.config.observer = state.catalogue->observer();
   state.origin = std::make_unique<TileGeometry>(read_tile_geometry(state.catalogue->origin().path));
+  const MetalTileHeader header = read_metal_tile_header(state.catalogue->origin().path);
+  state.trace_quantized =
+      state.config.retain_quantized && header.sample_type == MetalTileSampleType::Uint16Decimeters;
   validate_tile_position(*state.origin, state.catalogue->origin().key, state.catalogue->grid());
   const size_t mip_count =
       static_cast<size_t>(metal_tile_mipmap_value_count(state.origin->cell_count));
@@ -102,8 +105,6 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
     throw std::logic_error("Tile manager GPU residency is already attached or invalid");
   }
   const MetalTileHeader header = read_metal_tile_header(state.catalogue->origin().path);
-  state.trace_quantized =
-      state.config.retain_quantized && header.sample_type == MetalTileSampleType::Uint16Decimeters;
   QuantizedMetalTileRecordLayout layout = {};
   if (state.trace_quantized) {
     layout = quantized_metal_tile_record_layout(header);
