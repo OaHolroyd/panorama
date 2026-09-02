@@ -2,6 +2,7 @@
 
 #include "raytrace_config.h"
 #include "tile_geometry.h"
+#include "tile_manager.h"
 #include "tile_preparer.h"
 
 #import <Metal/Metal.h>
@@ -13,45 +14,8 @@
 
 namespace panorama {
 
-/// Immutable spatial metadata stored beside one resident atlas payload.
-///
-/// All other raytrace parameters are common to compatible atlas slots and are
-/// supplied once per GPU frontier dispatch.
-struct ResidentTile {
-  float tile_x_min;
-  float tile_y_min;
-  float maximum_elevation;
-  uint32_t lod;
-  int64_t row;
-  int64_t column;
-};
-
-/// Fixed byte offsets used by the uint16 trace specialization.
-/// This must remain identical to `QuantizedTerrainLayout` in panorama.metal.
-struct QuantizedTerrainLayout {
-  uint32_t record_stride;
-  uint32_t vertex_offset;
-  uint32_t elevation_base_offset;
-};
-
-/// Host-visible Metal buffers and dimensions required by a frontier dispatch.
-struct ResidentTileCacheBindings {
-  id<MTLBuffer> mipmap_atlas;
-  id<MTLBuffer> vertex_atlas;
-  id<MTLBuffer> metadata;
-  QuantizedTerrainLayout quantized_layout;
-};
-
-/// Final counters describing atlas residency, Metal I/O, and evictions.
-struct ResidentTileCacheStatistics {
-  uint64_t installations;
-  uint64_t bytes_loaded_with_metal_io;
-  uint64_t evictions;
-  uint32_t resident_tiles;
-  uint32_t slot_capacity;
-};
-
-/// A bounded fixed-stride terrain atlas with synchronous LRU replacement.
+/// Private TileManager implementation: a bounded fixed-stride terrain atlas
+/// with synchronous LRU replacement.
 ///
 /// The cache owns the GPU-visible vertex/mipmap buffers and variant-to-slot
 /// map. Between completed frontier commands it installs all currently
@@ -81,10 +45,10 @@ public:
   ~ResidentTileCache();
 
   /// Return the slot holding this source/LOD variant, or `slot_capacity()`.
-  [[nodiscard]] uint32_t slot_for_variant(TerrainTileVariant variant) const;
+  [[nodiscard]] uint32_t slot_for_variant(TileVariant variant) const;
 
   /// Install prepared tiles and return the source/LOD variants published to safe slots.
-  [[nodiscard]] std::vector<TerrainTileVariant> install_prepared(
+  [[nodiscard]] std::vector<TileVariant> install_prepared(
       AsyncTilePreparer &preparer,
       std::span<const uint8_t> pinned_slots,
       Timer &timer
@@ -98,13 +62,13 @@ public:
   void rebase_observer(ObserverLocation observer);
 
   /// Return the atlas buffers and layout metadata for the next GPU dispatch.
-  [[nodiscard]] ResidentTileCacheBindings bindings() const;
+  [[nodiscard]] TileManagerBindings bindings() const;
 
   /// Return the number of fixed-size resident atlas slots.
   [[nodiscard]] uint32_t slot_capacity() const;
 
   /// Return final cache counters for command-line diagnostics.
-  [[nodiscard]] ResidentTileCacheStatistics statistics() const;
+  [[nodiscard]] TileManagerStatistics statistics() const;
 
 private:
   struct State;

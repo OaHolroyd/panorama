@@ -1,7 +1,7 @@
 #pragma once
 
 #include "metal_tile.h"
-#include "terrain_catalogue.h"
+#include "tile_manager.h"
 #include "timer.h"
 
 #import <Metal/Metal.h>
@@ -12,27 +12,6 @@
 #include <vector>
 
 namespace panorama {
-
-/// Identity of one independently loadable representation of a catalogue source.
-struct TerrainTileVariant {
-  uint32_t source_index;
-  uint32_t lod;
-
-  /// Order variants by source and then LOD for small scheduler maps.
-  [[nodiscard]] bool operator<(const TerrainTileVariant &other) const {
-    return source_index != other.source_index ? source_index < other.source_index : lod < other.lod;
-  }
-};
-
-/// One source awaiting installation in the resident atlas.
-///
-/// A worker opens the Metal file handle while the selected LOD metadata stays
-/// with the request until synchronous atlas installation.
-struct PreparedTile {
-  TerrainTileVariant variant;
-  id<MTLIOFileHandle> metal_file;
-  MetalTileLod metal_lod;
-};
 
 /// Final counters describing background tile preparation work.
 struct TilePreparationStatistics {
@@ -45,7 +24,8 @@ struct TilePreparationStatistics {
   uint32_t worker_count;
 };
 
-/// Prepare `.ptile` sources without owning atlas or command resources.
+/// Private TileManager implementation which prepares `.ptile` sources without
+/// owning atlas or command resources.
 ///
 /// The main thread requests catalogue indices by ray-entry priority. Workers
 /// read LOD metadata and open Metal I/O handles in parallel, then place them
@@ -84,10 +64,10 @@ public:
   void rethrow_if_failed() const;
 
   /// Record that the atlas has installed one prepared source/LOD variant.
-  void mark_resident(TerrainTileVariant variant);
+  void mark_resident(TileVariant variant);
 
   /// Record that an atlas eviction makes a source/LOD variant eligible for reloading.
-  void mark_evicted(TerrainTileVariant variant);
+  void mark_evicted(TileVariant variant);
 
   /// Stop workers, wake all waiters, and join every worker thread.
   void stop_and_join();

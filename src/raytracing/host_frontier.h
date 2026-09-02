@@ -14,7 +14,7 @@ namespace panorama {
 ///
 /// The GPU stores work for resident tiles in a reusable frontier buffer. This
 /// component owns complementary deferred rays, groups them by required source,
-/// and requests each source once from the asynchronous preparer.
+/// and asks TileManager to make each required variant resident.
 class HostFrontier {
 public:
   /// Construct the scheduler state for one fixed observer and ray direction set.
@@ -36,8 +36,8 @@ public:
       std::span<const float> scheduling_distances = {}
   );
 
-  /// Clear pending-request state for matching variants published by tile management.
-  void mark_installed(std::span<const TerrainTileVariant> variants);
+  /// Clear pending-request state for variants published by TileManager.
+  void mark_installed(std::span<const TileVariant> variants);
 
   /// Consume new GPU continuations, activate nearby work, and request sources.
   [[nodiscard]] uint32_t activate_resident(

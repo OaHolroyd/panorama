@@ -1,17 +1,61 @@
 #pragma once
 
-#include "resident_tile_cache.h"
 #include "terrain_catalogue.h"
 #include "tile_geometry.h"
+#include "tile_manager_gpu.h"
+
+#include "metal_tile.h"
+
+#import <Metal/Metal.h>
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
 namespace panorama {
 
-class AsyncTilePreparer;
 class Timer;
+
+/// Identity of one independently loadable representation of a terrain source.
+struct TileVariant {
+  uint32_t source_index;
+  uint32_t lod;
+
+  [[nodiscard]] bool operator<(const TileVariant &other) const {
+    return source_index != other.source_index ? source_index < other.source_index : lod < other.lod;
+  }
+};
+
+/// GPU buffers and layout selected by TileManager for a frontier dispatch.
+struct TileManagerBindings {
+  id<MTLBuffer> mipmap_atlas;
+  id<MTLBuffer> vertex_atlas;
+  id<MTLBuffer> metadata;
+  QuantizedTerrainLayout quantized_layout;
+};
+
+/// Cumulative loading and residency counters owned by TileManager.
+struct TileManagerStatistics {
+  uint64_t requests;
+  uint64_t unique_requests;
+  uint64_t duplicate_requests;
+  uint32_t worker_count;
+  uint64_t installations;
+  uint64_t bytes_loaded_with_metal_io;
+  uint64_t evictions;
+  uint32_t resident_tiles;
+  uint32_t slot_capacity;
+};
+
+/// A selected LOD whose file handle has been opened by a TileManager worker.
+/// The payload remains on disk until TileManager reaches a safe atlas-install
+/// point between frontier dispatches.
+struct PreparedTile {
+  TileVariant variant;
+  id<MTLIOFileHandle> metal_file;
+  MetalTileLod metal_lod;
+};
 
 /// Own prepared-terrain discovery, LOD selection, residency, and loading.
 ///
@@ -46,19 +90,18 @@ public:
   [[nodiscard]] uint32_t mipmap_value_count() const;
   [[nodiscard]] bool traces_quantized() const;
   [[nodiscard]] uint32_t slot_capacity() const;
-  [[nodiscard]] ResidentTileCacheBindings bindings() const;
+  [[nodiscard]] TileManagerBindings bindings() const;
 
   [[nodiscard]] uint32_t slot_for_source(uint32_t source_index) const;
   void request(uint32_t source_index, float priority);
-  [[nodiscard]] std::vector<TerrainTileVariant>
-  install_prepared(std::span<const uint8_t> pinned_slots, Timer &timer);
-  void wait_for_prepared();
+  [[nodiscard]] std::vector<TileVariant>
+  install_available(std::span<const uint8_t> pinned_slots, Timer &timer);
+  void wait_for_available();
   void record_slot_use(std::span<const uint32_t> slots);
   [[nodiscard]] uint32_t ensure_observer_resident(Timer &timer);
   void stop();
 
-  [[nodiscard]] TilePreparationStatistics preparation_statistics() const;
-  [[nodiscard]] ResidentTileCacheStatistics residency_statistics() const;
+  [[nodiscard]] TileManagerStatistics statistics() const;
 
 private:
   struct State;

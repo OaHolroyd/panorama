@@ -118,8 +118,8 @@ struct ResidentTileCache::State {
   id<MTLBuffer> preparation_slots;
   id<MTLBuffer> metadata_buffer;
   ResidentTile *metadata;
-  std::map<TerrainTileVariant, uint32_t> slot_by_variant;
-  std::vector<std::optional<TerrainTileVariant>> variant_by_slot;
+  std::map<TileVariant, uint32_t> slot_by_variant;
+  std::vector<std::optional<TileVariant>> variant_by_slot;
   std::vector<uint64_t> last_used;
 
   /// Submit every maximum-mipmap level for the supplied resident slots.
@@ -719,7 +719,7 @@ ResidentTileCache::ResidentTileCache(
   );
   state->slot_by_variant[{0U, 1U}] = 0U;
   state->variant_by_slot.assign(slot_capacity, std::nullopt);
-  state->variant_by_slot[0] = TerrainTileVariant{0U, 1U};
+  state->variant_by_slot[0] = TileVariant{0U, 1U};
   state->last_used.assign(slot_capacity, 0U);
   state->last_used[0] = 1U;
   state_ = std::move(state);
@@ -727,7 +727,7 @@ ResidentTileCache::ResidentTileCache(
 
 ResidentTileCache::~ResidentTileCache() = default;
 
-uint32_t ResidentTileCache::slot_for_variant(TerrainTileVariant variant) const {
+uint32_t ResidentTileCache::slot_for_variant(TileVariant variant) const {
   if (variant.source_index >= state_->sources.size() || variant.lod == 0U) {
     throw std::invalid_argument("Resident terrain variant is invalid");
   }
@@ -735,7 +735,7 @@ uint32_t ResidentTileCache::slot_for_variant(TerrainTileVariant variant) const {
   return found == state_->slot_by_variant.end() ? state_->slot_capacity : found->second;
 }
 
-std::vector<TerrainTileVariant> ResidentTileCache::install_prepared(
+std::vector<TileVariant> ResidentTileCache::install_prepared(
     AsyncTilePreparer &preparer,
     std::span<const uint8_t> pinned_slots,
     Timer &timer
@@ -860,8 +860,8 @@ std::vector<TerrainTileVariant> ResidentTileCache::install_prepared(
   // All payload writes are now complete. Publish the slot mappings together.
   for (const AtlasInstallation &installation : installations) {
     const uint32_t slot = installation.slot;
-    const TerrainTileVariant variant = installation.prepared.variant;
-    const std::optional<TerrainTileVariant> evicted = state.variant_by_slot[slot];
+    const TileVariant variant = installation.prepared.variant;
+    const std::optional<TileVariant> evicted = state.variant_by_slot[slot];
     if (evicted.has_value()) {
       state.slot_by_variant.erase(*evicted);
       preparer.mark_evicted(*evicted);
@@ -879,7 +879,7 @@ std::vector<TerrainTileVariant> ResidentTileCache::install_prepared(
 
   timer.stop("Atlas installation");
 
-  std::vector<TerrainTileVariant> installed_variants;
+  std::vector<TileVariant> installed_variants;
   installed_variants.reserve(installations.size());
   for (const AtlasInstallation &installation : installations) {
     installed_variants.push_back(installation.prepared.variant);
@@ -903,7 +903,7 @@ void ResidentTileCache::rebase_observer(ObserverLocation observer) {
     throw std::invalid_argument("Resident terrain rebase requires a finite observer");
   }
   for (uint32_t slot = 0U; slot < state.slot_capacity; slot++) {
-    const std::optional<TerrainTileVariant> variant = state.variant_by_slot[slot];
+    const std::optional<TileVariant> variant = state.variant_by_slot[slot];
     if (!variant.has_value()) {
       continue;
     }
@@ -925,7 +925,7 @@ void ResidentTileCache::rebase_observer(ObserverLocation observer) {
   }
 }
 
-ResidentTileCacheBindings ResidentTileCache::bindings() const {
+TileManagerBindings ResidentTileCache::bindings() const {
   const State &state = *state_;
   return {
       state.mipmap_atlas,
@@ -943,9 +943,13 @@ ResidentTileCacheBindings ResidentTileCache::bindings() const {
 
 uint32_t ResidentTileCache::slot_capacity() const { return state_->slot_capacity; }
 
-ResidentTileCacheStatistics ResidentTileCache::statistics() const {
+TileManagerStatistics ResidentTileCache::statistics() const {
   const State &state = *state_;
-  return {state.installations,
+  return {0U,
+          0U,
+          0U,
+          0U,
+          state.installations,
           state.bytes_loaded_with_metal_io,
           state.evictions,
           state.resident_count,

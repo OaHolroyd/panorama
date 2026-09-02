@@ -345,7 +345,7 @@ id<MTLLibrary> GpuRaytraceResources::library() const { return state_->library; }
 id<MTLBuffer> GpuRaytraceResources::active_frontier() const { return state_->active; }
 
 GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
-    const ResidentTileCacheBindings &cache,
+    const TileManagerBindings &cache,
     const RaytraceParameters &parameters,
     uint32_t mipmap_value_count,
     uint32_t active_count,

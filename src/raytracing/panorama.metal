@@ -33,7 +33,7 @@ struct RayDirection {
 };
 
 /// One observer-relative origin for a resident atlas slot, mirrored
-/// by `ResidentTile` in resident_tile_cache.h. All other parameters are dispatch-wide.
+/// by `ResidentTile` in tile_manager_gpu.h. All other parameters are dispatch-wide.
 struct ResidentTile {
   float tile_x_min;
   float tile_y_min;

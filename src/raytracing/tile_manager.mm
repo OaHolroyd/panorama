@@ -1,6 +1,7 @@
 #include "tile_manager.h"
 
 #include "metal_tile.h"
+#include "resident_tile_cache.h"
 #include "tile_preparer.h"
 #include "timer.h"
 
@@ -46,8 +47,11 @@ struct TileManager::State {
   uint32_t observer_source_index = 0U;
   uint32_t mipmap_values = 0U;
   bool trace_quantized = false;
-  std::unique_ptr<ResidentTileCache> cache;
-  std::unique_ptr<AsyncTilePreparer> preparer;
+  // TileManager owns both stages of tile lifetime.  The loader prepares an
+  // independently selectable file payload; the atlas installs it only at the
+  // frontier's explicit safe point.
+  std::unique_ptr<ResidentTileCache> atlas;
+  std::unique_ptr<AsyncTilePreparer> loader;
 
   void rebuild_lod_plan(float angle) {
     if (!std::isfinite(angle) || angle <= 0.0F) {
@@ -101,7 +105,7 @@ TileManager::~TileManager() { stop(); }
 
 void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
   State &state = *state_;
-  if (state.cache != nullptr || device == nil) {
+  if (state.atlas != nullptr || device == nil) {
     throw std::logic_error("Tile manager GPU residency is already attached or invalid");
   }
   const MetalTileHeader header = read_metal_tile_header(state.catalogue->origin().path);
@@ -122,7 +126,7 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
   const uint32_t slots = static_cast<uint32_t>(
       std::min<uint64_t>(capacity, static_cast<uint64_t>(state.catalogue->sources().size()))
   );
-  state.cache = std::make_unique<ResidentTileCache>(
+  state.atlas = std::make_unique<ResidentTileCache>(
       device,
       state.catalogue->sources(),
       *state.origin,
@@ -132,14 +136,14 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
       slots,
       timer
   );
-  state.preparer = std::make_unique<AsyncTilePreparer>(
+  state.loader = std::make_unique<AsyncTilePreparer>(
       device,
       state.catalogue->sources(),
       slots,
       state.config.max_tile_preparation_workers,
       timer
   );
-  state.preparer->start();
+  state.loader->start();
 }
 
 void TileManager::set_pixel_angle(float pixel_angle) { state_->rebuild_lod_plan(pixel_angle); }
@@ -162,8 +166,8 @@ bool TileManager::relocate_observer(ObserverLocation observer) {
   state.config.observer = observer;
   state.observer_source_index = *source;
   state.rebuild_lod_plan(state.pixel_angle);
-  if (state.cache != nullptr) {
-    state.cache->rebase_observer(observer);
+  if (state.atlas != nullptr) {
+    state.atlas->rebase_observer(observer);
   }
   return true;
 }
@@ -178,22 +182,22 @@ uint32_t TileManager::observer_source_index() const { return state_->observer_so
 float TileManager::pixel_angle() const { return state_->pixel_angle; }
 uint32_t TileManager::mipmap_value_count() const { return state_->mipmap_values; }
 bool TileManager::traces_quantized() const { return state_->trace_quantized; }
-uint32_t TileManager::slot_capacity() const { return state_->cache->slot_capacity(); }
-ResidentTileCacheBindings TileManager::bindings() const { return state_->cache->bindings(); }
+uint32_t TileManager::slot_capacity() const { return state_->atlas->slot_capacity(); }
+TileManagerBindings TileManager::bindings() const { return state_->atlas->bindings(); }
 
 uint32_t TileManager::slot_for_source(uint32_t source_index) const {
-  return state_->cache->slot_for_variant({source_index, state_->lod_by_source.at(source_index)});
+  return state_->atlas->slot_for_variant({source_index, state_->lod_by_source.at(source_index)});
 }
 void TileManager::request(uint32_t source_index, float priority) {
-  state_->preparer->request(source_index, state_->lod_by_source.at(source_index), priority);
+  state_->loader->request(source_index, state_->lod_by_source.at(source_index), priority);
 }
-std::vector<TerrainTileVariant>
-TileManager::install_prepared(std::span<const uint8_t> pinned_slots, Timer &timer) {
-  return state_->cache->install_prepared(*state_->preparer, pinned_slots, timer);
+std::vector<TileVariant>
+TileManager::install_available(std::span<const uint8_t> pinned_slots, Timer &timer) {
+  return state_->atlas->install_prepared(*state_->loader, pinned_slots, timer);
 }
-void TileManager::wait_for_prepared() { state_->preparer->wait_for_prepared(); }
+void TileManager::wait_for_available() { state_->loader->wait_for_prepared(); }
 void TileManager::record_slot_use(std::span<const uint32_t> slots) {
-  state_->cache->record_slot_use(slots);
+  state_->atlas->record_slot_use(slots);
 }
 uint32_t TileManager::ensure_observer_resident(Timer &timer) {
   const uint32_t source = state_->observer_source_index;
@@ -201,26 +205,29 @@ uint32_t TileManager::ensure_observer_resident(Timer &timer) {
   uint32_t slot = slot_for_source(source);
   while (slot == slot_capacity()) {
     request(source, 0.0F);
-    (void)install_prepared(unpinned, timer);
+    (void)install_available(unpinned, timer);
     slot = slot_for_source(source);
     if (slot == slot_capacity()) {
       timer.start_wall("Tile availability wait");
-      wait_for_prepared();
+      wait_for_available();
       timer.stop("Tile availability wait");
     }
   }
   return slot;
 }
 void TileManager::stop() {
-  if (state_ != nullptr && state_->preparer != nullptr) {
-    state_->preparer->stop_and_join();
+  if (state_ != nullptr && state_->loader != nullptr) {
+    state_->loader->stop_and_join();
   }
 }
-TilePreparationStatistics TileManager::preparation_statistics() const {
-  return state_->preparer->statistics();
-}
-ResidentTileCacheStatistics TileManager::residency_statistics() const {
-  return state_->cache->statistics();
+TileManagerStatistics TileManager::statistics() const {
+  TileManagerStatistics value = state_->atlas->statistics();
+  const TilePreparationStatistics preparation = state_->loader->statistics();
+  value.requests = preparation.requests;
+  value.unique_requests = preparation.unique_requests;
+  value.duplicate_requests = preparation.duplicate_requests;
+  value.worker_count = preparation.worker_count;
+  return value;
 }
 
 } // namespace panorama

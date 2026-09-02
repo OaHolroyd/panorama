@@ -225,7 +225,7 @@ void TerrainTraceSession::trace(const RayField &field) {
       state.timer.start_wall("Frontier bookkeeping");
       // The completed pass no longer reads the atlas. Publish available tiles,
       // then reactivate every continuation whose source is now resident.
-      frontier.mark_installed(state.tiles->install_prepared(no_pinned_slots, state.timer));
+      frontier.mark_installed(state.tiles->install_available(no_pinned_slots, state.timer));
       active_count = frontier.activate_resident(state.gpu->active_frontier(), 0U, deferred);
 #if defined(PANORAMA_DEBUG_VALIDATION)
       frontier.validate_deferred_work();
@@ -237,11 +237,11 @@ void TerrainTraceSession::trace(const RayField &field) {
         // Deferred work remains but none of it is resident. Wait for one of
         // the already-requested sources instead of submitting an empty pass.
         state.timer.start_wall("Tile availability wait");
-        state.tiles->wait_for_prepared();
+        state.tiles->wait_for_available();
         state.timer.stop("Tile availability wait");
 
         state.timer.start_wall("Frontier bookkeeping");
-        frontier.mark_installed(state.tiles->install_prepared(no_pinned_slots, state.timer));
+        frontier.mark_installed(state.tiles->install_available(no_pinned_slots, state.timer));
         active_count = frontier.activate_resident(state.gpu->active_frontier(), active_count);
 #if defined(PANORAMA_DEBUG_VALIDATION)
         frontier.validate_deferred_work();
@@ -341,9 +341,9 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
   while (active_count != 0U || frontier.has_deferred_work()) {
     if (active_count == 0U) {
       state.timer.start_wall("Tile availability wait");
-      state.tiles->wait_for_prepared();
+      state.tiles->wait_for_available();
       state.timer.stop("Tile availability wait");
-      frontier.mark_installed(state.tiles->install_prepared(no_pinned_slots, state.timer));
+      frontier.mark_installed(state.tiles->install_available(no_pinned_slots, state.timer));
       active_count = frontier.activate_resident(state.shadows->active_frontier(), 0U);
 #if defined(PANORAMA_DEBUG_VALIDATION)
       frontier.validate_deferred_work();
@@ -369,7 +369,7 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
 #if defined(PANORAMA_DEBUG_VALIDATION)
     frontier.validate_deferred_work(deferred);
 #endif
-    frontier.mark_installed(state.tiles->install_prepared(no_pinned_slots, state.timer));
+    frontier.mark_installed(state.tiles->install_available(no_pinned_slots, state.timer));
     active_count = frontier.activate_resident(state.shadows->active_frontier(), 0U, deferred);
 #if defined(PANORAMA_DEBUG_VALIDATION)
     frontier.validate_deferred_work();
@@ -419,14 +419,13 @@ id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
 
 void TerrainTraceSession::print_statistics() const {
   const State &state = *state_;
-  const TilePreparationStatistics preparation = state.tiles->preparation_statistics();
-  const ResidentTileCacheStatistics cache = state.tiles->residency_statistics();
+  const TileManagerStatistics tiles = state.tiles->statistics();
   std::printf(
       "Terrain sources: %zu (resident slots %u / cache capacity %u, preparation workers %u).\n",
       state.tiles->sources().size(),
-      cache.resident_tiles,
-      cache.slot_capacity,
-      preparation.worker_count
+      tiles.resident_tiles,
+      tiles.slot_capacity,
+      tiles.worker_count
   );
   if (state.frames == 1U) {
     std::printf(
@@ -444,9 +443,9 @@ void TerrainTraceSession::print_statistics() const {
   std::printf(
       "  Tile I/O: %llu requests (%llu unique, %llu duplicate); %llu skips "
       "(%llu local, %llu global; %s).\n",
-      static_cast<unsigned long long>(preparation.requests),
-      static_cast<unsigned long long>(preparation.unique_requests),
-      static_cast<unsigned long long>(preparation.duplicate_requests),
+      static_cast<unsigned long long>(tiles.requests),
+      static_cast<unsigned long long>(tiles.unique_requests),
+      static_cast<unsigned long long>(tiles.duplicate_requests),
       static_cast<unsigned long long>(skipped),
       static_cast<unsigned long long>(state.locally_skipped_tiles),
       static_cast<unsigned long long>(state.globally_skipped_tiles),
@@ -456,9 +455,9 @@ void TerrainTraceSession::print_statistics() const {
   std::printf(
       "  Atlas installations: %llu, Metal I/O: %.3f GiB, "
       "evictions: %llu.\n",
-      static_cast<unsigned long long>(cache.installations),
-      static_cast<double>(cache.bytes_loaded_with_metal_io) / (1024.0 * 1024.0 * 1024.0),
-      static_cast<unsigned long long>(cache.evictions)
+      static_cast<unsigned long long>(tiles.installations),
+      static_cast<double>(tiles.bytes_loaded_with_metal_io) / (1024.0 * 1024.0 * 1024.0),
+      static_cast<unsigned long long>(tiles.evictions)
   );
   state.timer.print();
 }

@@ -144,7 +144,7 @@ std::span<const DeferredRayWork> GpuTerrainShadowResources::initialise(
 }
 
 GpuFrontierPassResult GpuTerrainShadowResources::trace_frontier(
-    const ResidentTileCacheBindings &cache,
+    const TileManagerBindings &cache,
     id<MTLBuffer> catalogue_hash,
     const ShadowTraceParameters &parameters,
     uint32_t mipmap_value_count,

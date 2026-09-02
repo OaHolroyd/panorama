@@ -29,7 +29,7 @@ enum class TileLoadState : uint8_t {
 /// One priority-ordered request to prepare a source tile.
 struct TileLoadRequest {
   float priority;
-  TerrainTileVariant variant;
+  TileVariant variant;
 };
 
 /// Put smaller ray-entry distances at the front of the request queue.
@@ -56,9 +56,9 @@ struct AsyncTilePreparer::State {
   std::condition_variable prepared_space_available;
   std::priority_queue<TileLoadRequest, std::vector<TileLoadRequest>, TileLoadRequestGreater>
       requests;
-  std::map<TerrainTileVariant, TileLoadState> states;
-  std::map<TerrainTileVariant, float> queued_priorities;
-  std::map<TerrainTileVariant, uint8_t> requested_before;
+  std::map<TileVariant, TileLoadState> states;
+  std::map<TileVariant, float> queued_priorities;
+  std::map<TileVariant, uint8_t> requested_before;
   std::deque<PreparedTile> prepared;
   std::vector<std::thread> workers;
   std::exception_ptr error;
@@ -203,7 +203,7 @@ void AsyncTilePreparer::request(uint32_t source_index, uint32_t lod, float prior
   if (lod == 0U || !std::isfinite(priority)) {
     throw std::invalid_argument("Tile preparation request requires a valid LOD and priority");
   }
-  const TerrainTileVariant variant = {source_index, lod};
+  const TileVariant variant = {source_index, lod};
   state.request_count++;
   if (state.requested_before[variant] == 0U) {
     state.requested_before[variant] = 1U;
@@ -256,13 +256,13 @@ void AsyncTilePreparer::rethrow_if_failed() const {
   }
 }
 
-void AsyncTilePreparer::mark_resident(TerrainTileVariant variant) {
+void AsyncTilePreparer::mark_resident(TileVariant variant) {
   State &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
   state.states.at(variant) = TileLoadState::Resident;
 }
 
-void AsyncTilePreparer::mark_evicted(TerrainTileVariant variant) {
+void AsyncTilePreparer::mark_evicted(TileVariant variant) {
   State &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
   state.states.at(variant) = TileLoadState::Unrequested;

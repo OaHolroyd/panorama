@@ -76,8 +76,8 @@ HostFrontier::HostFrontier(
   }
 }
 
-void HostFrontier::mark_installed(std::span<const TerrainTileVariant> variants) {
-  for (TerrainTileVariant variant : variants) {
+void HostFrontier::mark_installed(std::span<const TileVariant> variants) {
+  for (TileVariant variant : variants) {
     const uint32_t source_index = variant.source_index;
     if (source_index >= tiles_.lod_by_source().size() ||
         variant.lod != tiles_.lod_by_source()[source_index]) {

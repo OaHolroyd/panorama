@@ -1,8 +1,8 @@
 #pragma once
 
 #include "ray_projection.h"
-#include "resident_tile_cache.h"
 #include "terrain_catalogue.h"
+#include "tile_manager.h"
 
 #import <Metal/Metal.h>
 
@@ -103,7 +103,7 @@ public:
 
   /// Encode, submit, and synchronously complete one trace-and-emit pass.
   [[nodiscard]] GpuFrontierPassResult trace_frontier(
-      const ResidentTileCacheBindings &cache,
+      const TileManagerBindings &cache,
       const RaytraceParameters &parameters,
       uint32_t mipmap_value_count,
       uint32_t active_count,
