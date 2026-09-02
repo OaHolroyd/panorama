@@ -1,6 +1,5 @@
 #pragma once
 
-#include "loaded_tile.h"
 #include "metal_tile.h"
 #include "terrain_catalogue.h"
 #include "timer.h"
@@ -9,8 +8,6 @@
 
 #include <cstdint>
 #include <exception>
-#include <memory>
-#include <optional>
 #include <span>
 #include <vector>
 
@@ -29,15 +26,12 @@ struct TerrainTileVariant {
 
 /// One source awaiting installation in the resident atlas.
 ///
-/// GeoTIFF sources carry a fully prepared CPU tile. A custom source instead
-/// carries a pre-opened Metal file handle but no CPU payload. Opening handles
-/// on workers keeps that cost outside synchronous atlas installation.
+/// A worker opens the Metal file handle while the selected LOD metadata stays
+/// with the request until synchronous atlas installation.
 struct PreparedTile {
   TerrainTileVariant variant;
-  std::unique_ptr<LoadedTile> tile;
   id<MTLIOFileHandle> metal_file;
-  /// Logical range and quantization base of a custom tile's selected LOD.
-  std::optional<MetalTileLod> metal_lod;
+  MetalTileLod metal_lod;
 };
 
 /// Final counters describing background tile preparation work.
@@ -51,24 +45,18 @@ struct TilePreparationStatistics {
   uint32_t worker_count;
 };
 
-/// Check that a loaded tile's georeferencing agrees with its catalogue key.
-void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const TileGrid &grid);
-
-/// Prepare compatible terrain sources without owning atlas or command resources.
+/// Prepare `.ptile` sources without owning atlas or command resources.
 ///
 /// The main thread requests catalogue indices by ray-entry priority. Workers
-/// load, validate, and mipmap GeoTIFFs, then place them into a bounded queue.
-/// Custom Metal sources need no CPU decoding, so workers open their Metal I/O
-/// handles in parallel. The cache remains solely responsible for GPU slots,
-/// Metal I/O, fixed-point conversion, mipmap generation, and residency state.
+/// read LOD metadata and open Metal I/O handles in parallel, then place them
+/// into a bounded queue. The cache owns GPU slots, payload I/O, fixed-point
+/// conversion, mipmap generation, and residency state.
 class AsyncTilePreparer {
 public:
   /// Construct a stopped preparer with a bounded prepared-tile hand-off queue.
   AsyncTilePreparer(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,
-      const LoadedTile &origin,
-      TileGrid grid,
       uint32_t prepared_capacity,
       uint32_t configured_workers,
       Timer &timer

@@ -695,19 +695,6 @@ public:
 
 private:
   void load(const TerrainSource &source) {
-    if (!is_metal_tile_path(source.path)) {
-      LoadedTile tile = LoadedTile::load_tif(source.path, true);
-      if (tile.vertices == nullptr || tile.size == 0U) {
-        throw std::runtime_error("Terrain point sampling requires level-0 vertices");
-      }
-      cached_cell_count_ = tile.size;
-      cached_cell_size_ = tile.delta;
-      cached_lower_left_x_ = tile.lower_left_x;
-      cached_lower_left_y_ = tile.lower_left_y;
-      cached_vertices_ = std::move(*tile.vertices);
-      return;
-    }
-
     const MetalTileHeader header = read_metal_tile_header(source.path);
     if (header.vertex_byte_count > std::numeric_limits<NSUInteger>::max()) {
       throw std::overflow_error("Terrain point tile is too large for Metal");

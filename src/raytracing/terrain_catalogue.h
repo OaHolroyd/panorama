@@ -47,7 +47,7 @@ struct TerrainSource {
 /// A finite, indexed catalogue of terrain sources relevant to one render.
 ///
 /// The catalogue scans a prepared-tile directory once, derives its physical
-/// grid from GeoTIFF metadata or the custom tile header, attaches any maxima
+/// grid from one `.ptile` header, attaches any maxima
 /// published in the directory manifest, retains sources within the configured
 /// horizontal range, and maps their stable grid keys to source indices. It is
 /// immutable thereafter, so foreground scheduling and worker threads can

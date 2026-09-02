@@ -40,40 +40,12 @@ struct TileLoadRequestGreater {
   }
 };
 
-/// Check that a prepared source has the origin tile's atlas layout.
-void validate_tile_compatibility(const LoadedTile &tile, const LoadedTile &origin) {
-  if (!tile.supports_level_0_collisions || tile.vertices == nullptr) {
-    throw std::logic_error("Level-0 multi-tile tracing received a tile without vertices");
-  }
-  if (tile.crs.id() != origin.crs.id() || tile.size != origin.size || tile.delta != origin.delta ||
-      tile.num_levels != origin.num_levels) {
-    throw std::runtime_error("Terrain tile is incompatible with the origin tile");
-  }
-}
-
 } // namespace
-
-/// Check that a loaded tile's georeferencing agrees with its catalogue key.
-void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const TileGrid &grid) {
-  const double tile_width = static_cast<double>(tile.size) * tile.delta;
-  const double expected_x = grid.origin_x + static_cast<double>(key.column) * grid.width;
-  const double expected_y = grid.origin_y - static_cast<double>(key.row + 1) * grid.width;
-  const double tolerance = 1e-6 * std::max(1.0, grid.width);
-  if (!std::isfinite(tile_width) || std::abs(tile_width - grid.width) > tolerance ||
-      std::abs(tile.lower_left_x - expected_x) > tolerance ||
-      std::abs(tile.lower_left_y - expected_y) > tolerance) {
-    throw std::runtime_error("Terrain tile georeferencing disagrees with the configured tile grid");
-  }
-}
 
 /// Mutable state kept behind the preparer's small public interface.
 struct AsyncTilePreparer::State {
   id<MTLDevice> device;
   std::span<const TerrainSource> sources;
-  const LoadedTile &origin;
-  TileGrid grid;
-  size_t expected_mipmap_values;
-  size_t expected_vertex_values;
   uint32_t prepared_capacity;
   Timer &timer;
 
@@ -100,32 +72,21 @@ struct AsyncTilePreparer::State {
   State(
       id<MTLDevice> device_value,
       std::span<const TerrainSource> source_values,
-      const LoadedTile &origin_value,
-      TileGrid grid_value,
       uint32_t queue_capacity,
       Timer &timer_value
   )
-      : device(device_value), sources(source_values), origin(origin_value), grid(grid_value),
-        expected_mipmap_values(
-            static_cast<size_t>(metal_tile_mipmap_value_count(origin_value.size))
-        ),
-        expected_vertex_values(
-            (static_cast<size_t>(origin_value.size) + 1U) *
-            (static_cast<size_t>(origin_value.size) + 1U)
-        ),
-        prepared_capacity(queue_capacity), timer(timer_value) {}
+      : device(device_value), sources(source_values), prepared_capacity(queue_capacity),
+        timer(timer_value) {}
 };
 
 AsyncTilePreparer::AsyncTilePreparer(
     id<MTLDevice> device,
     std::span<const TerrainSource> sources,
-    const LoadedTile &origin,
-    TileGrid grid,
     uint32_t prepared_capacity,
     uint32_t configured_workers,
     Timer &timer
 )
-    : state_(std::make_unique<State>(device, sources, origin, grid, prepared_capacity, timer)) {
+    : state_(std::make_unique<State>(device, sources, prepared_capacity, timer)) {
   if (sources.empty() || prepared_capacity == 0U) {
     throw std::invalid_argument("Tile preparer requires sources and prepared-tile capacity");
   }
@@ -157,7 +118,7 @@ void AsyncTilePreparer::start() {
       State &worker_state = *state_;
       while (true) {
         // Sleep until the main scheduler requests terrain. Keeping the mutex
-        // only around queue state lets independent GeoTIFF decoding overlap.
+        // only around queue state lets independent metadata reads overlap.
         TileLoadRequest request = {};
         {
           std::unique_lock<std::mutex> worker_lock(worker_state.mutex);
@@ -185,49 +146,20 @@ void AsyncTilePreparer::start() {
         try {
           const TerrainSource &source = worker_state.sources[request.variant.source_index];
 
-          // A custom tile's terrain payload already stores vertices in atlas
-          // order and contains no mipmap. Keep the payload out of host memory;
-          // opening its Metal handle here also keeps work off the scheduler.
-          std::unique_ptr<LoadedTile> tile;
-          id<MTLIOFileHandle> metal_file;
-          std::optional<MetalTileLod> metal_lod;
-          if (is_metal_tile_path(source.path)) {
-            const MetalTileHeader header = read_metal_tile_header(source.path);
-            const std::vector<MetalTileLod> lods = read_metal_tile_lods(source.path, header);
-            const auto selected =
-                std::find_if(lods.begin(), lods.end(), [&](const MetalTileLod &lod) {
-                  return lod.lod == request.variant.lod;
-                });
-            if (selected == lods.end()) {
-              throw std::out_of_range("Requested terrain LOD is unavailable in the Metal tile");
-            }
-            worker_state.timer.start_work("Metal tile open");
-            metal_file = open_metal_tile_file(worker_state.device, source.path);
-            worker_state.timer.stop("Metal tile open");
-            metal_lod = *selected;
-          } else {
-            if (request.variant.lod != 1U) {
-              throw std::runtime_error("GeoTIFF terrain does not provide LOD variants");
-            }
-            // Load and prepare GeoTIFFs outside the mutex. Timer work time
-            // intentionally sums concurrent worker effort, unlike wall time.
-            worker_state.timer.start_work("Tile load");
-            tile = std::make_unique<LoadedTile>(LoadedTile::load_tif(source.path, true));
-            worker_state.timer.stop("Tile load");
-
-            validate_tile_compatibility(*tile, worker_state.origin);
-            validate_terrain_tile_position(*tile, source.key, worker_state.grid);
-
-            // The resulting maximum hierarchy has exactly the fixed stride
-            // the resident atlas uses for every compatible source.
-            worker_state.timer.start_work("Mipmap generation");
-            tile->compute_mipmap();
-            worker_state.timer.stop("Mipmap generation");
-            if (tile->mipmap.size() != worker_state.expected_mipmap_values ||
-                tile->vertices->size() != worker_state.expected_vertex_values) {
-              throw std::runtime_error("Resident tile does not match the atlas dimensions");
-            }
+          // Payloads remain on disk until the cache assigns a safe atlas slot.
+          // Opening the handle here keeps file-system work off the scheduler.
+          const MetalTileHeader header = read_metal_tile_header(source.path);
+          const std::vector<MetalTileLod> lods = read_metal_tile_lods(source.path, header);
+          const auto selected =
+              std::find_if(lods.begin(), lods.end(), [&](const MetalTileLod &lod) {
+                return lod.lod == request.variant.lod;
+              });
+          if (selected == lods.end()) {
+            throw std::out_of_range("Requested terrain LOD is unavailable in the Metal tile");
           }
+          worker_state.timer.start_work("Metal tile open");
+          id<MTLIOFileHandle> metal_file = open_metal_tile_file(worker_state.device, source.path);
+          worker_state.timer.stop("Metal tile open");
 
           // Bound the prepared hand-off queue to the atlas capacity. This
           // applies back-pressure instead of preparing sources the cache
@@ -241,9 +173,7 @@ void AsyncTilePreparer::start() {
             break;
           }
           worker_state.states[request.variant] = TileLoadState::Prepared;
-          worker_state.prepared.push_back(
-              {request.variant, std::move(tile), metal_file, metal_lod}
-          );
+          worker_state.prepared.push_back({request.variant, metal_file, *selected});
           worker_lock.unlock();
           worker_state.prepared_available.notify_one();
         } catch (...) {

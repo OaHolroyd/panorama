@@ -23,7 +23,7 @@ struct ObserverLocation {
 /// derives optional trace fields from its selected render products, preventing
 /// unused collision buffers or shader work from being requested here.
 struct RaytraceConfig {
-  /// Directory containing prepared level-0 GeoTIFF or custom terrain tiles.
+  /// Directory containing prepared `.ptile` terrain tiles.
   std::filesystem::path tile_dir;
 
   ObserverLocation observer;

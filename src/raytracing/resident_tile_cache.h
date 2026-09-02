@@ -1,5 +1,6 @@
 #pragma once
 
+#include "loaded_tile.h"
 #include "raytrace_config.h"
 #include "tile_preparer.h"
 
@@ -41,10 +42,9 @@ struct ResidentTileCacheBindings {
   QuantizedTerrainLayout quantized_layout;
 };
 
-/// Final counters describing atlas residency, copies, and evictions.
+/// Final counters describing atlas residency, Metal I/O, and evictions.
 struct ResidentTileCacheStatistics {
   uint64_t installations;
-  uint64_t bytes_copied;
   uint64_t bytes_loaded_with_metal_io;
   uint64_t evictions;
   uint32_t resident_tiles;
@@ -61,9 +61,8 @@ class ResidentTileCache {
 public:
   /// Allocate the atlas and install the observer tile in slot zero.
   ///
-  /// A GeoTIFF observer's payload is already resident on the CPU. A custom
-  /// observer supplies metadata only and is loaded directly or staged for
-  /// conversion according to its representation and the trace configuration.
+  /// The observer payload is loaded directly or staged for conversion according
+  /// to the prepared tile's representation and trace configuration.
   ResidentTileCache(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,

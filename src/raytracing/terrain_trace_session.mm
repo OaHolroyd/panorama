@@ -90,6 +90,18 @@ void validate_configuration(const RaytraceConfig &config) {
   };
 }
 
+void validate_terrain_tile_position(const LoadedTile &tile, TileKey key, const TileGrid &grid) {
+  const double tile_width = static_cast<double>(tile.size) * tile.delta;
+  const double expected_x = grid.origin_x + static_cast<double>(key.column) * grid.width;
+  const double expected_y = grid.origin_y - static_cast<double>(key.row + 1) * grid.width;
+  const double tolerance = 1e-6 * std::max(1.0, grid.width);
+  if (!std::isfinite(tile_width) || std::abs(tile_width - grid.width) > tolerance ||
+      std::abs(tile.lower_left_x - expected_x) > tolerance ||
+      std::abs(tile.lower_left_y - expected_y) > tolerance) {
+    throw std::runtime_error("Terrain tile georeferencing disagrees with the configured tile grid");
+  }
+}
+
 } // namespace
 
 struct TerrainTraceSession::State {
@@ -180,18 +192,12 @@ struct TerrainTraceSession::State {
     origin = std::make_unique<LoadedTile>(LoadedTile::load(catalogue->origin().path));
     timer.stop("Tile load");
 
-    const bool custom_origin = is_metal_tile_path(catalogue->origin().path);
-    if (!custom_origin) {
-      timer.start_work("Mipmap generation");
-      origin->compute_mipmap();
-      timer.stop("Mipmap generation");
-    }
     validate_terrain_tile_position(*origin, origin_key, grid);
     rebuild_lod_plan(initial_field.minimum_pixel_angle);
 
     bool trace_quantized = false;
     QuantizedMetalTileRecordLayout quantized_layout = {};
-    if (config.retain_quantized && custom_origin) {
+    if (config.retain_quantized) {
       const MetalTileHeader header = read_metal_tile_header(catalogue->origin().path);
       if (header.sample_type == MetalTileSampleType::Uint16Decimeters) {
         quantized_layout = quantized_metal_tile_record_layout(header);
@@ -200,14 +206,6 @@ struct TerrainTraceSession::State {
     }
 
     const std::vector<TerrainSource> &sources = catalogue->sources();
-    if (trace_quantized &&
-        std::any_of(sources.begin(), sources.end(), [](const TerrainSource &source) {
-          return !is_metal_tile_path(source.path);
-        })) {
-      throw std::invalid_argument(
-          "Retaining quantized terrain requires a custom-only terrain directory"
-      );
-    }
 
     const size_t mip_count = static_cast<size_t>(metal_tile_mipmap_value_count(origin->size));
     const size_t vertex_side = static_cast<size_t>(origin->size) + 1U;
@@ -252,8 +250,6 @@ struct TerrainTraceSession::State {
     preparer = std::make_unique<AsyncTilePreparer>(
         gpu->device(),
         sources,
-        *origin,
-        grid,
         atlas_slots,
         config.max_tile_preparation_workers,
         timer
@@ -657,10 +653,9 @@ void TerrainTraceSession::print_statistics() const {
       state.catalogue->maximum_elevation().has_value() ? "GPU cutoff enabled" : "no complete maxima"
   );
   std::printf(
-      "  Atlas installations: %llu, copied: %.3f GiB, Metal I/O: %.3f GiB, "
+      "  Atlas installations: %llu, Metal I/O: %.3f GiB, "
       "evictions: %llu.\n",
       static_cast<unsigned long long>(cache.installations),
-      static_cast<double>(cache.bytes_copied) / (1024.0 * 1024.0 * 1024.0),
       static_cast<double>(cache.bytes_loaded_with_metal_io) / (1024.0 * 1024.0 * 1024.0),
       static_cast<unsigned long long>(cache.evictions)
   );
