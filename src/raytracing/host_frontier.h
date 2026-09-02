@@ -1,8 +1,7 @@
 #pragma once
 
 #include "raytrace_gpu.h"
-#include "terrain_catalogue.h"
-#include "tile_preparer.h"
+#include "tile_manager.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,10 +19,9 @@ class HostFrontier {
 public:
   /// Construct the scheduler state for one fixed observer and ray direction set.
   HostFrontier(
-      const TerrainCatalogue &catalogue,
+      TileManager &tiles,
       std::span<const RayDirection> rays,
       const RaytraceParameters &parameters,
-      std::span<const uint32_t> lod_by_source,
       uint32_t resident_slot_capacity,
       uint32_t observer_slot
   );
@@ -31,28 +29,25 @@ public:
   /// Construct an initially empty scheduler for rays whose first source is
   /// supplied as deferred work (for example, per-collision shadow rays).
   HostFrontier(
-      const TerrainCatalogue &catalogue,
+      TileManager &tiles,
       size_t ray_capacity,
       uint32_t num_levels,
-      std::span<const uint32_t> lod_by_source,
       uint32_t resident_slot_capacity,
       std::span<const float> scheduling_distances = {}
   );
 
-  /// Clear pending-request state for matching variants published by the atlas cache.
+  /// Clear pending-request state for matching variants published by tile management.
   void mark_installed(std::span<const TerrainTileVariant> variants);
 
   /// Consume new GPU continuations, activate nearby work, and request sources.
   [[nodiscard]] uint32_t activate_resident(
       id<MTLBuffer> buffer,
       uint32_t count,
-      ResidentTileCache &cache,
-      AsyncTilePreparer &preparer,
       std::span<const DeferredRayWork> incoming = {}
   );
 
   /// Update LRU use for the resident slots referenced by the active frontier.
-  void record_active_slot_use(ResidentTileCache &cache) const;
+  void record_active_slot_use() const;
 
   /// Return whether unresolved work is waiting for nonresident terrain.
   [[nodiscard]] bool has_deferred_work() const;
@@ -72,11 +67,9 @@ private:
     float minimum_pending_distance;
   };
 
-  const TerrainCatalogue &catalogue_;
+  TileManager &tiles_;
   size_t ray_capacity_;
   uint32_t num_levels_;
-  /// Immutable per-source terrain LOD plan selected by the owning session.
-  std::span<const uint32_t> lod_by_source_;
   /// Optional per-ray priority independent of the ray-local traversal distance.
   std::span<const float> scheduling_distances_;
   /// Deferred rays grouped by their next required catalogue source.

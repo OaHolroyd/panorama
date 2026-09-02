@@ -1,7 +1,7 @@
 #pragma once
 
-#include "loaded_tile.h"
 #include "raytrace_config.h"
+#include "tile_geometry.h"
 #include "tile_preparer.h"
 
 #import <Metal/Metal.h>
@@ -66,7 +66,7 @@ public:
   ResidentTileCache(
       id<MTLDevice> device,
       std::span<const TerrainSource> sources,
-      const LoadedTile &origin,
+      const TileGeometry &origin,
       TileKey origin_key,
       const RaytraceConfig &config,
       bool retain_quantized,

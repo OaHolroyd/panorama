@@ -530,7 +530,7 @@ void ResidentTileCache::State::generate_mipmaps(
 ResidentTileCache::ResidentTileCache(
     id<MTLDevice> device,
     std::span<const TerrainSource> sources,
-    const LoadedTile &origin,
+    const TileGeometry &origin,
     TileKey origin_key,
     const RaytraceConfig &config,
     bool retain_quantized,
@@ -540,10 +540,11 @@ ResidentTileCache::ResidentTileCache(
   if (sources.empty() || slot_capacity == 0U) {
     throw std::invalid_argument("Resident tile cache requires an origin tile and slots");
   }
-  const uint32_t mip_count = static_cast<uint32_t>(metal_tile_mipmap_value_count(origin.size));
-  const uint64_t vertex_side = static_cast<uint64_t>(origin.size) + 1U;
+  const uint32_t mip_count =
+      static_cast<uint32_t>(metal_tile_mipmap_value_count(origin.cell_count));
+  const uint64_t vertex_side = static_cast<uint64_t>(origin.cell_count) + 1U;
   const uint32_t vertex_count = static_cast<uint32_t>(vertex_side * vertex_side);
-  const double tile_width = static_cast<double>(origin.size) * origin.delta;
+  const double tile_width = static_cast<double>(origin.cell_count) * origin.cell_size;
   const double grid_origin_x =
       origin.lower_left_x - static_cast<double>(origin_key.column) * tile_width;
   const double grid_origin_y =

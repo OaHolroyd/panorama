@@ -1,7 +1,6 @@
 #include "arguments.h"
 #include "coordinate_input.h"
 #include "gpu_image_renderer.h"
-#include "loaded_tile.h"
 #include "metal_tile.h"
 #include "minimap.h"
 #include "ray_projection.h"

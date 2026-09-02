@@ -21,28 +21,26 @@ namespace {
 } // namespace
 
 HostFrontier::HostFrontier(
-    const TerrainCatalogue &catalogue,
+    TileManager &tiles,
     std::span<const RayDirection> rays,
     const RaytraceParameters &parameters,
-    std::span<const uint32_t> lod_by_source,
     uint32_t resident_slot_capacity,
     uint32_t observer_slot
 )
-    : catalogue_(catalogue), ray_capacity_(rays.size()), num_levels_(parameters.num_levels),
-      lod_by_source_(lod_by_source), scheduling_distances_(),
-      source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
-      source_is_pending_(catalogue.sources().size(), 0U),
-      request_outstanding_(catalogue.sources().size(), 0U),
-      request_distances_(catalogue.sources().size(), std::numeric_limits<float>::infinity()),
-      activation_slots_(catalogue.sources().size(), std::numeric_limits<uint32_t>::max()),
+    : tiles_(tiles), ray_capacity_(rays.size()), num_levels_(parameters.num_levels),
+      scheduling_distances_(),
+      source_buckets_(tiles.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
+      source_is_pending_(tiles.sources().size(), 0U),
+      request_outstanding_(tiles.sources().size(), 0U),
+      request_distances_(tiles.sources().size(), std::numeric_limits<float>::infinity()),
+      activation_slots_(tiles.sources().size(), std::numeric_limits<uint32_t>::max()),
       active_slots_{observer_slot}, active_slot_seen_(resident_slot_capacity, 0U)
 #if defined(PANORAMA_DEBUG_VALIDATION)
       ,
       claimed_ray_(rays.size(), 0U)
 #endif
 {
-  if (rays.empty() || rays.size() != parameters.ray_count ||
-      lod_by_source_.size() != catalogue.sources().size() || resident_slot_capacity == 0U ||
+  if (rays.empty() || rays.size() != parameters.ray_count || resident_slot_capacity == 0U ||
       observer_slot >= resident_slot_capacity) {
     throw std::invalid_argument("Host frontier requires one direction per output ray");
   }
@@ -53,28 +51,26 @@ HostFrontier::HostFrontier(
 }
 
 HostFrontier::HostFrontier(
-    const TerrainCatalogue &catalogue,
+    TileManager &tiles,
     size_t ray_capacity,
     uint32_t num_levels,
-    std::span<const uint32_t> lod_by_source,
     uint32_t resident_slot_capacity,
     std::span<const float> scheduling_distances
 )
-    : catalogue_(catalogue), ray_capacity_(ray_capacity), num_levels_(num_levels),
-      lod_by_source_(lod_by_source), scheduling_distances_(scheduling_distances),
-      source_buckets_(catalogue.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
-      source_is_pending_(catalogue.sources().size(), 0U),
-      request_outstanding_(catalogue.sources().size(), 0U),
-      request_distances_(catalogue.sources().size(), std::numeric_limits<float>::infinity()),
-      activation_slots_(catalogue.sources().size(), std::numeric_limits<uint32_t>::max()),
+    : tiles_(tiles), ray_capacity_(ray_capacity), num_levels_(num_levels),
+      scheduling_distances_(scheduling_distances),
+      source_buckets_(tiles.sources().size(), {{}, {}, std::numeric_limits<float>::infinity()}),
+      source_is_pending_(tiles.sources().size(), 0U),
+      request_outstanding_(tiles.sources().size(), 0U),
+      request_distances_(tiles.sources().size(), std::numeric_limits<float>::infinity()),
+      activation_slots_(tiles.sources().size(), std::numeric_limits<uint32_t>::max()),
       active_slot_seen_(resident_slot_capacity, 0U)
 #if defined(PANORAMA_DEBUG_VALIDATION)
       ,
       claimed_ray_(ray_capacity, 0U)
 #endif
 {
-  if (ray_capacity == 0U || num_levels == 0U ||
-      lod_by_source_.size() != catalogue.sources().size() || resident_slot_capacity == 0U ||
+  if (ray_capacity == 0U || num_levels == 0U || resident_slot_capacity == 0U ||
       (!scheduling_distances.empty() && scheduling_distances.size() != ray_capacity)) {
     throw std::invalid_argument("Host frontier requires a valid ray and terrain capacity");
   }
@@ -83,7 +79,8 @@ HostFrontier::HostFrontier(
 void HostFrontier::mark_installed(std::span<const TerrainTileVariant> variants) {
   for (TerrainTileVariant variant : variants) {
     const uint32_t source_index = variant.source_index;
-    if (source_index >= lod_by_source_.size() || variant.lod != lod_by_source_[source_index]) {
+    if (source_index >= tiles_.lod_by_source().size() ||
+        variant.lod != tiles_.lod_by_source()[source_index]) {
       // A persistent preparer can complete an obsolete variant after the
       // observer has moved. It is valid cache content, but not this
       // frontier's pending request.
@@ -113,8 +110,6 @@ void HostFrontier::mark_installed(std::span<const TerrainTileVariant> variants) 
 uint32_t HostFrontier::activate_resident(
     id<MTLBuffer> buffer,
     uint32_t count,
-    ResidentTileCache &cache,
-    AsyncTilePreparer &preparer,
     std::span<const DeferredRayWork> incoming
 ) {
   auto *items = static_cast<RayWorkItem *>(buffer.contents);
@@ -136,7 +131,8 @@ uint32_t HostFrontier::activate_resident(
   // Keep independently advancing rays within one tile width of the nearest
   // work. This limits cache churn without restoring any projection-specific
   // column grouping.
-  const float activation_limit = nearest_entry + static_cast<float>(catalogue_.grid().width);
+  const float activation_limit =
+      nearest_entry + static_cast<float>(tiles_.catalogue().grid().width);
   if (count == 0U) {
     for (uint32_t slot : active_slots_) {
       active_slot_seen_[slot] = 0U;
@@ -152,8 +148,8 @@ uint32_t HostFrontier::activate_resident(
   const auto slot_for_source = [&](uint32_t source_index) {
     uint32_t &slot = activation_slots_[source_index];
     if (slot == std::numeric_limits<uint32_t>::max()) {
-      slot = cache.slot_for_variant({source_index, lod_by_source_[source_index]});
-      if (slot != cache.slot_capacity()) {
+      slot = tiles_.slot_for_source(source_index);
+      if (slot != tiles_.slot_capacity()) {
         if (slot >= active_slot_seen_.size()) {
           throw std::logic_error("Active frontier references an invalid resident slot");
         }
@@ -196,7 +192,7 @@ uint32_t HostFrontier::activate_resident(
     }
 
     const uint32_t slot = slot_for_source(source_index);
-    const bool resident = slot != cache.slot_capacity();
+    const bool resident = slot != tiles_.slot_capacity();
     const float request_distance = bucket.minimum_pending_distance;
     float remaining_minimum = std::numeric_limits<float>::infinity();
     size_t retained_work_count = 0U;
@@ -221,7 +217,7 @@ uint32_t HostFrontier::activate_resident(
         items[count] = {
             slot,
             work.ray_index,
-            mipmap_levels_for_lod(num_levels_, lod_by_source_[source_index]),
+            mipmap_levels_for_lod(num_levels_, tiles_.lod_by_source()[source_index]),
             work.entry_distance,
         };
         count++;
@@ -253,7 +249,7 @@ uint32_t HostFrontier::activate_resident(
       continue;
     }
     const uint32_t slot = slot_for_source(work.source_index);
-    if (slot == cache.slot_capacity()) {
+    if (slot == tiles_.slot_capacity()) {
       source_buckets_[work.source_index].waiting.push_back(work);
       waiting_count_++;
       queue_request(work.source_index, priority);
@@ -266,22 +262,20 @@ uint32_t HostFrontier::activate_resident(
     items[count] = {
         slot,
         work.ray_index,
-        mipmap_levels_for_lod(num_levels_, lod_by_source_[work.source_index]),
+        mipmap_levels_for_lod(num_levels_, tiles_.lod_by_source()[work.source_index]),
         work.entry_distance,
     };
     count++;
   }
   for (uint32_t source_index : request_sources_) {
-    preparer.request(source_index, lod_by_source_[source_index], request_distances_[source_index]);
+    tiles_.request(source_index, request_distances_[source_index]);
     request_outstanding_[source_index] = 1U;
     request_distances_[source_index] = std::numeric_limits<float>::infinity();
   }
   return count;
 }
 
-void HostFrontier::record_active_slot_use(ResidentTileCache &cache) const {
-  cache.record_slot_use(active_slots_);
-}
+void HostFrontier::record_active_slot_use() const { tiles_.record_slot_use(active_slots_); }
 
 bool HostFrontier::has_deferred_work() const {
   return pending_count_ != 0U || waiting_count_ != 0U;
