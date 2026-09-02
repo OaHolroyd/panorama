@@ -111,10 +111,15 @@ struct RayFieldRequest {
 /// change per unit horizontal distance, while the reciprocals avoid repeated
 /// DDA divisions in Metal. This layout is mirrored by Metal's `RayDirection`.
 struct RayDirection {
+  /// Unit horizontal component toward projected east.
   float x;
+  /// Unit horizontal component toward projected north.
   float y;
+  /// Reciprocal east component, possibly infinity for a north/south ray.
   float inverse_x;
+  /// Reciprocal north component, possibly infinity for an east/west ray.
   float inverse_y;
+  /// Vertical change per metre of horizontal travel.
   float slope;
 };
 
@@ -123,7 +128,9 @@ struct RayDirection {
 /// After construction the tracing and frontier code use only this type; they
 /// do not depend on the projection model which generated it.
 struct RayField {
+  /// Row/column dimensions used to map pixels to `rays` indices.
   ImageSize image;
+  /// Row-major projection-independent directions, one per output pixel.
   std::vector<RayDirection> rays;
   /// Conservative angular span of one output pixel, in radians. This is kept
   /// beside the generated rays so terrain LOD planning does not need to know

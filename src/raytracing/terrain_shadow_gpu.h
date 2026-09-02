@@ -15,25 +15,34 @@ class Timer;
 
 /// Geometry shared by the shadow initializer, traversal, and successor pass.
 struct ShadowTraceParameters {
+  /// Shared terrain dimensions, curvature, range, and ray count.
   RaytraceParameters trace;
+  /// Common horizontal direction and vertical slope toward the sun.
   RayDirection direction;
+  /// Observer-relative western edge of catalogue column zero.
   float grid_x_min;
+  /// Observer-relative northern edge of catalogue row zero.
   float grid_y_max;
+  /// Width of every square catalogue tile in projected metres.
   float tile_width;
+  /// Power-of-two capacity of the GPU catalogue hash table.
   uint32_t catalogue_hash_capacity;
 };
 
 /// GPU storage and kernels for one any-hit sun ray per primary collision.
 class GpuTerrainShadowResources {
 public:
+  /// Compile shadow kernels on the primary trace's device, queue, and library.
   GpuTerrainShadowResources(
       id<MTLDevice> device,
       id<MTLCommandQueue> queue,
       id<MTLLibrary> library,
       bool trace_quantized
   );
+  /// Release per-ray buffers and pipelines after their queue has completed.
   ~GpuTerrainShadowResources();
 
+  /// Reallocate per-ray state when the primary image dimensions change.
   void resize(uint32_t ray_count);
 
   /// Construct ray origins and return their source-bucketed initial frontier.
@@ -47,6 +56,7 @@ public:
       Timer &timer
   );
 
+  /// Trace one resident batch and emit source-indexed continuations.
   [[nodiscard]] GpuFrontierPassResult trace_frontier(
       const TileManagerBindings &cache,
       id<MTLBuffer> catalogue_hash,
@@ -56,9 +66,13 @@ public:
       Timer &timer
   );
 
+  /// Return mapped successor work written by the latest frontier pass.
   [[nodiscard]] std::span<const DeferredRayWork> deferred_work(uint32_t count) const;
+  /// Return the shared work buffer populated by HostFrontier.
   [[nodiscard]] id<MTLBuffer> active_frontier() const;
+  /// Return one byte per primary pixel: nonzero is visible to the sun.
   [[nodiscard]] id<MTLBuffer> visibility() const;
+  /// Fill visibility without tracing, for vertical or below-horizon sunlight.
   void fill_visibility(uint8_t value);
 
 private:

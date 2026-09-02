@@ -32,11 +32,15 @@ void check_command(id<MTLCommandBuffer> command, const char *name) {
 static_assert(sizeof(ShadowTraceParameters) == 16U * sizeof(uint32_t));
 
 struct GpuTerrainShadowResources::State {
+  // Pipelines reuse the primary trace's device, command queue, and library.
   id<MTLDevice> device;
   id<MTLCommandQueue> queue;
   id<MTLComputePipelineState> initialise_pipeline;
   id<MTLComputePipelineState> trace_pipeline;
   id<MTLComputePipelineState> emit_pipeline;
+
+  // Ray-sized buffers follow primary output indices. `active` and `deferred`
+  // use the same ABI as the primary HostFrontier.
   id<MTLBuffer> rays;
   id<MTLBuffer> visibility;
   id<MTLBuffer> active;
@@ -122,6 +126,8 @@ std::span<const DeferredRayWork> GpuTerrainShadowResources::initialise(
   if (command == nil || encoder == nil) {
     throw std::runtime_error("Could not create shadow initialisation command");
   }
+  // Reconstruct eligible collision origins and emit their starting catalogue
+  // sources. Ineligible pixels retain a visible byte and require no frontier.
   [encoder setComputePipelineState:state.initialise_pipeline];
   [encoder setBuffer:camera_rays offset:0 atIndex:0];
   [encoder setBuffer:distances offset:0 atIndex:1];
@@ -163,6 +169,8 @@ GpuFrontierPassResult GpuTerrainShadowResources::trace_frontier(
   if (command == nil || encoder == nil) {
     throw std::runtime_error("Could not create shadow frontier command");
   }
+  // Any-hit traversal shares TileManager's resident buffers with the primary
+  // trace, but clears visibility instead of writing collision products.
   [encoder setComputePipelineState:state.trace_pipeline];
   [encoder setBuffer:cache.mipmap_atlas offset:0 atIndex:0];
   [encoder setBuffer:cache.vertex_atlas offset:0 atIndex:1];
@@ -184,6 +192,8 @@ GpuFrontierPassResult GpuTerrainShadowResources::trace_frontier(
   if (encoder == nil) {
     throw std::runtime_error("Could not create shadow continuation command");
   }
+  // Continue clear sun rays from their individual collision origins. As in
+  // the primary path, the host receives source indices rather than slots.
   [encoder setComputePipelineState:state.emit_pipeline];
   [encoder setBuffer:state.active offset:0 atIndex:0];
   [encoder setBuffer:cache.metadata offset:0 atIndex:1];

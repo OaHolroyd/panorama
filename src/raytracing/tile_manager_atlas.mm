@@ -81,9 +81,13 @@ void print_error(NSString *context, NSError *error) {
 
 /// One prepared source paired with its selected destination atlas slot.
 struct AtlasInstallation {
+  /// Reserved destination which remains pinned for this installation batch.
   uint32_t slot;
+  /// Worker-prepared file handle and selected LOD range.
   PreparedTile prepared;
+  /// Absolute projected easting used to publish observer-relative metadata.
   double lower_left_x;
+  /// Absolute projected northing used to publish observer-relative metadata.
   double lower_left_y;
 };
 
@@ -114,6 +118,9 @@ void TileManager::State::load_custom_vertices(
     throw std::logic_error("Metal tile loading resources are unavailable");
   }
 
+  // Float32 sources and retained uint16 records already match their final
+  // atlas representation. Split out only compressed, unaligned ranges which
+  // require the compatibility staging path below.
   if (header_template.sample_type == MetalTileSampleType::Float32 || trace_quantized) {
     std::vector<MetalTileBufferLoad> direct_loads;
     std::vector<MetalTileBufferLoad> prefixed_loads;
@@ -169,6 +176,9 @@ void TileManager::State::load_custom_vertices(
 
   const uint32_t wave_capacity = static_cast<uint32_t>(metal_tile_io_concurrency());
 
+  // Expanded uint16 data first enters a small packed staging area. Process no
+  // more records per wave than Metal I/O can keep in flight, then convert each
+  // vertex directly into its final Float32 slot on the GPU.
   for (size_t wave_start = 0U; wave_start < loads.size(); wave_start += wave_capacity) {
     const size_t wave_size =
         std::min(static_cast<size_t>(wave_capacity), loads.size() - wave_start);
@@ -466,6 +476,8 @@ void TileManager::State::attach_atlas(
     throw std::invalid_argument("Quantized atlas retention requires uint16 prepared terrain");
   }
   device = metal_device;
+  // All prepared tiles in a catalogue share the reference grid and encoding.
+  // Keep one template so later installations need only their compact LOD row.
   header_template = header;
   quantized_record = header.sample_type == MetalTileSampleType::Uint16Decimeters
                          ? quantized_metal_tile_record_layout(header)
@@ -798,6 +810,8 @@ void TileManager::State::record_slot_use(std::span<const uint32_t> slots) {
     if (slot >= state.slot_capacity || !state.variant_by_slot[slot].has_value()) {
       throw std::logic_error("GPU frontier refers to a nonresident tile slot");
     }
+    // HostFrontier deduplicates this span, so one pass advances each active
+    // slot's stamp exactly once regardless of how many rays reference it.
     state.last_used[slot] = state.next_use_stamp++;
   }
 }
@@ -847,7 +861,6 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
   const TerrainSource &source = catalogue->sources()[*source_index];
   const uint32_t cell_count = header_template.cell_count;
   const size_t side = static_cast<size_t>(cell_count) + 1U;
-  const size_t value_count = side * side;
   const double lower_left_x =
       catalogue->grid().origin_x + static_cast<double>(key.column) * catalogue->grid().width;
   const double lower_left_y =
@@ -869,6 +882,9 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
   int32_t elevation_base = 0;
   const auto resident = slot_by_variant.find({*source_index, 1U});
   if (resident != slot_by_variant.end()) {
+    // Inspection requires exact LOD-1 terrain. Reuse it in place when the
+    // render atlas already contains that variant, decoding packed records
+    // with the per-slot base written during installation.
     const uint32_t slot = resident->second;
     if (trace_quantized) {
       const auto *record = static_cast<const std::byte *>(vertex_atlas.contents) +
@@ -885,6 +901,9 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
       sample_type = MetalTileSampleType::Float32;
     }
   } else {
+    // A render may legitimately retain only a coarse variant. Keep a separate
+    // one-tile LOD-1 payload so cursor queries do not perturb frontier
+    // residency or force the selected rendering LOD to change.
     if (!sampled_source_index.has_value() || *sampled_source_index != *source_index) {
       const MetalTileHeader header = read_metal_tile_header(source.path);
       if (header.cell_count != cell_count || header.sample_type != header_template.sample_type ||
@@ -922,9 +941,11 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
     elevation_base = sampled_header.elevation_base_decimeters;
   }
 
-  if (values == nullptr || value_count == 0U) {
+  if (values == nullptr) {
     throw std::runtime_error("Could not access terrain sampling vertices");
   }
+  // Use the same bilinear surface definition as the finest collision test.
+  // Boundary samples select the final cell with interpolation weight one.
   const auto vertex = [&](uint32_t column, uint32_t row) {
     const size_t index = static_cast<size_t>(row) * side + column;
     if (sample_type == MetalTileSampleType::Float32) {

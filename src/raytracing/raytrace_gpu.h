@@ -15,42 +15,62 @@ namespace panorama {
 
 /// Scalar-only tracing ABI shared with the Metal frontier kernels.
 struct RaytraceParameters {
+  /// Metres between adjacent vertices in the reference LOD-1 surface.
   float cell_size;
+  /// Camera elevation in the terrain vertical datum.
   float observer_elevation;
+  /// Effective-Earth vertical lift per squared horizontal metre.
   float curvature_coefficient;
+  /// Conservative catalogue-wide maximum, or infinity when unavailable.
   float global_maximum_elevation;
+  /// Number of levels in the reference tile's maximum hierarchy.
   uint32_t num_levels;
+  /// Number of output rays and maximum valid `ray_index` plus one.
   uint32_t ray_count;
+  /// Maximum horizontal traversal distance in metres.
   float max_distance;
 };
 
 /// One unresolved ray segment in a resident terrain tile.
 struct RayWorkItem {
+  /// Resident atlas slot containing the segment's terrain variant.
   uint32_t slot;
+  /// Index of the output ray and its collision products.
   uint32_t ray_index;
+  /// One-based maximum-mipmap level at which traversal should begin.
   uint32_t start_level;
+  /// Horizontal distance from the ray origin to this tile segment's near edge.
   float entry_distance;
 };
 
 /// One continuation whose successor tile is not resident yet.
 struct DeferredRayWork {
+  /// Index of the primary or shadow ray being continued.
   uint32_t ray_index;
+  /// Stable catalogue source required for the next segment.
   uint32_t source_index;
+  /// Horizontal distance from the ray origin to the source boundary.
   float entry_distance;
 };
 
 /// Results produced by one ordered trace-and-emit command buffer.
 struct GpuFrontierPassResult {
+  /// Number of valid entries written to the mapped deferred buffer.
   uint32_t deferred_count;
+  /// Catalogue tiles skipped using their individual maximum elevations.
   uint32_t locally_skipped_tiles;
+  /// Rays terminated using the catalogue-wide maximum elevation.
   uint32_t globally_skipped_tiles;
+  /// GPUStartTime-to-GPUEndTime duration for the combined command buffer.
   double device_milliseconds;
 };
 
 /// Per-collision GPU products that may be compiled out of the trace pipeline.
 /// Distance is intentionally absent because it is always produced.
 struct GpuTraceOutputRequirements {
+  /// Allocate and write one collision elevation per ray.
   bool elevations;
+  /// Allocate and write packed east/north gradients at collisions.
   bool surface_gradients;
 };
 
@@ -135,7 +155,9 @@ public:
 
   /// Immutable catalogue lookup shared with secondary terrain rays.
   [[nodiscard]] id<MTLBuffer> catalogue_hash() const;
+  /// Return the power-of-two bucket count of `catalogue_hash()`.
   [[nodiscard]] uint32_t catalogue_hash_capacity() const;
+  /// Return whether this resource selected retained-uint16 kernels.
   [[nodiscard]] bool traces_quantized() const;
 
   /// Begin an opt-in queue-scoped Metal capture, if requested by the environment.

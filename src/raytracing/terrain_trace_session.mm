@@ -82,18 +82,26 @@ void validate_configuration(const RaytraceConfig &config) {
 } // namespace
 
 struct TerrainTraceSession::State {
+  // Observer, image, and scalar kernel parameters updated across frames.
   RaytraceConfig config;
   ImageSize image;
   uint32_t ray_count;
   Timer timer{"Total elapsed"};
+
+  // Long-lived owners. TileManager serves both primary and shadow frontiers;
+  // ray-sized GPU buffers remain valid for presentation after tracing.
   std::unique_ptr<TileManager> tiles;
   RaytraceParameters parameters = {};
   std::unique_ptr<GpuRaytraceResources> gpu;
   std::unique_ptr<GpuTerrainShadowResources> shadows;
+
+  // Cumulative scheduling diagnostics printed by the command-line frontend.
   uint64_t deferred_successor_work = 0U;
   uint64_t locally_skipped_tiles = 0U;
   uint64_t globally_skipped_tiles = 0U;
   uint64_t frames = 0U;
+
+  // Shadow results are reusable only for the same primary trace and sun.
   uint64_t trace_revision = 0U;
   uint64_t shadow_revision = std::numeric_limits<uint64_t>::max();
   double shadow_azimuth = 0.0;
@@ -108,6 +116,9 @@ struct TerrainTraceSession::State {
     validate_configuration(config);
     timer.start_wall("Initial setup");
 
+    // Tile discovery must precede ray-resource construction because the GPU
+    // catalogue hash uses stable source indices. Atlas attachment follows so
+    // it can reuse the device selected by the primary tracing resources.
     tiles = std::make_unique<TileManager>(config, initial_field.minimum_pixel_angle);
     config.observer = tiles->catalogue().observer();
     parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), ray_count);
@@ -194,6 +205,9 @@ void TerrainTraceSession::trace(const RayField &field) {
   state.gpu->start_capture_if_requested();
   state.timer.start_wall("GPU raytrace");
   try {
+    // Each iteration traces only resident segments. GPU-emitted successors
+    // return to HostFrontier, while TileManager progresses missing sources in
+    // parallel and installs them only after the command has completed.
     while (active_count != 0U) {
       state.timer.start_wall("Frontier bookkeeping");
 #if defined(PANORAMA_DEBUG_VALIDATION)

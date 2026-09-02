@@ -673,6 +673,8 @@ public:
     observer_fallback_used_ = settings_.observer.easting != requestedObserver.easting ||
                               settings_.observer.northing != requestedObserver.northing;
     device_ = trace_->device();
+    // Ground queries share the trace session's catalogue and resident atlas;
+    // constructing a second app-local tile cache would duplicate I/O.
     if (const std::optional<float> ground =
             trace_->sample_terrain(settings_.observer.easting, settings_.observer.northing)) {
       if (observer_fallback_used_) {
@@ -1122,6 +1124,8 @@ private:
           std::optional<RoamResult> roam_result;
           double next_ground_clearance = current_ground_clearance;
           if (roam_requested) {
+            // Resolve terrain on the render worker through TileManager so
+            // continuous input never blocks the AppKit event thread.
             const std::optional<float> ground =
                 trace_->sample_terrain(roam_coordinate.easting, roam_coordinate.northing);
             const bool terrain_clear =
@@ -1229,6 +1233,8 @@ private:
           }
           std::optional<TerrainPoint> map_point;
           if (map_point_requested) {
+            // Map inspection uses exact LOD-1 sampling even when the current
+            // render selected a coarser terrain variant for this source.
             if (const std::optional<float> elevation =
                     trace_->sample_terrain(map_coordinate.easting, map_coordinate.northing)) {
               map_point = TerrainPoint{

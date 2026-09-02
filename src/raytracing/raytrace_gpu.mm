@@ -101,11 +101,14 @@ void clear_buffer(id<MTLBuffer> buffer, const char *name) {
 
 /// Mutable Objective-C++ state hidden from the scheduling implementation.
 struct GpuRaytraceResources::State {
+  // Long-lived device objects and pipelines selected once per session.
   id<MTLDevice> device;
   id<MTLCommandQueue> queue;
   id<MTLLibrary> library;
   id<MTLComputePipelineState> trace_pipeline;
   id<MTLComputePipelineState> emit_pipeline;
+
+  // Ray-sized buffers replaced together when interactive resolution changes.
   id<MTLBuffer> rays;
   id<MTLBuffer> distance_output;
   id<MTLBuffer> elevation_output;
@@ -113,6 +116,8 @@ struct GpuRaytraceResources::State {
   id<MTLBuffer> active;
   id<MTLBuffer> continuations;
   id<MTLBuffer> deferred_items;
+
+  // Fixed-size counters and catalogue lookup shared by every pass.
   id<MTLBuffer> deferred_count;
   id<MTLBuffer> catalogue_hash;
   id<MTLBuffer> local_skip_count;
@@ -372,6 +377,8 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   if (command == nil || encoder == nil) {
     throw std::runtime_error("Could not create GPU frontier command");
   }
+  // Phase one traces each active segment through exactly one resident tile.
+  // A miss writes its exact tile-exit distance into `continuations`.
   command.label = @"GPU tile frontier";
   encoder.label = @"trace_tile_frontier";
   [encoder setComputePipelineState:state.trace_pipeline];
@@ -397,6 +404,9 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   if (encoder == nil) {
     throw std::runtime_error("Could not create successor frontier encoder");
   }
+  // Phase two starts at those exits, skips catalogue tiles using manifest
+  // maxima, and emits the first source which requires resident traversal.
+  // Keeping both phases in one command buffer avoids a host round trip.
   encoder.label = @"emit_tile_frontier";
   [encoder setComputePipelineState:state.emit_pipeline];
   [encoder setBuffer:state.active offset:0 atIndex:0];

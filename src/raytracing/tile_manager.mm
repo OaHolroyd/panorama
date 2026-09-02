@@ -12,6 +12,7 @@
 namespace panorama {
 namespace {
 
+/// Reduce the prepared-file header to geometry needed throughout a session.
 [[nodiscard]] TileGeometry read_tile_geometry(const std::filesystem::path &path) {
   const MetalTileHeader header = read_metal_tile_header(path);
   return {Crs::from_epsg(header.epsg_code),
@@ -23,6 +24,9 @@ namespace {
           header.level_count};
 }
 
+/// Confirm the origin file and catalogue use the same global square grid.
+/// Successor lookup derives positions from that grid rather than reopening
+/// every file, so accepting a disagreement here would shift later tiles.
 void validate_tile_position(const TileGeometry &tile, TileKey key, const TileGrid &grid) {
   const double width = static_cast<double>(tile.cell_count) * tile.cell_size;
   const double expected_x = grid.origin_x + static_cast<double>(key.column) * grid.width;
@@ -43,6 +47,9 @@ void TileManager::State::rebuild_lod_plan(float angle) {
   }
   const std::vector<TerrainSource> &source_values = catalogue->sources();
   lod_by_source.resize(source_values.size());
+  // Select each source once for this observer/view combination. HostFrontier,
+  // workers, residency lookup, and Metal metadata then carry the chosen LOD
+  // as part of TileVariant instead of independently recomputing policy.
   for (uint32_t source_index = 0U; source_index < static_cast<uint32_t>(source_values.size());
        source_index++) {
     lod_by_source[source_index] = tile_lod(
@@ -78,6 +85,8 @@ void TileManager::State::start_workers(uint32_t configured_workers) {
       std::min(static_cast<uint32_t>(catalogue->sources().size() - 1U), available_workers);
   workers.reserve(worker_count);
 
+  // Workers prepare only control-plane state. Terrain payloads stay on disk
+  // until the render thread has selected an evictable destination slot.
   for (uint32_t worker = 0U; worker < worker_count; worker++) {
     workers.emplace_back([this] {
       while (true) {
@@ -92,6 +101,8 @@ void TileManager::State::start_workers(uint32_t configured_workers) {
           }
           request = requests.top();
           requests.pop();
+          // Reprioritization uses lazy queue deletion: the lifecycle and best
+          // priority maps identify entries superseded by a later request.
           if (load_states.at(request.variant) != TileLoadState::Queued ||
               request.priority != queued_priorities.at(request.variant)) {
             continue;
@@ -100,6 +111,9 @@ void TileManager::State::start_workers(uint32_t configured_workers) {
         }
 
         try {
+          // Validate the requested LOD before retaining its file handle. This
+          // keeps malformed-file failures on a worker while the coordinating
+          // thread receives them through `loader_error`.
           const TerrainSource &source = catalogue->sources()[request.variant.source_index];
           const MetalTileHeader header = read_metal_tile_header(source.path);
           const std::vector<MetalTileLod> lods = read_metal_tile_lods(source.path, header);
@@ -115,6 +129,8 @@ void TileManager::State::start_workers(uint32_t configured_workers) {
           loader_timer->stop("Metal tile open");
 
           std::unique_lock<std::mutex> lock(loader_mutex);
+          // Bound retained handles and metadata by atlas capacity. A worker
+          // resumes as soon as installation removes one prepared item.
           prepared_space_available.wait(lock, [&] {
             return stop_requested.load(std::memory_order_relaxed) ||
                    prepared_tiles.size() < prepared_capacity;
@@ -127,6 +143,8 @@ void TileManager::State::start_workers(uint32_t configured_workers) {
           lock.unlock();
           prepared_available.notify_one();
         } catch (...) {
+          // The first worker failure terminates the pool and wakes every host
+          // wait so the exception can be rethrown on the render thread.
           std::lock_guard<std::mutex> lock(loader_mutex);
           if (loader_error == nullptr) {
             loader_error = std::current_exception();
@@ -165,6 +183,8 @@ void TileManager::State::request_tile(uint32_t source_index, uint32_t lod, float
     requests.push({priority, variant});
     request_available.notify_one();
   } else if (state == TileLoadState::Queued && priority < queued_priorities[variant]) {
+    // std::priority_queue cannot update an entry in place. Push the improved
+    // request and let the worker discard the older entry when it reaches it.
     queued_priorities[variant] = priority;
     requests.push({priority, variant});
     request_available.notify_one();
@@ -178,6 +198,8 @@ std::optional<PreparedTile> TileManager::State::try_take_prepared() {
   }
   PreparedTile tile = std::move(prepared_tiles.front());
   prepared_tiles.pop_front();
+  // File handles leave the bounded queue only after the render thread has
+  // reserved an atlas destination, making room for one more worker result.
   prepared_space_available.notify_one();
   return tile;
 }
@@ -216,6 +238,8 @@ TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle
     : state_(std::make_unique<State>()) {
   State &state = *state_;
   state.config = config;
+  // Discovery places the observer source at index zero and fixes source
+  // indices for the lifetime of GPU catalogue hashes and deferred work.
   state.catalogue = std::make_unique<TerrainCatalogue>(TerrainCatalogue::discover(
       config.tile_dir,
       config.observer,
@@ -256,6 +280,9 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
       state.trace_quantized
           ? static_cast<size_t>(state.mipmap_values) * sizeof(uint16_t) + layout.stride
           : (static_cast<size_t>(state.mipmap_values) + vertex_count) * sizeof(float);
+  // Every slot retains the LOD-1 stride even when it currently contains a
+  // coarser variant. That fixed addressing keeps Metal bindings simple and
+  // makes the byte budget a direct division.
   const uint64_t capacity = state.config.tile_cache_size_bytes / tile_bytes;
   if (capacity == 0U || capacity > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("Tile-cache byte budget cannot hold a valid terrain atlas");
@@ -288,6 +315,8 @@ bool TileManager::relocate_observer(ObserverLocation observer) {
   }
   state.config.observer = observer;
   state.observer_source_index = *source;
+  // LOD distance and observer-relative Float32 metadata both change, but the
+  // catalogue, resident payload bytes, pipelines, and worker pool remain valid.
   state.rebuild_lod_plan(state.pixel_angle);
   if (state.atlas_attached) {
     state.rebase_observer(observer);
@@ -331,6 +360,8 @@ uint32_t TileManager::ensure_observer_resident(Timer &timer) {
   const uint32_t source = state_->observer_source_index;
   const std::vector<uint8_t> unpinned(slot_capacity(), 0U);
   uint32_t slot = slot_for_source(source);
+  // The initial GPU frontier cannot be formed without this particular tile.
+  // Drive the ordinary async lifecycle synchronously until it is published.
   while (slot == slot_capacity()) {
     request(source, 0.0F);
     (void)install_available(unpinned, timer);
