@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 
 #include <memory>
+#include <optional>
 
 namespace panorama {
 
@@ -52,15 +53,27 @@ public:
   [[nodiscard]] ImageSize image() const;
   /// Return the projected coordinate system shared by the resident terrain.
   [[nodiscard]] Crs crs() const;
+  /// Return the current projected observer position and absolute elevation.
   [[nodiscard]] ObserverLocation observer() const;
+  /// Return the complete prepared-data footprint used by the minimap.
   [[nodiscard]] const TerrainCoverage &terrain_coverage() const;
+  /// Sample full-resolution terrain through this session's TileManager.
+  [[nodiscard]] std::optional<float> sample_terrain(double easting, double northing);
+  /// Return the device on which terrain and presentation resources must live.
   [[nodiscard]] id<MTLDevice> device() const;
+  /// Return the queue used for ordered primary tracing and presentation.
   [[nodiscard]] id<MTLCommandQueue> command_queue() const;
+  /// Return the compiled library containing raytracing and rendering kernels.
   [[nodiscard]] id<MTLLibrary> library() const;
+  /// Return the current per-pixel direction buffer.
   [[nodiscard]] id<MTLBuffer> ray_directions() const;
+  /// Return horizontal collision distances; zero means no terrain hit.
   [[nodiscard]] id<MTLBuffer> distances() const;
+  /// Return absolute collision elevations when requested at construction.
   [[nodiscard]] id<MTLBuffer> elevations() const;
+  /// Return packed Float16 east/north gradients when requested at construction.
   [[nodiscard]] id<MTLBuffer> surface_gradients() const;
+  /// Return hard-shadow visibility for the current trace and sun direction.
   [[nodiscard]] id<MTLBuffer> shadow_visibility() const;
 
   /// Print cumulative cache, preparation, frontier, and timing statistics.

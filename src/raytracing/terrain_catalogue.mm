@@ -1,10 +1,7 @@
 #include "terrain_catalogue.h"
 
-#include "gdal_utils.h"
 #include "metal_tile.h"
 #include "terrain_manifest.h"
-
-#include <gdal_priv.h>
 
 #include <algorithm>
 #include <charconv>
@@ -55,64 +52,24 @@ namespace {
   };
 }
 
-/// Derive the global tile grid from one prepared level-0 GeoTIFF.
+/// Derive the global tile grid from one indexed Metal tile.
 ///
 /// The filename supplies only the signed row and column. The affine transform
 /// and raster dimensions supply the cell spacing and physical tile width;
 /// combining them reconstructs the common north-west grid origin without any
 /// dataset-specific constants.
 [[nodiscard]] TileGrid infer_tile_grid(const TerrainSource &source) {
-  if (is_metal_tile_path(source.path)) {
-    const MetalTileHeader header = read_metal_tile_header(source.path);
-    if (header.row != source.key.row || header.column != source.key.column) {
-      throw std::runtime_error("Metal tile filename and header contain different grid keys");
-    }
-
-    const double tile_width = static_cast<double>(header.cell_count) * header.cell_size;
-    const double origin_x = header.lower_left_x - static_cast<double>(header.column) * tile_width;
-    const double origin_y = header.lower_left_y + static_cast<double>(header.row + 1) * tile_width;
-    if (!std::isfinite(tile_width) || !std::isfinite(origin_x) || !std::isfinite(origin_y) ||
-        tile_width <= 0.0) {
-      throw std::runtime_error("Metal tile has an invalid global grid");
-    }
-    return {origin_x, origin_y, tile_width};
+  const MetalTileHeader header = read_metal_tile_header(source.path);
+  if (header.row != source.key.row || header.column != source.key.column) {
+    throw std::runtime_error("Metal tile filename and header contain different grid keys");
   }
 
-  register_gdal_drivers();
-  const char *drivers[] = {"GTiff", nullptr};
-  GDALDataset *raw_dataset = static_cast<GDALDataset *>(GDALOpenEx(
-      source.path.string().c_str(),
-      GDAL_OF_RASTER | GDAL_OF_READONLY | GDAL_OF_VERBOSE_ERROR,
-      drivers,
-      nullptr,
-      nullptr
-  ));
-  if (raw_dataset == nullptr) {
-    throw std::runtime_error(gdal_error("Could not inspect prepared tile " + source.path.string()));
-  }
-  GdalDatasetPointer dataset(raw_dataset);
-
-  const int sample_width = dataset->GetRasterXSize();
-  const int sample_height = dataset->GetRasterYSize();
-  if (dataset->GetRasterCount() != 1 || sample_width < 2 || sample_width != sample_height) {
-    throw std::runtime_error("Prepared level-0 terrain tile must be a square single-band raster");
-  }
-
-  double transform[6] = {};
-  if (dataset->GetGeoTransform(transform) != CE_None || transform[1] <= 0.0 ||
-      transform[5] >= 0.0 || transform[2] != 0.0 || transform[4] != 0.0 ||
-      transform[1] != -transform[5]) {
-    throw std::runtime_error("Prepared terrain tile must have a square, north-up affine grid");
-  }
-
-  // A level-0 tile has one more vertex sample than terrain cells. Tile keys
-  // advance by the non-overlapping cell count, not by the stored sample count.
-  const double tile_width = static_cast<double>(sample_width - 1) * transform[1];
-  const double origin_x = transform[0] - static_cast<double>(source.key.column) * tile_width;
-  const double origin_y = transform[3] + static_cast<double>(source.key.row) * tile_width;
+  const double tile_width = static_cast<double>(header.cell_count) * header.cell_size;
+  const double origin_x = header.lower_left_x - static_cast<double>(header.column) * tile_width;
+  const double origin_y = header.lower_left_y + static_cast<double>(header.row + 1) * tile_width;
   if (!std::isfinite(tile_width) || !std::isfinite(origin_x) || !std::isfinite(origin_y) ||
       tile_width <= 0.0) {
-    throw std::runtime_error("Prepared terrain tile has an invalid global grid");
+    throw std::runtime_error("Metal tile has an invalid global grid");
   }
   return {origin_x, origin_y, tile_width};
 }
@@ -248,29 +205,27 @@ TerrainCatalogue TerrainCatalogue::discover(
     if (!entry.is_regular_file() && !entry.is_symlink()) {
       continue;
     }
-    if (entry.path().extension() != ".tif" && !is_metal_tile_path(entry.path())) {
+    if (!is_metal_tile_path(entry.path())) {
       continue;
     }
     try {
       const TileKey key = parse_tile_name(entry.path());
       const auto maximum = maximum_elevation_by_key.find(key);
-      const bool metal = is_metal_tile_path(entry.path());
       available_sources.push_back(
           {
               key,
               entry.path(),
-              !metal || maximum == maximum_elevation_by_key.end()
-                  ? std::nullopt
-                  : std::optional<float>(maximum->second),
+              maximum == maximum_elevation_by_key.end() ? std::nullopt
+                                                        : std::optional<float>(maximum->second),
               1U,
           }
       );
     } catch (const std::invalid_argument &) {
-      // Prepared-tile directories may contain unrelated GeoTIFFs.
+      // Prepared-terrain directories may contain unrelated files.
     }
   }
   if (available_sources.empty()) {
-    throw std::runtime_error("Prepared-terrain directory contains no indexed terrain tiles");
+    throw std::runtime_error("Prepared-terrain directory contains no indexed .ptile files");
   }
   std::sort(
       available_sources.begin(),
@@ -283,19 +238,9 @@ TerrainCatalogue TerrainCatalogue::discover(
   // common set of LOD representations. Reading a compressed header requires a
   // synchronous Metal I/O decompression, so inspect one representative custom
   // file instead of serially opening every source before tracing can begin.
-  const auto custom_source = std::find_if(
-      available_sources.begin(),
-      available_sources.end(),
-      [](const TerrainSource &source) { return is_metal_tile_path(source.path); }
-  );
-  if (custom_source != available_sources.end()) {
-    const MetalTileHeader header = read_metal_tile_header(custom_source->path);
-    const uint32_t lod_count = header.lod_count;
-    for (TerrainSource &source : available_sources) {
-      if (is_metal_tile_path(source.path)) {
-        source.lod_count = lod_count;
-      }
-    }
+  const MetalTileHeader header = read_metal_tile_header(available_sources.front().path);
+  for (TerrainSource &source : available_sources) {
+    source.lod_count = header.lod_count;
   }
   std::vector<TileKey> coverage_tiles;
   coverage_tiles.reserve(available_sources.size());

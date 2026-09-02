@@ -13,50 +13,76 @@ constant bool store_collision_elevations [[function_constant(1)]];
 ///
 /// Projected coordinates have already been rebased around the observer.
 struct RaytraceParameters {
+  /// LOD-1 vertex spacing in projected metres.
   float cell_size;
+  /// Camera elevation in the terrain vertical datum.
   float observer_elevation;
+  /// Effective-Earth lift per squared horizontal metre.
   float curvature_coefficient;
+  /// Catalogue-wide conservative upper bound, or infinity when unavailable.
   float global_maximum_elevation;
+  /// Number of levels in the reference tile's maximum hierarchy.
   uint num_levels;
+  /// Number of output rays and collision records.
   uint ray_count;
+  /// Maximum permitted horizontal traversal distance.
   float max_distance;
 };
 
 /// One normalized horizontal direction and vertical slope per output pixel.
 /// This must remain identical to `RayDirection` in ray_projection.h.
 struct RayDirection {
+  /// Unit horizontal component toward projected east.
   float x;
+  /// Unit horizontal component toward projected north.
   float y;
+  /// Reciprocal east component used by DDA boundary calculations.
   float inverse_x;
+  /// Reciprocal north component used by DDA boundary calculations.
   float inverse_y;
+  /// Vertical change per metre of horizontal travel.
   float slope;
 };
 
 /// One observer-relative origin for a resident atlas slot, mirrored
-/// by `ResidentTile` in resident_tile_cache.h. All other parameters are dispatch-wide.
+/// by `ResidentTile` in tile_manager_gpu.h. All other parameters are dispatch-wide.
 struct ResidentTile {
+  /// Observer-relative easting of the south-west tile corner.
   float tile_x_min;
+  /// Observer-relative northing of the south-west tile corner.
   float tile_y_min;
+  /// Conservative complete-tile elevation bound.
   float maximum_elevation;
+  /// One-based surface LOD stored at the beginning of this atlas slot.
   uint lod;
+  /// Global north-to-south grid row used for successor lookup.
   long row;
+  /// Global west-to-east grid column used for successor lookup.
   long column;
 };
 
 /// One immutable catalogue key, manifest maximum, and host source index.
 struct CatalogueTileHashEntry {
+  /// Global north-to-south grid row.
   long row;
+  /// Global west-to-east grid column.
   long column;
+  /// Manifest upper bound used to skip this source without loading it.
   float maximum_elevation;
+  /// Stable host catalogue index returned in deferred work.
   uint source_index;
 };
 
 /// One unresolved ray segment in the GPU-owned work frontier.
 /// This must remain identical to `RayWorkItem` in raytrace_gpu.h.
 struct RayWorkItem {
+  /// Resident atlas slot traversed by this invocation.
   uint slot;
+  /// Output ray whose distance and optional products are updated.
   uint ray_index;
+  /// One-based maximum-mipmap level at which traversal begins.
   uint start_level;
+  /// Exact horizontal distance to this tile segment's near boundary.
   float entry_distance;
 };
 
@@ -65,8 +91,11 @@ struct RayWorkItem {
 /// The GPU resolves its catalogue source; the CPU retries the ray after the
 /// loader assigns that source to an atlas slot. This mirrors the host type.
 struct DeferredRayWork {
+  /// Primary or shadow output ray being continued.
   uint ray_index;
+  /// Catalogue source required for its next non-skippable segment.
   uint source_index;
+  /// Exact horizontal distance from this ray's origin to the source boundary.
   float entry_distance;
 };
 
@@ -74,24 +103,34 @@ struct DeferredRayWork {
 /// carry their absolute projected elevation so curvature starts at the
 /// camera collision rather than at the observer.
 struct ShadowRay {
+  /// Observer-relative X/Y, absolute elevation Z; W is unused padding.
   float4 origin;
 };
 
 /// Scalar shadow-tracing ABI mirrored by terrain_shadow_gpu.h.
 struct ShadowTraceParameters {
+  /// Terrain dimensions, curvature, bounds, and ray capacity.
   RaytraceParameters trace;
+  /// Common direction from every collision toward the directional sun.
   RayDirection direction;
+  /// Observer-relative western edge of catalogue column zero.
   float grid_x_min;
+  /// Observer-relative northern edge of catalogue row zero.
   float grid_y_max;
+  /// Common physical source-tile width.
   float tile_width;
+  /// Power-of-two size of the open-addressed catalogue table.
   uint catalogue_hash_capacity;
 };
 
 /// Fixed record offsets for a uint16 terrain atlas, mirrored by the host's
 /// `QuantizedTerrainLayout`.
 struct QuantizedTerrainLayout {
+  /// Byte distance between packed atlas records.
   uint record_stride;
+  /// Byte offset from a record to its uint16 vertex array.
   uint vertex_offset;
+  /// Byte offset from a record to its signed decimetre elevation base.
   uint elevation_base_offset;
 };
 
@@ -348,7 +387,9 @@ inline device const CatalogueTileHashEntry *lookup_catalogue_tile(
 
 /// Result of an exact bilinear terrain-patch intersection test.
 struct Collision {
+  /// True only when an accepted root lies in this cell's DDA interval.
   bool hit;
+  /// Horizontal distance from the ray origin to that root.
   float distance;
 };
 
@@ -634,8 +675,8 @@ inline uint packed_surface_gradients(
   return as_type<uint>(half2(east_gradient, north_gradient));
 }
 
-/// Return whether the index is a at the boundary of a level+1 block (and would thus be permitted to
-/// go up a level)
+/// Return whether stepping from this index crosses a parent-block boundary.
+/// Only such a crossing permits traversal to move to the next coarser level.
 inline bool at_level_boundary(int index, int direction, uint scale) {
   const uint block_mask = 2U * scale - 1U;
   const uint boundary_remainder = direction > 0 ? block_mask : 0U;
@@ -1217,6 +1258,9 @@ inline void trace_shadow_frontier_impl(
     device float *continuations,
     uint work_index
 ) {
+  // Shadow rays share the primary DDA and bilinear intersection code. The
+  // template flag changes a confirmed collision into an any-hit visibility
+  // update and suppresses primary collision products.
   const RayWorkItem input = work_items[work_index];
   continuations[work_index] = trace_tile_frontier_impl<Sample, true>(
       mipmap_atlas,
@@ -1234,6 +1278,7 @@ inline void trace_shadow_frontier_impl(
   );
 }
 
+/// Trace active hard-shadow segments through Float32 resident terrain.
 kernel void trace_shadow_tile_frontier(
     device const float *mipmap_atlas [[buffer(0)]],
     device const float *vertex_atlas [[buffer(1)]],
@@ -1262,6 +1307,7 @@ kernel void trace_shadow_tile_frontier(
   );
 }
 
+/// Trace active hard-shadow segments through retained uint16 terrain.
 kernel void trace_shadow_tile_frontier_quantized(
     device const ushort *mipmap_atlas [[buffer(0)]],
     device const uchar *vertex_records [[buffer(1)]],
