@@ -26,7 +26,7 @@ constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 
 /// Runtime-selectable settings for one panorama invocation.
 struct EntrypointSettings {
-  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-u16-none";
+  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-u16-none-lod-point";
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t max_tile_preparation_workers = 8U;
   uint32_t max_tile_count = 0U;
