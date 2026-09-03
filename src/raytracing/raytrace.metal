@@ -288,6 +288,125 @@ inline Collision conservative_boundary_collision(
   return {false, 0.0F};
 }
 
+/// Branchlessly solves exact intersection with TWO triangles that share the edge (d - a).
+/// Returns float2(t0, t1). If a triangle is missed, its respective t is -1.0F.
+inline float2 dual_triangle_ray_intersection(
+    float3 a,
+    float3 b,
+    float3 c,
+    float3 d,
+    float3 origin,
+    float3 direction
+) {
+  const float eps = 1e-7F;
+
+  // Compute shared geometry
+  float3 e_shared = d - a;
+  float3 p = cross(direction, e_shared);
+  float3 s = origin - a;
+
+  // Triangle 0: (a, b, d)
+  float3 e1_0 = b - a;
+  float det0 = dot(e1_0, p);
+
+  // Prevent divide-by-zero in the determinant
+  float safe_det0 = fabs(det0) < eps ? 1.0F : det0;
+  float invDet0 = 1.0F / safe_det0;
+
+  float u0 = dot(s, p) * invDet0;
+  float3 q0 = cross(s, e1_0);
+  float v0 = dot(direction, q0) * invDet0;
+  float t0_raw = dot(e_shared, q0) * invDet0;
+
+  bool valid0 = (fabs(det0) >= eps) && (u0 >= 0.0F) && (v0 >= 0.0F) && ((u0 + v0) <= 1.0F);
+  float t0 = valid0 ? t0_raw : -1.0F;
+
+  // Triangle 1: (a, c, d)
+  float3 e1_1 = c - a;
+  float det1 = dot(e1_1, p);
+
+  float safe_det1 = fabs(det1) < eps ? 1.0F : det1;
+  float invDet1 = 1.0F / safe_det1;
+
+  float u1 = dot(s, p) * invDet1;
+  float3 q1 = cross(s, e1_1);
+  float v1 = dot(direction, q1) * invDet1;
+  float t1_raw = dot(e_shared, q1) * invDet1;
+
+  bool valid1 = (fabs(det1) >= eps) && (u1 >= 0.0F) && (v1 >= 0.0F) && ((u1 + v1) <= 1.0F);
+  float t1 = valid1 ? t1_raw : -1.0F;
+
+  return float2(t0, t1);
+}
+
+template <typename Sample>
+inline __attribute__((always_inline)) Collision triangle_collision(
+    device const Sample *vertices,
+    uint vertex_count,
+    int base_decimeters,
+    float cell_x,
+    float cell_y,
+    float inverse_delta,
+    uint i,
+    uint j,
+    float observer_elevation,
+    float2 direction,
+    float slope,
+    float curvature,
+    float t_entry,
+    float t_exit
+) {
+  const float delta = 1.0F / inverse_delta;
+  const uint lower_left = i * vertex_count + j;
+
+  // Extract relevant vertex heights
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+
+  // Compute coordinate positions
+  const float x_next = cell_x + delta;
+  const float y_next = cell_y + delta;
+
+  // Compute vertex locations
+  const float3 v00 = float3(cell_x, cell_y, z00);
+  const float3 v01 = float3(x_next, cell_y, z01);
+  const float3 v10 = float3(cell_x, y_next, z10);
+  const float3 v11 = float3(x_next, y_next, z11);
+
+  // Split the square into two triangles along the diagonal with the least height difference
+  bool split = fabs(z00 - z11) < fabs(z01 - z10);
+  const float3 a = split ? v00 : v01;
+  const float3 b = split ? v01 : v00;
+  const float3 c = split ? v10 : v11;
+  const float3 d = split ? v11 : v10;
+
+  // Evaluate ray properties once
+  const float z = observer_elevation + slope * t_entry + curvature * (t_entry * t_entry);
+  const float3 origin = float3(direction.x * t_entry, direction.y * t_entry, z);
+  const float3 direction3 = float3(direction.x, direction.y, slope);
+
+  // Perform intersection of both triangles at once
+  float2 hits = dual_triangle_ray_intersection(a, b, c, d, origin, direction3);
+
+  // Resolve intersection
+  bool hit0 = hits.x >= 0.0F;
+  bool hit1 = hits.y >= 0.0F;
+  if (hit0 || hit1) {
+    float t_hit = (hit0 && hit1) ? min(hits.x, hits.y) : (hit0 ? hits.x : hits.y);
+    return {true, t_entry + t_hit};
+  }
+
+  // Sub-surface fallback check to catch any misses
+  float min_z = min(min(z00, z01), min(z10, z11));
+  if (z < min_z) {
+    return {true, t_entry};
+  }
+
+  return {false, 0.0F};
+}
+
 /// Solve the exact intersection with one bilinear level-0 terrain patch. The
 /// local parameter begins at t_entry to avoid cancellation on distant cells.
 template <typename Sample>
@@ -781,7 +900,7 @@ inline float trace_tile_frontier_impl(
       if (level == 1) {
         // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
-        const Collision collision = bilinear_collision(
+        const Collision collision = triangle_collision(
             vertices,
             vertex_count,
             base_decimeters,
