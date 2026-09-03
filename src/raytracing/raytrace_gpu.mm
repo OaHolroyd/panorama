@@ -113,6 +113,8 @@ struct GpuRaytraceResources::State {
   id<MTLBuffer> distance_output;
   id<MTLBuffer> elevation_output;
   id<MTLBuffer> surface_gradient_output;
+  id<MTLBuffer> num_steps_output;
+  id<MTLBuffer> num_evaluations_output;
   id<MTLBuffer> active;
   id<MTLBuffer> continuations;
   id<MTLBuffer> deferred_items;
@@ -164,6 +166,22 @@ struct GpuRaytraceResources::State {
             : sizeof(uint32_t),
         "surface gradient output"
     );
+    id<MTLBuffer> next_num_steps_output = make_buffer(
+        device,
+        nullptr,
+        outputs.debugging_info
+            ? checked_buffer_length(next_rays.size(), sizeof(float), "num steps output")
+            : sizeof(float),
+        "num steps output"
+    );
+    id<MTLBuffer> next_num_evaluations_output = make_buffer(
+        device,
+        nullptr,
+        outputs.debugging_info
+            ? checked_buffer_length(next_rays.size(), sizeof(float), "num evaluations output")
+            : sizeof(float),
+        "num evaluations output"
+    );
     id<MTLBuffer> next_active = make_buffer(
         device,
         nullptr,
@@ -186,12 +204,18 @@ struct GpuRaytraceResources::State {
     if (outputs.elevations) {
       clear_buffer(next_elevation_output, "elevation output");
     }
+    if (outputs.debugging_info) {
+      clear_buffer(next_num_steps_output, "num steps output");
+      clear_buffer(next_num_evaluations_output, "num evaluations output");
+    }
 
     frontier_capacity = next_capacity;
     rays = next_ray_buffer;
     distance_output = next_distance_output;
     elevation_output = next_elevation_output;
     surface_gradient_output = next_surface_gradient_output;
+    num_steps_output = next_num_steps_output;
+    num_evaluations_output = next_num_evaluations_output;
     active = next_active;
     continuations = next_continuations;
     deferred_items = next_deferred_items;
@@ -233,6 +257,7 @@ GpuRaytraceResources::GpuRaytraceResources(
   MTLFunctionConstantValues *trace_constants = [[MTLFunctionConstantValues alloc] init];
   [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
   [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
+  [trace_constants setConstantValue:&outputs.debugging_info type:MTLDataTypeBool atIndex:2];
   id<MTLFunction> trace = [state->library newFunctionWithName:trace_name
                                                constantValues:trace_constants
                                                         error:&error];
@@ -305,19 +330,20 @@ void GpuRaytraceResources::update_rays(std::span<const RayDirection> rays) {
   if (rays.size() != state.frontier_capacity) {
     throw std::invalid_argument("Updated ray field has the wrong size");
   }
+
   void *ray_contents = state.rays.contents;
-  void *distance_contents = state.distance_output.contents;
-  if (ray_contents == nullptr || distance_contents == nullptr) {
+  if (ray_contents == nullptr) {
     throw std::runtime_error("Could not map reusable raytrace buffers");
   }
   std::memcpy(ray_contents, rays.data(), rays.size_bytes());
-  std::memset(distance_contents, 0, state.distance_output.length);
+
+  clear_buffer(state.distance_output, "distance output");
+  if (state.outputs.debugging_info) {
+    clear_buffer(state.num_steps_output, "num steps output");
+    clear_buffer(state.num_evaluations_output, "num evaluations output");
+  }
   if (state.outputs.elevations) {
-    void *elevation_contents = state.elevation_output.contents;
-    if (elevation_contents == nullptr) {
-      throw std::runtime_error("Could not map reusable elevation output");
-    }
-    std::memset(elevation_contents, 0, state.elevation_output.length);
+    clear_buffer(state.elevation_output, "elevation output");
   }
 }
 
@@ -396,6 +422,8 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
     [encoder setBytes:&cache.quantized_layout length:sizeof(cache.quantized_layout) atIndex:10];
   }
   [encoder setBuffer:state.surface_gradient_output offset:0 atIndex:11];
+  [encoder setBuffer:state.num_steps_output offset:0 atIndex:12];
+  [encoder setBuffer:state.num_evaluations_output offset:0 atIndex:13];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [encoder endEncoding];
@@ -475,6 +503,20 @@ id<MTLBuffer> GpuRaytraceResources::surface_gradients() const {
     throw std::logic_error("Surface gradients were not requested");
   }
   return state_->surface_gradient_output;
+}
+
+id<MTLBuffer> GpuRaytraceResources::num_steps() const {
+  if (!state_->outputs.debugging_info) {
+    throw std::logic_error("Number of steps were not requested");
+  }
+  return state_->num_steps_output;
+}
+
+id<MTLBuffer> GpuRaytraceResources::num_evaluations() const {
+  if (!state_->outputs.debugging_info) {
+    throw std::logic_error("Number of evaluations were not requested");
+  }
+  return state_->num_evaluations_output;
 }
 
 void GpuRaytraceResources::start_capture_if_requested() {

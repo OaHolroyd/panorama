@@ -1,6 +1,7 @@
 #include "gpu_image_renderer.h"
 
 #include "raytrace_config.h"
+#include "synthetic_render_options.h"
 #include "timer.h"
 
 #import <Foundation/Foundation.h>
@@ -179,7 +180,7 @@ GpuImageRenderer::GpuImageRenderer(
   state->output_pixel_format = output_pixel_format;
   state->host_readback = requirements.host_readback;
   state->supports_synthetic = requirements.white_synthetic || requirements.synthetic_scalar_colour;
-  if (requirements.scalar_diagnostics) {
+  if (requirements.scalar_diagnostics || requirements.debugging_diagnostics) {
     state->scalar = make_pipeline(device, library, @"present_scalar_viridis");
   }
   if (requirements.normal_diagnostics) {
@@ -289,7 +290,7 @@ void GpuImageRenderer::render_synthetic(
       !std::isfinite(options.feature_outline_detail) || options.feature_outline_detail < 0.0F ||
       options.feature_outline_detail > 1.0F || !std::isfinite(range.minimum) ||
       !std::isfinite(range.maximum) || range.maximum <= range.minimum ||
-      colour_source > static_cast<uint32_t>(TerrainColourSource::Elevation) ||
+      colour_source > static_cast<uint32_t>(TerrainColourSource::NumEvaluations) ||
       colourmap > static_cast<uint32_t>(PresetColourmap::Viewfinder) ||
       colour_scale > static_cast<uint32_t>(ScalarColourScale::Quadratic)) {
     throw std::invalid_argument("Synthetic presentation inputs are invalid");

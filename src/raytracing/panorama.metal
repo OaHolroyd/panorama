@@ -8,6 +8,7 @@ using namespace metal;
 /// remove the associated collision arithmetic and output writes entirely.
 constant bool compute_surface_gradients [[function_constant(0)]];
 constant bool store_collision_elevations [[function_constant(1)]];
+constant bool store_debugging_info [[function_constant(2)]];
 
 /// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///
@@ -795,6 +796,8 @@ inline float trace_tile_frontier_impl(
     device float *distances,
     device float *elevations,
     device uint *surface_gradients,
+    device float *num_steps,
+    device float *num_evaluations,
     float3 ray_origin,
     device uchar *visibility
 ) {
@@ -980,6 +983,11 @@ inline float trace_tile_frontier_impl(
             interval_end
         );
 
+        // Store debugging details if requested
+        if (!shadow_trace && store_debugging_info) {
+          num_evaluations[output_index] += 1.0F;
+        }
+
         // Exit only after the exact patch test confirms a hit.
         if (collision.hit) {
           if (shadow_trace) {
@@ -1109,6 +1117,10 @@ inline float trace_tile_frontier_impl(
       tx += scale * dtx;
       j += scale * stepx;
     }
+    // Store debugging details if requested
+    if (!shadow_trace && store_debugging_info) {
+      num_steps[output_index] += 1.0F;
+    }
   }
   // The DDA normally returns through the segment-limit check above. Retain a
   // defensive continuation for an unexpected fine-cell exit discrepancy.
@@ -1131,6 +1143,8 @@ kernel void trace_tile_frontier(
     device float *elevations [[buffer(8)]],
     device float *continuations [[buffer(9)]],
     device uint *surface_gradients [[buffer(11)]],
+    device float *num_steps [[buffer(12)]],
+    device float *num_evaluations [[buffer(13)]],
     uint work_index [[thread_position_in_grid]]
 ) {
   const RayWorkItem input = work_items[work_index];
@@ -1147,6 +1161,8 @@ kernel void trace_tile_frontier(
       distances,
       elevations,
       surface_gradients,
+      num_steps,
+      num_evaluations,
       float3(0.0F, 0.0F, shared_parameters.observer_elevation),
       nullptr
   );
@@ -1166,6 +1182,8 @@ kernel void trace_tile_frontier_quantized(
     device float *continuations [[buffer(9)]],
     constant QuantizedTerrainLayout &layout [[buffer(10)]],
     device uint *surface_gradients [[buffer(11)]],
+    device float *num_steps [[buffer(12)]],
+    device float *num_evaluations [[buffer(13)]],
     uint work_index [[thread_position_in_grid]]
 ) {
   const RayWorkItem input = work_items[work_index];
@@ -1185,6 +1203,8 @@ kernel void trace_tile_frontier_quantized(
       distances,
       elevations,
       surface_gradients,
+      num_steps,
+      num_evaluations,
       float3(0.0F, 0.0F, shared_parameters.observer_elevation),
       nullptr
   );
@@ -1270,6 +1290,8 @@ inline void trace_shadow_frontier_impl(
       input,
       tiles,
       params.trace,
+      nullptr,
+      nullptr,
       nullptr,
       nullptr,
       nullptr,

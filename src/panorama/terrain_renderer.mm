@@ -73,6 +73,7 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
       GpuPresentationRequirements{
           .scalar_diagnostics = outputs.write_diagnostics,
           .normal_diagnostics = outputs.write_diagnostics && outputs.write_normal_diagnostic,
+          .debugging_diagnostics = outputs.write_diagnostics && outputs.write_debugging_diagnostic,
           .white_synthetic = outputs.write_synthetic &&
                              outputs.synthetic_options.colour_source == TerrainColourSource::White,
           .synthetic_scalar_colour =
@@ -96,6 +97,14 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
     if (outputs.write_normal_diagnostic) {
       render_and_write_png(timer, "normals.png", renderer, image, [&] {
         renderer.render_surface_normals(trace.surface_gradients(), distances, timer);
+      });
+    }
+    if (outputs.write_debugging_diagnostic) {
+      render_and_write_png(timer, "num_steps.png", renderer, image, [&] {
+        renderer.render_scalar(trace.num_steps(), outputs.scalar_colour_range, timer);
+      });
+      render_and_write_png(timer, "num_evaluations.png", renderer, image, [&] {
+        renderer.render_scalar(trace.num_evaluations(), outputs.scalar_colour_range, timer);
       });
     }
   }
@@ -141,8 +150,9 @@ void render_terrain(
         config,
         field,
         GpuTraceOutputRequirements{
-            .elevations = outputs.requires_elevations(),
             .surface_gradients = outputs.requires_normals(),
+            .elevations = outputs.requires_elevations(),
+            .debugging_info = outputs.requires_debugging_info(),
         }
     );
     trace.trace(field);

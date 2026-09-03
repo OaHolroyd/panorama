@@ -73,6 +73,10 @@ public:
   [[nodiscard]] id<MTLBuffer> elevations() const;
   /// Return packed Float16 east/north gradients when requested at construction.
   [[nodiscard]] id<MTLBuffer> surface_gradients() const;
+  /// Return number of steps taken by each ray when requested at construction.
+  [[nodiscard]] id<MTLBuffer> num_steps() const;
+  /// Return number of collision evaluations done by each ray when requested at construction.
+  [[nodiscard]] id<MTLBuffer> num_evaluations() const;
   /// Return hard-shadow visibility for the current trace and sun direction.
   [[nodiscard]] id<MTLBuffer> shadow_visibility() const;
 

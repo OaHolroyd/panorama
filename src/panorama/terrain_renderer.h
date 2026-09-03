@@ -17,6 +17,8 @@ struct TerrainRenderOutputs {
   bool write_elevation_diagnostic;
   /// Include normals.png when diagnostic outputs are enabled.
   bool write_normal_diagnostic;
+  /// Include num_steps.png and num_evaluations when diagnostic outputs are enabled.
+  bool write_debugging_diagnostic;
   /// Write synthetic.png using configurable base colour and normal-based lighting.
   bool write_synthetic;
   /// Lighting parameters used only when `write_synthetic` is true.
@@ -34,6 +36,11 @@ struct TerrainRenderOutputs {
   /// Return whether any selected output consumes per-collision gradients.
   [[nodiscard]] bool requires_normals() const {
     return write_synthetic || (write_diagnostics && write_normal_diagnostic);
+  }
+
+  /// Return whether any selected output consumes per-collision debugging info.
+  [[nodiscard]] bool requires_debugging_info() const {
+    return (write_diagnostics && write_debugging_diagnostic);
   }
 };
 

@@ -35,6 +35,7 @@ struct EntrypointSettings {
   bool discard_quantized = false;
   bool elevations_enabled = true;
   bool normals_enabled = true;
+  bool debugging_enabled = true;
   bool write_diagnostics = true;
   bool write_synthetic = false;
   bool synthetic_setting_seen = false;
@@ -76,6 +77,8 @@ constexpr std::array kTerrainColours = {
     std::pair{"white", panorama::TerrainColourSource::White},
     std::pair{"distance", panorama::TerrainColourSource::Distance},
     std::pair{"elevation", panorama::TerrainColourSource::Elevation},
+    std::pair{"num_steps", panorama::TerrainColourSource::NumSteps},
+    std::pair{"num_evaluations", panorama::TerrainColourSource::NumEvaluations},
 };
 
 constexpr std::array kColourmaps = {
@@ -353,8 +356,12 @@ void print_usage(const char *program) {
       settings.colour_maximum = parse_float32(value, option);
       settings.colour_range_setting_seen = true;
     } else if (option == "--terrain-colour") {
-      settings.synthetic.colour_source =
-          parse_choice(value, kTerrainColours, "terrain colour", "white, distance, or elevation");
+      settings.synthetic.colour_source = parse_choice(
+          value,
+          kTerrainColours,
+          "terrain colour",
+          "white, distance, elevation, or num steps/evaluations"
+      );
       settings.synthetic_setting_seen = true;
     } else if (option == "--colourmap") {
       settings.synthetic.colourmap = parse_choice(
@@ -407,6 +414,7 @@ int main(int argc, const char *argv[]) {
         settings.write_diagnostics,
         settings.elevations_enabled,
         settings.normals_enabled,
+        settings.debugging_enabled,
         settings.write_synthetic,
         settings.synthetic,
         colour_range,
