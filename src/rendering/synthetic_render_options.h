@@ -9,6 +9,8 @@ enum class TerrainColourSource : uint32_t {
   White = 0U,
   Distance = 1U,
   Elevation = 2U,
+  NumSteps = 3U,
+  NumEvaluations = 4U,
 };
 
 /// Built-in colourmaps available to GPU presentation kernels.

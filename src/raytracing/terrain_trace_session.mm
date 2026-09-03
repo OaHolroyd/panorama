@@ -428,6 +428,12 @@ id<MTLBuffer> TerrainTraceSession::surface_gradients() const {
   return state_->gpu->surface_gradients();
 }
 
+id<MTLBuffer> TerrainTraceSession::num_steps() const { return state_->gpu->num_steps(); }
+
+id<MTLBuffer> TerrainTraceSession::num_evaluations() const {
+  return state_->gpu->num_evaluations();
+}
+
 id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
   if (state_->shadows == nullptr || state_->shadow_revision != state_->trace_revision) {
     throw std::logic_error("Shadows have not been traced for the current terrain view");

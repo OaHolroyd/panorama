@@ -667,7 +667,11 @@ public:
     trace_ = std::make_unique<TerrainTraceSession>(
         traceConfig(requestedObserver, true),
         initial_field,
-        GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
+        GpuTraceOutputRequirements{
+            .surface_gradients = true,
+            .elevations = true,
+            .debugging_info = true,
+        }
     );
     settings_.observer = trace_->observer();
     observer_fallback_used_ = settings_.observer.easting != requestedObserver.easting ||
@@ -682,7 +686,11 @@ public:
         trace_ = std::make_unique<TerrainTraceSession>(
             traceConfig(settings_.observer, false),
             initial_field,
-            GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
+            GpuTraceOutputRequirements{
+                .surface_gradients = true,
+                .elevations = true,
+                .debugging_info = true,
+            }
         );
         if (trace_->device() != device_) {
           throw std::runtime_error("Observer fallback selected a different Metal device");
@@ -715,6 +723,7 @@ public:
         GpuPresentationRequirements{
             .scalar_diagnostics = false,
             .normal_diagnostics = false,
+            .debugging_diagnostics = false,
             .white_synthetic = true,
             .synthetic_scalar_colour = true,
             .host_readback = false,
@@ -1173,7 +1182,11 @@ private:
                 auto replacement = std::make_unique<TerrainTraceSession>(
                     config,
                     field,
-                    GpuTraceOutputRequirements{.elevations = true, .surface_gradients = true}
+                    GpuTraceOutputRequirements{
+                        .surface_gradients = true,
+                        .elevations = true,
+                        .debugging_info = true,
+                    }
                 );
                 if (replacement->device() != device_) {
                   throw std::runtime_error("Observer relocation selected a different Metal device");
@@ -1203,10 +1216,25 @@ private:
                   presentation.appearance.sun_elevation
               );
             }
-            const id<MTLBuffer> colour_values =
-                presentation.appearance.colour_source == TerrainColourSource::Elevation
-                    ? trace_->elevations()
-                    : trace_->distances();
+
+            id<MTLBuffer> colour_values = nil;
+            switch (presentation.appearance.colour_source) {
+            case TerrainColourSource::White:
+              break;
+            case TerrainColourSource::Elevation:
+              colour_values = trace_->elevations();
+              break;
+            case TerrainColourSource::Distance:
+              colour_values = trace_->distances();
+              break;
+            case TerrainColourSource::NumSteps:
+              colour_values = trace_->num_steps();
+              break;
+            case TerrainColourSource::NumEvaluations:
+              colour_values = trace_->num_evaluations();
+              break;
+            }
+
             presentation_->render_synthetic(
                 trace_->surface_gradients(),
                 trace_->distances(),
@@ -1303,6 +1331,7 @@ private:
       } catch (const std::exception &exception) {
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = exception.what();
+        printf("ERROR: %s\n", error_.c_str());
         return;
       }
     }
@@ -4130,7 +4159,13 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _invertMousePanningControl.action = @selector(invertMousePanningChanged:);
 
   _colourSourceControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-  [_colourSourceControl addItemsWithTitles:@[ @"None (white)", @"Distance", @"Elevation" ]];
+  [_colourSourceControl addItemsWithTitles:@[
+    @"None (white)",
+    @"Distance",
+    @"Elevation",
+    @"Num. steps",
+    @"Num. evals",
+  ]];
   [_colourSourceControl
       selectItemAtIndex:static_cast<NSInteger>(_presentation.appearance.colour_source)];
 

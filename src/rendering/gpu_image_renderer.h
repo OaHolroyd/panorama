@@ -31,6 +31,7 @@ struct GpuImageReadback {
 struct GpuPresentationRequirements {
   bool scalar_diagnostics;
   bool normal_diagnostics;
+  bool debugging_diagnostics;
   /// Enable uncoloured (white base) synthetic terrain presentation.
   bool white_synthetic;
   /// Enable distance/elevation colourmapped synthetic presentation.

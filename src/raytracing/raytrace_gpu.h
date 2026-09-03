@@ -68,10 +68,12 @@ struct GpuFrontierPassResult {
 /// Per-collision GPU products that may be compiled out of the trace pipeline.
 /// Distance is intentionally absent because it is always produced.
 struct GpuTraceOutputRequirements {
-  /// Allocate and write one collision elevation per ray.
-  bool elevations;
   /// Allocate and write packed east/north gradients at collisions.
   bool surface_gradients;
+  /// Allocate and write one collision elevation per ray.
+  bool elevations;
+  /// Allocate and write per ray debugging info.
+  bool debugging_info;
 };
 
 /// Long-lived Metal resources for repeated multi-tile frontier passes.
@@ -152,6 +154,16 @@ public:
   ///
   /// Throws if normal computation was disabled when this object was created.
   [[nodiscard]] id<MTLBuffer> surface_gradients() const;
+
+  /// Return the shared num_steps output buffer after tracing completes.
+  ///
+  /// Throws if debugging_info output was disabled when this object was created.
+  [[nodiscard]] id<MTLBuffer> num_steps() const;
+
+  /// Return the shared num_evaluations output buffer after tracing completes.
+  ///
+  /// Throws if debugging_info output was disabled when this object was created.
+  [[nodiscard]] id<MTLBuffer> num_evaluations() const;
 
   /// Immutable catalogue lookup shared with secondary terrain rays.
   [[nodiscard]] id<MTLBuffer> catalogue_hash() const;
