@@ -36,7 +36,8 @@ RAYTRACE_INCLUDES := -I$(RAYTRACE_SRC_DIR) -I$(SHARED_SRC_DIR)
 RENDERING_INCLUDES := -I$(RENDERING_SRC_DIR) -I$(RAYTRACE_SRC_DIR) -I$(SHARED_SRC_DIR)
 TILE_GEN_INCLUDES := -I$(TILE_GEN_SRC_DIR) -I$(SHARED_SRC_DIR)
 SHARED_INCLUDES := -I$(SHARED_SRC_DIR)
-WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion
+WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion -Wmissing-designated-field-initializers
+# -Wold-style-cast -Wzero-as-null-pointer-constant -Wfloat-equal -Wcast-qual -Wundef -Wimplicit-fallthrough -Wswitch-enum -Wunreachable-code -Wnon-virtual-dtor -Woverloaded-virtual -Wunused-lambda-capture -Wobjc-interface-ivars
 COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
 # ImageIO/CoreGraphics encode diagnostic and rendered images as PNG files.
 FRAMEWORKS := -framework Foundation -framework Metal -framework CoreGraphics -framework ImageIO

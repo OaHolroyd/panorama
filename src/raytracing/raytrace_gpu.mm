@@ -226,6 +226,8 @@ GpuRaytraceResources::GpuRaytraceResources(
     std::span<const RayDirection> rays,
     std::span<const TerrainSource> sources,
     bool trace_quantized,
+    bool bilinear_collisions,
+    bool c1_normals,
     GpuTraceOutputRequirements outputs
 ) {
   if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
@@ -258,6 +260,8 @@ GpuRaytraceResources::GpuRaytraceResources(
   [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
   [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
   [trace_constants setConstantValue:&outputs.debugging_info type:MTLDataTypeBool atIndex:2];
+  [trace_constants setConstantValue:&bilinear_collisions type:MTLDataTypeBool atIndex:3];
+  [trace_constants setConstantValue:&c1_normals type:MTLDataTypeBool atIndex:4];
   id<MTLFunction> trace = [state->library newFunctionWithName:trace_name
                                                constantValues:trace_constants
                                                         error:&error];

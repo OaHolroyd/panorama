@@ -9,6 +9,8 @@ using namespace metal;
 constant bool compute_surface_gradients [[function_constant(0)]];
 constant bool store_collision_elevations [[function_constant(1)]];
 constant bool store_debugging_info [[function_constant(2)]];
+constant bool use_bilinear_collisions [[function_constant(3)]];
+constant bool use_c1_normals [[function_constant(4)]]; // TODO: implement
 
 /// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///
@@ -272,22 +274,6 @@ inline bool above_global_terrain(
              global_maximum + kElevationCullingMargin;
 }
 
-/// Recover a near-boundary hit when DDA rounding assigns the root to an
-/// adjacent cell even though the ray ends below this patch's lowest vertex.
-inline Collision conservative_boundary_collision(
-    float observer_elevation,
-    float slope,
-    float curvature,
-    float t_entry,
-    float t_exit,
-    float minimum_vertex
-) {
-  if (curved_ray_elevation(observer_elevation, slope, curvature, t_exit) <= minimum_vertex) {
-    return {true, t_entry};
-  }
-  return {false, 0.0F};
-}
-
 /// Branchlessly solves exact intersection with TWO triangles that share the edge (d - a).
 /// Returns float2(t0, t1). If a triangle is missed, its respective t is -1.0F.
 inline float2 dual_triangle_ray_intersection(
@@ -340,23 +326,21 @@ inline float2 dual_triangle_ray_intersection(
 }
 
 template <typename Sample>
-inline __attribute__((always_inline)) Collision triangle_collision(
+inline Collision triangle_collision(
     device const Sample *vertices,
     uint vertex_count,
     int base_decimeters,
     float cell_x,
     float cell_y,
-    float inverse_delta,
+    float delta,
     uint i,
     uint j,
     float observer_elevation,
     float2 direction,
     float slope,
     float curvature,
-    float t_entry,
-    float t_exit
+    float t_entry
 ) {
-  const float delta = 1.0F / inverse_delta;
   const uint lower_left = i * vertex_count + j;
 
   // Extract relevant vertex heights
@@ -404,6 +388,77 @@ inline __attribute__((always_inline)) Collision triangle_collision(
     return {true, t_entry};
   }
 
+  return {false, 0.0F};
+}
+
+/// Evaluate the analytical east/north derivatives of a split-triangle terrain patch
+/// at a confirmed collision. Reloading the four samples here keeps them and
+/// the derivative temporaries out of the root solver's peak live register set.
+/// The two float16 gradients are sufficient to reconstruct the upward normal
+/// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
+template <typename Sample>
+inline uint triangle_packed_surface_gradients(
+    device const Sample *vertices,
+    uint vertex_count,
+    int base_decimeters,
+    float cell_x,
+    float cell_y,
+    float inverse_delta,
+    uint i,
+    uint j,
+    float2 direction,
+    float distance
+) {
+  const uint lower_left = i * vertex_count + j;
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+
+  // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
+  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+
+  // Re-evaluate the data-dependent split rule
+  bool split = fabs(z00 - z11) < fabs(z01 - z10);
+
+  // Pre-calculate the X and Y gradients along all four outer edges of the cell
+  const float dx_bottom = z01 - z00;
+  const float dx_top = z11 - z10;
+  const float dy_left = z10 - z00;
+  const float dy_right = z11 - z01;
+
+  // Determine which triangle we hit based on the diagonal
+  // if split is true (00-11 diagonal): Triangle is decided by sx > sy
+  // if split is false (01-10 diagonal): Triangle is decided by sx + sy < 1.0
+  bool pick_dx_bottom = split ? (sx > sy) : ((sx + sy) < 1.0F);
+  bool pick_dy_left = split ? (sx <= sy) : ((sx + sy) < 1.0F);
+
+  // Select the constant gradient for the specific triangle
+  const float raw_east_gradient = pick_dx_bottom ? dx_bottom : dx_top;
+  const float raw_north_gradient = pick_dy_left ? dy_left : dy_right;
+
+  // Scale and pack
+  constexpr float kMaximumHalf = 65504.0F;
+  const float east_gradient = clamp(raw_east_gradient * inverse_delta, -kMaximumHalf, kMaximumHalf);
+  const float north_gradient =
+      clamp(raw_north_gradient * inverse_delta, -kMaximumHalf, kMaximumHalf);
+  return as_type<uint>(half2(east_gradient, north_gradient));
+}
+
+/// Recover a near-boundary hit when DDA rounding assigns the root to an
+/// adjacent cell even though the ray ends below this patch's lowest vertex.
+inline Collision conservative_boundary_collision(
+    float observer_elevation,
+    float slope,
+    float curvature,
+    float t_entry,
+    float t_exit,
+    float minimum_vertex
+) {
+  if (curved_ray_elevation(observer_elevation, slope, curvature, t_exit) <= minimum_vertex) {
+    return {true, t_entry};
+  }
   return {false, 0.0F};
 }
 
@@ -900,22 +955,42 @@ inline float trace_tile_frontier_impl(
       if (level == 1) {
         // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
-        const Collision collision = triangle_collision(
-            vertices,
-            vertex_count,
-            base_decimeters,
-            tile_x_min + float(j) * delta - ray_origin.x,
-            tile_y_min + float(i) * delta - ray_origin.y,
-            inverse_delta,
-            uint(i),
-            uint(j),
-            observer_elevation,
-            direction,
-            dz,
-            curvature,
-            interval_start,
-            interval_end
-        );
+        Collision collision;
+
+        if (use_bilinear_collisions) {
+          collision = bilinear_collision(
+              vertices,
+              vertex_count,
+              base_decimeters,
+              tile_x_min + float(j) * delta - ray_origin.x,
+              tile_y_min + float(i) * delta - ray_origin.y,
+              inverse_delta,
+              uint(i),
+              uint(j),
+              observer_elevation,
+              direction,
+              dz,
+              curvature,
+              interval_start,
+              interval_end
+          );
+        } else {
+          collision = triangle_collision(
+              vertices,
+              vertex_count,
+              base_decimeters,
+              tile_x_min + float(j) * delta - ray_origin.x,
+              tile_y_min + float(i) * delta - ray_origin.y,
+              delta,
+              uint(i),
+              uint(j),
+              observer_elevation,
+              direction,
+              dz,
+              curvature,
+              interval_start
+          );
+        }
 
         // Store debugging details if requested
         if (!shadow_trace && store_debugging_info) {
@@ -934,18 +1009,34 @@ inline float trace_tile_frontier_impl(
                 curved_ray_elevation(observer_elevation, dz, curvature, collision.distance);
           }
           if (!shadow_trace && compute_surface_gradients) {
-            surface_gradients[output_index] = packed_surface_gradients(
-                vertices,
-                vertex_count,
-                base_decimeters,
-                tile_x_min + float(j) * delta - ray_origin.x,
-                tile_y_min + float(i) * delta - ray_origin.y,
-                inverse_delta,
-                uint(i),
-                uint(j),
-                direction,
-                collision.distance
-            );
+            // TODO: give option to do better normals
+            if (use_bilinear_collisions) {
+              surface_gradients[output_index] = packed_surface_gradients(
+                  vertices,
+                  vertex_count,
+                  base_decimeters,
+                  tile_x_min + float(j) * delta - ray_origin.x,
+                  tile_y_min + float(i) * delta - ray_origin.y,
+                  inverse_delta,
+                  uint(i),
+                  uint(j),
+                  direction,
+                  collision.distance
+              );
+            } else {
+              surface_gradients[output_index] = triangle_packed_surface_gradients(
+                  vertices,
+                  vertex_count,
+                  base_decimeters,
+                  tile_x_min + float(j) * delta - ray_origin.x,
+                  tile_y_min + float(i) * delta - ray_origin.y,
+                  inverse_delta,
+                  uint(i),
+                  uint(j),
+                  direction,
+                  collision.distance
+              );
+            }
           }
           return INFINITY;
         }

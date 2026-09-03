@@ -93,6 +93,8 @@ public:
       std::span<const RayDirection> rays,
       std::span<const TerrainSource> sources,
       bool trace_quantized,
+      bool bilinear_collisions,
+      bool c1_normals,
       GpuTraceOutputRequirements outputs
   );
 

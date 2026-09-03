@@ -74,6 +74,8 @@ struct ViewerSettings {
   float max_distance = 600'000.0F;
   float lod_scale = 0.0F;
   bool discard_quantized = false;
+  bool bilinear_collisions = false;
+  bool c1_normals = false;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
   ImageSize image = {1600U, 900U};
   double vertical_field_of_view = kDefaultVerticalFieldOfView;
@@ -650,22 +652,25 @@ public:
         presented_image_(settings_.image) {
     RayField initial_field =
         make_view(settings_.image, settings_.orientation, settings_.vertical_field_of_view);
-    const auto traceConfig = [&](ObserverLocation observer, bool allowFallback) {
-      return RaytraceConfig{
-          settings_.tile_dir,
-          observer,
-          settings_.max_distance,
-          0U,
-          settings_.tile_cache_size_bytes,
-          settings_.workers,
-          !settings_.discard_quantized,
-          allowFallback,
-          settings_.lod_scale,
-      };
-    };
+    const auto traceConfig =
+        [&](ObserverLocation observer, bool allowFallback, bool bilinear, bool c1Normals) {
+          return RaytraceConfig{
+              settings_.tile_dir,
+              observer,
+              settings_.max_distance,
+              0U,
+              settings_.tile_cache_size_bytes,
+              settings_.workers,
+              !settings_.discard_quantized,
+              bilinear,
+              c1Normals,
+              allowFallback,
+              settings_.lod_scale,
+          };
+        };
     const ObserverLocation requestedObserver = settings_.observer;
     trace_ = std::make_unique<TerrainTraceSession>(
-        traceConfig(requestedObserver, true),
+        traceConfig(requestedObserver, true, settings_.bilinear_collisions, settings_.c1_normals),
         initial_field,
         GpuTraceOutputRequirements{
             .surface_gradients = true,
@@ -684,7 +689,12 @@ public:
       if (observer_fallback_used_) {
         settings_.observer.elevation = static_cast<double>(*ground) + kFallbackEyeHeight;
         trace_ = std::make_unique<TerrainTraceSession>(
-            traceConfig(settings_.observer, false),
+            traceConfig(
+                settings_.observer,
+                false,
+                settings_.bilinear_collisions,
+                settings_.c1_normals
+            ),
             initial_field,
             GpuTraceOutputRequirements{
                 .surface_gradients = true,
@@ -737,6 +747,8 @@ public:
     current_vertical_field_of_view_ = settings_.vertical_field_of_view;
     requested_observer_ = settings_.observer;
     requested_lod_scale_ = settings_.lod_scale;
+    requested_bilinear_collisions_ = settings_.bilinear_collisions;
+    requested_c1_normals_ = settings_.c1_normals;
     presented_observer_ = settings_.observer;
     worker_ = std::thread([this] { render_loop(); });
     request_view(settings_.orientation, settings_.vertical_field_of_view, settings_.image);
@@ -792,6 +804,22 @@ public:
       requested_lod_scale_ = lodScale;
       requested_revision_++;
       lod_scale_pending_ = true;
+      trace_pending_ = true;
+      presentation_pending_ = true;
+    }
+    changed_.notify_one();
+  }
+
+  /// Rebuild the tracing pipelines with the selected collision and normal
+  /// interpolation modes. These are function-constant kernel options, so
+  /// changing them requires a new trace session rather than presentation only.
+  void request_collision_settings(bool bilinear, bool c1Normals) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requested_bilinear_collisions_ = bilinear;
+      requested_c1_normals_ = c1Normals;
+      requested_revision_++;
+      collision_settings_pending_ = true;
       trace_pending_ = true;
       presentation_pending_ = true;
     }
@@ -948,6 +976,8 @@ public:
   }
   [[nodiscard]] float max_distance() const { return settings_.max_distance; }
   [[nodiscard]] float initial_lod_scale() const { return settings_.lod_scale; }
+  [[nodiscard]] bool initial_bilinear_collisions() const { return settings_.bilinear_collisions; }
+  [[nodiscard]] bool initial_c1_normals() const { return settings_.c1_normals; }
   [[nodiscard]] CameraOrientation initial_orientation() const { return settings_.orientation; }
   [[nodiscard]] TerrainPresentationSettings initial_presentation() const {
     return settings_.presentation;
@@ -1069,6 +1099,9 @@ private:
       bool target_requested = false;
       bool roam_requested = false;
       bool lod_scale_requested = false;
+      bool collision_settings_requested = false;
+      bool bilinear_collisions = false;
+      bool c1_normals = false;
       float lod_scale = 0.0F;
       std::optional<InspectionPixel> inspection_pixel;
       uint64_t inspection_token = 0U;
@@ -1114,6 +1147,9 @@ private:
         current_ground_clearance = observer_ground_clearance_;
         lod_scale_requested = lod_scale_pending_;
         lod_scale = requested_lod_scale_;
+        collision_settings_requested = collision_settings_pending_;
+        bilinear_collisions = requested_bilinear_collisions_;
+        c1_normals = requested_c1_normals_;
         target_requested = target_pending_ || trace_pending_ || presentation_pending_;
         target = requested_target_;
         target_token = requested_target_token_;
@@ -1125,6 +1161,7 @@ private:
         target_pending_ = false;
         roam_pending_ = false;
         lod_scale_pending_ = false;
+        collision_settings_pending_ = false;
       }
 
       try {
@@ -1166,6 +1203,38 @@ private:
             if (lod_scale_requested) {
               trace_->set_lod_scale(lod_scale);
             }
+            if (collision_settings_requested) {
+              const ObserverLocation session_observer =
+                  observer_requested ? observer : current_observer_;
+              const RaytraceConfig config = {
+                  settings_.tile_dir,
+                  session_observer,
+                  settings_.max_distance,
+                  0U,
+                  settings_.tile_cache_size_bytes,
+                  settings_.workers,
+                  !settings_.discard_quantized,
+                  bilinear_collisions,
+                  c1_normals,
+                  false,
+                  lod_scale_requested ? lod_scale : requested_lod_scale_,
+              };
+              auto replacement = std::make_unique<TerrainTraceSession>(
+                  config,
+                  field,
+                  GpuTraceOutputRequirements{
+                      .surface_gradients = true,
+                      .elevations = true,
+                      .debugging_info = true,
+                  }
+              );
+              if (replacement->device() != device_) {
+                throw std::runtime_error(
+                    "Collision setting change selected a different Metal device"
+                );
+              }
+              trace_ = std::move(replacement);
+            }
             if (observer_requested) {
               if (!trace_->relocate_observer(observer)) {
                 const RaytraceConfig config = {
@@ -1176,6 +1245,8 @@ private:
                     settings_.tile_cache_size_bytes,
                     settings_.workers,
                     !settings_.discard_quantized,
+                    bilinear_collisions,
+                    c1_normals,
                     false,
                     lod_scale,
                 };
@@ -1389,6 +1460,8 @@ private:
   double observer_ground_clearance_ = 0.0;
   double frame_ms_ = 0.0;
   float requested_lod_scale_ = 0.0F;
+  bool requested_bilinear_collisions_ = false;
+  bool requested_c1_normals_ = false;
   std::string error_;
   bool trace_pending_ = false;
   bool presentation_pending_ = false;
@@ -1398,6 +1471,7 @@ private:
   bool target_pending_ = false;
   bool roam_pending_ = false;
   bool lod_scale_pending_ = false;
+  bool collision_settings_pending_ = false;
   bool observer_fallback_used_ = false;
   bool stopping_ = false;
 };
@@ -1787,7 +1861,9 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   NSButton *_aspectLockControl;
   NSButton *_matchWindowControl;
   NSButton *_invertMousePanningControl;
+  NSButton *_bilinearCollisionControl;
   NSButton *_normalLightingControl;
+  NSButton *_c1NormalsControl;
   NSButton *_raytracedShadowsControl;
   NSButton *_featureOutlinesControl;
   NSSlider *_featureOutlineDetailControl;
@@ -1902,6 +1978,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   bool _viewerPaused;
   bool _cruiseRecovery;
   bool _cruiseSteeringActive;
+  bool _bilinearCollisions;
+  bool _c1Normals;
   bool _updatingResolutionControls;
 }
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
@@ -1959,6 +2037,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 - (void)coordinateSystemChanged:(id)sender;
 - (void)moveToCoordinate:(id)sender;
 - (BOOL)updateCoordinateInputValidation;
+- (void)bilinearCollisionChanged:(NSButton *)sender;
+- (void)c1NormalsChanged:(NSButton *)sender;
 - (void)resolveObserverTimeZone;
 - (void)setDaylightStatus:(NSString *)status;
 - (BOOL)publishAstronomicalLighting;
@@ -2752,6 +2832,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _aircraftAirspeed = _cruiseSpeed;
     _roamDesiredPosition = {_observer.easting, _observer.northing};
     _presentation = renderer->initial_presentation();
+    _bilinearCollisions = renderer->initial_bilinear_collisions();
+    _c1Normals = renderer->initial_c1_normals();
     _mapPointAction = panorama::app::MapPointAction::None;
     _pointerOwner = panorama::app::PointerOwner::None;
 
@@ -3646,6 +3728,16 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _renderer->request_presentation(_presentation);
 }
 
+- (void)bilinearCollisionChanged:(NSButton *)sender {
+  _bilinearCollisions = sender.state == NSControlStateValueOn;
+  _renderer->request_collision_settings(_bilinearCollisions, _c1Normals);
+}
+
+- (void)c1NormalsChanged:(NSButton *)sender {
+  _c1Normals = sender.state == NSControlStateValueOn;
+  _renderer->request_collision_settings(_bilinearCollisions, _c1Normals);
+}
+
 - (void)raytracedShadowsChanged:(NSButton *)sender {
   _presentation.appearance.raytraced_shadows = sender.state == NSControlStateValueOn;
   _renderer->request_presentation(_presentation);
@@ -4197,6 +4289,16 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       panorama::app::format_range_value(_presentation.colour_range.maximum);
   _maximumControl.delegate = self;
 
+  _bilinearCollisionControl = [[NSButton alloc] initWithFrame:NSZeroRect];
+  _bilinearCollisionControl.buttonType = NSButtonTypeSwitch;
+  _bilinearCollisionControl.title = @"Bilinear patches";
+  _bilinearCollisionControl.state =
+      _bilinearCollisions ? NSControlStateValueOn : NSControlStateValueOff;
+  _bilinearCollisionControl.target = self;
+  _bilinearCollisionControl.action = @selector(bilinearCollisionChanged:);
+  _bilinearCollisionControl.toolTip =
+      @"Compute terrain collisions with bilinear patches rather than split triangles";
+
   _featureOutlinesControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _featureOutlinesControl.buttonType = NSButtonTypeSwitch;
   _featureOutlinesControl.title = @"Feature outlines";
@@ -4256,6 +4358,15 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       _presentation.use_surface_normals ? NSControlStateValueOn : NSControlStateValueOff;
   _normalLightingControl.target = self;
   _normalLightingControl.action = @selector(normalLightingChanged:);
+
+  _c1NormalsControl = [[NSButton alloc] initWithFrame:NSZeroRect];
+  _c1NormalsControl.buttonType = NSButtonTypeSwitch;
+  _c1NormalsControl.title = @"C1-continuous normals";
+  _c1NormalsControl.state = _c1Normals ? NSControlStateValueOn : NSControlStateValueOff;
+  _c1NormalsControl.target = self;
+  _c1NormalsControl.action = @selector(c1NormalsChanged:);
+  _c1NormalsControl.toolTip =
+      @"Smooth normals across cell boundaries instead of using each patch independently";
 
   _raytracedShadowsControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _raytracedShadowsControl.buttonType = NSButtonTypeSwitch;
@@ -4540,6 +4651,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _manualSunRows = @[ azimuthRow, altitudeRow ];
   _astronomicalSunRows = @[ dateRow, timeRow ];
   _normalLightingRows = @[
+    _c1NormalsControl,
     _raytracedShadowsControl,
     sunModeRow,
     dateRow,
@@ -4569,6 +4681,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                            colourScaleRow,
                                            colourRangeRow,
                                            lodScaleRow,
+                                           _bilinearCollisionControl,
                                            _featureOutlinesControl,
                                            _featureOutlineDetailRow,
                                          ]
@@ -4577,6 +4690,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       [[InspectorSectionView alloc] initWithTitle:@"Lighting"
                                          controls:@[
                                            _normalLightingControl,
+                                           _c1NormalsControl,
                                            _raytracedShadowsControl,
                                            sunModeRow,
                                            dateRow,

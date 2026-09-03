@@ -127,6 +127,8 @@ struct TerrainTraceSession::State {
         initial_field.rays,
         tiles->sources(),
         tiles->traces_quantized(),
+        config.bilinear_collisions,
+        config.c1_normals,
         outputs
     );
     tiles->attach_gpu(gpu->device(), timer);
