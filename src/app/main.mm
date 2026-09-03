@@ -4163,8 +4163,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     @"None (white)",
     @"Distance",
     @"Elevation",
-    @"Num. steps",
-    @"Num. evals",
+    @"Traversal steps",
+    @"Collision evaluations",
   ]];
   [_colourSourceControl
       selectItemAtIndex:static_cast<NSInteger>(_presentation.appearance.colour_source)];
@@ -4524,7 +4524,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   NSView *colourmapRow = make_row(@"Colourmap", _colourmapControl);
   NSView *colourScaleRow = make_row(@"Scale", _colourScaleControl);
-  NSView *colourRangeRow = make_row(@"Range (m)", rangeSetting);
+  NSView *colourRangeRow = make_row(@"Range", rangeSetting);
   _scalarColourRows = @[ colourmapRow, colourScaleRow, colourRangeRow ];
   _featureOutlineDetailRow = make_row(@"Detail", featureOutlineDetailSetting);
   NSView *lodScaleRow = make_row(@"LOD scale", lodScaleSetting);
