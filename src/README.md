@@ -42,7 +42,7 @@ flowchart TD
     SESSION --> TM[TileManager]
     SESSION --> GPU[GpuRaytraceResources]
     SESSION --> HF[HostFrontier per trace]
-    GPU --> MK[panorama.metal kernels]
+    GPU --> MK[raytrace.metal kernels]
     TM --> MK
     HF --> TM
 ```
@@ -149,7 +149,7 @@ query.
 
 The public kernels `trace_tile_frontier` and
 `trace_tile_frontier_quantized` select the atlas representation and call the
-templated `trace_tile_frontier_impl` in `raytracing/panorama.metal`.
+templated `trace_tile_frontier_impl` in `raytracing/raytrace.metal`.
 
 The implementation combines two structures:
 
