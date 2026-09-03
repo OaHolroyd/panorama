@@ -2,6 +2,7 @@
 
 #include "crs.h"
 
+#include <Foundation/Foundation.h>
 #import <MapKit/MapKit.h>
 #import <MetalKit/MetalKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -30,13 +31,22 @@ struct VisibilityMapParameters {
   float point_size;
   uint32_t ray_count;
 };
-
 static_assert(sizeof(VisibilityMapParameters) == 8U * sizeof(uint32_t));
 
 enum class AnnotationKind : NSInteger {
   Observer,
   Hover,
   Locked,
+};
+
+/// Pairs of title/template URL for XYZ TileOverlays
+static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOverlays = {
+    {
+        {@"SwissTopo",
+         @"https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/"
+         @"{z}/{x}/{y}.jpeg"},
+        {@"OpenTopoMap", @"https://a.tile.opentopomap.org/{z}/{x}/{y}.png"},
+    },
 };
 
 /// Return a small symbol-only marker rather than MapKit's full pin balloon.
@@ -416,6 +426,7 @@ enum class AnnotationKind : NSInteger {
   CLLocationCoordinate2D _northBasisCoordinate;
   id<MKOverlay> _fieldOfViewOverlay;
   id<MKOverlay> _headingOverlay;
+  MKTileOverlay *_tileOverlay;
   MKMultiPolygon *_coverageOverlay;
   double _observerEasting;
   double _observerNorthing;
@@ -469,14 +480,16 @@ enum class AnnotationKind : NSInteger {
   [self addSubview:_mapSection];
   [self addSubview:_pointInfoView];
 
-  NSTextField *heading = [NSTextField labelWithString:@"Minimap"];
-  heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
   _mapStyleControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   [_mapStyleControl addItemsWithTitles:@[
     @"Standard Terrain",
     @"Hybrid",
     @"Imagery",
   ]];
+  for (auto title_url : kTileOverlays) {
+    [_mapStyleControl addItemsWithTitles:@[ title_url.first ]];
+  }
+  _tileOverlay = nil;
   _mapStyleControl.target = self;
   _mapStyleControl.action = @selector(mapStyleChanged:);
 
@@ -535,7 +548,6 @@ enum class AnnotationKind : NSInteger {
                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
 
   NSStackView *controls = [NSStackView stackViewWithViews:@[
-    heading,
     _mapStyleControl,
     controlSpacer,
     _coverageControl,
@@ -546,8 +558,6 @@ enum class AnnotationKind : NSInteger {
   controls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   controls.alignment = NSLayoutAttributeCenterY;
   controls.spacing = 4.0;
-  [heading setContentHuggingPriority:NSLayoutPriorityDefaultHigh
-                      forOrientation:NSLayoutConstraintOrientationHorizontal];
   [_mapStyleControl setContentHuggingPriority:NSLayoutPriorityDefaultHigh
                                forOrientation:NSLayoutConstraintOrientationHorizontal];
   controls.translatesAutoresizingMaskIntoConstraints = NO;
@@ -656,8 +666,9 @@ enum class AnnotationKind : NSInteger {
   _followInspection = false;
   _mapPointerInside = false;
   _largeMap = false;
+
   if (_coverageVisible) {
-    [_mapView addOverlay:_coverageOverlay level:MKOverlayLevelAboveRoads];
+    [_mapView addOverlay:_coverageOverlay level:MKOverlayLevelAboveLabels];
   }
   [self updateCoverageControl];
   [self updateMapFocusControl];
@@ -681,7 +692,7 @@ enum class AnnotationKind : NSInteger {
   (void)sender;
   _coverageVisible = !_coverageVisible;
   if (_coverageVisible) {
-    [_mapView addOverlay:_coverageOverlay level:MKOverlayLevelAboveRoads];
+    [_mapView insertOverlay:_coverageOverlay belowOverlay:_headingOverlay];
   } else {
     [_mapView removeOverlay:_coverageOverlay];
   }
@@ -779,6 +790,7 @@ enum class AnnotationKind : NSInteger {
 
 - (void)mapStyleChanged:(id)sender {
   (void)sender;
+  [_mapView removeOverlay:_tileOverlay];
   switch (_mapStyleControl.indexOfSelectedItem) {
   case 0:
     _mapView.preferredConfiguration =
@@ -788,9 +800,27 @@ enum class AnnotationKind : NSInteger {
     _mapView.preferredConfiguration =
         [[MKHybridMapConfiguration alloc] initWithElevationStyle:MKMapElevationStyleRealistic];
     break;
-  default:
+  case 2:
     _mapView.preferredConfiguration =
         [[MKImageryMapConfiguration alloc] initWithElevationStyle:MKMapElevationStyleRealistic];
+    break;
+  // all other styles are custom tile overlays
+  default:
+    // set map to use WGS:3857 and turn off the standard apple labels
+    _mapView.preferredConfiguration =
+        [[MKStandardMapConfiguration alloc] initWithElevationStyle:MKMapElevationStyleRealistic];
+    _mapView.pointOfInterestFilter = [MKPointOfInterestFilter filterExcludingAllCategories];
+
+    const size_t index = _mapStyleControl.indexOfSelectedItem - 3;
+    if (index > kTileOverlays.size()) {
+      throw std::invalid_argument(
+          std::format("Map style index '{}' not handled", _mapStyleControl.indexOfSelectedItem)
+      );
+    }
+    _tileOverlay = [[MKTileOverlay alloc] initWithURLTemplate:kTileOverlays[index].second];
+    _tileOverlay.canReplaceMapContent = YES;
+    [_mapView insertOverlay:_tileOverlay belowOverlay:_fieldOfViewOverlay];
+
     break;
   }
 }
@@ -880,8 +910,8 @@ enum class AnnotationKind : NSInteger {
   }
   _fieldOfViewOverlay = [MKPolygon polygonWithCoordinates:wedge count:3];
   _headingOverlay = [MKPolyline polylineWithCoordinates:headingLine count:2];
-  [_mapView addOverlay:_fieldOfViewOverlay level:MKOverlayLevelAboveRoads];
-  [_mapView addOverlay:_headingOverlay level:MKOverlayLevelAboveRoads];
+  [_mapView addOverlay:_fieldOfViewOverlay level:MKOverlayLevelAboveLabels];
+  [_mapView addOverlay:_headingOverlay level:MKOverlayLevelAboveLabels];
 }
 
 - (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image {
@@ -1025,11 +1055,23 @@ enum class AnnotationKind : NSInteger {
     renderer.lineWidth = 0.0;
     return renderer;
   }
-  MKPolylineRenderer *renderer =
-      [[MKPolylineRenderer alloc] initWithPolyline:(MKPolyline *)overlay];
-  renderer.strokeColor = NSColor.systemBlueColor;
-  renderer.lineWidth = 2.0;
-  return renderer;
+  if ([overlay isKindOfClass:MKPolyline.class]) {
+    MKPolylineRenderer *renderer =
+        [[MKPolylineRenderer alloc] initWithPolyline:(MKPolyline *)overlay];
+    renderer.strokeColor = NSColor.systemBlueColor;
+    renderer.lineWidth = 2.0;
+    return renderer;
+  }
+  if ([overlay isKindOfClass:MKTileOverlay.class]) {
+    MKTileOverlayRenderer *renderer =
+        [[MKTileOverlayRenderer alloc] initWithTileOverlay:(MKTileOverlay *)overlay];
+
+    if (!overlay.canReplaceMapContent) {
+      renderer.alpha = 0.4;
+    }
+    return renderer;
+  }
+  throw std::invalid_argument("Overlay type not handled");
 }
 
 @end
