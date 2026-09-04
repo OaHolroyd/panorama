@@ -1009,33 +1009,37 @@ inline float trace_tile_frontier_impl(
                 curved_ray_elevation(observer_elevation, dz, curvature, collision.distance);
           }
           if (!shadow_trace && compute_surface_gradients) {
-            // TODO: give option to do better normals
-            if (use_bilinear_collisions) {
-              surface_gradients[output_index] = packed_surface_gradients(
-                  vertices,
-                  vertex_count,
-                  base_decimeters,
-                  tile_x_min + float(j) * delta - ray_origin.x,
-                  tile_y_min + float(i) * delta - ray_origin.y,
-                  inverse_delta,
-                  uint(i),
-                  uint(j),
-                  direction,
-                  collision.distance
-              );
+            if (use_c1_normals) {
+              surface_gradients[output_index] = 0;
             } else {
-              surface_gradients[output_index] = triangle_packed_surface_gradients(
-                  vertices,
-                  vertex_count,
-                  base_decimeters,
-                  tile_x_min + float(j) * delta - ray_origin.x,
-                  tile_y_min + float(i) * delta - ray_origin.y,
-                  inverse_delta,
-                  uint(i),
-                  uint(j),
-                  direction,
-                  collision.distance
-              );
+              // TODO: give option to do better normals
+              if (use_bilinear_collisions) {
+                surface_gradients[output_index] = packed_surface_gradients(
+                    vertices,
+                    vertex_count,
+                    base_decimeters,
+                    tile_x_min + float(j) * delta - ray_origin.x,
+                    tile_y_min + float(i) * delta - ray_origin.y,
+                    inverse_delta,
+                    uint(i),
+                    uint(j),
+                    direction,
+                    collision.distance
+                );
+              } else {
+                surface_gradients[output_index] = triangle_packed_surface_gradients(
+                    vertices,
+                    vertex_count,
+                    base_decimeters,
+                    tile_x_min + float(j) * delta - ray_origin.x,
+                    tile_y_min + float(i) * delta - ray_origin.y,
+                    inverse_delta,
+                    uint(i),
+                    uint(j),
+                    direction,
+                    collision.distance
+                );
+              }
             }
           }
           return INFINITY;

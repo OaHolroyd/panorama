@@ -290,7 +290,9 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
         state.gpu->device(),
         state.gpu->command_queue(),
         state.gpu->library(),
-        state.gpu->traces_quantized()
+        state.gpu->traces_quantized(),
+        state.gpu->bilinear_collisions(),
+        state.gpu->c1_normals()
     );
   }
   state.shadows->resize(state.ray_count);

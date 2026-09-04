@@ -55,7 +55,9 @@ GpuTerrainShadowResources::GpuTerrainShadowResources(
     id<MTLDevice> device,
     id<MTLCommandQueue> queue,
     id<MTLLibrary> library,
-    bool trace_quantized
+    bool trace_quantized,
+    bool bilinear_collisions,
+    bool c1_normals
 ) {
   if (device == nil || queue == nil || library == nil) {
     throw std::invalid_argument("Shadow resources require an existing Metal trace context");
@@ -68,7 +70,15 @@ GpuTerrainShadowResources::GpuTerrainShadowResources(
   id<MTLFunction> initialise = [library newFunctionWithName:@"initialise_shadow_rays"];
   NSString *trace_name =
       trace_quantized ? @"trace_shadow_tile_frontier_quantized" : @"trace_shadow_tile_frontier";
-  id<MTLFunction> trace = [library newFunctionWithName:trace_name];
+  MTLFunctionConstantValues *trace_constants = [[MTLFunctionConstantValues alloc] init];
+  // [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
+  // [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
+  // [trace_constants setConstantValue:&outputs.debugging_info type:MTLDataTypeBool atIndex:2];
+  [trace_constants setConstantValue:&bilinear_collisions type:MTLDataTypeBool atIndex:3];
+  [trace_constants setConstantValue:&c1_normals type:MTLDataTypeBool atIndex:4];
+  id<MTLFunction> trace = [library newFunctionWithName:trace_name
+                                        constantValues:trace_constants
+                                                 error:&error];
   id<MTLFunction> emit = [library newFunctionWithName:@"emit_shadow_tile_frontier"];
   if (initialise == nil || trace == nil || emit == nil) {
     throw std::runtime_error("Shadow Metal kernels are missing");

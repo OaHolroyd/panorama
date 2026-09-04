@@ -127,6 +127,8 @@ struct GpuRaytraceResources::State {
   uint32_t frontier_capacity;
   uint32_t catalogue_hash_capacity;
   bool trace_quantized;
+  bool bilinear_collisions;
+  bool c1_normals;
   GpuTraceOutputRequirements outputs;
   bool capture_active = false;
 
@@ -237,6 +239,8 @@ GpuRaytraceResources::GpuRaytraceResources(
   auto state = std::make_unique<State>();
   state->catalogue_hash_capacity = make_catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
+  state->bilinear_collisions = bilinear_collisions;
+  state->c1_normals = c1_normals;
   state->outputs = outputs;
   state->device = MTLCreateSystemDefaultDevice();
   if (state->device == nil) {
@@ -494,6 +498,8 @@ uint32_t GpuRaytraceResources::catalogue_hash_capacity() const {
 }
 
 bool GpuRaytraceResources::traces_quantized() const { return state_->trace_quantized; }
+bool GpuRaytraceResources::bilinear_collisions() const { return state_->bilinear_collisions; }
+bool GpuRaytraceResources::c1_normals() const { return state_->c1_normals; }
 
 id<MTLBuffer> GpuRaytraceResources::elevations() const {
   if (!state_->outputs.elevations) {

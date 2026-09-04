@@ -37,7 +37,9 @@ public:
       id<MTLDevice> device,
       id<MTLCommandQueue> queue,
       id<MTLLibrary> library,
-      bool trace_quantized
+      bool trace_quantized,
+      bool bilinear_collisions,
+      bool c1_normals
   );
   /// Release per-ray buffers and pipelines after their queue has completed.
   ~GpuTerrainShadowResources();

@@ -169,10 +169,18 @@ public:
 
   /// Immutable catalogue lookup shared with secondary terrain rays.
   [[nodiscard]] id<MTLBuffer> catalogue_hash() const;
+
   /// Return the power-of-two bucket count of `catalogue_hash()`.
   [[nodiscard]] uint32_t catalogue_hash_capacity() const;
+
   /// Return whether this resource selected retained-uint16 kernels.
   [[nodiscard]] bool traces_quantized() const;
+
+  /// Return whether this resource selected retained-uint16 kernels.
+  [[nodiscard]] bool bilinear_collisions() const;
+
+  /// Return whether this resource selected retained-uint16 kernels.
+  [[nodiscard]] bool c1_normals() const;
 
   /// Begin an opt-in queue-scoped Metal capture, if requested by the environment.
   void start_capture_if_requested();
