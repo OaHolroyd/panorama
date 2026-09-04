@@ -47,6 +47,11 @@ public:
   /// Reallocate per-ray state when the primary image dimensions change.
   void resize(uint32_t ray_count);
 
+  /// Select a precompiled traversal specialization without reallocating rays
+  /// or visibility storage. C1 normals do not affect any-hit shadows, but the
+  /// argument keeps this interface aligned with the primary trace resource.
+  void set_collision_options(bool bilinear_collisions, bool c1_normals);
+
   /// Construct ray origins and return their source-bucketed initial frontier.
   [[nodiscard]] std::span<const DeferredRayWork> initialise(
       id<MTLBuffer> camera_rays,

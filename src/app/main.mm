@@ -1204,36 +1204,7 @@ private:
               trace_->set_lod_scale(lod_scale);
             }
             if (collision_settings_requested) {
-              const ObserverLocation session_observer =
-                  observer_requested ? observer : current_observer_;
-              const RaytraceConfig config = {
-                  settings_.tile_dir,
-                  session_observer,
-                  settings_.max_distance,
-                  0U,
-                  settings_.tile_cache_size_bytes,
-                  settings_.workers,
-                  !settings_.discard_quantized,
-                  bilinear_collisions,
-                  c1_normals,
-                  false,
-                  lod_scale_requested ? lod_scale : requested_lod_scale_,
-              };
-              auto replacement = std::make_unique<TerrainTraceSession>(
-                  config,
-                  field,
-                  GpuTraceOutputRequirements{
-                      .surface_gradients = true,
-                      .elevations = true,
-                      .debugging_info = true,
-                  }
-              );
-              if (replacement->device() != device_) {
-                throw std::runtime_error(
-                    "Collision setting change selected a different Metal device"
-                );
-              }
-              trace_ = std::move(replacement);
+              trace_->set_collision_options(bilinear_collisions, c1_normals);
             }
             if (observer_requested) {
               if (!trace_->relocate_observer(observer)) {
@@ -4361,7 +4332,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
   _c1NormalsControl = [[NSButton alloc] initWithFrame:NSZeroRect];
   _c1NormalsControl.buttonType = NSButtonTypeSwitch;
-  _c1NormalsControl.title = @"C1-continuous normals";
+  _c1NormalsControl.title = @"Smooth normals";
   _c1NormalsControl.state = _c1Normals ? NSControlStateValueOn : NSControlStateValueOff;
   _c1NormalsControl.target = self;
   _c1NormalsControl.action = @selector(c1NormalsChanged:);

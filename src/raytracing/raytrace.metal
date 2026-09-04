@@ -10,7 +10,7 @@ constant bool compute_surface_gradients [[function_constant(0)]];
 constant bool store_collision_elevations [[function_constant(1)]];
 constant bool store_debugging_info [[function_constant(2)]];
 constant bool use_bilinear_collisions [[function_constant(3)]];
-constant bool use_c1_normals [[function_constant(4)]]; // TODO: implement
+constant bool use_c1_normals [[function_constant(4)]];
 
 /// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///

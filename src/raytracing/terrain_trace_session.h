@@ -45,6 +45,10 @@ public:
   /// the original terrain resolution for every source.
   void set_lod_scale(float lod_scale);
 
+  /// Select bilinear or triangular collision patches and C1 or patch-local
+  /// surface normals for subsequent traces without rebuilding terrain state.
+  void set_collision_options(bool bilinear_collisions, bool c1_normals);
+
   /// Trace one directional sun ray from each eligible primary collision.
   /// Angles are radians; azimuth is clockwise from grid north and elevation
   /// is above the horizontal plane.

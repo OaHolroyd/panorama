@@ -110,6 +110,10 @@ public:
   /// Reallocate ray-dependent buffers for a differently sized output image.
   void resize_rays(std::span<const RayDirection> rays);
 
+  /// Select precompiled collision and normal-interpolation specializations.
+  /// The atlas, ray buffers, catalogue, and command queue are unchanged.
+  void set_collision_options(bool bilinear_collisions, bool c1_normals);
+
   /// Fill the current frontier with every ray in the observer tile's current slot.
   void initialise_frontier(uint32_t observer_slot);
 
@@ -176,10 +180,10 @@ public:
   /// Return whether this resource selected retained-uint16 kernels.
   [[nodiscard]] bool traces_quantized() const;
 
-  /// Return whether this resource selected retained-uint16 kernels.
+  /// Return whether the selected trace pipeline intersects bilinear patches.
   [[nodiscard]] bool bilinear_collisions() const;
 
-  /// Return whether this resource selected retained-uint16 kernels.
+  /// Return whether the selected trace pipeline computes C1-continuous normals.
   [[nodiscard]] bool c1_normals() const;
 
   /// Begin an opt-in queue-scoped Metal capture, if requested by the environment.
