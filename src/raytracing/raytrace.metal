@@ -9,6 +9,8 @@ using namespace metal;
 constant bool compute_surface_gradients [[function_constant(0)]];
 constant bool store_collision_elevations [[function_constant(1)]];
 constant bool store_debugging_info [[function_constant(2)]];
+constant bool use_bilinear_collisions [[function_constant(3)]];
+constant bool use_c1_normals [[function_constant(4)]];
 
 /// Scalar-only terrain-tracing ABI mirrored by raytrace_gpu.h.
 ///
@@ -162,191 +164,6 @@ kernel void convert_quantized_vertices(
       (float(*base) + float(vertices[output_index.x])) * 0.1F;
 }
 
-/// Build four adjacent level-1 cells and their level-2 parent from one 3×3
-/// vertex patch.
-///
-/// Computing these outputs independently would issue sixteen source reads.
-/// Grouping them in one thread requires only nine reads, keeps the values in
-/// registers, and removes the separate level-2 reduction dispatch.
-template <typename Sample>
-inline void build_initial_maximum_mipmap_levels_impl(
-    device const Sample *source,
-    device Sample *destination,
-    uint cell_count,
-    device const uint *slots,
-    uint source_tile_stride,
-    uint destination_tile_stride,
-    uint tile_count,
-    uint3 output_index
-) {
-  if (output_index.z >= tile_count) {
-    return;
-  }
-
-  const uint slot = slots[output_index.z];
-  source += slot * source_tile_stride;
-  destination += slot * destination_tile_stride;
-  const uint source_side = cell_count + 1U;
-  const uint source_x = 2U * output_index.x;
-  const uint source_y = 2U * output_index.y;
-  const uint row_0 = source_y * source_side + source_x;
-  const uint row_1 = row_0 + source_side;
-  const uint row_2 = row_1 + source_side;
-  const Sample value_00 = source[row_0];
-  const Sample value_01 = source[row_0 + 1U];
-  const Sample value_02 = source[row_0 + 2U];
-  const Sample value_10 = source[row_1];
-  const Sample value_11 = source[row_1 + 1U];
-  const Sample value_12 = source[row_1 + 2U];
-  const Sample value_20 = source[row_2];
-  const Sample value_21 = source[row_2 + 1U];
-  const Sample value_22 = source[row_2 + 2U];
-
-  const Sample maximum_00 = max(max(value_00, value_01), max(value_10, value_11));
-  const Sample maximum_01 = max(max(value_01, value_02), max(value_11, value_12));
-  const Sample maximum_10 = max(max(value_10, value_11), max(value_20, value_21));
-  const Sample maximum_11 = max(max(value_11, value_12), max(value_21, value_22));
-
-  const uint level_1_x = 2U * output_index.x;
-  const uint level_1_y = 2U * output_index.y;
-  const uint level_1_offset = level_1_y * cell_count + level_1_x;
-  destination[level_1_offset] = maximum_00;
-  destination[level_1_offset + 1U] = maximum_01;
-  destination[level_1_offset + cell_count] = maximum_10;
-  destination[level_1_offset + cell_count + 1U] = maximum_11;
-
-  const uint level_2_side = cell_count / 2U;
-  const uint level_2_offset = cell_count * cell_count;
-  destination[level_2_offset + output_index.y * level_2_side + output_index.x] =
-      max(max(maximum_00, maximum_01), max(maximum_10, maximum_11));
-}
-
-kernel void build_initial_maximum_mipmap_levels(
-    device const float *source [[buffer(0)]],
-    device float *destination [[buffer(1)]],
-    constant uint &cell_count [[buffer(2)]],
-    device const uint *slots [[buffer(4)]],
-    constant uint &source_tile_stride [[buffer(5)]],
-    constant uint &destination_tile_stride [[buffer(6)]],
-    constant uint &tile_count [[buffer(7)]],
-    uint3 output_index [[thread_position_in_grid]]
-) {
-  build_initial_maximum_mipmap_levels_impl(
-      source,
-      destination,
-      cell_count,
-      slots,
-      source_tile_stride,
-      destination_tile_stride,
-      tile_count,
-      output_index
-  );
-}
-
-kernel void build_quantized_initial_maximum_mipmap_levels(
-    device const ushort *source [[buffer(0)]],
-    device ushort *destination [[buffer(1)]],
-    constant uint &cell_count [[buffer(2)]],
-    device const uint *slots [[buffer(4)]],
-    constant uint &source_tile_stride [[buffer(5)]],
-    constant uint &destination_tile_stride [[buffer(6)]],
-    constant uint &tile_count [[buffer(7)]],
-    uint3 output_index [[thread_position_in_grid]]
-) {
-  build_initial_maximum_mipmap_levels_impl(
-      source,
-      destination,
-      cell_count,
-      slots,
-      source_tile_stride,
-      destination_tile_stride,
-      tile_count,
-      output_index
-  );
-}
-
-/// Reduce one square maximum-mipmap level for a batch of atlas slots.
-///
-/// The Z grid coordinate selects an entry in `slots`, so all newly loaded
-/// tiles share one dispatch per level. Ending each encoder supplies the global
-/// barrier before a newly written level becomes the next dispatch's source.
-template <typename Sample>
-inline void build_maximum_mipmap_level_impl(
-    device const Sample *source,
-    device Sample *destination,
-    uint source_side,
-    uint source_step,
-    device const uint *slots,
-    uint source_tile_stride,
-    uint destination_tile_stride,
-    uint tile_count,
-    uint3 output_index
-) {
-  const uint output_side = source_step == 1U ? source_side - 1U : source_side / 2U;
-  if (output_index.x >= output_side || output_index.y >= output_side ||
-      output_index.z >= tile_count) {
-    return;
-  }
-
-  const uint slot = slots[output_index.z];
-  source += slot * source_tile_stride;
-  destination += slot * destination_tile_stride;
-  const uint source_x = output_index.x * source_step;
-  const uint source_y = output_index.y * source_step;
-  const uint lower_left = source_y * source_side + source_x;
-  destination[output_index.y * output_side + output_index.x] =
-      max(max(source[lower_left], source[lower_left + 1U]),
-          max(source[lower_left + source_side], source[lower_left + source_side + 1U]));
-}
-
-kernel void build_maximum_mipmap_level(
-    device const float *source [[buffer(0)]],
-    device float *destination [[buffer(1)]],
-    constant uint &source_side [[buffer(2)]],
-    constant uint &source_step [[buffer(3)]],
-    device const uint *slots [[buffer(4)]],
-    constant uint &source_tile_stride [[buffer(5)]],
-    constant uint &destination_tile_stride [[buffer(6)]],
-    constant uint &tile_count [[buffer(7)]],
-    uint3 output_index [[thread_position_in_grid]]
-) {
-  build_maximum_mipmap_level_impl(
-      source,
-      destination,
-      source_side,
-      source_step,
-      slots,
-      source_tile_stride,
-      destination_tile_stride,
-      tile_count,
-      output_index
-  );
-}
-
-kernel void build_quantized_maximum_mipmap_level(
-    device const ushort *source [[buffer(0)]],
-    device ushort *destination [[buffer(1)]],
-    constant uint &source_side [[buffer(2)]],
-    constant uint &source_step [[buffer(3)]],
-    device const uint *slots [[buffer(4)]],
-    constant uint &source_tile_stride [[buffer(5)]],
-    constant uint &destination_tile_stride [[buffer(6)]],
-    constant uint &tile_count [[buffer(7)]],
-    uint3 output_index [[thread_position_in_grid]]
-) {
-  build_maximum_mipmap_level_impl(
-      source,
-      destination,
-      source_side,
-      source_step,
-      slots,
-      source_tile_stride,
-      destination_tile_stride,
-      tile_count,
-      output_index
-  );
-}
-
 /// Mix one unsigned 64-bit value for the catalogue tile lookup table.
 inline ulong mix_tile_hash(ulong value) {
   value ^= value >> 30UL;
@@ -455,6 +272,178 @@ inline bool above_global_terrain(
   return isfinite(global_maximum) && distance >= stationary_distance &&
          curved_ray_elevation(origin, slope, curvature, distance) >
              global_maximum + kElevationCullingMargin;
+}
+
+/// Branchlessly solves exact intersection with TWO triangles that share the edge (d - a).
+/// Returns float2(t0, t1). If a triangle is missed, its respective t is -1.0F.
+inline float2 dual_triangle_ray_intersection(
+    float3 a,
+    float3 b,
+    float3 c,
+    float3 d,
+    float3 origin,
+    float3 direction
+) {
+  const float eps = 1e-7F;
+
+  // Compute shared geometry
+  float3 e_shared = d - a;
+  float3 p = cross(direction, e_shared);
+  float3 s = origin - a;
+
+  // Triangle 0: (a, b, d)
+  float3 e1_0 = b - a;
+  float det0 = dot(e1_0, p);
+
+  // Prevent divide-by-zero in the determinant
+  float safe_det0 = fabs(det0) < eps ? 1.0F : det0;
+  float invDet0 = 1.0F / safe_det0;
+
+  float u0 = dot(s, p) * invDet0;
+  float3 q0 = cross(s, e1_0);
+  float v0 = dot(direction, q0) * invDet0;
+  float t0_raw = dot(e_shared, q0) * invDet0;
+
+  bool valid0 = (fabs(det0) >= eps) && (u0 >= 0.0F) && (v0 >= 0.0F) && ((u0 + v0) <= 1.0F);
+  float t0 = valid0 ? t0_raw : -1.0F;
+
+  // Triangle 1: (a, c, d)
+  float3 e1_1 = c - a;
+  float det1 = dot(e1_1, p);
+
+  float safe_det1 = fabs(det1) < eps ? 1.0F : det1;
+  float invDet1 = 1.0F / safe_det1;
+
+  float u1 = dot(s, p) * invDet1;
+  float3 q1 = cross(s, e1_1);
+  float v1 = dot(direction, q1) * invDet1;
+  float t1_raw = dot(e_shared, q1) * invDet1;
+
+  bool valid1 = (fabs(det1) >= eps) && (u1 >= 0.0F) && (v1 >= 0.0F) && ((u1 + v1) <= 1.0F);
+  float t1 = valid1 ? t1_raw : -1.0F;
+
+  return float2(t0, t1);
+}
+
+template <typename Sample>
+inline Collision triangle_collision(
+    device const Sample *vertices,
+    uint vertex_count,
+    int base_decimeters,
+    float cell_x,
+    float cell_y,
+    float delta,
+    uint i,
+    uint j,
+    float observer_elevation,
+    float2 direction,
+    float slope,
+    float curvature,
+    float t_entry
+) {
+  const uint lower_left = i * vertex_count + j;
+
+  // Extract relevant vertex heights
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+
+  // Compute coordinate positions
+  const float x_next = cell_x + delta;
+  const float y_next = cell_y + delta;
+
+  // Compute vertex locations
+  const float3 v00 = float3(cell_x, cell_y, z00);
+  const float3 v01 = float3(x_next, cell_y, z01);
+  const float3 v10 = float3(cell_x, y_next, z10);
+  const float3 v11 = float3(x_next, y_next, z11);
+
+  // Split the square into two triangles along the diagonal with the least height difference
+  bool split = fabs(z00 - z11) < fabs(z01 - z10);
+  const float3 a = split ? v00 : v01;
+  const float3 b = split ? v01 : v00;
+  const float3 c = split ? v10 : v11;
+  const float3 d = split ? v11 : v10;
+
+  // Evaluate ray properties once
+  const float z = observer_elevation + slope * t_entry + curvature * (t_entry * t_entry);
+  const float3 origin = float3(direction.x * t_entry, direction.y * t_entry, z);
+  const float3 direction3 = float3(direction.x, direction.y, slope);
+
+  // Perform intersection of both triangles at once
+  float2 hits = dual_triangle_ray_intersection(a, b, c, d, origin, direction3);
+
+  // Resolve intersection
+  bool hit0 = hits.x >= 0.0F;
+  bool hit1 = hits.y >= 0.0F;
+  if (hit0 || hit1) {
+    float t_hit = (hit0 && hit1) ? min(hits.x, hits.y) : (hit0 ? hits.x : hits.y);
+    return {true, t_entry + t_hit};
+  }
+
+  // Sub-surface fallback check to catch any misses
+  float min_z = min(min(z00, z01), min(z10, z11));
+  if (z < min_z) {
+    return {true, t_entry};
+  }
+
+  return {false, 0.0F};
+}
+
+/// Evaluate the analytical east/north derivatives of a split-triangle terrain patch
+/// at a confirmed collision. Reloading the four samples here keeps them and
+/// the derivative temporaries out of the root solver's peak live register set.
+/// The two float16 gradients are sufficient to reconstruct the upward normal
+/// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
+template <typename Sample>
+inline uint triangle_packed_surface_gradients(
+    device const Sample *vertices,
+    uint vertex_count,
+    int base_decimeters,
+    float cell_x,
+    float cell_y,
+    float inverse_delta,
+    uint i,
+    uint j,
+    float2 direction,
+    float distance
+) {
+  const uint lower_left = i * vertex_count + j;
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+
+  // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
+  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+
+  // Re-evaluate the data-dependent split rule
+  bool split = fabs(z00 - z11) < fabs(z01 - z10);
+
+  // Pre-calculate the X and Y gradients along all four outer edges of the cell
+  const float dx_bottom = z01 - z00;
+  const float dx_top = z11 - z10;
+  const float dy_left = z10 - z00;
+  const float dy_right = z11 - z01;
+
+  // Determine which triangle we hit based on the diagonal
+  // if split is true (00-11 diagonal): Triangle is decided by sx > sy
+  // if split is false (01-10 diagonal): Triangle is decided by sx + sy < 1.0
+  bool pick_dx_bottom = split ? (sx > sy) : ((sx + sy) < 1.0F);
+  bool pick_dy_left = split ? (sx <= sy) : ((sx + sy) < 1.0F);
+
+  // Select the constant gradient for the specific triangle
+  const float raw_east_gradient = pick_dx_bottom ? dx_bottom : dx_top;
+  const float raw_north_gradient = pick_dy_left ? dy_left : dy_right;
+
+  // Scale and pack
+  constexpr float kMaximumHalf = 65504.0F;
+  const float east_gradient = clamp(raw_east_gradient * inverse_delta, -kMaximumHalf, kMaximumHalf);
+  const float north_gradient =
+      clamp(raw_north_gradient * inverse_delta, -kMaximumHalf, kMaximumHalf);
+  return as_type<uint>(half2(east_gradient, north_gradient));
 }
 
 /// Recover a near-boundary hit when DDA rounding assigns the root to an
@@ -648,7 +637,7 @@ inline Collision bilinear_collision(
 /// The two float16 gradients are sufficient to reconstruct the upward normal
 /// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
 template <typename Sample>
-inline uint packed_surface_gradients(
+inline uint bilinear_packed_surface_gradients(
     device const Sample *vertices,
     uint vertex_count,
     int base_decimeters,
@@ -713,6 +702,74 @@ inline uint mipmap_value_count(uint cell_count) {
     count += side * side;
   }
   return count;
+}
+
+/// Evaluate the analytical east/north derivatives of a split-triangle terrain patch
+/// at a confirmed collision. Reloading the four samples here keeps them and
+/// the derivative temporaries out of the root solver's peak live register set.
+/// The two float16 gradients are sufficient to reconstruct the upward normal
+/// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
+template <typename Sample>
+inline uint interpolated_packed_surface_gradients(
+    device const Sample *vertices,
+    uint vertex_count,
+    int base_decimeters,
+    float cell_x,
+    float cell_y,
+    float inverse_delta,
+    uint i,
+    uint j,
+    float2 direction,
+    float distance
+) {
+  const uint lower_left = i * vertex_count + j;
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+
+  // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
+  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+
+  // Fetch surrounding 1-ring neighbor elevations required for central differences
+  const float z_w0 = sample_elevation(vertices[lower_left - 1U], base_decimeters);
+  const float z_e1 = sample_elevation(vertices[lower_left + 2U], base_decimeters);
+  const float z_s0 = sample_elevation(vertices[lower_left - vertex_count], base_decimeters);
+  const float z_s1 = sample_elevation(vertices[lower_left - vertex_count + 1U], base_decimeters);
+
+  const uint row1 = lower_left + vertex_count;
+  const float z_w1 = sample_elevation(vertices[row1 - 1U], base_decimeters);
+  const float z_e3 = sample_elevation(vertices[row1 + 2U], base_decimeters);
+
+  const uint row2 = lower_left + 2U * vertex_count;
+  const float z_n0 = sample_elevation(vertices[row2], base_decimeters);
+  const float z_n1 = sample_elevation(vertices[row2 + 1U], base_decimeters);
+
+  const float half_inv_delta = 0.5F * inverse_delta;
+
+  // Calculate central-difference gradients (dz/dx, dz/dy) for each of the 4 cell vertices
+  const float gx00 = (z01 - z_w0) * half_inv_delta;
+  const float gy00 = (z10 - z_s0) * half_inv_delta;
+
+  const float gx01 = (z_e1 - z00) * half_inv_delta;
+  const float gy01 = (z11 - z_s1) * half_inv_delta;
+
+  const float gx10 = (z11 - z_w1) * half_inv_delta;
+  const float gy10 = (z_n0 - z00) * half_inv_delta;
+
+  const float gx11 = (z_e3 - z10) * half_inv_delta;
+  const float gy11 = (z_n1 - z01) * half_inv_delta;
+
+  // Bilinearly interpolate the partial derivatives across the cell footprint
+  const float gx_interp = mix(mix(gx00, gx01, sx), mix(gx10, gx11, sx), sy);
+  const float gy_interp = mix(mix(gy00, gy01, sx), mix(gy10, gy11, sx), sy);
+
+  constexpr float kMaximumHalf = 65504.0F;
+  const float east_gradient = clamp(gx_interp, -kMaximumHalf, kMaximumHalf);
+  const float north_gradient = clamp(gy_interp, -kMaximumHalf, kMaximumHalf);
+
+  return as_type<uint>(half2(east_gradient, north_gradient));
 }
 
 /// Derive the geometry of a resident tile from the dispatch's LOD-1 reference
@@ -966,22 +1023,42 @@ inline float trace_tile_frontier_impl(
       if (level == 1) {
         // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
-        const Collision collision = bilinear_collision(
-            vertices,
-            vertex_count,
-            base_decimeters,
-            tile_x_min + float(j) * delta - ray_origin.x,
-            tile_y_min + float(i) * delta - ray_origin.y,
-            inverse_delta,
-            uint(i),
-            uint(j),
-            observer_elevation,
-            direction,
-            dz,
-            curvature,
-            interval_start,
-            interval_end
-        );
+        Collision collision;
+
+        if (use_bilinear_collisions) {
+          collision = bilinear_collision(
+              vertices,
+              vertex_count,
+              base_decimeters,
+              tile_x_min + float(j) * delta - ray_origin.x,
+              tile_y_min + float(i) * delta - ray_origin.y,
+              inverse_delta,
+              uint(i),
+              uint(j),
+              observer_elevation,
+              direction,
+              dz,
+              curvature,
+              interval_start,
+              interval_end
+          );
+        } else {
+          collision = triangle_collision(
+              vertices,
+              vertex_count,
+              base_decimeters,
+              tile_x_min + float(j) * delta - ray_origin.x,
+              tile_y_min + float(i) * delta - ray_origin.y,
+              delta,
+              uint(i),
+              uint(j),
+              observer_elevation,
+              direction,
+              dz,
+              curvature,
+              interval_start
+          );
+        }
 
         // Store debugging details if requested
         if (!shadow_trace && store_debugging_info) {
@@ -1000,18 +1077,49 @@ inline float trace_tile_frontier_impl(
                 curved_ray_elevation(observer_elevation, dz, curvature, collision.distance);
           }
           if (!shadow_trace && compute_surface_gradients) {
-            surface_gradients[output_index] = packed_surface_gradients(
-                vertices,
-                vertex_count,
-                base_decimeters,
-                tile_x_min + float(j) * delta - ray_origin.x,
-                tile_y_min + float(i) * delta - ray_origin.y,
-                inverse_delta,
-                uint(i),
-                uint(j),
-                direction,
-                collision.distance
-            );
+            if (use_c1_normals && (i >= 1 && j >= 1 && i < n - 1 && j < n - 1)) {
+              surface_gradients[output_index] = interpolated_packed_surface_gradients(
+                  vertices,
+                  vertex_count,
+                  base_decimeters,
+                  tile_x_min + float(j) * delta - ray_origin.x,
+                  tile_y_min + float(i) * delta - ray_origin.y,
+                  inverse_delta,
+                  uint(i),
+                  uint(j),
+                  direction,
+                  collision.distance
+              );
+            } else {
+              // TODO: give option to do better normals
+              if (use_bilinear_collisions) {
+                surface_gradients[output_index] = bilinear_packed_surface_gradients(
+                    vertices,
+                    vertex_count,
+                    base_decimeters,
+                    tile_x_min + float(j) * delta - ray_origin.x,
+                    tile_y_min + float(i) * delta - ray_origin.y,
+                    inverse_delta,
+                    uint(i),
+                    uint(j),
+                    direction,
+                    collision.distance
+                );
+              } else {
+                surface_gradients[output_index] = triangle_packed_surface_gradients(
+                    vertices,
+                    vertex_count,
+                    base_decimeters,
+                    tile_x_min + float(j) * delta - ray_origin.x,
+                    tile_y_min + float(i) * delta - ray_origin.y,
+                    inverse_delta,
+                    uint(i),
+                    uint(j),
+                    direction,
+                    collision.distance
+                );
+              }
+            }
           }
           return INFINITY;
         }

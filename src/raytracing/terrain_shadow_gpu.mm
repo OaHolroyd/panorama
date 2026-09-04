@@ -4,12 +4,18 @@
 
 #include "timer.h"
 
+#include <array>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 
 namespace panorama {
 namespace {
+
+/// Use the same bit layout as primary traversal specialization selection.
+[[nodiscard]] constexpr uint32_t trace_variant_index(bool bilinear, bool c1_normals) {
+  return (bilinear ? 1U : 0U) | (c1_normals ? 2U : 0U);
+}
 
 [[nodiscard]] id<MTLBuffer> make_buffer(id<MTLDevice> device, NSUInteger length, const char *name) {
   id<MTLBuffer> result = [device newBufferWithLength:length options:MTLResourceStorageModeShared];
@@ -35,7 +41,11 @@ struct GpuTerrainShadowResources::State {
   // Pipelines reuse the primary trace's device, command queue, and library.
   id<MTLDevice> device;
   id<MTLCommandQueue> queue;
+  id<MTLLibrary> library;
   id<MTLComputePipelineState> initialise_pipeline;
+  // C1 normals are not consumed by any-hit shadows, but caching the matching
+  // four specializations keeps primary and shadow option changes atomic.
+  std::array<id<MTLComputePipelineState>, 4U> trace_pipelines = {};
   id<MTLComputePipelineState> trace_pipeline;
   id<MTLComputePipelineState> emit_pipeline;
 
@@ -49,13 +59,44 @@ struct GpuTerrainShadowResources::State {
   id<MTLBuffer> deferred_count;
   uint32_t capacity = 0U;
   bool trace_quantized;
+
+  [[nodiscard]] id<MTLComputePipelineState>
+  make_trace_pipeline(bool bilinear, bool c1Normals) const {
+    NSError *error = nil;
+    NSString *trace_name =
+        trace_quantized ? @"trace_shadow_tile_frontier_quantized" : @"trace_shadow_tile_frontier";
+    MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
+    [constants setConstantValue:&bilinear type:MTLDataTypeBool atIndex:3];
+    [constants setConstantValue:&c1Normals type:MTLDataTypeBool atIndex:4];
+    id<MTLFunction> function = [library newFunctionWithName:trace_name
+                                             constantValues:constants
+                                                      error:&error];
+    if (function == nil) {
+      throw std::runtime_error("Could not specialize shadow trace kernel");
+    }
+    id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function
+                                                                                 error:&error];
+    if (pipeline == nil) {
+      throw std::runtime_error("Could not create shadow trace pipeline");
+    }
+    return pipeline;
+  }
+
+  void select_trace_pipeline(bool bilinear, bool c1Normals) {
+    trace_pipeline = trace_pipelines[trace_variant_index(bilinear, c1Normals)];
+    if (trace_pipeline == nil) {
+      throw std::logic_error("Requested shadow trace pipeline specialization is unavailable");
+    }
+  }
 };
 
 GpuTerrainShadowResources::GpuTerrainShadowResources(
     id<MTLDevice> device,
     id<MTLCommandQueue> queue,
     id<MTLLibrary> library,
-    bool trace_quantized
+    bool trace_quantized,
+    bool bilinear_collisions,
+    bool c1_normals
 ) {
   if (device == nil || queue == nil || library == nil) {
     throw std::invalid_argument("Shadow resources require an existing Metal trace context");
@@ -63,23 +104,24 @@ GpuTerrainShadowResources::GpuTerrainShadowResources(
   auto state = std::make_unique<State>();
   state->device = device;
   state->queue = queue;
+  state->library = library;
   state->trace_quantized = trace_quantized;
   NSError *error = nil;
   id<MTLFunction> initialise = [library newFunctionWithName:@"initialise_shadow_rays"];
-  NSString *trace_name =
-      trace_quantized ? @"trace_shadow_tile_frontier_quantized" : @"trace_shadow_tile_frontier";
-  id<MTLFunction> trace = [library newFunctionWithName:trace_name];
   id<MTLFunction> emit = [library newFunctionWithName:@"emit_shadow_tile_frontier"];
-  if (initialise == nil || trace == nil || emit == nil) {
+  if (initialise == nil || emit == nil) {
     throw std::runtime_error("Shadow Metal kernels are missing");
   }
   state->initialise_pipeline = [device newComputePipelineStateWithFunction:initialise error:&error];
-  state->trace_pipeline = [device newComputePipelineStateWithFunction:trace error:&error];
   state->emit_pipeline = [device newComputePipelineStateWithFunction:emit error:&error];
-  if (state->initialise_pipeline == nil || state->trace_pipeline == nil ||
-      state->emit_pipeline == nil) {
+  if (state->initialise_pipeline == nil || state->emit_pipeline == nil) {
     throw std::runtime_error("Could not create shadow Metal pipelines");
   }
+  for (uint32_t index = 0U; index < state->trace_pipelines.size(); index++) {
+    state->trace_pipelines[index] =
+        state->make_trace_pipeline((index & 1U) != 0U, (index & 2U) != 0U);
+  }
+  state->select_trace_pipeline(bilinear_collisions, c1_normals);
   state->deferred_count = make_buffer(device, sizeof(uint32_t), "shadow deferred count");
   state_ = std::move(state);
 }
@@ -102,6 +144,12 @@ void GpuTerrainShadowResources::resize(uint32_t ray_count) {
   state.deferred =
       make_buffer(state.device, sizeof(DeferredRayWork) * ray_count, "shadow deferred work");
   state.capacity = ray_count;
+}
+
+void GpuTerrainShadowResources::set_collision_options(bool bilinear_collisions, bool c1_normals) {
+  // The render thread synchronously completes every shadow pass before this
+  // method can run, so choosing a cached pipeline is safe without a fence.
+  state_->select_trace_pipeline(bilinear_collisions, c1_normals);
 }
 
 std::span<const DeferredRayWork> GpuTerrainShadowResources::initialise(

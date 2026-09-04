@@ -33,6 +33,8 @@ struct EntrypointSettings {
   float max_distance = 600'000.0F;
   float lod_scale = 0.0F;
   bool discard_quantized = false;
+  bool bilinear_collisions = false;
+  bool c1_normals = false;
   bool elevations_enabled = true;
   bool normals_enabled = true;
   bool debugging_enabled = true;
@@ -191,6 +193,11 @@ void print_usage(const char *program) {
       "  --max-distance M      horizontal trace range in metres (default: 600000)\n"
       "  --lod-scale V         terrain cell footprint multiplier; 0 keeps full detail\n"
       "                        (default: 0)\n"
+      "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
+      "                        (default: retain uint16)\n"
+      "  --bilinear-patches    use bilinear patches for collisions rather than split\n"
+      "                        triangles\n"
+      "  --smooth-normals      enforce smooth normals\n"
       "\n",
       program
   );
@@ -201,8 +208,6 @@ void print_usage(const char *program) {
       "  --no-diagnostic-output\n"
       "                        skip diagnostic field PNGs\n"
       "  --synthetic-output    write a shaded synthetic.png (default: disabled)\n"
-      "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
-      "                        (default: retain uint16)\n"
       "  --no-elevations       skip collision-elevation storage and elevations.png\n"
       "  --no-normals          skip collision-normal computation and normals.png\n"
       "\n"
@@ -245,6 +250,18 @@ void print_usage(const char *program) {
     }
     if (option == "--discard-quantized") {
       settings.discard_quantized = true;
+      continue;
+    }
+    if (option == "--discard-quantized") {
+      settings.discard_quantized = true;
+      continue;
+    }
+    if (option == "--smooth-normals") {
+      settings.c1_normals = true;
+      continue;
+    }
+    if (option == "--bilinear-patch") {
+      settings.bilinear_collisions = true;
       continue;
     }
     if (option == "--no-normals") {
@@ -405,6 +422,8 @@ int main(int argc, const char *argv[]) {
         settings.tile_cache_size_bytes,
         settings.max_tile_preparation_workers,
         !settings.discard_quantized,
+        settings.bilinear_collisions,
+        settings.c1_normals,
         false,
         settings.lod_scale,
     };

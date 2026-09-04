@@ -106,6 +106,7 @@ struct TerrainTraceSession::State {
   uint64_t shadow_revision = std::numeric_limits<uint64_t>::max();
   double shadow_azimuth = 0.0;
   double shadow_elevation = 0.0;
+
   State(
       const RaytraceConfig &config_value,
       const RayField &initial_field,
@@ -127,6 +128,8 @@ struct TerrainTraceSession::State {
         initial_field.rays,
         tiles->sources(),
         tiles->traces_quantized(),
+        config.bilinear_collisions,
+        config.c1_normals,
         outputs
     );
     tiles->attach_gpu(gpu->device(), timer);
@@ -168,6 +171,25 @@ void TerrainTraceSession::set_lod_scale(float lod_scale) {
   }
   state.config.lod_scale = lod_scale;
   state.tiles->set_lod_scale(lod_scale);
+  state.shadow_revision = std::numeric_limits<uint64_t>::max();
+}
+
+void TerrainTraceSession::set_collision_options(bool bilinear_collisions, bool c1_normals) {
+  State &state = *state_;
+  if (state.config.bilinear_collisions == bilinear_collisions &&
+      state.config.c1_normals == c1_normals) {
+    return;
+  }
+
+  // Collision and normal choices are represented by already-specialized
+  // pipeline objects. TileManager residency and every ray-sized buffer remain
+  // valid, so changing an inspector switch must not reconstruct the session.
+  state.gpu->set_collision_options(bilinear_collisions, c1_normals);
+  if (state.shadows != nullptr) {
+    state.shadows->set_collision_options(bilinear_collisions, c1_normals);
+  }
+  state.config.bilinear_collisions = bilinear_collisions;
+  state.config.c1_normals = c1_normals;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
 
@@ -288,7 +310,9 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
         state.gpu->device(),
         state.gpu->command_queue(),
         state.gpu->library(),
-        state.gpu->traces_quantized()
+        state.gpu->traces_quantized(),
+        state.gpu->bilinear_collisions(),
+        state.gpu->c1_normals()
     );
   }
   state.shadows->resize(state.ray_count);

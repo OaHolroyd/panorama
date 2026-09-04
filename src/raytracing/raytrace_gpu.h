@@ -93,6 +93,8 @@ public:
       std::span<const RayDirection> rays,
       std::span<const TerrainSource> sources,
       bool trace_quantized,
+      bool bilinear_collisions,
+      bool c1_normals,
       GpuTraceOutputRequirements outputs
   );
 
@@ -107,6 +109,10 @@ public:
 
   /// Reallocate ray-dependent buffers for a differently sized output image.
   void resize_rays(std::span<const RayDirection> rays);
+
+  /// Select precompiled collision and normal-interpolation specializations.
+  /// The atlas, ray buffers, catalogue, and command queue are unchanged.
+  void set_collision_options(bool bilinear_collisions, bool c1_normals);
 
   /// Fill the current frontier with every ray in the observer tile's current slot.
   void initialise_frontier(uint32_t observer_slot);
@@ -167,10 +173,18 @@ public:
 
   /// Immutable catalogue lookup shared with secondary terrain rays.
   [[nodiscard]] id<MTLBuffer> catalogue_hash() const;
+
   /// Return the power-of-two bucket count of `catalogue_hash()`.
   [[nodiscard]] uint32_t catalogue_hash_capacity() const;
+
   /// Return whether this resource selected retained-uint16 kernels.
   [[nodiscard]] bool traces_quantized() const;
+
+  /// Return whether the selected trace pipeline intersects bilinear patches.
+  [[nodiscard]] bool bilinear_collisions() const;
+
+  /// Return whether the selected trace pipeline computes C1-continuous normals.
+  [[nodiscard]] bool c1_normals() const;
 
   /// Begin an opt-in queue-scoped Metal capture, if requested by the environment.
   void start_capture_if_requested();

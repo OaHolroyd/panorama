@@ -5,6 +5,7 @@
 #include "timer.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -24,6 +25,11 @@ static_assert(sizeof(RayDirection) == 5U * sizeof(float));
 static_assert(sizeof(RaytraceParameters) == 7U * sizeof(uint32_t));
 static_assert(sizeof(RayWorkItem) == 4U * sizeof(uint32_t));
 static_assert(sizeof(DeferredRayWork) == 3U * sizeof(uint32_t));
+
+/// Map the two dispatch-wide trace choices to one cached pipeline slot.
+[[nodiscard]] constexpr uint32_t trace_variant_index(bool bilinear, bool c1_normals) {
+  return (bilinear ? 1U : 0U) | (c1_normals ? 2U : 0U);
+}
 
 struct CatalogueTileHashEntry {
   int64_t row;
@@ -105,6 +111,10 @@ struct GpuRaytraceResources::State {
   id<MTLDevice> device;
   id<MTLCommandQueue> queue;
   id<MTLLibrary> library;
+  // The four collision/normal combinations share every buffer and differ
+  // solely in Metal function constants. Keep all variants so UI toggles are a
+  // pointer selection, not a session or atlas reconstruction.
+  std::array<id<MTLComputePipelineState>, 4U> trace_pipelines = {};
   id<MTLComputePipelineState> trace_pipeline;
   id<MTLComputePipelineState> emit_pipeline;
 
@@ -127,8 +137,47 @@ struct GpuRaytraceResources::State {
   uint32_t frontier_capacity;
   uint32_t catalogue_hash_capacity;
   bool trace_quantized;
+  bool bilinear_collisions;
+  bool c1_normals;
   GpuTraceOutputRequirements outputs;
   bool capture_active = false;
+
+  [[nodiscard]] id<MTLComputePipelineState>
+  make_trace_pipeline(bool bilinear, bool c1Normals) const {
+    NSError *error = nil;
+    NSString *trace_name =
+        trace_quantized ? @"trace_tile_frontier_quantized" : @"trace_tile_frontier";
+    MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
+    [constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
+    [constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
+    [constants setConstantValue:&outputs.debugging_info type:MTLDataTypeBool atIndex:2];
+    [constants setConstantValue:&bilinear type:MTLDataTypeBool atIndex:3];
+    [constants setConstantValue:&c1Normals type:MTLDataTypeBool atIndex:4];
+    id<MTLFunction> function = [library newFunctionWithName:trace_name
+                                             constantValues:constants
+                                                      error:&error];
+    if (function == nil) {
+      print_error(@"Could not specialize trace kernel", error);
+      throw std::runtime_error("Could not specialize trace kernel");
+    }
+    id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function
+                                                                                 error:&error];
+    if (pipeline == nil) {
+      print_error(@"Could not create trace pipeline", error);
+      throw std::runtime_error("Could not create trace pipeline");
+    }
+    return pipeline;
+  }
+
+  void select_trace_pipeline(bool bilinear, bool c1Normals) {
+    const uint32_t index = trace_variant_index(bilinear, c1Normals);
+    trace_pipeline = trace_pipelines[index];
+    if (trace_pipeline == nil) {
+      throw std::logic_error("Requested trace pipeline specialization is unavailable");
+    }
+    bilinear_collisions = bilinear;
+    c1_normals = c1Normals;
+  }
 
   /// Allocate a complete ray-dependent resource set before publishing it.
   /// Keeping the old set intact until every allocation succeeds makes a
@@ -226,6 +275,8 @@ GpuRaytraceResources::GpuRaytraceResources(
     std::span<const RayDirection> rays,
     std::span<const TerrainSource> sources,
     bool trace_quantized,
+    bool bilinear_collisions,
+    bool c1_normals,
     GpuTraceOutputRequirements outputs
 ) {
   if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
@@ -235,6 +286,8 @@ GpuRaytraceResources::GpuRaytraceResources(
   auto state = std::make_unique<State>();
   state->catalogue_hash_capacity = make_catalogue_hash_capacity(sources.size());
   state->trace_quantized = trace_quantized;
+  state->bilinear_collisions = bilinear_collisions;
+  state->c1_normals = c1_normals;
   state->outputs = outputs;
   state->device = MTLCreateSystemDefaultDevice();
   if (state->device == nil) {
@@ -252,24 +305,15 @@ GpuRaytraceResources::GpuRaytraceResources(
     print_error(@"Could not load the Metal library", error);
     throw std::runtime_error("Could not load Metal library");
   }
-  NSString *trace_name =
-      trace_quantized ? @"trace_tile_frontier_quantized" : @"trace_tile_frontier";
-  MTLFunctionConstantValues *trace_constants = [[MTLFunctionConstantValues alloc] init];
-  [trace_constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
-  [trace_constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
-  [trace_constants setConstantValue:&outputs.debugging_info type:MTLDataTypeBool atIndex:2];
-  id<MTLFunction> trace = [state->library newFunctionWithName:trace_name
-                                               constantValues:trace_constants
-                                                        error:&error];
   id<MTLFunction> emit = [state->library newFunctionWithName:@"emit_tile_frontier"];
-  if (trace == nil || emit == nil) {
+  if (emit == nil) {
     throw std::runtime_error("GPU-frontier Metal kernels are missing");
   }
-  state->trace_pipeline = [state->device newComputePipelineStateWithFunction:trace error:&error];
-  if (state->trace_pipeline == nil) {
-    print_error(@"Could not create trace pipeline", error);
-    throw std::runtime_error("Could not create trace pipeline");
+  for (uint32_t index = 0U; index < state->trace_pipelines.size(); index++) {
+    state->trace_pipelines[index] =
+        state->make_trace_pipeline((index & 1U) != 0U, (index & 2U) != 0U);
   }
+  state->select_trace_pipeline(bilinear_collisions, c1_normals);
   state->emit_pipeline = [state->device newComputePipelineStateWithFunction:emit error:&error];
   if (state->emit_pipeline == nil) {
     print_error(@"Could not create continuation pipeline", error);
@@ -354,6 +398,13 @@ void GpuRaytraceResources::resize_rays(std::span<const RayDirection> rays) {
     return;
   }
   state.replace_ray_buffers(rays);
+}
+
+void GpuRaytraceResources::set_collision_options(bool bilinear_collisions, bool c1_normals) {
+  // TerrainTraceSession calls this only on its render-owning thread, after all
+  // prior frontier command buffers have completed. Switching the retained
+  // pipeline pointer therefore cannot race an in-flight dispatch.
+  state_->select_trace_pipeline(bilinear_collisions, c1_normals);
 }
 
 void GpuRaytraceResources::initialise_frontier(uint32_t observer_slot) {
@@ -490,6 +541,8 @@ uint32_t GpuRaytraceResources::catalogue_hash_capacity() const {
 }
 
 bool GpuRaytraceResources::traces_quantized() const { return state_->trace_quantized; }
+bool GpuRaytraceResources::bilinear_collisions() const { return state_->bilinear_collisions; }
+bool GpuRaytraceResources::c1_normals() const { return state_->c1_normals; }
 
 id<MTLBuffer> GpuRaytraceResources::elevations() const {
   if (!state_->outputs.elevations) {
