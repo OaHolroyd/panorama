@@ -637,7 +637,7 @@ inline Collision bilinear_collision(
 /// The two float16 gradients are sufficient to reconstruct the upward normal
 /// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
 template <typename Sample>
-inline uint packed_surface_gradients(
+inline uint bilinear_packed_surface_gradients(
     device const Sample *vertices,
     uint vertex_count,
     int base_decimeters,
@@ -702,6 +702,74 @@ inline uint mipmap_value_count(uint cell_count) {
     count += side * side;
   }
   return count;
+}
+
+/// Evaluate the analytical east/north derivatives of a split-triangle terrain patch
+/// at a confirmed collision. Reloading the four samples here keeps them and
+/// the derivative temporaries out of the root solver's peak live register set.
+/// The two float16 gradients are sufficient to reconstruct the upward normal
+/// as normalize(float3(-dz/deast, -dz/dnorth, 1)).
+template <typename Sample>
+inline uint interpolated_packed_surface_gradients(
+    device const Sample *vertices,
+    uint vertex_count,
+    int base_decimeters,
+    float cell_x,
+    float cell_y,
+    float inverse_delta,
+    uint i,
+    uint j,
+    float2 direction,
+    float distance
+) {
+  const uint lower_left = i * vertex_count + j;
+  const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
+  const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
+  const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
+  const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
+
+  // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
+  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+
+  // Fetch surrounding 1-ring neighbor elevations required for central differences
+  const float z_w0 = sample_elevation(vertices[lower_left - 1U], base_decimeters);
+  const float z_e1 = sample_elevation(vertices[lower_left + 2U], base_decimeters);
+  const float z_s0 = sample_elevation(vertices[lower_left - vertex_count], base_decimeters);
+  const float z_s1 = sample_elevation(vertices[lower_left - vertex_count + 1U], base_decimeters);
+
+  const uint row1 = lower_left + vertex_count;
+  const float z_w1 = sample_elevation(vertices[row1 - 1U], base_decimeters);
+  const float z_e3 = sample_elevation(vertices[row1 + 2U], base_decimeters);
+
+  const uint row2 = lower_left + 2U * vertex_count;
+  const float z_n0 = sample_elevation(vertices[row2], base_decimeters);
+  const float z_n1 = sample_elevation(vertices[row2 + 1U], base_decimeters);
+
+  const float half_inv_delta = 0.5F * inverse_delta;
+
+  // Calculate central-difference gradients (dz/dx, dz/dy) for each of the 4 cell vertices
+  const float gx00 = (z01 - z_w0) * half_inv_delta;
+  const float gy00 = (z10 - z_s0) * half_inv_delta;
+
+  const float gx01 = (z_e1 - z00) * half_inv_delta;
+  const float gy01 = (z11 - z_s1) * half_inv_delta;
+
+  const float gx10 = (z11 - z_w1) * half_inv_delta;
+  const float gy10 = (z_n0 - z00) * half_inv_delta;
+
+  const float gx11 = (z_e3 - z10) * half_inv_delta;
+  const float gy11 = (z_n1 - z01) * half_inv_delta;
+
+  // Bilinearly interpolate the partial derivatives across the cell footprint
+  const float gx_interp = mix(mix(gx00, gx01, sx), mix(gx10, gx11, sx), sy);
+  const float gy_interp = mix(mix(gy00, gy01, sx), mix(gy10, gy11, sx), sy);
+
+  constexpr float kMaximumHalf = 65504.0F;
+  const float east_gradient = clamp(gx_interp, -kMaximumHalf, kMaximumHalf);
+  const float north_gradient = clamp(gy_interp, -kMaximumHalf, kMaximumHalf);
+
+  return as_type<uint>(half2(east_gradient, north_gradient));
 }
 
 /// Derive the geometry of a resident tile from the dispatch's LOD-1 reference
@@ -1010,11 +1078,27 @@ inline float trace_tile_frontier_impl(
           }
           if (!shadow_trace && compute_surface_gradients) {
             if (use_c1_normals) {
-              surface_gradients[output_index] = 0;
+              if (i >= 1 && j >= 1 && i < n - 1 && j < n - 1) {
+                surface_gradients[output_index] = interpolated_packed_surface_gradients(
+                    vertices,
+                    vertex_count,
+                    base_decimeters,
+                    tile_x_min + float(j) * delta - ray_origin.x,
+                    tile_y_min + float(i) * delta - ray_origin.y,
+                    inverse_delta,
+                    uint(i),
+                    uint(j),
+                    direction,
+                    collision.distance
+                );
+              } else {
+                // TODO: handle the edge of the domain
+                surface_gradients[output_index] = 0;
+              }
             } else {
               // TODO: give option to do better normals
               if (use_bilinear_collisions) {
-                surface_gradients[output_index] = packed_surface_gradients(
+                surface_gradients[output_index] = bilinear_packed_surface_gradients(
                     vertices,
                     vertex_count,
                     base_decimeters,
