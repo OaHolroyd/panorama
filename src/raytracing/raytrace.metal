@@ -1077,24 +1077,19 @@ inline float trace_tile_frontier_impl(
                 curved_ray_elevation(observer_elevation, dz, curvature, collision.distance);
           }
           if (!shadow_trace && compute_surface_gradients) {
-            if (use_c1_normals) {
-              if (i >= 1 && j >= 1 && i < n - 1 && j < n - 1) {
-                surface_gradients[output_index] = interpolated_packed_surface_gradients(
-                    vertices,
-                    vertex_count,
-                    base_decimeters,
-                    tile_x_min + float(j) * delta - ray_origin.x,
-                    tile_y_min + float(i) * delta - ray_origin.y,
-                    inverse_delta,
-                    uint(i),
-                    uint(j),
-                    direction,
-                    collision.distance
-                );
-              } else {
-                // TODO: handle the edge of the domain
-                surface_gradients[output_index] = 0;
-              }
+            if (use_c1_normals && (i >= 1 && j >= 1 && i < n - 1 && j < n - 1)) {
+              surface_gradients[output_index] = interpolated_packed_surface_gradients(
+                  vertices,
+                  vertex_count,
+                  base_decimeters,
+                  tile_x_min + float(j) * delta - ray_origin.x,
+                  tile_y_min + float(i) * delta - ray_origin.y,
+                  inverse_delta,
+                  uint(i),
+                  uint(j),
+                  direction,
+                  collision.distance
+              );
             } else {
               // TODO: give option to do better normals
               if (use_bilinear_collisions) {
