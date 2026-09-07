@@ -97,6 +97,12 @@ or rendered non-interactively:
 
 ## Interactive viewer
 
+Use `./panorama-app --trace-diagnostics` to log per-trace wall time, GPU
+traversal time, and BVH builds, cache hits, evictions and submissions. GPU
+traversal is a sum of completed command-buffer durations, excluding construction,
+CPU work and presentation. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
+for measurements, cache guidance and a repeatable camera benchmark.
+
 The viewer defaults to the `metal-bvh` terrain backend. In Viewer Settings →
 Terrain, the Raytracer selector switches between Mipmap and BVH and redraws the
 current view. The Raytracer menu provides the same choices. Mipmap uses the

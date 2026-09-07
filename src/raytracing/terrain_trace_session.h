@@ -93,6 +93,10 @@ public:
   /// Print cumulative cache, preparation, frontier, and timing statistics.
   void print_statistics() const;
 
+  /// Print the last primary trace's wall time, GPU work, and BVH cache deltas.
+  /// GPU traversal is a sum of command durations, not total GPU frame latency.
+  void print_trace_statistics() const;
+
 private:
   struct State;
   std::unique_ptr<State> state_;

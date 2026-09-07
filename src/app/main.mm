@@ -77,6 +77,7 @@ struct ViewerSettings {
   uint32_t bvh_block_cells = 4U;
   uint64_t bvh_cache_size_bytes = 512ULL * kBytesPerMiB;
   bool discard_quantized = false;
+  bool trace_diagnostics = false;
   bool bilinear_collisions = false;
   bool c1_normals = false;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
@@ -274,6 +275,7 @@ void print_usage(const char *program) {
       "                        (default: 0)\n"
       "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
       "                        (default: retain uint16)\n"
+      "  --trace-diagnostics   log per-trace wall/GPU timing and BVH cache activity\n"
       "  --easting M           fixed observer easting (default: 2623452.4)\n"
       "  --northing M          fixed observer northing (default: 1100502.2)\n"
       "  --elevation M         fixed observer elevation (default: 3415)\n"
@@ -306,6 +308,10 @@ void print_usage(const char *program) {
     }
     if (option == "--discard-quantized") {
       settings.discard_quantized = true;
+      continue;
+    }
+    if (option == "--trace-diagnostics") {
+      settings.trace_diagnostics = true;
       continue;
     }
     const std::string_view value = arguments::option_value(argc, argv, index, option);
@@ -1280,6 +1286,8 @@ private:
               current_observer_ = observer;
             }
             trace_->trace(field);
+            if (settings_.trace_diagnostics)
+              trace_->print_trace_statistics();
             current_field_ = std::move(field);
             current_orientation_ = orientation;
             current_vertical_field_of_view_ = vertical_field_of_view;

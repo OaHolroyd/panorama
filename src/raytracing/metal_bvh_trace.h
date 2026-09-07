@@ -5,6 +5,9 @@
 namespace panorama {
 
 struct MetalBvhStatistics {
+  // Counts and durations accumulate over this backend's lifetime. GPU build
+  // time includes bounds generation, construction and compaction; traversal
+  // times exclude that work and the gaps between command buffers.
   uint64_t resident_bytes = 0U;
   uint64_t peak_bytes = 0U;
   uint64_t budget_bytes = 0U;
@@ -12,6 +15,15 @@ struct MetalBvhStatistics {
   uint64_t cache_hits = 0U;
   uint64_t evictions = 0U;
   uint64_t catalogue_bytes = 0U;
+  uint64_t catalogue_builds = 0U;
+  uint64_t instance_builds = 0U;
+  uint64_t selection_passes = 0U;
+  uint64_t trace_passes = 0U;
+  uint64_t submissions = 0U;
+  double build_gpu_ms = 0.0;
+  double selection_gpu_ms = 0.0;
+  double trace_gpu_ms = 0.0;
+  double grouping_cpu_ms = 0.0;
 };
 
 /// Procedural terrain acceleration structures with bounded immutable tile storage.

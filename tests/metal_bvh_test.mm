@@ -23,6 +23,64 @@ void require(bool condition, const char *message) {
     throw std::runtime_error(message);
 }
 
+// Match the viewer's default camera and output requirements, excluding image
+// generation, lighting and display. Run each backend in a separate process.
+void benchmark(int argc, const char *argv[]) {
+  if (argc < 5 || argc > 10)
+    throw std::invalid_argument(
+        "usage: metal-bvh-test --benchmark TILE_DIR software|metal-bvh CACHE_MIB "
+        "[RANGE [WIDTH HEIGHT [LOD_SCALE [DEBUG_OUTPUTS]]]]"
+    );
+  RaytraceConfig config{};
+  config.tile_dir = argv[2];
+  config.observer = {2623452.4, 1100502.2, 3415.0};
+  config.raytracer = arguments::parse_raytracer(argv[3]);
+  config.bvh_cache_size_bytes = std::stoull(argv[4]) * 1048576ULL;
+  config.tile_cache_size_bytes = 128ULL * 1048576ULL;
+  config.max_tile_preparation_workers = 8U;
+  config.retain_quantized = true;
+  config.max_distance = argc > 5 ? std::stof(argv[5]) : 600000.0F;
+  config.lod_scale = argc > 8 ? std::stof(argv[8]) : 0.0F;
+  const ImageSize image = {
+      argc > 6 ? static_cast<uint32_t>(std::stoul(argv[6])) : 1600U,
+      argc > 7 ? static_cast<uint32_t>(std::stoul(argv[7])) : 900U,
+  };
+  const bool debugging = argc <= 9 || std::stoi(argv[9]) != 0;
+  const auto intrinsics =
+      CameraIntrinsics::from_vertical_field_of_view(image, 70.0 * std::numbers::pi / 180.0);
+  auto field = make_camera_ray_field(image, {{0, 0, 0}, intrinsics, NoDistortion{}});
+  TerrainTraceSession session(config, field, {true, true, debugging});
+  std::printf(
+      "Device: %s; range %.0f m, LOD %.2f, debug %d\n",
+      session.device().name.UTF8String,
+      config.max_distance,
+      config.lod_scale,
+      debugging
+  );
+  for (uint32_t frame = 0; frame < 6; ++frame) {
+    @autoreleasepool {
+      if (frame == 3)
+        field = make_camera_ray_field(
+            image,
+            {{std::numbers::pi / 180.0, 0, 0}, intrinsics, NoDistortion{}}
+        );
+      if (frame == 5) {
+        config.observer.easting += 1.0;
+        require(session.relocate_observer(config.observer), "Benchmark relocation failed");
+      }
+      std::printf(
+          "%s: ",
+          frame == 0   ? "cold"
+          : frame == 3 ? "turn 1 degree"
+          : frame == 5 ? "move 1 metre"
+                       : "repeat"
+      );
+      session.trace(field);
+      session.print_trace_statistics();
+    }
+  }
+}
+
 void write_fixture(const std::filesystem::path &directory, bool quantized, double spacing) {
   std::filesystem::create_directories(directory);
   constexpr uint32_t cells = 16U;
@@ -375,6 +433,10 @@ int main(int argc, const char *argv[]) {
   try {
     @autoreleasepool {
       require(arguments::parse_raytracer("metal-bvh") == Raytracer::MetalBvh, "Backend parser");
+      if (argc >= 2 && std::string_view(argv[1]) == "--benchmark") {
+        benchmark(argc, argv);
+        return EXIT_SUCCESS;
+      }
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
       if (argc >= 2 && !edge_cases && !streaming) {

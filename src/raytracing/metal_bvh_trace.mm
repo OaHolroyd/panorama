@@ -50,15 +50,14 @@ id<MTLBuffer> buffer(
   result.label = label;
   return result;
 }
-void complete(id<MTLCommandBuffer> command, Timer *timer = nullptr) {
+double complete(id<MTLCommandBuffer> command) {
   if (command == nil)
     throw std::runtime_error("Could not create BVH command buffer");
   [command commit];
   [command waitUntilCompleted];
   if (command.status != MTLCommandBufferStatusCompleted)
     throw std::runtime_error("Metal BVH command failed: " + error_text(command.error));
-  if (timer != nullptr)
-    timer->add_work("GPU BVH traversal", (command.GPUEndTime - command.GPUStartTime) * 1000.0);
+  return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
 }
 void dispatch(
     id<MTLComputeCommandEncoder> encoder,
@@ -223,7 +222,8 @@ struct MetalBvhTrace::State {
                                                 offset:0
                                           sizeDataType:MTLDataTypeULong];
     [encoder endEncoding];
-    complete(command);
+    stats.build_gpu_ms += complete(command);
+    ++stats.submissions;
     if (!compact)
       return original;
     const uint64_t size = *static_cast<const uint64_t *>(size_buffer.contents);
@@ -238,7 +238,8 @@ struct MetalBvhTrace::State {
       throw std::runtime_error("Could not encode BVH compaction");
     [encoder copyAndCompactAccelerationStructure:original toAccelerationStructure:result];
     [encoder endEncoding];
-    complete(command);
+    stats.build_gpu_ms += complete(command);
+    ++stats.submissions;
     return result;
   }
 
@@ -300,6 +301,7 @@ struct MetalBvhTrace::State {
     std::memcpy(tiles.contents, tile_metadata.data(), tiles.length);
     std::memcpy(catalogue_bounds.contents, boxes.data(), catalogue_bounds.length);
     catalogue = build(primitive_descriptor(checked_count(boxes.size()), catalogue_bounds), false);
+    ++stats.catalogue_builds;
     stats.catalogue_bytes = tiles.length + catalogue_bounds.length + catalogue.size;
   }
 
@@ -411,7 +413,8 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:parameters offset:0 atIndex:4];
     dispatch(encoder, bounds_pipeline, count);
     [encoder endEncoding];
-    complete(command);
+    stats.build_gpu_ms += complete(command);
+    ++stats.submissions;
     entry->acceleration = build(primitive_descriptor(count, entry->bounds), true);
     entry->bytes = base_bytes + entry->acceleration.size;
     stats.resident_bytes += entry->bytes;
@@ -472,6 +475,7 @@ struct MetalBvhTrace::State {
     descriptor.instanceDescriptorBuffer = instances;
     descriptor.instancedAccelerationStructures = structures;
     auto acceleration = build(descriptor, false);
+    ++stats.instance_builds;
     timer.add_work("BVH instance setup", std::chrono::steady_clock::now() - started);
     std::memcpy(work.contents, indices.data(), indices.size() * sizeof(uint32_t));
     current.work_count = checked_count(indices.size());
@@ -511,7 +515,11 @@ struct MetalBvhTrace::State {
     }
     dispatch(encoder, p.state, current.work_count);
     [encoder endEncoding];
-    complete(command, &timer);
+    const double gpu_ms = complete(command);
+    stats.trace_gpu_ms += gpu_ms;
+    ++stats.trace_passes;
+    ++stats.submissions;
+    timer.add_work("GPU BVH detail traversal", gpu_ms);
     // Tables otherwise retain their previous argument buffers between batches.
     [p.table setBuffer:nil offset:0 atIndex:0];
   }
@@ -535,7 +543,11 @@ struct MetalBvhTrace::State {
     [encoder useResource:selector.table usage:MTLResourceUsageRead];
     dispatch(encoder, selector.state, current.trace.ray_count);
     [encoder endEncoding];
-    complete(command, &timer);
+    const double gpu_ms = complete(command);
+    stats.selection_gpu_ms += gpu_ms;
+    ++stats.selection_passes;
+    ++stats.submissions;
+    timer.add_work("GPU BVH tile selection", gpu_ms);
   }
 };
 
@@ -613,6 +625,7 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
     @autoreleasepool {
       state.select(timer);
     }
+    const auto grouping_started = std::chrono::steady_clock::now();
     const auto *rays = static_cast<const BvhRayState *>(state.rays.contents);
     double nearest_shell = std::numeric_limits<double>::infinity();
     for (uint32_t i = 0; i < parameters.ray_count; ++i) {
@@ -634,6 +647,10 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
         continue;
       groups[rays[i].source].push_back(i);
     }
+    state.stats.grouping_cpu_ms += std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - grouping_started
+    )
+                                       .count();
     if (groups.empty())
       return;
     auto group = groups.begin();

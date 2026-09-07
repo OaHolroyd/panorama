@@ -96,6 +96,10 @@ struct TerrainTraceSession::State {
   ImageSize image;
   uint32_t ray_count;
   Timer timer{"Total elapsed"};
+  MetalBvhStatistics frame_bvh_before;
+  double frame_wall_ms = 0.0;
+  double frame_gpu_ms = 0.0;
+  uint64_t frame_passes = 0U;
 
   // Long-lived owners. TileManager serves both primary and shadow frontiers;
   // ray-sized GPU buffers remain valid for presentation after tracing.
@@ -237,6 +241,10 @@ void TerrainTraceSession::set_collision_options(bool bilinear_collisions, bool c
 
 void TerrainTraceSession::trace(const RayField &field) {
   State &state = *state_;
+  const auto started = std::chrono::steady_clock::now();
+  state.frame_bvh_before = bvh_statistics();
+  state.frame_gpu_ms = 0.0;
+  state.frame_passes = 0U;
   const uint32_t ray_count = validate_ray_field(field);
   state.tiles->set_pixel_angle(field.minimum_pixel_angle);
   const bool dimensions_changed = field.image.width != state.image.width ||
@@ -266,6 +274,14 @@ void TerrainTraceSession::trace(const RayField &field) {
     }
     state.timer.stop("BVH streaming trace");
     state.gpu->stop_capture();
+    const auto after = bvh_statistics();
+    state.frame_gpu_ms = after.selection_gpu_ms - state.frame_bvh_before.selection_gpu_ms +
+                         after.trace_gpu_ms - state.frame_bvh_before.trace_gpu_ms;
+    state.frame_passes = after.selection_passes - state.frame_bvh_before.selection_passes +
+                         after.trace_passes - state.frame_bvh_before.trace_passes;
+    state.frame_wall_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
     state.frames++;
     state.trace_revision++;
     return;
@@ -305,6 +321,8 @@ void TerrainTraceSession::trace(const RayField &field) {
           state.timer
       );
       state.timer.add_work("GPU raytrace", pass.device_milliseconds);
+      state.frame_gpu_ms += pass.device_milliseconds;
+      ++state.frame_passes;
       state.locally_skipped_tiles += pass.locally_skipped_tiles;
       state.globally_skipped_tiles += pass.globally_skipped_tiles;
       if (pass.deferred_count > state.ray_count) {
@@ -353,6 +371,8 @@ void TerrainTraceSession::trace(const RayField &field) {
   }
   state.gpu->stop_capture();
   state.timer.stop("GPU raytrace");
+  state.frame_wall_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   state.frames++;
   state.trace_revision++;
 }
@@ -522,6 +542,43 @@ id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
     throw std::logic_error("Shadows have not been traced for the current terrain view");
   }
   return state_->shadows->visibility();
+}
+
+void TerrainTraceSession::print_trace_statistics() const {
+  const State &state = *state_;
+  std::printf(
+      "Trace %llu %s %ux%u: wall %.3f ms, GPU traversal sum %.3f ms, %llu passes",
+      static_cast<unsigned long long>(state.frames),
+      state.config.raytracer == Raytracer::MetalBvh ? "BVH" : "Mipmap",
+      state.image.width,
+      state.image.height,
+      state.frame_wall_ms,
+      state.frame_gpu_ms,
+      static_cast<unsigned long long>(state.frame_passes)
+  );
+  if (state.config.raytracer == Raytracer::MetalBvh) {
+    const auto b = bvh_statistics();
+    const auto &a = state.frame_bvh_before;
+    std::printf(
+        "; tiles built/hit/evicted %llu/%llu/%llu, catalogue/instance builds %llu/%llu, "
+        "BVH submissions %llu, GPU selection/detail/build %.3f/%.3f/%.3f ms, "
+        "CPU grouping %.3f ms, resident %.1f/%.1f MiB",
+        static_cast<unsigned long long>(b.builds - a.builds),
+        static_cast<unsigned long long>(b.cache_hits - a.cache_hits),
+        static_cast<unsigned long long>(b.evictions - a.evictions),
+        static_cast<unsigned long long>(b.catalogue_builds - a.catalogue_builds),
+        static_cast<unsigned long long>(b.instance_builds - a.instance_builds),
+        static_cast<unsigned long long>(b.submissions - a.submissions),
+        b.selection_gpu_ms - a.selection_gpu_ms,
+        b.trace_gpu_ms - a.trace_gpu_ms,
+        b.build_gpu_ms - a.build_gpu_ms,
+        b.grouping_cpu_ms - a.grouping_cpu_ms,
+        double(b.resident_bytes) / 1048576.0,
+        double(b.budget_bytes) / 1048576.0
+    );
+  }
+  std::putchar('\n');
+  std::fflush(stdout);
 }
 
 void TerrainTraceSession::print_statistics() const {
