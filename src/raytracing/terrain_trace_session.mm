@@ -1,6 +1,7 @@
 #include "terrain_trace_session.h"
 
 #include "host_frontier.h"
+#include "metal_bvh_trace.h"
 #include "terrain_shadow_gpu.h"
 #include "tile_manager.h"
 #include "timer.h"
@@ -21,6 +22,14 @@ namespace panorama {
 namespace {
 
 void validate_configuration(const RaytraceConfig &config) {
+  if (config.bvh_block_cells == 0U) {
+    throw std::invalid_argument("BVH block cell count must be positive");
+  }
+  if (config.bvh_cache_size_bytes == 0U)
+    throw std::invalid_argument("BVH cache size must be positive");
+  if (config.raytracer != Raytracer::Software && config.raytracer != Raytracer::MetalBvh) {
+    throw std::invalid_argument("Unknown terrain raytracer");
+  }
   if (config.tile_cache_size_bytes == 0U || config.tile_dir.empty()) {
     throw std::invalid_argument("Terrain trace session requires a tile directory and cache");
   }
@@ -93,6 +102,8 @@ struct TerrainTraceSession::State {
   std::unique_ptr<TileManager> tiles;
   RaytraceParameters parameters = {};
   std::unique_ptr<GpuRaytraceResources> gpu;
+  std::unique_ptr<MetalBvhTrace> bvh;
+  GpuTraceOutputRequirements outputs;
   std::unique_ptr<GpuTerrainShadowResources> shadows;
 
   // Cumulative scheduling diagnostics printed by the command-line frontend.
@@ -113,7 +124,7 @@ struct TerrainTraceSession::State {
       GpuTraceOutputRequirements outputs
   )
       : config(config_value), image(initial_field.image),
-        ray_count(validate_ray_field(initial_field)) {
+        ray_count(validate_ray_field(initial_field)), outputs(outputs) {
     validate_configuration(config);
     timer.start_wall("Initial setup");
 
@@ -133,6 +144,14 @@ struct TerrainTraceSession::State {
         outputs
     );
     tiles->attach_gpu(gpu->device(), timer);
+    if (config.raytracer == Raytracer::MetalBvh) {
+      bvh = std::make_unique<MetalBvhTrace>(
+          *gpu,
+          config.bvh_block_cells,
+          outputs,
+          config.bvh_cache_size_bytes
+      );
+    }
     timer.stop("Initial setup");
   }
 };
@@ -145,6 +164,29 @@ TerrainTraceSession::TerrainTraceSession(
     : state_(std::make_unique<State>(config, initial_field, outputs)) {}
 
 TerrainTraceSession::~TerrainTraceSession() = default;
+
+MetalBvhStatistics TerrainTraceSession::bvh_statistics() const {
+  return state_->bvh ? state_->bvh->statistics() : MetalBvhStatistics{};
+}
+
+void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
+  State &state = *state_;
+  if (raytracer != Raytracer::Software && raytracer != Raytracer::MetalBvh) {
+    throw std::invalid_argument("Unknown terrain raytracer");
+  }
+  if (state.config.raytracer == raytracer)
+    return;
+  if (raytracer == Raytracer::MetalBvh && !state.bvh) {
+    state.bvh = std::make_unique<MetalBvhTrace>(
+        *state.gpu,
+        state.config.bvh_block_cells,
+        state.outputs,
+        state.config.bvh_cache_size_bytes
+    );
+  }
+  state.config.raytracer = raytracer;
+  state.shadow_revision = std::numeric_limits<uint64_t>::max();
+}
 
 bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
   State &state = *state_;
@@ -203,7 +245,6 @@ void TerrainTraceSession::trace(const RayField &field) {
 
   // Ray-dependent storage changes with the viewport; catalogue discovery,
   // terrain preparation, pipelines, and the resident atlas remain intact.
-  const uint32_t observer_slot = state.tiles->ensure_observer_resident(state.timer);
   if (dimensions_changed) {
     state.gpu->resize_rays(field.rays);
     state.image = field.image;
@@ -212,6 +253,24 @@ void TerrainTraceSession::trace(const RayField &field) {
   } else {
     state.gpu->update_rays(field.rays);
   }
+  if (state.config.raytracer == Raytracer::MetalBvh) {
+    state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
+    state.gpu->start_capture_if_requested();
+    state.timer.start_wall("BVH streaming trace");
+    try {
+      state.bvh->trace(state.parameters, state.timer);
+    } catch (...) {
+      state.timer.stop("BVH streaming trace");
+      state.gpu->stop_capture();
+      throw;
+    }
+    state.timer.stop("BVH streaming trace");
+    state.gpu->stop_capture();
+    state.frames++;
+    state.trace_revision++;
+    return;
+  }
+  const uint32_t observer_slot = state.tiles->ensure_observer_resident(state.timer);
   state.gpu->initialise_frontier(observer_slot);
 
   HostFrontier frontier(
@@ -468,6 +527,21 @@ id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
 void TerrainTraceSession::print_statistics() const {
   const State &state = *state_;
   const TileManagerStatistics tiles = state.tiles->statistics();
+  if (state.bvh) {
+    const auto bvh = state.bvh->statistics();
+    std::printf(
+        "Metal BVH cache: %.3f MiB resident, %.3f MiB peak including build workspace / %.3f MiB "
+        "budget; "
+        "%llu builds, %llu cache hits, %llu evictions; catalogue %.3f MiB.\n",
+        double(bvh.resident_bytes) / 1048576.0,
+        double(bvh.peak_bytes) / 1048576.0,
+        double(bvh.budget_bytes) / 1048576.0,
+        static_cast<unsigned long long>(bvh.builds),
+        static_cast<unsigned long long>(bvh.cache_hits),
+        static_cast<unsigned long long>(bvh.evictions),
+        double(bvh.catalogue_bytes) / 1048576.0
+    );
+  }
   std::printf(
       "Terrain sources: %zu (resident slots %u / cache capacity %u, preparation workers %u).\n",
       state.tiles->sources().size(),

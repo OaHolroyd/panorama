@@ -17,7 +17,7 @@ OBJ_ROOT := obj
 
 # Objective-C++ host compiler and the two Metal shader-toolchain stages.
 CXX := clang++
-METAL := xcrun --sdk macosx metal
+METAL := $(shell xcrun --find metal)
 METALLIB := xcrun --sdk macosx metallib
 GDAL_CONFIG := gdal-config
 # GDAL supplies GeoTIFF loading and EPSG/PROJ-backed coordinate transforms.
@@ -148,6 +148,8 @@ $(OBJ_DIR)/raytracing/%.air: $(RAYTRACE_SRC_DIR)/%.metal | $(OBJ_DIR)/raytracing
 	@printf 'Compiling %s\n' '$@'
 	$(METAL) -c -o $@ $<
 
+$(RAYTRACE_METAL_AIR): $(wildcard $(RAYTRACE_SRC_DIR)/*.metalh)
+
 $(OBJ_DIR)/rendering/%.air: $(RENDERING_SRC_DIR)/%.metal | $(OBJ_DIR)/rendering
 	@printf 'Compiling %s\n' '$@'
 	$(METAL) -c -o $@ $<
@@ -176,6 +178,23 @@ clean:
 # A phony prerequisite makes the shared executable relink when switching
 # between debug and release object directories.
 FORCE:
+
+$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(RAYTRACE_OBJ) $(SHARED_OBJ) $(METAL_LIB)
+	$(CXX) $(RAYTRACE_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(RAYTRACE_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
+
+.PHONY: check-bvh
+check-bvh: $(OBJ_DIR)/metal-bvh-test
+	# Bound concurrently retained Metal I/O driver workers between fixture groups.
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --edge-cases
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
+
+$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(OBJ_DIR)/tile-gen/geotiff_writer.o $(SHARED_OBJ)
+	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $^ $(FRAMEWORKS) $(LDLIBS)
+
+.PHONY: check-manifest
+check-manifest: $(OBJ_DIR)/terrain-manifest-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/terrain-manifest-test
 
 # Missing dependency files are harmless on the first build.
 -include $(DEPS)

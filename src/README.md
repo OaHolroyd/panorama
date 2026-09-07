@@ -2,9 +2,10 @@
 
 Panorama turns prepared digital terrain model (DTM) tiles into distance,
 elevation, normal, shadow, and colour images. The expensive work is performed
-by Metal kernels, but terrain is larger than the GPU-resident cache. Rendering
-therefore alternates between GPU traversal and host-side scheduling while
-tiles are loaded asynchronously.
+by Metal kernels. The software backend alternates between GPU traversal and
+host-side scheduling while terrain tiles are loaded asynchronously. The Metal
+BVH backend streams cached tile acceleration structures, with a manifest BVH
+selecting tiles and Metal instance transforms applying observer curvature.
 
 This document follows a request from an executable down to the terrain kernels.
 
@@ -45,6 +46,10 @@ flowchart TD
     GPU --> MK[raytrace.metal kernels]
     TM --> MK
     HF --> TM
+    SESSION --> BVH[MetalBvhTrace]
+    TM --> CACHE[Bounded immutable tile BVH cache]
+    CACHE --> BVH
+    BVH --> HW[metal_bvh_trace.metal]
 ```
 
 `RayField` is the projection-independent input to tracing: one normalized
@@ -71,6 +76,51 @@ ownership:
 The catalogue is immutable for the session. A viewer relocation inside that
 catalogue only rebases resident tile coordinates and recalculates LOD choices.
 Moving beyond it causes the app to construct a replacement session.
+
+## Metal BVH primary tracing
+
+`MetalBvhTrace` shares the session's device, queue, ray buffers, and output ABI.
+It copies each selected LOD from `TileManager` before allowing that atlas slot
+to be reused. Each cached BVH owns its vertices independently of atlas eviction
+and software shadow passes. Float32 and retained uint16 use the same block metadata
+with byte offsets and per-tile quantization bases.
+
+Each primitive covers up to `bvh_block_cells` cells per axis. The bounds kernel
+scans the block's actual vertices and conservatively encloses elevation minus
+effective-Earth curvature. The intersection function repeats an inclusive slab
+test before any terrain access, then walks only the block's cells using the
+shared collision and normal helpers in `terrain_intersection.metalh`. The ray
+remains `(dx, dy, slope)` with horizontal-distance parameterization. A successful
+hit is checked against catalogue coverage so missing tiles terminate rays just
+as they do in the software frontier.
+
+The backend builds a primitive acceleration structure, reads back its compacted
+size, and completes copy-and-compact before releasing build storage. All
+indirect intersection-table resources are declared on every trace encoder.
+Submissions finish synchronously before parameters, outputs, or cache entries may
+change. A small catalogue BVH contains one conservative manifest box per tile.
+Version 2 manifests carry minima and maxima over all LODs; missing bounds use
+conservative finite columns. Candidate rays wait in source buckets. Processing
+outward Manhattan grid shells gathers all incoming rays before loading a source,
+so even a one-tile cache does not repeatedly build that source within a frame.
+
+Detailed tile bounds enclose `h(u,v) - k*(u*u+v*v)` around the tile centre.
+For centre offset `a = tile_centre - observer`, each Metal instance maps
+`(u,v,z)` to `(u+a.x, v+a.y, z-2*k*dot(a,(u,v))-k*dot(a,a))`.
+The callback tests the local AABB but uses the original world ray in the shared
+collision solver, preserving its horizontal parameter and normal convention.
+Movement rebuilds only small catalogue and batch instance hierarchies. Cached
+tile BVHs are keyed by source and LOD and survive observer changes.
+
+Admission reserves terrain buffers, original/compacted acceleration structures,
+and build scratch before loading. LRU entries are evicted only between completed
+submissions. The independent `bvh_cache_size_bytes` budget excludes ray-sized
+work/output buffers and the small upper hierarchies. A cache smaller than one
+tile's peak build requirement is rejected with the required byte count.
+Timing separates GPU traversal, tile loading/building, and instance setup under
+the inclusive streaming trace, so cold construction cannot masquerade as tracing.
+The software shadow frontier remains available and consumes hardware primary
+outputs through the unchanged session interface.
 
 ## One primary tracing pass
 

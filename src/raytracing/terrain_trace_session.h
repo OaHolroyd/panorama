@@ -1,6 +1,7 @@
 #pragma once
 
 #include "crs.h"
+#include "metal_bvh_trace.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
 #include "raytrace_gpu.h"
@@ -48,6 +49,11 @@ public:
   /// Select bilinear or triangular collision patches and C1 or patch-local
   /// surface normals for subsequent traces without rebuilding terrain state.
   void set_collision_options(bool bilinear_collisions, bool c1_normals);
+
+  /// Select primary tracing on the render-owning thread. Outputs and the
+  /// software shadow path keep the same device, queue, and buffer ABI.
+  void set_raytracer(Raytracer raytracer);
+  [[nodiscard]] MetalBvhStatistics bvh_statistics() const;
 
   /// Trace one directional sun ray from each eligible primary collision.
   /// Angles are radians; azimuth is clockwise from grid north and elevation

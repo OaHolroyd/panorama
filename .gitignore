@@ -35,6 +35,7 @@
 # Scratch space/Python
 __pycache__/
 panorama-python
+todo/
 
 # Xcode user-specific files
 xcuserdata/

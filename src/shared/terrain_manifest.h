@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -15,6 +16,8 @@ struct TerrainManifestEntry {
   int64_t row;
   int64_t column;
   float maximum_elevation;
+  /// Absent in version-1 manifests. Bounds include every stored LOD.
+  std::optional<float> minimum_elevation = std::nullopt;
 };
 
 /// Return the manifest sidecar belonging to a prepared-terrain directory.

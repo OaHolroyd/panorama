@@ -97,6 +97,72 @@ or rendered non-interactively:
 
 ## Interactive viewer
 
+The viewer defaults to the `metal-bvh` terrain backend. In Viewer Settings →
+Terrain, the Raytracer selector switches between Mipmap and BVH and redraws the
+current view. The Raytracer menu provides the same choices. Mipmap uses the
+`software` backend; both executables also accept
+`--raytracer software|metal-bvh`, `--bvh-block-cells N` (default `4`), and
+`--bvh-cache-mib N` (default `512`). The batch
+renderer keeps `software` as its default. For example:
+
+```sh
+./panorama --raytracer metal-bvh --bvh-cache-mib 512 \
+  --max-distance 600000 --lod-scale 0 --synthetic-output
+```
+
+Metal BVH streams full-resolution tiles on demand; LOD is optional. A small
+inter-tile BVH uses the manifest's elevation bounds to select terrain before
+loading it. Detailed tile BVHs and their immutable vertices are cached by tile
+and LOD. Rays retain their progress across batches, including when a frame's
+terrain exceeds the cache. Tiles are scheduled in outward grid shells to avoid
+rebuilding the same tile for successive groups of rays within a frame.
+
+`--bvh-cache-mib` bounds the requested Metal storage for detailed BVHs, owned
+vertices, block metadata, bounds, and peak build/compaction workspace. It is
+**additional to** `--tile-cache-mib`; ray/output buffers, the small catalogue
+BVH, batch instance structures (at most 64 tiles), and driver allocation overhead
+are separate. A cache must fit at least one tile plus its build workspace;
+otherwise the error reports the required bytes. LRU eviction occurs only after
+GPU work completes. Statistics report resident bytes, peak reservation, builds,
+cache hits, and evictions. A small cache increases construction costs, particularly
+between viewer frames.
+
+Detailed bounds use a fixed tile-centred curvature anchor. Metal instance
+transforms apply XY translation and Z shear for the current observer, preserving
+horizontal ray distance without rebuilding the cached terrain. Observer movement
+updates the small catalogue and batch instance hierarchies; LOD changes select
+separate cache entries. GPU traversal, tile loading/building, and instance setup
+are reported separately beneath inclusive `BVH streaming trace` time.
+Actual speed and compaction savings depend on the GPU. Devices without Metal
+ray-tracing support can use the software backend. Shadows currently use the
+existing software traversal with either primary backend.
+
+`make check-bvh` runs Metal API validation and software/BVH comparisons on
+generated terrain, including retained and expanded uint16, float samples,
+partial blocks, coverage gaps, range clipping, resizing, relocation, backend
+switching, shadows, and forced cache eviction. `make check-manifest` validates
+manifest versions, bounds across all LODs, and raw/compressed tile scans.
+The test executable also accepts a Swiss prepared-tile directory, optional range
+in metres (default 21000), and BVH cache in MiB (default 512):
+
+```sh
+obj/release/metal-bvh-test data/swissalti3d-10-level-0-metal-u16-none-lod-point 600000 64
+```
+
+The real-terrain check requires identical hit masks and bounded distance and
+elevation errors. Patch-local normals can differ at the existing collision
+solver's cell-edge tolerance; away from those edges, the comparison allows only
+half-precision rounding. BVH step diagnostics count procedural candidates;
+evaluation diagnostics count precise cell tests.
+
+`panorama-tile-gen` now writes version-2 `panorama-terrain-manifest.bin` entries
+with minimum and maximum elevations enclosing **all stored LODs**, including
+quantization and finite no-data fill values. Re-running the original generation
+command without `--overwrite` upgrades an old manifest by scanning existing tile
+payloads; it does not regenerate those tiles. Existing version-2 entries are
+reused for skipped files. Version-1 or absent manifests remain readable with
+conservative culling where bounds are unavailable.
+
 Build the project, then launch the interactive viewer with:
 
 ```sh

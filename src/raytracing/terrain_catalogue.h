@@ -42,6 +42,7 @@ struct TerrainSource {
   std::optional<float> maximum_elevation;
   /// Independently loadable terrain representations, including LOD 1.
   uint32_t lod_count = 1U;
+  std::optional<float> minimum_elevation = std::nullopt;
 };
 
 /// A finite, indexed catalogue of terrain sources relevant to one render.

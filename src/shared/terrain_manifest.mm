@@ -15,7 +15,7 @@ namespace {
 
 inline constexpr std::array<char, 8> kTerrainManifestMagic =
     {'P', 'N', 'M', 'A', 'N', '0', '0', '1'};
-inline constexpr uint32_t kTerrainManifestVersion = 1U;
+inline constexpr uint32_t kTerrainManifestVersion = 2U;
 
 struct TerrainManifestHeader {
   std::array<char, 8> magic;
@@ -29,7 +29,8 @@ struct TerrainManifestDiskEntry {
   int64_t row;
   int64_t column;
   float maximum_elevation;
-  uint32_t reserved;
+  // Version 1 used these four bytes as a zero reserved word.
+  float minimum_elevation;
 };
 
 static_assert(std::endian::native == std::endian::little);
@@ -63,7 +64,8 @@ std::vector<TerrainManifestEntry> read_terrain_manifest(const std::filesystem::p
   std::ifstream stream(path, std::ios::binary);
   TerrainManifestHeader header = {};
   if (!stream.read(reinterpret_cast<char *>(&header), sizeof(header)) ||
-      header.magic != kTerrainManifestMagic || header.version != kTerrainManifestVersion ||
+      header.magic != kTerrainManifestMagic ||
+      (header.version != 1U && header.version != kTerrainManifestVersion) ||
       header.header_size != sizeof(TerrainManifestHeader) ||
       header.entry_size != sizeof(TerrainManifestDiskEntry)) {
     throw std::runtime_error("Terrain manifest has an unsupported header: " + path.string());
@@ -79,11 +81,19 @@ std::vector<TerrainManifestEntry> read_terrain_manifest(const std::filesystem::p
   entries.reserve(header.entry_count);
   for (uint32_t index = 0U; index < header.entry_count; index++) {
     TerrainManifestDiskEntry disk = {};
-    if (!stream.read(reinterpret_cast<char *>(&disk), sizeof(disk)) || disk.reserved != 0U ||
-        !std::isfinite(disk.maximum_elevation)) {
+    if (!stream.read(reinterpret_cast<char *>(&disk), sizeof(disk)) ||
+        !std::isfinite(disk.maximum_elevation) ||
+        (header.version == 1U ? std::bit_cast<uint32_t>(disk.minimum_elevation) != 0U
+                              : !std::isfinite(disk.minimum_elevation) ||
+                                    disk.minimum_elevation > disk.maximum_elevation)) {
       throw std::runtime_error("Terrain manifest contains an invalid entry: " + path.string());
     }
-    entries.push_back({disk.row, disk.column, disk.maximum_elevation});
+    entries.push_back(
+        {disk.row,
+         disk.column,
+         disk.maximum_elevation,
+         header.version == 1U ? std::nullopt : std::optional<float>(disk.minimum_elevation)}
+    );
   }
   return entries;
 }
@@ -106,16 +116,20 @@ void write_terrain_manifest(
   };
   stream.write(reinterpret_cast<const char *>(&header), sizeof(header));
   for (const TerrainManifestEntry &entry : entries) {
-    if (!std::isfinite(entry.maximum_elevation)) {
+    if (!std::isfinite(entry.maximum_elevation) || !entry.minimum_elevation.has_value() ||
+        !std::isfinite(*entry.minimum_elevation) ||
+        *entry.minimum_elevation > entry.maximum_elevation) {
       stream.close();
       std::filesystem::remove(temporary);
-      throw std::invalid_argument("Terrain manifest maximum elevation must be finite");
+      throw std::invalid_argument(
+          "Terrain manifest requires finite, ordered minimum and maximum elevations"
+      );
     }
     const TerrainManifestDiskEntry disk = {
         entry.row,
         entry.column,
         entry.maximum_elevation,
-        0U,
+        *entry.minimum_elevation,
     };
     stream.write(reinterpret_cast<const char *>(&disk), sizeof(disk));
   }

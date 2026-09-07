@@ -186,12 +186,12 @@ TerrainCatalogue TerrainCatalogue::discover(
     throw std::invalid_argument("Prepared terrain path is not a directory: " + tile_dir.string());
   }
 
-  std::map<TileKey, float> maximum_elevation_by_key;
+  std::map<TileKey, TerrainManifestEntry> maximum_elevation_by_key;
   const std::filesystem::path manifest = terrain_manifest_path(tile_dir);
   if (std::filesystem::exists(manifest)) {
     for (const TerrainManifestEntry &entry : read_terrain_manifest(manifest)) {
       const TileKey key = {entry.row, entry.column};
-      if (!maximum_elevation_by_key.emplace(key, entry.maximum_elevation).second) {
+      if (!maximum_elevation_by_key.emplace(key, entry).second) {
         throw std::runtime_error("Terrain manifest contains duplicate tile keys");
       }
     }
@@ -215,9 +215,12 @@ TerrainCatalogue TerrainCatalogue::discover(
           {
               key,
               entry.path(),
-              maximum == maximum_elevation_by_key.end() ? std::nullopt
-                                                        : std::optional<float>(maximum->second),
+              maximum == maximum_elevation_by_key.end()
+                  ? std::nullopt
+                  : std::optional<float>(maximum->second.maximum_elevation),
               1U,
+              maximum == maximum_elevation_by_key.end() ? std::nullopt
+                                                        : maximum->second.minimum_elevation,
           }
       );
     } catch (const std::invalid_argument &) {

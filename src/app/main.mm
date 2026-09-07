@@ -68,11 +68,14 @@ constexpr float kDefaultDiffusivity = 1.0F;
 constexpr double kFallbackEyeHeight = 2.0;
 
 struct ViewerSettings {
-  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0";
+  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
   float lod_scale = 0.0F;
+  Raytracer raytracer = Raytracer::MetalBvh;
+  uint32_t bvh_block_cells = 4U;
+  uint64_t bvh_cache_size_bytes = 512ULL * kBytesPerMiB;
   bool discard_quantized = false;
   bool bilinear_collisions = false;
   bool c1_normals = false;
@@ -260,6 +263,9 @@ void print_usage(const char *program) {
       "interactive collision inspection.\n"
       "\n"
       "Input and camera options:\n"
+      "  --raytracer MODE     metal-bvh (default) or software\n"
+      "  --bvh-block-cells N  cells per BVH block axis (default: 4)\n"
+      "  --bvh-cache-mib N    BVH cache and build budget (default: 512)\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
@@ -271,8 +277,8 @@ void print_usage(const char *program) {
       "  --easting M           fixed observer easting (default: 2623452.4)\n"
       "  --northing M          fixed observer northing (default: 1100502.2)\n"
       "  --elevation M         fixed observer elevation (default: 3415)\n"
-      "  --image-width N       internal render width (default: 960)\n"
-      "  --image-height N      internal render height (default: 540)\n"
+      "  --image-width N       internal render width (default: 1600)\n"
+      "  --image-height N      internal render height (default: 900)\n"
       "  --vertical-fov D      vertical camera field of view in degrees (default: 70)\n"
       "  --heading D           initial heading clockwise from north (default: 0)\n"
       "  --pitch D             initial pitch above the horizon (default: 0)\n"
@@ -305,6 +311,15 @@ void print_usage(const char *program) {
     const std::string_view value = arguments::option_value(argc, argv, index, option);
     if (option == "--tile-dir") {
       settings.tile_dir = value;
+    } else if (option == "--raytracer") {
+      settings.raytracer = arguments::parse_raytracer(value);
+    } else if (option == "--bvh-block-cells") {
+      settings.bvh_block_cells = arguments::parse_uint32(value, option, false);
+    } else if (option == "--bvh-cache-mib") {
+      const uint64_t size = arguments::parse_uint64(value, option);
+      if (size == 0U || size > std::numeric_limits<uint64_t>::max() / kBytesPerMiB)
+        throw std::out_of_range("BVH cache is outside the supported byte range");
+      settings.bvh_cache_size_bytes = size * kBytesPerMiB;
     } else if (option == "--tile-cache-mib") {
       const uint64_t size = arguments::parse_uint64(value, option);
       if (size == 0U || size > std::numeric_limits<uint64_t>::max() / kBytesPerMiB) {
@@ -666,6 +681,9 @@ public:
               c1Normals,
               allowFallback,
               settings_.lod_scale,
+              settings_.raytracer,
+              settings_.bvh_block_cells,
+              settings_.bvh_cache_size_bytes,
           };
         };
     const ObserverLocation requestedObserver = settings_.observer;
@@ -747,6 +765,7 @@ public:
     current_vertical_field_of_view_ = settings_.vertical_field_of_view;
     requested_observer_ = settings_.observer;
     requested_lod_scale_ = settings_.lod_scale;
+    requested_raytracer_ = settings_.raytracer;
     requested_bilinear_collisions_ = settings_.bilinear_collisions;
     requested_c1_normals_ = settings_.c1_normals;
     presented_observer_ = settings_.observer;
@@ -780,6 +799,23 @@ public:
       presentation_pending_ = true;
     }
     changed_.notify_one();
+  }
+
+  /// Switch primary tracing on the render worker, coalescing rapid selection changes.
+  void request_raytracer(Raytracer raytracer) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requested_raytracer_ = raytracer;
+      requested_revision_++;
+      trace_pending_ = true;
+      presentation_pending_ = true;
+    }
+    changed_.notify_one();
+  }
+
+  [[nodiscard]] Raytracer requested_raytracer() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return requested_raytracer_;
   }
 
   /// Re-present the completed trace with new appearance settings.
@@ -1102,6 +1138,7 @@ private:
       bool collision_settings_requested = false;
       bool bilinear_collisions = false;
       bool c1_normals = false;
+      Raytracer raytracer = Raytracer::Software;
       float lod_scale = 0.0F;
       std::optional<InspectionPixel> inspection_pixel;
       uint64_t inspection_token = 0U;
@@ -1150,6 +1187,7 @@ private:
         collision_settings_requested = collision_settings_pending_;
         bilinear_collisions = requested_bilinear_collisions_;
         c1_normals = requested_c1_normals_;
+        raytracer = requested_raytracer_;
         target_requested = target_pending_ || trace_pending_ || presentation_pending_;
         target = requested_target_;
         target_token = requested_target_token_;
@@ -1200,6 +1238,7 @@ private:
           }
           if (trace_requested) {
             RayField field = make_view(image, orientation, vertical_field_of_view);
+            trace_->set_raytracer(raytracer);
             if (lod_scale_requested) {
               trace_->set_lod_scale(lod_scale);
             }
@@ -1220,6 +1259,9 @@ private:
                     c1_normals,
                     false,
                     lod_scale,
+                    raytracer,
+                    settings_.bvh_block_cells,
+                    settings_.bvh_cache_size_bytes,
                 };
                 auto replacement = std::make_unique<TerrainTraceSession>(
                     config,
@@ -1328,6 +1370,8 @@ private:
           }
 
           std::lock_guard<std::mutex> lock(mutex_);
+          if (trace_requested)
+            error_.clear();
           if (presentation_requested) {
             presented_texture_ = presentation_->texture();
             presented_visibility_points_ = current_visibility_points_;
@@ -1374,7 +1418,6 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = exception.what();
         printf("ERROR: %s\n", error_.c_str());
-        return;
       }
     }
   }
@@ -1431,6 +1474,7 @@ private:
   double observer_ground_clearance_ = 0.0;
   double frame_ms_ = 0.0;
   float requested_lod_scale_ = 0.0F;
+  Raytracer requested_raytracer_ = Raytracer::MetalBvh;
   bool requested_bilinear_collisions_ = false;
   bool requested_c1_normals_ = false;
   std::string error_;
@@ -1819,6 +1863,7 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   std::optional<panorama::app::PointInspection> _lockedPoint;
   std::optional<panorama::app::PointInspection> _mapHoverPoint;
   NSPopUpButton *_colourSourceControl;
+  NSPopUpButton *_raytracerControl;
   NSPopUpButton *_colourmapControl;
   NSPopUpButton *_colourScaleControl;
   NSTextField *_minimumControl;
@@ -1956,6 +2001,7 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 - (instancetype)initWithRenderer:(panorama::app::ViewerRenderer *)renderer
                           window:(NSWindow *)window;
 - (void)rotateHeading:(double)headingDelta pitch:(double)pitchDelta;
+- (void)selectRaytracer:(NSMenuItem *)sender;
 - (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (void)panForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
 - (void)mouseTurnForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta;
@@ -3356,6 +3402,24 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self updateMiniMapTelemetry];
 }
 
+- (void)selectRaytracer:(NSMenuItem *)sender {
+  [_raytracerControl selectItemWithTag:sender.tag];
+  _renderer->request_raytracer(static_cast<panorama::Raytracer>(sender.tag));
+}
+
+- (void)raytracerChanged:(NSPopUpButton *)sender {
+  [self selectRaytracer:sender.selectedItem];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+  if (item.action == @selector(selectRaytracer:)) {
+    item.state = static_cast<panorama::Raytracer>(item.tag) == _renderer->requested_raytracer()
+                     ? NSControlStateValueOn
+                     : NSControlStateValueOff;
+  }
+  return YES;
+}
+
 - (void)rotateForCurrentZoomHeading:(double)headingDelta pitch:(double)pitchDelta {
   // Mouse and keyboard deltas define their desired feel at the default FOV.
   // Scaling by the current angular extent preserves that behaviour while
@@ -4221,6 +4285,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _invertMousePanningControl.target = self;
   _invertMousePanningControl.action = @selector(invertMousePanningChanged:);
 
+  _raytracerControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+  for (const auto backend : {panorama::Raytracer::Software, panorama::Raytracer::MetalBvh}) {
+    [_raytracerControl
+        addItemWithTitle:backend == panorama::Raytracer::MetalBvh ? @"BVH" : @"Mipmap"];
+    _raytracerControl.lastItem.tag = static_cast<NSInteger>(backend);
+  }
+  [_raytracerControl selectItemWithTag:static_cast<NSInteger>(_renderer->requested_raytracer())];
+  _raytracerControl.target = self;
+  _raytracerControl.action = @selector(raytracerChanged:);
+  _raytracerControl.toolTip = @"Switch the terrain raytracing method and redraw the current view";
+
   _colourSourceControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   [_colourSourceControl addItemsWithTitles:@[
     @"None (white)",
@@ -4647,6 +4722,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   InspectorSectionView *terrainSection =
       [[InspectorSectionView alloc] initWithTitle:@"Terrain"
                                          controls:@[
+                                           make_row(@"Raytracer", _raytracerControl),
                                            make_row(@"Colour by", _colourSourceControl),
                                            colourmapRow,
                                            colourScaleRow,
@@ -5931,8 +6007,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }
 
   if (!frame.error.empty()) {
+    _window.titleVisibility = NSWindowTitleVisible;
     _window.title = [NSString stringWithFormat:@"panorama-app — error: %s", frame.error.c_str()];
   } else if (frame.revision != 0U && frame.revision != _displayedRevision) {
+    _window.titleVisibility = NSWindowTitleHidden;
     _displayedRevision = frame.revision;
     const bool observerPositionMoved = frame.observer.easting != _observer.easting ||
                                        frame.observer.northing != _observer.northing;
@@ -6178,6 +6256,22 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
                                                       action:@selector(terminate:)
                                                keyEquivalent:@"q"]];
   applicationItem.submenu = applicationMenu;
+
+  NSMenuItem *raytracerItem = [[NSMenuItem alloc] initWithTitle:@"Raytracer"
+                                                         action:nil
+                                                  keyEquivalent:@""];
+  NSMenu *raytracerMenu = [[NSMenu alloc] initWithTitle:@"Raytracer"];
+  for (const auto backend : {panorama::Raytracer::MetalBvh, panorama::Raytracer::Software}) {
+    NSMenuItem *item = [[NSMenuItem alloc]
+        initWithTitle:backend == panorama::Raytracer::MetalBvh ? @"BVH" : @"Mipmap"
+               action:@selector(selectRaytracer:)
+        keyEquivalent:@""];
+    item.tag = static_cast<NSInteger>(backend);
+    item.target = _controller;
+    [raytracerMenu addItem:item];
+  }
+  raytracerItem.submenu = raytracerMenu;
+  [mainMenu addItem:raytracerItem];
 
   NSApp.mainMenu = mainMenu;
 
