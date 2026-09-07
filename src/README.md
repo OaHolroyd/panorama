@@ -100,25 +100,46 @@ indirect intersection-table resources are declared on every trace encoder.
 Submissions finish synchronously before parameters, outputs, or cache entries may
 change. A small catalogue BVH contains one conservative manifest box per tile.
 Version 2 manifests carry minima and maxima over all LODs; missing bounds use
-conservative finite columns. Candidate rays wait in source buckets. Processing
-outward Manhattan grid shells gathers all incoming rays before loading a source,
-so even a one-tile cache does not repeatedly build that source within a frame.
+conservative finite columns.
+
+After terrain has been cached, a persistent instance hierarchy references all
+resident tiles at their currently selected LODs. One compute dispatch traces
+the entire resident scene and queries the catalogue for uncached candidates
+before accepting a hit (or sky). A potentially closer uncached tile defers that
+ray to streaming; completed resident rays keep their outputs. A GPU counter
+lets a fully resolved frame return after one submission, without scanning or
+grouping ray continuations on the CPU. The scene is reused across heading,
+pitch, zoom, resolution, height-only and collision/normal option changes.
+
+Cold and unresolved rays use the bounded streaming path. Candidate rays wait
+in source buckets. Processing outward Manhattan grid shells gathers all
+incoming rays before loading a source, so even a one-tile cache does not
+repeatedly build that source within a frame. Cache insertions/evictions and
+observer XY/LOD changes invalidate the resident scene. All scene references
+are released before detailed tile eviction; the next trace lazily rebuilds
+the hierarchy from the current cache.
 
 Detailed tile bounds enclose `h(u,v) - k*(u*u+v*v)` around the tile centre.
 For centre offset `a = tile_centre - observer`, each Metal instance maps
 `(u,v,z)` to `(u+a.x, v+a.y, z-2*k*dot(a,(u,v))-k*dot(a,a))`.
 The callback tests the local AABB but uses the original world ray in the shared
 collision solver, preserving its horizontal parameter and normal convention.
-Movement rebuilds only small catalogue and batch instance hierarchies. Cached
+XY movement rebuilds only small catalogue and scene/batch instance hierarchies. Cached
 tile BVHs are keyed by source and LOD and survive observer changes.
 
 Admission reserves terrain buffers, original/compacted acceleration structures,
 and build scratch before loading. LRU entries are evicted only between completed
 submissions. The independent `bvh_cache_size_bytes` budget excludes ray-sized
-work/output buffers and the small upper hierarchies. A cache smaller than one
+work/output buffers and the small upper hierarchies. Resident-scene hierarchy,
+instance/resource metadata and source residency flags are reported separately
+as `scene_bytes`; the hierarchy's instance count is bounded by cached tiles.
+A cache smaller than one
 tile's peak build requirement is rejected with the required byte count.
 Timing separates GPU traversal, tile loading/building, and instance setup under
 the inclusive streaming trace, so cold construction cannot masquerade as tracing.
+Per-frame diagnostics also report scene builds, scene passes and fallback-ray
+counts. The existing cache-hit counter counts streaming acquisitions; a warm
+scene can resolve all rays without any such acquisitions.
 The software shadow frontier remains available and consumes hardware primary
 outputs through the unchanged session interface.
 

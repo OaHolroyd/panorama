@@ -562,7 +562,8 @@ void TerrainTraceSession::print_trace_statistics() const {
     std::printf(
         "; tiles built/hit/evicted %llu/%llu/%llu, catalogue/instance builds %llu/%llu, "
         "BVH submissions %llu, GPU selection/detail/build %.3f/%.3f/%.3f ms, "
-        "CPU grouping %.3f ms, resident %.1f/%.1f MiB",
+        "CPU grouping %.3f ms, resident %.1f/%.1f MiB, "
+        "scene builds/passes/fallback rays %llu/%llu/%llu (%.3f MiB)",
         static_cast<unsigned long long>(b.builds - a.builds),
         static_cast<unsigned long long>(b.cache_hits - a.cache_hits),
         static_cast<unsigned long long>(b.evictions - a.evictions),
@@ -574,7 +575,11 @@ void TerrainTraceSession::print_trace_statistics() const {
         b.build_gpu_ms - a.build_gpu_ms,
         b.grouping_cpu_ms - a.grouping_cpu_ms,
         double(b.resident_bytes) / 1048576.0,
-        double(b.budget_bytes) / 1048576.0
+        double(b.budget_bytes) / 1048576.0,
+        static_cast<unsigned long long>(b.scene_builds - a.scene_builds),
+        static_cast<unsigned long long>(b.scene_passes - a.scene_passes),
+        static_cast<unsigned long long>(b.scene_fallback_rays - a.scene_fallback_rays),
+        double(b.scene_bytes) / 1048576.0
     );
   }
   std::putchar('\n');

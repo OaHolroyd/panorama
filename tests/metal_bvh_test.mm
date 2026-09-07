@@ -304,11 +304,31 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
   TerrainTraceSession hardware(config, field, outputs);
   std::printf("Fixture: retain=%d spacing=%g block=%u\n", retain, spacing, block);
   compare(software, hardware, field, spacing > 10 ? 0.25F : 0.01F);
+  // The first repeat assembles the resident scene. Further repeats must use
+  // that hierarchy in one dispatch without CPU grouping or instance rebuilds.
+  compare(software, hardware, field, spacing > 10 ? 0.25F : 0.01F);
+  const auto warm = hardware.bvh_statistics();
+  compare(software, hardware, field, spacing > 10 ? 0.25F : 0.01F);
+  const auto repeated = hardware.bvh_statistics();
+  require(
+      repeated.scene_passes == warm.scene_passes + 1U &&
+          repeated.submissions == warm.submissions + 1U &&
+          repeated.instance_builds == warm.instance_builds && repeated.builds == warm.builds &&
+          repeated.scene_fallback_rays == warm.scene_fallback_rays &&
+          repeated.grouping_cpu_ms == warm.grouping_cpu_ms,
+      "Warm scene did not reuse one GPU traversal"
+  );
   // Same session, different camera and dimensions: residency must be declared again.
   auto next = make_angular_ray_field({97, 33}, {0.35, 6.6, -1.25, 0.05});
   software.set_collision_options(false, true);
   hardware.set_collision_options(false, true);
   compare(software, hardware, next, spacing > 10 ? 0.25F : 0.01F);
+  // A changed view may need new tiles and temporary streaming batches, but
+  // it must begin by reusing the existing resident scene.
+  require(
+      hardware.bvh_statistics().scene_builds == repeated.scene_builds,
+      "Camera, resolution or normal changes rebuilt the resident scene"
+  );
   const uint64_t builds_before_move = hardware.bvh_statistics().builds;
   ObserverLocation moved = config.observer;
   moved.easting -= 8 * spacing;
@@ -359,6 +379,8 @@ void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
     config.bilinear_collisions = bilinear;
     TerrainTraceSession trace(config, field, {false, false, false});
     trace.trace(field);
+    trace.trace(field);
+    const auto warm = trace.bvh_statistics();
     const auto *values = static_cast<const float *>(trace.distances().contents);
     for (size_t i = 0; i < field.rays.size(); ++i) {
       require(
@@ -370,6 +392,11 @@ void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
     observer.elevation += 40.0;
     require(trace.relocate_observer(observer), "Height-only relocation failed");
     trace.trace(field);
+    require(
+        trace.bvh_statistics().scene_builds == warm.scene_builds &&
+            trace.bvh_statistics().catalogue_builds == warm.catalogue_builds,
+        "Height-only relocation rebuilt the scene"
+    );
   }
   config.bvh_block_cells = 0;
   bool rejected = false;
@@ -386,6 +413,40 @@ void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
     rejected = true;
   }
   require(rejected, "Unknown backend must be rejected");
+}
+
+void check_scene_misses(const std::filesystem::path &directory) {
+  RaytraceConfig
+      config{directory, {2600045.0, 1199945.0, 1120.0}, 480.0F, 0U, 16384U, 2U, true, true, false};
+  // A steep ray warms only nearby terrain. A wider view then contains both
+  // resolvable resident hits and rays that must load previously unseen tiles.
+  const auto narrow = make_angular_ray_field({1, 1}, {0.0, 0.01, -1.55, -1.54});
+  const auto wide = make_angular_ray_field({129, 65}, {0.0, 6.3, -1.3, 0.1});
+  TerrainTraceSession software(config, narrow, {true, true, true});
+  config.raytracer = Raytracer::MetalBvh;
+  TerrainTraceSession hardware(config, narrow, {true, true, true});
+  compare(software, hardware, narrow, 0.01F);
+  const auto before = hardware.bvh_statistics();
+  compare(software, hardware, wide, 0.01F);
+  const auto after = hardware.bvh_statistics();
+  require(
+      after.scene_passes == before.scene_passes + 1U &&
+          after.scene_fallback_rays > before.scene_fallback_rays &&
+          after.scene_fallback_rays - before.scene_fallback_rays < wide.rays.size() &&
+          after.builds > before.builds,
+      "Partial scene did not stream only unresolved rays"
+  );
+  compare(software, hardware, wide, 0.01F);
+  const auto rebuilt = hardware.bvh_statistics();
+  require(
+      rebuilt.scene_builds > after.scene_builds,
+      "Newly resident tiles did not update the scene"
+  );
+  compare(software, hardware, wide, 0.01F);
+  require(
+      hardware.bvh_statistics().submissions == rebuilt.submissions + 1U,
+      "Updated scene did not reuse one GPU traversal"
+  );
 }
 
 void check_streaming(const std::filesystem::path &directory) {
@@ -493,6 +554,9 @@ int main(int argc, const char *argv[]) {
         if (streaming) {
           check_streaming(root / "quantized");
         } else if (edge_cases) {
+          @autoreleasepool {
+            check_scene_misses(root / "quantized");
+          }
           @autoreleasepool {
             check_limits_and_optional_outputs(root / "quantized");
           }

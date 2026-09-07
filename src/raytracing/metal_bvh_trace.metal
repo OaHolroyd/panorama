@@ -299,7 +299,13 @@ BvhIntersection terrain_bvh_intersection(
   if (store_debugging_info)
     payload.steps++;
   const BvhChunk chunk = chunks[instance];
-  if (chunk.source != payload.source)
+  if (payload.source != 0xffffffffU && chunk.source != payload.source)
+    return {false, 0};
+  // The whole-scene path must preserve the streaming selector's half-open
+  // ownership when a ray lies exactly on a shared tile edge.
+  const float width = chunk.tile.cell_size * float(chunk.tile.cell_count);
+  if ((payload.world_direction.x == 0 && chunk.tile.x_min + width <= 0) ||
+      (payload.world_direction.y == 0 && chunk.tile.y_min + width <= 0))
     return {false, 0};
   const BvhBounds box = chunk.bounds[primitive];
   float near_t = min_distance, far_t = max_distance;
@@ -434,6 +440,7 @@ struct TileSelection {
   uint source;
   float exit;
   float3 world_direction;
+  bool skip_resident;
 };
 
 /// Select the next tile in XY order among the conservative 3D candidates.
@@ -445,8 +452,11 @@ BvhIntersection terrain_tile_intersection(
     float max_distance [[max_distance]],
     uint primitive [[primitive_id]],
     ray_data TileSelection &payload [[payload]],
-    device const BvhTile *tiles [[buffer(0)]]
+    device const BvhTile *tiles [[buffer(0)]],
+    device const uint *resident [[buffer(1)]]
 ) {
+  if (payload.skip_resident && resident[primitive] != 0U)
+    return {false, 0};
   const BvhTile tile = tiles[primitive];
   const float width = tile.cell_size * float(tile.cell_count);
   float entry = 0.0F, exit = max_distance;
@@ -481,7 +491,7 @@ kernel void select_terrain_tiles(
   r.max_distance = params.trace.max_distance;
   intersector<> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
-  TileSelection payload = {0xffffffffU, 0, r.direction};
+  TileSelection payload = {0xffffffffU, 0, r.direction, false};
   const auto hit = tracer.intersect(r, catalogue, functions, payload);
   if (hit.type == intersection_type::none) {
     states[index].done = 1U;
@@ -496,5 +506,76 @@ kernel void select_terrain_tiles(
     bvh_slab(0, r.direction.x, tile.x_min, tile.x_min + width, entry, exit);
     bvh_slab(0, r.direction.y, tile.y_min, tile.y_min + width, entry, exit);
     states[index].exit = exit;
+  }
+}
+
+// Traverse all cached tiles in one GPU dispatch. A second, conservative
+// catalogue query proves no missing tile can occlude the tentative hit. Rays
+// without that proof remain at progress zero for the bounded streaming path.
+kernel void trace_terrain_scene(
+    instance_acceleration_structure terrain [[buffer(0)]],
+    intersection_function_table<instancing> functions [[buffer(1)]],
+    device const RayDirection *rays [[buffer(2)]],
+    device float *distances [[buffer(3)]],
+    device float *elevations [[buffer(4)]],
+    device uint *gradients [[buffer(5)]],
+    device float *steps [[buffer(6)]],
+    device float *evaluations [[buffer(7)]],
+    constant BvhParameters &params [[buffer(8)]],
+    device const BvhTile *tiles [[buffer(9)]],
+    device const CatalogueTileHashEntry *catalogue [[buffer(10)]],
+    device BvhRayState *states [[buffer(11)]],
+    primitive_acceleration_structure missing_tiles [[buffer(13)]],
+    intersection_function_table<> missing_functions [[buffer(14)]],
+    device atomic_uint *missing_count [[buffer(15)]],
+    uint index [[thread_position_in_grid]]
+) {
+  if (index >= params.trace.ray_count)
+    return;
+  const RayDirection direction = rays[index];
+  ray r;
+  r.origin = float3(0.0F, 0.0F, params.trace.observer_elevation);
+  r.direction = float3(direction.x, direction.y, direction.slope);
+  r.min_distance = 0.0F;
+  r.max_distance = params.trace.max_distance;
+  intersector<instancing> tracer;
+  tracer.assume_geometry_type(geometry_type::bounding_box);
+  BvhPayload payload = {INFINITY, 0U, 0U, 0U, 0xffffffffU, r.direction};
+  const auto result = tracer.intersect(r, terrain, functions, payload);
+  bool hit = result.type != intersection_type::none;
+  if (hit) {
+    r.max_distance =
+        min(params.trace.max_distance,
+            result.distance + 8.0F * FLT_EPSILON * max(1.0F, result.distance));
+  }
+  intersector<> missing_tracer;
+  missing_tracer.assume_geometry_type(geometry_type::bounding_box);
+  missing_tracer.accept_any_intersection(true);
+  TileSelection missing_payload = {0xffffffffU, 0, r.direction, true};
+  const auto missing =
+      missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
+  if (missing.type != intersection_type::none) {
+    atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
+    return;
+  }
+  if (hit) {
+    const float limit = bvh_coverage_limit(direction, params, tiles, catalogue, result.distance);
+    hit = result.distance <= limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
+  }
+  states[index].done = 1U;
+  distances[index] = hit ? result.distance : 0.0F;
+  if (store_collision_elevations)
+    elevations[index] = hit ? curved_ray_elevation(
+                                  params.trace.observer_elevation,
+                                  direction.slope,
+                                  params.trace.curvature_coefficient,
+                                  result.distance
+                              )
+                            : 0.0F;
+  if (compute_surface_gradients)
+    gradients[index] = hit ? payload.gradients : 0U;
+  if (store_debugging_info) {
+    steps[index] = float(payload.steps);
+    evaluations[index] = float(payload.evaluations);
   }
 }

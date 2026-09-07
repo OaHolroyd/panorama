@@ -86,6 +86,11 @@ primitive_descriptor(uint32_t count, id<MTLBuffer> bounds) {
 struct Pipeline {
   id<MTLComputePipelineState> state;
   id<MTLIntersectionFunctionTable> table;
+  id<MTLIntersectionFunctionTable> missing_table;
+};
+struct Hierarchy {
+  id<MTLBuffer> instances, chunks;
+  id<MTLAccelerationStructure> acceleration;
 };
 } // namespace
 
@@ -99,6 +104,7 @@ struct MetalBvhTrace::State {
   BvhParameters current = {};
   id<MTLComputePipelineState> bounds_pipeline;
   std::array<Pipeline, 4> pipelines = {};
+  std::array<Pipeline, 4> scene_pipelines = {};
   Pipeline selector;
   id<MTLBuffer> parameters, dummy, tiles, catalogue_bounds, rays, work;
   id<MTLAccelerationStructure> catalogue;
@@ -116,6 +122,18 @@ struct MetalBvhTrace::State {
     uint64_t bytes = 0, used = 0;
   };
   std::map<TileVariant, std::unique_ptr<Entry>> cache;
+  Hierarchy scene;
+  std::vector<Entry *> scene_entries;
+  id<MTLBuffer> scene_resident, scene_missing_count;
+
+  // Release indirect references before eviction, and before observer/LOD
+  // changes invalidate instance transforms or the selected tile variants.
+  void invalidate_scene() {
+    scene = {};
+    scene_entries.clear();
+    scene_resident = nil;
+    stats.scene_bytes = 0U;
+  }
 
   State(
       GpuRaytraceResources &resources,
@@ -138,13 +156,15 @@ struct MetalBvhTrace::State {
       throw std::runtime_error("Could not create BVH bounds pipeline: " + error_text(error));
     parameters = buffer(gpu.device(), 1, sizeof(BvhParameters), @"parameters");
     dummy = buffer(gpu.device(), 1, sizeof(uint32_t), @"unused output");
+    scene_missing_count = buffer(gpu.device(), 1, sizeof(uint32_t), @"scene missing ray count");
     selector = make_pipeline(@"select_terrain_tiles", @"terrain_tile_intersection", nil);
   }
 
   Pipeline make_pipeline(
       NSString *kernel_name,
       NSString *intersection_name,
-      MTLFunctionConstantValues *constants
+      MTLFunctionConstantValues *constants,
+      bool scene_mode = false
   ) {
     NSError *error = nil;
     id<MTLFunction> kernel = constants == nil ? [gpu.library() newFunctionWithName:kernel_name]
@@ -162,6 +182,13 @@ struct MetalBvhTrace::State {
     descriptor.computeFunction = kernel;
     descriptor.linkedFunctions = [[MTLLinkedFunctions alloc] init];
     descriptor.linkedFunctions.functions = @[ intersection ];
+    id<MTLFunction> missing = nil;
+    if (scene_mode) {
+      missing = [gpu.library() newFunctionWithName:@"terrain_tile_intersection"];
+      if (missing == nil)
+        throw std::runtime_error("Could not load scene missing-tile intersection function");
+      descriptor.linkedFunctions.functions = @[ intersection, missing ];
+    }
     Pipeline result;
     result.state = [gpu.device() newComputePipelineStateWithDescriptor:descriptor
                                                                options:MTLPipelineOptionNone
@@ -176,11 +203,18 @@ struct MetalBvhTrace::State {
     if (result.table == nil || handle == nil)
       throw std::runtime_error("Could not create BVH intersection table");
     [result.table setFunction:handle atIndex:0];
+    if (scene_mode) {
+      result.missing_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
+      auto missing_handle = [result.state functionHandleWithFunction:missing];
+      if (result.missing_table == nil || missing_handle == nil)
+        throw std::runtime_error("Could not create scene missing-tile intersection table");
+      [result.missing_table setFunction:missing_handle atIndex:0];
+    }
     return result;
   }
-  Pipeline &pipeline() {
+  Pipeline &pipeline(bool scene_mode = false) {
     const uint32_t index = (gpu.bilinear_collisions() ? 1U : 0U) | (gpu.c1_normals() ? 2U : 0U);
-    auto &result = pipelines[index];
+    auto &result = scene_mode ? scene_pipelines[index] : pipelines[index];
     if (result.state == nil) {
       const bool bilinear = gpu.bilinear_collisions(), smooth = gpu.c1_normals();
       auto *constants = [[MTLFunctionConstantValues alloc] init];
@@ -189,7 +223,12 @@ struct MetalBvhTrace::State {
       [constants setConstantValue:&outputs.debugging_info type:MTLDataTypeBool atIndex:2];
       [constants setConstantValue:&bilinear type:MTLDataTypeBool atIndex:3];
       [constants setConstantValue:&smooth type:MTLDataTypeBool atIndex:4];
-      result = make_pipeline(@"trace_terrain_bvh", @"terrain_bvh_intersection", constants);
+      result = make_pipeline(
+          scene_mode ? @"trace_terrain_scene" : @"trace_terrain_bvh",
+          @"terrain_bvh_intersection",
+          constants,
+          scene_mode
+      );
     }
     return result;
   }
@@ -244,6 +283,7 @@ struct MetalBvhTrace::State {
   }
 
   void update_catalogue() {
+    invalidate_scene();
     const auto &grid = manager->catalogue().grid();
     const auto &sources = manager->sources();
     const auto &geometry = manager->origin_geometry();
@@ -322,6 +362,7 @@ struct MetalBvhTrace::State {
       if (victim == cache.end())
         return false;
       stats.resident_bytes -= victim->second->bytes;
+      invalidate_scene();
       cache.erase(victim);
       ++stats.evictions;
     }
@@ -420,16 +461,13 @@ struct MetalBvhTrace::State {
     stats.resident_bytes += entry->bytes;
     ++stats.builds;
     Entry *result = entry.get();
+    invalidate_scene();
     cache.emplace(key, std::move(entry));
     timer.add_work("BVH tile loading/building", std::chrono::steady_clock::now() - started);
     return result;
   }
 
-  void trace_batch(
-      const std::vector<Entry *> &batch,
-      const std::vector<uint32_t> &indices,
-      Timer &timer
-  ) {
+  Hierarchy make_hierarchy(const std::vector<Entry *> &batch, Timer &timer) {
     const auto started = std::chrono::steady_clock::now();
     auto instances = buffer(
         gpu.device(),
@@ -477,18 +515,25 @@ struct MetalBvhTrace::State {
     auto acceleration = build(descriptor, false);
     ++stats.instance_builds;
     timer.add_work("BVH instance setup", std::chrono::steady_clock::now() - started);
-    std::memcpy(work.contents, indices.data(), indices.size() * sizeof(uint32_t));
-    current.work_count = checked_count(indices.size());
+    return {instances, chunks, acceleration};
+  }
+
+  void trace_hierarchy(
+      const std::vector<Entry *> &batch,
+      const Hierarchy &hierarchy,
+      bool scene_mode,
+      Timer &timer
+  ) {
     std::memcpy(parameters.contents, &current, sizeof(current));
-    auto &p = pipeline();
-    [p.table setBuffer:chunks offset:0 atIndex:0];
+    auto &p = pipeline(scene_mode);
+    [p.table setBuffer:hierarchy.chunks offset:0 atIndex:0];
     [p.table setBuffer:parameters offset:0 atIndex:1];
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command computeCommandEncoder];
     if (encoder == nil)
       throw std::runtime_error("Could not encode BVH trace");
     [encoder setComputePipelineState:p.state];
-    [encoder setAccelerationStructure:acceleration atBufferIndex:0];
+    [encoder setAccelerationStructure:hierarchy.acceleration atBufferIndex:0];
     [encoder setIntersectionFunctionTable:p.table atBufferIndex:1];
     [encoder setBuffer:gpu.ray_directions() offset:0 atIndex:2];
     [encoder setBuffer:gpu.distances() offset:0 atIndex:3];
@@ -503,9 +548,19 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:gpu.catalogue_hash() offset:0 atIndex:10];
     [encoder setBuffer:rays offset:0 atIndex:11];
     [encoder setBuffer:work offset:0 atIndex:12];
-    [encoder useResource:chunks usage:MTLResourceUsageRead];
+    if (scene_mode) {
+      [p.missing_table setBuffer:tiles offset:0 atIndex:0];
+      [p.missing_table setBuffer:scene_resident offset:0 atIndex:1];
+      [encoder setAccelerationStructure:catalogue atBufferIndex:13];
+      [encoder setIntersectionFunctionTable:p.missing_table atBufferIndex:14];
+      [encoder setBuffer:scene_missing_count offset:0 atIndex:15];
+      [encoder useResource:catalogue usage:MTLResourceUsageRead];
+      [encoder useResource:scene_resident usage:MTLResourceUsageRead];
+      [encoder useResource:p.missing_table usage:MTLResourceUsageRead];
+    }
+    [encoder useResource:hierarchy.chunks usage:MTLResourceUsageRead];
     [encoder useResource:parameters usage:MTLResourceUsageRead];
-    [encoder useResource:acceleration usage:MTLResourceUsageRead];
+    [encoder useResource:hierarchy.acceleration usage:MTLResourceUsageRead];
     [encoder useResource:p.table usage:MTLResourceUsageRead];
     for (Entry *entry : batch) {
       [encoder useResource:entry->vertices usage:MTLResourceUsageRead];
@@ -519,14 +574,64 @@ struct MetalBvhTrace::State {
     stats.trace_gpu_ms += gpu_ms;
     ++stats.trace_passes;
     ++stats.submissions;
+    if (scene_mode)
+      ++stats.scene_passes;
     timer.add_work("GPU BVH detail traversal", gpu_ms);
     // Tables otherwise retain their previous argument buffers between batches.
     [p.table setBuffer:nil offset:0 atIndex:0];
+    [p.missing_table setBuffer:nil offset:0 atIndex:0];
+    [p.missing_table setBuffer:nil offset:0 atIndex:1];
+  }
+
+  void trace_batch(
+      const std::vector<Entry *> &batch,
+      const std::vector<uint32_t> &indices,
+      Timer &timer
+  ) {
+    const auto hierarchy = make_hierarchy(batch, timer);
+    std::memcpy(work.contents, indices.data(), indices.size() * sizeof(uint32_t));
+    current.work_count = checked_count(indices.size());
+    trace_hierarchy(batch, hierarchy, false, timer);
+  }
+
+  // A cached scene can resolve rays across any number of resident tiles. The
+  // GPU also checks the catalogue for missing candidates before accepting the
+  // result, so unseen terrain cannot be mistaken for empty space.
+  bool trace_scene(Timer &timer) {
+    if (scene.acceleration == nil) {
+      std::vector<Entry *> entries;
+      for (auto &[key, entry] : cache) {
+        if (key.lod == selected_lods[key.source_index])
+          entries.push_back(entry.get());
+      }
+      if (entries.empty())
+        return false;
+      auto hierarchy = make_hierarchy(entries, timer);
+      auto residency =
+          buffer(gpu.device(), current.source_count, sizeof(uint32_t), @"scene residency");
+      std::memset(residency.contents, 0, residency.length);
+      auto *resident = static_cast<uint32_t *>(residency.contents);
+      for (Entry *entry : entries)
+        resident[entry->key.source_index] = 1U;
+      scene = std::move(hierarchy);
+      scene_entries = std::move(entries);
+      scene_resident = residency;
+      ++stats.scene_builds;
+      stats.scene_bytes = scene.instances.length + scene.chunks.length + scene.acceleration.size +
+                          scene_resident.length;
+    }
+    *static_cast<uint32_t *>(scene_missing_count.contents) = 0U;
+    current.work_count = current.trace.ray_count;
+    trace_hierarchy(scene_entries, scene, true, timer);
+    const uint32_t missing = *static_cast<const uint32_t *>(scene_missing_count.contents);
+    stats.scene_fallback_rays += missing;
+    return missing == 0U;
   }
 
   void select(Timer &timer) {
     std::memcpy(parameters.contents, &current, sizeof(current));
     [selector.table setBuffer:tiles offset:0 atIndex:0];
+    [selector.table setBuffer:dummy offset:0 atIndex:1];
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command computeCommandEncoder];
     if (encoder == nil)
@@ -583,6 +688,7 @@ void MetalBvhTrace::prepare(
   state.current.hash_capacity = state.gpu.catalogue_hash_capacity();
   @autoreleasepool {
     (void)state.pipeline();
+    (void)state.pipeline(true);
     if (rebuild) {
       const auto started = std::chrono::steady_clock::now();
       state.update_catalogue();
@@ -620,6 +726,10 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
         0,
         size_t(parameters.ray_count) * sizeof(float)
     );
+  }
+  @autoreleasepool {
+    if (state.trace_scene(timer))
+      return;
   }
   for (uint32_t round = 0; round <= state.current.source_count; ++round) {
     @autoreleasepool {

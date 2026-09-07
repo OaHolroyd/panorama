@@ -103,6 +103,13 @@ traversal is a sum of completed command-buffer durations, excluding construction
 CPU work and presentation. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
 for measurements, cache guidance and a repeatable camera benchmark.
 
+The BVH backend automatically reuses a resident scene hierarchy to trace across
+cached tiles in one GPU pass. Uncached candidates fall back to bounded streaming.
+For the default full-detail Swiss view, use `--bvh-cache-mib 2048` to keep its
+working set resident, or `--lod-scale 1` to fit coarser distant terrain within
+the default cache. Repeated views then avoid per-tile submissions and CPU ray
+grouping; cold views and cache misses still incur loading/building work.
+
 The viewer defaults to the `metal-bvh` terrain backend. In Viewer Settings →
 Terrain, the Raytracer selector switches between Mipmap and BVH and redraws the
 current view. The Raytracer menu provides the same choices. Mipmap uses the

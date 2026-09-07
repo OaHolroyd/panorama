@@ -20,6 +20,11 @@ struct MetalBvhStatistics {
   uint64_t selection_passes = 0U;
   uint64_t trace_passes = 0U;
   uint64_t submissions = 0U;
+  uint64_t scene_builds = 0U;
+  uint64_t scene_passes = 0U;
+  uint64_t scene_fallback_rays = 0U;
+  // Small scene metadata/TLAS overhead, separate from detailed tile storage.
+  uint64_t scene_bytes = 0U;
   double build_gpu_ms = 0.0;
   double selection_gpu_ms = 0.0;
   double trace_gpu_ms = 0.0;
