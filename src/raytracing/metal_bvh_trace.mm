@@ -1,5 +1,6 @@
 #include "metal_bvh_trace.h"
 #include "metal_bvh_types.metalh"
+#include "terrain_tile_bvh.h"
 #include "timer.h"
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <vector>
 
 namespace panorama {
+using namespace bvh_resources;
 namespace {
 static_assert(sizeof(BvhTile) == 48U);
 static_assert(sizeof(BvhBlock) == 20U);
@@ -23,42 +25,6 @@ static_assert(sizeof(BvhParameters) == 52U);
 static_assert(sizeof(BvhChunk) == 80U);
 static_assert(sizeof(BvhRayState) == 16U);
 
-std::string error_text(NSError *error) {
-  return error == nil ? "unknown Metal error" : error.localizedDescription.UTF8String;
-}
-uint32_t checked_count(uint64_t count) {
-  if (count > std::numeric_limits<uint32_t>::max())
-    throw std::overflow_error("Metal BVH count exceeds uint32");
-  return static_cast<uint32_t>(count);
-}
-id<MTLBuffer> buffer(
-    id<MTLDevice> device,
-    uint64_t count,
-    size_t stride,
-    NSString *label,
-    MTLResourceOptions options = MTLResourceStorageModeShared
-) {
-  if (stride == 0 || count > device.maxBufferLength / stride)
-    throw std::overflow_error(
-        "Metal BVH " + std::string(label.UTF8String) + " exceeds device buffer limit of " +
-        std::to_string(device.maxBufferLength) + " bytes"
-    );
-  id<MTLBuffer> result = [device newBufferWithLength:std::max<uint64_t>(count * stride, 4U)
-                                             options:options];
-  if (result == nil)
-    throw std::runtime_error("Could not allocate Metal BVH " + std::string(label.UTF8String));
-  result.label = label;
-  return result;
-}
-double complete(id<MTLCommandBuffer> command) {
-  if (command == nil)
-    throw std::runtime_error("Could not create BVH command buffer");
-  [command commit];
-  [command waitUntilCompleted];
-  if (command.status != MTLCommandBufferStatusCompleted)
-    throw std::runtime_error("Metal BVH command failed: " + error_text(command.error));
-  return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
-}
 void dispatch(
     id<MTLComputeCommandEncoder> encoder,
     id<MTLComputePipelineState> pipeline,
@@ -71,23 +37,7 @@ void dispatch(
                                 1
                             )];
 }
-MTLPrimitiveAccelerationStructureDescriptor *
-primitive_descriptor(uint32_t count, id<MTLBuffer> bounds) {
-  auto *geometry = [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
-  geometry.boundingBoxBuffer = bounds;
-  geometry.boundingBoxCount = count;
-  geometry.boundingBoxStride = sizeof(BvhBounds);
-  geometry.opaque = NO;
-  geometry.allowDuplicateIntersectionFunctionInvocation = NO;
-  auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
-  descriptor.geometryDescriptors = @[ geometry ];
-  return descriptor;
-}
-struct Pipeline {
-  id<MTLComputePipelineState> state;
-  id<MTLIntersectionFunctionTable> table;
-  id<MTLIntersectionFunctionTable> missing_table;
-};
+using Pipeline = BvhPipeline;
 struct Hierarchy {
   id<MTLBuffer> instances, chunks;
   id<MTLAccelerationStructure> acceleration;
@@ -105,10 +55,12 @@ struct MetalBvhTrace::State {
   id<MTLComputePipelineState> bounds_pipeline;
   std::array<Pipeline, 4> pipelines = {};
   std::array<Pipeline, 4> scene_pipelines = {};
+  std::array<Pipeline, 4> shadow_pipelines = {};
   Pipeline selector;
-  id<MTLBuffer> parameters, dummy, tiles, catalogue_bounds, rays, work;
+  id<MTLBuffer> parameters, dummy, tiles, rays, work;
   id<MTLAccelerationStructure> catalogue;
-  std::vector<BvhTile> tile_metadata;
+  std::span<const BvhTile> tile_metadata;
+  uint64_t catalogue_generation = 0;
   std::vector<double> tile_shells;
   std::vector<uint32_t> selected_lods;
   uint32_t ray_capacity = 0;
@@ -125,6 +77,8 @@ struct MetalBvhTrace::State {
   Hierarchy scene;
   std::vector<Entry *> scene_entries;
   id<MTLBuffer> scene_resident, scene_missing_count;
+  id<MTLBuffer> scene_shadows, shadow_missing_count;
+  float sun[4] = {};
 
   // Release indirect references before eviction, and before observer/LOD
   // changes invalidate instance transforms or the selected tile variants.
@@ -157,74 +111,32 @@ struct MetalBvhTrace::State {
     parameters = buffer(gpu.device(), 1, sizeof(BvhParameters), @"parameters");
     dummy = buffer(gpu.device(), 1, sizeof(uint32_t), @"unused output");
     scene_missing_count = buffer(gpu.device(), 1, sizeof(uint32_t), @"scene missing ray count");
-    selector = make_pipeline(@"select_terrain_tiles", @"terrain_tile_intersection", nil);
+    shadow_missing_count = buffer(gpu.device(), 1, sizeof(uint32_t), @"shadow missing ray count");
+    selector = make_bvh_pipeline(gpu, @"select_terrain_tiles", @"terrain_tile_intersection");
   }
 
-  Pipeline make_pipeline(
-      NSString *kernel_name,
-      NSString *intersection_name,
-      MTLFunctionConstantValues *constants,
-      bool scene_mode = false
-  ) {
-    NSError *error = nil;
-    id<MTLFunction> kernel = constants == nil ? [gpu.library() newFunctionWithName:kernel_name]
-                                              : [gpu.library() newFunctionWithName:kernel_name
-                                                                    constantValues:constants
-                                                                             error:&error];
-    id<MTLFunction> intersection = constants == nil
-                                       ? [gpu.library() newFunctionWithName:intersection_name]
-                                       : [gpu.library() newFunctionWithName:intersection_name
-                                                             constantValues:constants
-                                                                      error:&error];
-    if (kernel == nil || intersection == nil)
-      throw std::runtime_error("Could not specialize BVH shader: " + error_text(error));
-    auto *descriptor = [[MTLComputePipelineDescriptor alloc] init];
-    descriptor.computeFunction = kernel;
-    descriptor.linkedFunctions = [[MTLLinkedFunctions alloc] init];
-    descriptor.linkedFunctions.functions = @[ intersection ];
-    id<MTLFunction> missing = nil;
-    if (scene_mode) {
-      missing = [gpu.library() newFunctionWithName:@"terrain_tile_intersection"];
-      if (missing == nil)
-        throw std::runtime_error("Could not load scene missing-tile intersection function");
-      descriptor.linkedFunctions.functions = @[ intersection, missing ];
-    }
-    Pipeline result;
-    result.state = [gpu.device() newComputePipelineStateWithDescriptor:descriptor
-                                                               options:MTLPipelineOptionNone
-                                                            reflection:nil
-                                                                 error:&error];
-    if (result.state == nil)
-      throw std::runtime_error("Could not link BVH pipeline: " + error_text(error));
-    auto *table = [MTLIntersectionFunctionTableDescriptor intersectionFunctionTableDescriptor];
-    table.functionCount = 1;
-    result.table = [result.state newIntersectionFunctionTableWithDescriptor:table];
-    auto handle = [result.state functionHandleWithFunction:intersection];
-    if (result.table == nil || handle == nil)
-      throw std::runtime_error("Could not create BVH intersection table");
-    [result.table setFunction:handle atIndex:0];
-    if (scene_mode) {
-      result.missing_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
-      auto missing_handle = [result.state functionHandleWithFunction:missing];
-      if (result.missing_table == nil || missing_handle == nil)
-        throw std::runtime_error("Could not create scene missing-tile intersection table");
-      [result.missing_table setFunction:missing_handle atIndex:0];
-    }
-    return result;
-  }
-  Pipeline &pipeline(bool scene_mode = false) {
+  Pipeline &pipeline(uint32_t mode = 0U) {
+    const bool scene_mode = mode != 0U;
     const uint32_t index = (gpu.bilinear_collisions() ? 1U : 0U) | (gpu.c1_normals() ? 2U : 0U);
-    auto &result = scene_mode ? scene_pipelines[index] : pipelines[index];
+    auto &result = mode == 2U   ? shadow_pipelines[index]
+                   : scene_mode ? scene_pipelines[index]
+                                : pipelines[index];
     if (result.state == nil) {
       const bool bilinear = gpu.bilinear_collisions(), smooth = gpu.c1_normals();
       auto *constants = [[MTLFunctionConstantValues alloc] init];
-      [constants setConstantValue:&outputs.surface_gradients type:MTLDataTypeBool atIndex:0];
-      [constants setConstantValue:&outputs.elevations type:MTLDataTypeBool atIndex:1];
-      [constants setConstantValue:&outputs.debugging_info type:MTLDataTypeBool atIndex:2];
+      const bool gradients = mode != 2U && outputs.surface_gradients;
+      const bool elevations = mode != 2U && outputs.elevations;
+      const bool debugging = mode != 2U && outputs.debugging_info;
+      [constants setConstantValue:&gradients type:MTLDataTypeBool atIndex:0];
+      [constants setConstantValue:&elevations type:MTLDataTypeBool atIndex:1];
+      [constants setConstantValue:&debugging type:MTLDataTypeBool atIndex:2];
       [constants setConstantValue:&bilinear type:MTLDataTypeBool atIndex:3];
       [constants setConstantValue:&smooth type:MTLDataTypeBool atIndex:4];
-      result = make_pipeline(
-          scene_mode ? @"trace_terrain_scene" : @"trace_terrain_bvh",
+      result = make_bvh_pipeline(
+          gpu,
+          mode == 2U   ? @"trace_scene_shadows"
+          : scene_mode ? @"trace_terrain_scene"
+                       : @"trace_terrain_bvh",
           @"terrain_bvh_intersection",
           constants,
           scene_mode
@@ -284,65 +196,18 @@ struct MetalBvhTrace::State {
 
   void update_catalogue() {
     invalidate_scene();
-    const auto &grid = manager->catalogue().grid();
+    auto &shared = gpu.tile_bvh();
+    tiles = shared.tiles();
+    catalogue = shared.acceleration();
+    tile_metadata = shared.metadata();
+    catalogue_generation = shared.generation();
     const auto &sources = manager->sources();
-    const auto &geometry = manager->origin_geometry();
-    tile_metadata.resize(sources.size());
+    const auto origin = sources[manager->observer_source_index()].key;
     tile_shells.resize(sources.size());
-    const auto origin_key = sources[manager->observer_source_index()].key;
-    std::vector<BvhBounds> boxes(sources.size());
-    const double k = current.trace.curvature_coefficient;
-    for (size_t i = 0; i < sources.size(); ++i) {
-      const auto &source = sources[i];
-      tile_shells[i] = std::abs(double(source.key.row) - double(origin_key.row)) +
-                       std::abs(double(source.key.column) - double(origin_key.column));
-      const float x = static_cast<float>(
-          grid.origin_x + double(source.key.column) * grid.width - observer.easting
-      );
-      const float y = static_cast<float>(
-          grid.origin_y - double(source.key.row + 1) * grid.width - observer.northing
-      );
-      const float width = static_cast<float>(grid.width);
-      tile_metadata[i] = {x,
-                          y,
-                          static_cast<float>(geometry.cell_size),
-                          geometry.cell_count,
-                          0,
-                          0,
-                          1,
-                          source.key.row,
-                          source.key.column};
-      const double near_x = std::clamp(0.0, double(x), double(x + width));
-      const double near_y = std::clamp(0.0, double(y), double(y + width));
-      const double far_x = std::max(std::abs(double(x)), std::abs(double(x + width)));
-      const double far_y = std::max(std::abs(double(y)), std::abs(double(y + width)));
-      const double far_lift = k * (far_x * far_x + far_y * far_y);
-      const double near_lift = k * (near_x * near_x + near_y * near_y);
-      // Cover the legacy triangle solver at the selected LOD as well as
-      // float coordinate conversion and the allowed horizontal ray-length error.
-      const double diagonal =
-          std::sqrt(2.0) * geometry.cell_size * double(uint64_t(1) << (selected_lods[i] - 1U));
-      const double guard =
-          0.01 + 64 * std::numeric_limits<float>::epsilon() * (far_lift + 100000.0) +
-          k * diagonal * (2 * std::hypot(far_x, far_y) + diagonal) + 2.01e-4 * far_lift;
-      boxes[i] = {x,
-                  y,
-                  source.minimum_elevation.has_value()
-                      ? float(*source.minimum_elevation - far_lift - guard)
-                      : -1e30F,
-                  x + width,
-                  y + width,
-                  source.maximum_elevation.has_value()
-                      ? float(*source.maximum_elevation - near_lift + guard)
-                      : 1e30F};
-    }
-    tiles = buffer(gpu.device(), sources.size(), sizeof(BvhTile), @"catalogue tiles");
-    catalogue_bounds = buffer(gpu.device(), boxes.size(), sizeof(BvhBounds), @"catalogue bounds");
-    std::memcpy(tiles.contents, tile_metadata.data(), tiles.length);
-    std::memcpy(catalogue_bounds.contents, boxes.data(), catalogue_bounds.length);
-    catalogue = build(primitive_descriptor(checked_count(boxes.size()), catalogue_bounds), false);
-    ++stats.catalogue_builds;
-    stats.catalogue_bytes = tiles.length + catalogue_bounds.length + catalogue.size;
+    for (size_t i = 0; i < sources.size(); ++i)
+      tile_shells[i] = std::abs(double(sources[i].key.row) - double(origin.row)) +
+                       std::abs(double(sources[i].key.column) - double(origin.column));
+    stats.catalogue_bytes = shared.bytes();
   }
 
   bool make_room(uint64_t required, const std::vector<Entry *> &pinned) {
@@ -522,13 +387,17 @@ struct MetalBvhTrace::State {
       const std::vector<Entry *> &batch,
       const Hierarchy &hierarchy,
       bool scene_mode,
-      Timer &timer
+      Timer &timer,
+      id<MTLCommandBuffer> command = nil,
+      bool shadows = false
   ) {
     std::memcpy(parameters.contents, &current, sizeof(current));
-    auto &p = pipeline(scene_mode);
+    auto &p = pipeline(shadows ? 2U : scene_mode ? 1U : 0U);
     [p.table setBuffer:hierarchy.chunks offset:0 atIndex:0];
     [p.table setBuffer:parameters offset:0 atIndex:1];
-    auto command = [gpu.command_queue() commandBuffer];
+    const bool submit = command == nil;
+    if (submit)
+      command = [gpu.command_queue() commandBuffer];
     auto encoder = [command computeCommandEncoder];
     if (encoder == nil)
       throw std::runtime_error("Could not encode BVH trace");
@@ -553,10 +422,14 @@ struct MetalBvhTrace::State {
       [p.missing_table setBuffer:scene_resident offset:0 atIndex:1];
       [encoder setAccelerationStructure:catalogue atBufferIndex:13];
       [encoder setIntersectionFunctionTable:p.missing_table atBufferIndex:14];
-      [encoder setBuffer:scene_missing_count offset:0 atIndex:15];
+      [encoder setBuffer:shadows ? shadow_missing_count : scene_missing_count offset:0 atIndex:15];
       [encoder useResource:catalogue usage:MTLResourceUsageRead];
       [encoder useResource:scene_resident usage:MTLResourceUsageRead];
       [encoder useResource:p.missing_table usage:MTLResourceUsageRead];
+    }
+    if (shadows) {
+      [encoder setBytes:sun length:sizeof(sun) atIndex:16];
+      [encoder setBuffer:scene_shadows offset:0 atIndex:17];
     }
     [encoder useResource:hierarchy.chunks usage:MTLResourceUsageRead];
     [encoder useResource:parameters usage:MTLResourceUsageRead];
@@ -570,6 +443,8 @@ struct MetalBvhTrace::State {
     }
     dispatch(encoder, p.state, current.work_count);
     [encoder endEncoding];
+    if (!submit)
+      return;
     const double gpu_ms = complete(command);
     stats.trace_gpu_ms += gpu_ms;
     ++stats.trace_passes;
@@ -597,7 +472,7 @@ struct MetalBvhTrace::State {
   // A cached scene can resolve rays across any number of resident tiles. The
   // GPU also checks the catalogue for missing candidates before accepting the
   // result, so unseen terrain cannot be mistaken for empty space.
-  bool trace_scene(Timer &timer) {
+  bool prepare_scene(Timer &timer) {
     if (scene.acceleration == nil) {
       std::vector<Entry *> entries;
       for (auto &[key, entry] : cache) {
@@ -620,6 +495,12 @@ struct MetalBvhTrace::State {
       stats.scene_bytes = scene.instances.length + scene.chunks.length + scene.acceleration.size +
                           scene_resident.length;
     }
+    return true;
+  }
+
+  bool trace_scene(Timer &timer) {
+    if (!prepare_scene(timer))
+      return false;
     *static_cast<uint32_t *>(scene_missing_count.contents) = 0U;
     current.work_count = current.trace.ray_count;
     trace_hierarchy(scene_entries, scene, true, timer);
@@ -666,6 +547,52 @@ MetalBvhTrace::MetalBvhTrace(
 MetalBvhTrace::~MetalBvhTrace() = default;
 MetalBvhStatistics MetalBvhTrace::statistics() const { return state_->stats; }
 
+bool MetalBvhTrace::encode_scene(id<MTLCommandBuffer> command, Timer &timer) {
+  State &state = *state_;
+  if (command == nil || !state.prepare_scene(timer))
+    return false;
+  *static_cast<uint32_t *>(state.scene_missing_count.contents) = 0U;
+  state.current.work_count = state.current.trace.ray_count;
+  state.trace_hierarchy(state.scene_entries, state.scene, true, timer, command);
+  return true;
+}
+
+bool MetalBvhTrace::scene_complete() {
+  State &state = *state_;
+  const uint32_t missing = *static_cast<const uint32_t *>(state.scene_missing_count.contents);
+  state.stats.scene_fallback_rays += missing;
+  ++state.stats.scene_passes;
+  ++state.stats.trace_passes;
+  ++state.stats.submissions;
+  return missing == 0U;
+}
+
+bool MetalBvhTrace::encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation) {
+  State &state = *state_;
+  Timer timer("Encode scene shadows");
+  if (command == nil || !state.prepare_scene(timer))
+    return false;
+  const uint32_t count = state.current.trace.ray_count;
+  // A cold primary trace leaves work_count at its final streaming batch size.
+  // Shadows always cover the entire image, including sky visibility values.
+  state.current.work_count = count;
+  if (state.scene_shadows == nil || state.scene_shadows.length < count)
+    state.scene_shadows = buffer(state.gpu.device(), count, 1U, @"scene shadow visibility");
+  state.sun[0] = static_cast<float>(std::sin(azimuth));
+  state.sun[1] = static_cast<float>(std::cos(azimuth));
+  state.sun[2] = static_cast<float>(std::tan(elevation));
+  state.sun[3] = elevation <= 0.0 ? -1.0F : std::cos(elevation) < 1e-6 ? 1.0F : 0.0F;
+  *static_cast<uint32_t *>(state.shadow_missing_count.contents) = 0U;
+  state.trace_hierarchy(state.scene_entries, state.scene, true, timer, command, true);
+  return true;
+}
+
+bool MetalBvhTrace::shadows_complete() const {
+  return *static_cast<const uint32_t *>(state_->shadow_missing_count.contents) == 0U;
+}
+
+id<MTLBuffer> MetalBvhTrace::shadow_visibility() const { return state_->scene_shadows; }
+
 void MetalBvhTrace::prepare(
     TileManager &tiles,
     ObserverLocation observer,
@@ -676,8 +603,6 @@ void MetalBvhTrace::prepare(
   std::vector<uint32_t> lods;
   for (uint32_t i = 0; i < tiles.sources().size(); ++i)
     lods.push_back(tiles.lod_for_source(i));
-  const bool rebuild = state.catalogue == nil || state.observer.easting != observer.easting ||
-                       state.observer.northing != observer.northing || state.selected_lods != lods;
   state.selected_lods = std::move(lods);
   state.manager = &tiles;
   state.observer = observer;
@@ -689,12 +614,18 @@ void MetalBvhTrace::prepare(
   @autoreleasepool {
     (void)state.pipeline();
     (void)state.pipeline(true);
-    if (rebuild) {
-      const auto started = std::chrono::steady_clock::now();
-      state.update_catalogue();
+    auto &shared = state.gpu.tile_bvh();
+    const auto started = std::chrono::steady_clock::now();
+    if (shared.prepare(tiles, observer, parameters)) {
+      ++state.stats.catalogue_builds;
+      ++state.stats.submissions;
+      state.stats.build_gpu_ms += shared.build_milliseconds();
       timer.add_work("BVH catalogue setup", std::chrono::steady_clock::now() - started);
     }
+    if (state.catalogue_generation != shared.generation())
+      state.update_catalogue();
   }
+
   if (parameters.ray_count > state.ray_capacity) {
     state.rays =
         buffer(state.gpu.device(), parameters.ray_count, sizeof(BvhRayState), @"ray continuations");

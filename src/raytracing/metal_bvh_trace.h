@@ -57,6 +57,17 @@ public:
   void trace(const RaytraceParameters &parameters, Timer &timer);
   [[nodiscard]] MetalBvhStatistics statistics() const;
 
+  /// Encode a resident primary pass without committing or waiting. False
+  /// means no scene is available and the caller must use synchronous tracing.
+  bool encode_scene(id<MTLCommandBuffer> command, Timer &timer);
+  /// Inspect the primary missing-ray counter after the caller completes its command.
+  bool scene_complete();
+  /// Encode sun visibility using the same scene. Resources remain stable
+  /// until completion; false from shadows_complete requires streaming shadows.
+  bool encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation);
+  bool shadows_complete() const;
+  id<MTLBuffer> shadow_visibility() const;
+
 private:
   struct State;
   std::unique_ptr<State> state_;

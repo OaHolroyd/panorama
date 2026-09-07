@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <gdal_priv.h>
+#include <map>
+#include <ogr_spatialref.h>
 #include <stdexcept>
 #include <vector>
 using namespace panorama;
@@ -19,8 +22,92 @@ void write_bytes(const std::filesystem::path &path, const std::vector<char> &byt
   std::ofstream out(path, std::ios::binary);
   out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
+
+// Exercise the actual generator, including upgrading skipped existing tiles.
+void check_generator(const std::filesystem::path &executable, const std::filesystem::path &root) {
+  GDALAllRegister();
+  const auto input = root / "input";
+  const auto output = root / "generated";
+  std::filesystem::create_directory(input);
+  OGRSpatialReference crs;
+  require(crs.importFromEPSG(2056) == OGRERR_NONE, "Fixture CRS");
+  char *wkt = nullptr;
+  require(crs.exportToWkt(&wkt) == OGRERR_NONE, "Fixture WKT");
+  SourceGrid source{};
+  source.projection_wkt = wkt;
+  CPLFree(wkt);
+  const TerrainChunk chunk{3,
+                           {-42.35F, 5, 100, 40, 200.24F, 0, -3, 25, 80},
+                           std::vector<uint8_t>(9, 1),
+                           {}};
+  const DestinationGrid grid{2600000, 1200000, 1, 2, RasterLayout::Level0, -9999};
+  write_geotiff_chunk(input / "source.tif", chunk, grid, {0, 0}, source);
+  const auto run = [&] {
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@(executable.c_str())];
+    task.arguments = @[
+      @"--input",
+      @(input.c_str()),
+      @"--output",
+      @(output.c_str()),
+      @"--format",
+      @"metal",
+      @"--power",
+      @"1",
+      @"--lod",
+      @"point",
+      @"--sample-type",
+      @"uint16",
+      @"--compression",
+      @"none"
+    ];
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error])
+      throw std::runtime_error(
+          "Could not launch tile generator: " + std::string(error.localizedDescription.UTF8String)
+      );
+    [task waitUntilExit];
+    require(task.terminationStatus == 0, "Tile generator failed");
+  };
+  run();
+  const auto path = terrain_manifest_path(output);
+  const auto original = read_terrain_manifest(path);
+  require(!original.empty(), "Generator omitted manifest entries");
+  std::map<std::filesystem::path, std::filesystem::file_time_type> timestamps;
+  for (const auto &file : std::filesystem::directory_iterator(output)) {
+    if (file.path().extension() == ".ptile")
+      timestamps.emplace(file.path(), file.last_write_time());
+  }
+  require(timestamps.size() == original.size(), "Generator omitted a tile's bounds");
+  std::ifstream stream(path, std::ios::binary);
+  std::vector<char> bytes((std::istreambuf_iterator<char>(stream)), {});
+  const uint32_t one = 1, zero = 0;
+  std::memcpy(bytes.data() + 8, &one, sizeof(one));
+  for (size_t offset = 44; offset < bytes.size(); offset += 24)
+    std::memcpy(bytes.data() + offset, &zero, sizeof(zero));
+  write_bytes(path, bytes);
+  // First run scans payloads to upgrade v1; the next reuses complete v2 entries.
+  for (int repetition = 0; repetition < 2; ++repetition) {
+    run();
+    const auto upgraded = read_terrain_manifest(path);
+    require(upgraded.size() == original.size(), "Upgrade omitted manifest entries");
+    for (size_t i = 0; i < original.size(); ++i)
+      require(
+          upgraded[i].row == original[i].row && upgraded[i].column == original[i].column &&
+              upgraded[i].minimum_elevation.has_value() &&
+              std::abs(*upgraded[i].minimum_elevation - *original[i].minimum_elevation) < 0.001F &&
+              std::abs(upgraded[i].maximum_elevation - original[i].maximum_elevation) < 0.001F,
+          "Generator upgrade changed tile elevation bounds"
+      );
+    for (const auto &[tile, timestamp] : timestamps)
+      require(
+          std::filesystem::last_write_time(tile) == timestamp,
+          "Manifest upgrade rewrote an existing tile"
+      );
+  }
+}
 } // namespace
-int main() {
+int main(int argc, const char *argv[]) {
   try {
     @autoreleasepool {
       char temporary[] = "/tmp/panorama-manifest-test.XXXXXX";
@@ -106,6 +193,8 @@ int main() {
           }
         }
       }
+      if (argc == 2)
+        check_generator(std::filesystem::absolute(argv[1]), root);
     }
     std::puts("Terrain manifest tests passed.");
     return 0;

@@ -1,7 +1,9 @@
 #include "arguments.h"
+#include "gpu_terrain_frame.h"
 #include "metal_tile.h"
 #include "terrain_manifest.h"
 #include "terrain_trace_session.h"
+#include "timer.h"
 
 #include <algorithm>
 #include <bit>
@@ -26,10 +28,10 @@ void require(bool condition, const char *message) {
 // Match the viewer's default camera and output requirements, excluding image
 // generation, lighting and display. Run each backend in a separate process.
 void benchmark(int argc, const char *argv[]) {
-  if (argc < 5 || argc > 10)
+  if (argc < 5 || argc > 11)
     throw std::invalid_argument(
         "usage: metal-bvh-test --benchmark TILE_DIR software|metal-bvh CACHE_MIB "
-        "[RANGE [WIDTH HEIGHT [LOD_SCALE [DEBUG_OUTPUTS]]]]"
+        "[RANGE [WIDTH HEIGHT [LOD_SCALE [DEBUG_OUTPUTS [TILE_BVH]]]]]"
     );
   RaytraceConfig config{};
   config.tile_dir = argv[2];
@@ -45,6 +47,7 @@ void benchmark(int argc, const char *argv[]) {
       argc > 6 ? static_cast<uint32_t>(std::stoul(argv[6])) : 1600U,
       argc > 7 ? static_cast<uint32_t>(std::stoul(argv[7])) : 900U,
   };
+  config.use_tile_bvh = argc <= 10 || std::stoi(argv[10]) != 0;
   const bool debugging = argc <= 9 || std::stoi(argv[9]) != 0;
   const auto intrinsics =
       CameraIntrinsics::from_vertical_field_of_view(image, 70.0 * std::numbers::pi / 180.0);
@@ -274,6 +277,70 @@ void compare(
   require(mismatches == 0, "BVH/software parity failed");
 }
 
+void check_tile_selection(const std::filesystem::path &directory, bool retain, double spacing) {
+  RaytraceConfig config{directory,
+                        {2600000.0 + 4.5 * spacing, 1200000.0 - 5.5 * spacing, 1120.0},
+                        float(48.0 * spacing),
+                        0U,
+                        16384U,
+                        2U,
+                        retain,
+                        true,
+                        false};
+  auto field = make_angular_ray_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
+  for (uint32_t i = 0; i < 4; ++i) {
+    const float x = i == 0 ? 1.0F : i == 1 ? -1.0F : 0.0F;
+    const float y = i == 2 ? 1.0F : i == 3 ? -1.0F : 0.0F;
+    field.rays[i] = {x, y, x == 0 ? INFINITY : 1 / x, y == 0 ? INFINITY : 1 / y, -0.6F};
+  }
+  config.use_tile_bvh = false;
+  TerrainTraceSession grid(config, field, {true, true, true});
+  config.use_tile_bvh = true;
+  TerrainTraceSession shared(config, field, {true, true, true});
+  const float tolerance = spacing > 10 ? 0.25F : 0.01F;
+  compare(grid, shared, field, tolerance);
+  compare(grid, shared, field, tolerance);
+  field = make_angular_ray_field({97, 33}, {0.35, 6.6, -1.25, 0.05});
+  grid.set_collision_options(false, true);
+  shared.set_collision_options(false, true);
+  compare(grid, shared, field, tolerance);
+  auto moved = config.observer;
+  moved.easting -= 8 * spacing;
+  moved.northing += 3 * spacing;
+  require(
+      grid.relocate_observer(moved) && shared.relocate_observer(moved),
+      "Tile selector relocation"
+  );
+  compare(grid, shared, field, tolerance);
+  grid.set_collision_options(true, true);
+  shared.set_collision_options(true, true);
+  grid.set_lod_scale(3);
+  shared.set_lod_scale(3);
+  compare(grid, shared, field, tolerance);
+  grid.trace_shadows(2.1, 0.35);
+  shared.trace_shadows(2.1, 0.35);
+  require(
+      std::memcmp(
+          grid.shadow_visibility().contents,
+          shared.shadow_visibility().contents,
+          field.rays.size()
+      ) == 0,
+      "Tile selector changed shadows"
+  );
+  ObserverLocation corner{2600000, 1200000, 1120};
+  require(grid.relocate_observer(corner) && shared.relocate_observer(corner), "Corner relocation");
+  compare(grid, shared, field, tolerance);
+  grid.set_lod_scale(3);
+  shared.set_lod_scale(3);
+  compare(grid, shared, field, tolerance);
+  // Both backends must consume the existing catalogue after switching.
+  shared.set_raytracer(Raytracer::MetalBvh);
+  compare(grid, shared, field, tolerance);
+  require(shared.bvh_statistics().catalogue_builds == 0, "Backend switch rebuilt shared catalogue");
+  shared.set_raytracer(Raytracer::Software);
+  compare(grid, shared, field, tolerance);
+}
+
 void exercise(const std::filesystem::path &directory, bool retain, double spacing, uint32_t block) {
   RaytraceConfig config{directory,
                         {2600000.0 + 4.5 * spacing, 1200000.0 - 5.5 * spacing, 1120.0},
@@ -298,6 +365,7 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
     field.rays[i] = {x, y, x == 0 ? INFINITY : 1.0F / x, y == 0 ? INFINITY : 1.0F / y, -2.0F};
   }
   const GpuTraceOutputRequirements outputs{true, true, true};
+  config.use_tile_bvh = false;
   TerrainTraceSession software(config, field, outputs);
   config.raytracer = Raytracer::MetalBvh;
   config.bvh_block_cells = block;
@@ -413,6 +481,30 @@ void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
     rejected = true;
   }
   require(rejected, "Unknown backend must be rejected");
+  config.bvh_block_cells = 4;
+  config.bvh_cache_size_bytes = 0;
+  rejected = false;
+  try {
+    TerrainTraceSession invalid(config, field, {false, false, false});
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  require(rejected, "Zero BVH cache size must be rejected");
+  config.bvh_cache_size_bytes = 1;
+  config.max_distance = 480;
+  TerrainTraceSession too_small(config, field, {false, false, false});
+  rejected = false;
+  try {
+    too_small.trace(field);
+  } catch (const std::runtime_error &error) {
+    rejected = std::string_view(error.what()).find("--bvh-cache-mib") != std::string_view::npos;
+  }
+  require(rejected, "Undersized BVH cache must explain the required budget");
+  const auto failed = too_small.bvh_statistics();
+  require(
+      failed.builds == 0 && failed.resident_bytes == 0 && failed.peak_bytes == 0,
+      "Undersized cache allocated detailed tile resources before rejection"
+  );
 }
 
 void check_scene_misses(const std::filesystem::path &directory) {
@@ -422,6 +514,7 @@ void check_scene_misses(const std::filesystem::path &directory) {
   // resolvable resident hits and rays that must load previously unseen tiles.
   const auto narrow = make_angular_ray_field({1, 1}, {0.0, 0.01, -1.55, -1.54});
   const auto wide = make_angular_ray_field({129, 65}, {0.0, 6.3, -1.3, 0.1});
+  config.use_tile_bvh = false;
   TerrainTraceSession software(config, narrow, {true, true, true});
   config.raytracer = Raytracer::MetalBvh;
   TerrainTraceSession hardware(config, narrow, {true, true, true});
@@ -449,10 +542,133 @@ void check_scene_misses(const std::filesystem::path &directory) {
   );
 }
 
+void check_producer(const std::filesystem::path &directory, bool bilinear, bool partial = false) {
+  RaytraceConfig
+      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
+  auto field = make_angular_ray_field({129, 65}, {0, 6.3, -1.3, 0.1});
+  if (partial)
+    field = make_angular_ray_field({1, 1}, {0, 0.01, -1.55, -1.54});
+  TerrainTraceSession reference(config, field, {true, true, true});
+  config.raytracer = Raytracer::MetalBvh;
+  TerrainTraceSession trace(config, field, {true, true, true});
+  const GpuPresentationRequirements products{false, false, false, true, true, true};
+  GpuImageRenderer expected(
+      reference.device(),
+      reference.command_queue(),
+      reference.library(),
+      field.image,
+      products
+  );
+  GpuImageRenderer
+      actual(trace.device(), trace.command_queue(), trace.library(), field.image, products);
+  TerrainPresentationSettings settings{};
+  settings.colour_range = {0, 480};
+  settings.appearance.ambient_light = 0.3F;
+  settings.appearance.sun_azimuth = 2.1;
+  settings.appearance.sun_elevation = 0.35;
+  Timer timer("Producer test");
+  for (uint32_t frame = 0; frame < (partial ? 3U : 14U); ++frame) {
+    settings.appearance.raytraced_shadows = frame != 12 && !(partial && frame == 0);
+    if (partial && frame == 1)
+      field = make_angular_ray_field({129, 65}, {0, 6.3, -1.3, 0.1});
+    settings.appearance.feature_outlines = frame == 2;
+    settings.appearance.colour_source =
+        frame == 3 ? TerrainColourSource::White : TerrainColourSource::Distance;
+    settings.appearance.sun_elevation = frame == 4   ? -0.1
+                                        : frame == 5 ? std::numbers::pi / 2
+                                                     : 0.35;
+    const bool appearance_only = frame == 3 || frame == 12;
+    if (frame == 7)
+      field = make_angular_ray_field({161, 97}, {0.2, 6.5, -1.3, 0.1});
+    if (frame == 8) {
+      const ObserverLocation moved{2599965, 1199975, 1120};
+      require(
+          reference.relocate_observer(moved) && trace.relocate_observer(moved),
+          "Producer relocation failed"
+      );
+    }
+    if (frame == 9) {
+      reference.set_lod_scale(3);
+      trace.set_lod_scale(3);
+    }
+    if (frame == 10)
+      trace.set_raytracer(Raytracer::Software);
+    if (frame == 11)
+      trace.set_raytracer(Raytracer::MetalBvh);
+    if (!appearance_only)
+      reference.trace(field);
+    if (settings.appearance.raytraced_shadows)
+      reference.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
+    expected.resize(field.image);
+    expected.render_synthetic(
+        reference.surface_gradients(),
+        reference.distances(),
+        reference.ray_directions(),
+        settings.appearance.colour_source == TerrainColourSource::White ? nil
+                                                                        : reference.distances(),
+        settings.appearance.raytraced_shadows ? reference.shadow_visibility() : nil,
+        settings.appearance,
+        settings.colour_range,
+        true,
+        timer
+    );
+    const auto timing =
+        render_terrain_frame(trace, appearance_only ? nullptr : &field, actual, settings);
+    std::printf(
+        "Producer bilinear=%d frame=%u: wall %.3f GPU %.3f submits %u streamed %d\n",
+        bilinear,
+        frame,
+        timing.wall_milliseconds,
+        timing.gpu_milliseconds,
+        timing.producer_submissions,
+        timing.streamed
+    );
+    if (frame == 0)
+      require(timing.streamed, "Cold producer did not stream");
+    else if (partial && frame == 1)
+      require(
+          timing.streamed && timing.producer_submissions == 2U,
+          "Partial resident producer did not repair missing terrain before presentation"
+      );
+    else if (frame < 7)
+      require(
+          !timing.streamed && timing.producer_submissions == 1U,
+          "Resident producer required intermediate submissions"
+      );
+    if (settings.appearance.raytraced_shadows)
+      require(
+          std::memcmp(
+              reference.shadow_visibility().contents,
+              trace.shadow_visibility().contents,
+              field.rays.size()
+          ) == 0,
+          "Producer shadow parity failed"
+      );
+    const auto a = expected.readback(timer);
+    const auto b = actual.readback(timer);
+    require(a.bytes.size() == b.bytes.size(), "Producer image size mismatch");
+    uint32_t different = 0;
+    for (size_t i = 0; i < a.bytes.size(); ++i)
+      if (std::abs(int(a.bytes[i]) - int(b.bytes[i])) > 2)
+        ++different;
+    std::printf("Producer image mismatched channels: %u\n", different);
+    require(different == 0, "Producer colouring parity failed");
+  }
+  trace.trace(field);
+  bool rejected = false;
+  try {
+    (void)trace.shadow_visibility();
+  } catch (const std::logic_error &) {
+    rejected = true;
+  }
+  require(rejected, "Primary update exposed stale resident shadows");
+}
+
 void check_streaming(const std::filesystem::path &directory) {
   const auto field = make_angular_ray_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
   RaytraceConfig
       config{directory, {2600045, 1199945, 1120}, 600000, 0, 16384, 2, true, true, false};
+  config.use_tile_bvh = false;
   TerrainTraceSession software(config, field, {true, true, true});
   config.raytracer = Raytracer::MetalBvh;
   // Size selected from the device's real build workspace for the first tile.
@@ -498,9 +714,11 @@ int main(int argc, const char *argv[]) {
         benchmark(argc, argv);
         return EXIT_SUCCESS;
       }
+      const bool tile_selection = argc == 2 && std::string_view(argv[1]) == "--tile-selection";
+      const bool producer = argc == 2 && std::string_view(argv[1]) == "--producer";
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
-      if (argc >= 2 && !edge_cases && !streaming) {
+      if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -516,12 +734,20 @@ int main(int argc, const char *argv[]) {
           config.bvh_cache_size_bytes = std::stoull(argv[3]) * 1048576U;
         const auto field =
             make_angular_ray_field({512, 128}, {0, 2 * std::numbers::pi, -0.6, 0.15});
+        config.use_tile_bvh = false;
         TerrainTraceSession software(config, field, {true, true, true});
         config.raytracer = Raytracer::MetalBvh;
         TerrainTraceSession hardware(config, field, {true, true, true});
         const auto catalogue =
             TerrainCatalogue::discover(config.tile_dir, config.observer, config.max_distance, 0U);
         const auto header = read_metal_tile_header(catalogue.origin().path);
+        {
+          config.raytracer = Raytracer::Software;
+          config.use_tile_bvh = true;
+          TerrainTraceSession shared(config, field, {true, true, true});
+          compare(software, shared, field, 0.15F, &header);
+          compare(software, shared, field, 0.15F, &header);
+        }
         compare(software, hardware, field, 0.15F, &header);
         compare(software, hardware, field, 0.15F, &header);
         require(
@@ -551,7 +777,26 @@ int main(int argc, const char *argv[]) {
         write_fixture(root / "float", false, 10.0);
         write_fixture(root / "quantized", true, 10.0);
         write_fixture(root / "distant", true, 1000.0);
-        if (streaming) {
+        if (tile_selection) {
+          @autoreleasepool {
+            check_tile_selection(root / "float", false, 10.0);
+          }
+          @autoreleasepool {
+            check_tile_selection(root / "quantized", true, 10.0);
+          }
+          @autoreleasepool {
+            check_tile_selection(root / "distant", true, 1000.0);
+          }
+        } else if (producer) {
+          for (bool bilinear : {false, true}) {
+            @autoreleasepool {
+              check_producer(root / "quantized", bilinear);
+            }
+          }
+          @autoreleasepool {
+            check_producer(root / "quantized", true, true);
+          }
+        } else if (streaming) {
           check_streaming(root / "quantized");
         } else if (edge_cases) {
           @autoreleasepool {

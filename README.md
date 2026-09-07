@@ -97,10 +97,11 @@ or rendered non-interactively:
 
 ## Interactive viewer
 
-Use `./panorama-app --trace-diagnostics` to log per-trace wall time, GPU
-traversal time, and BVH builds, cache hits, evictions and submissions. GPU
-traversal is a sum of completed command-buffer durations, excluding construction,
-CPU work and presentation. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
+Use `./panorama-app --trace-diagnostics` to log frame wall latency, GPU producer
+time, submission count, and whether streaming was needed. Resident frames encode
+primary tracing, shadows, colouring and visibility projection into one command.
+GPU producer time excludes synchronous BVH preparation and streaming work;
+wall latency includes them. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
 for measurements, cache guidance and a repeatable camera benchmark.
 
 The BVH backend automatically reuses a resident scene hierarchy to trace across
@@ -123,10 +124,16 @@ renderer keeps `software` as its default. For example:
   --max-distance 600000 --lod-scale 0 --synthetic-output
 ```
 
-Metal BVH streams full-resolution tiles on demand; LOD is optional. A small
-inter-tile BVH uses the manifest's elevation bounds to select terrain before
-loading it. Detailed tile BVHs and their immutable vertices are cached by tile
-and LOD. Rays retain their progress across batches, including when a frame's
+Both raytracers share a session-owned inter-tile BVH on devices supporting
+Metal ray tracing. It uses conservative manifest elevation bounds to select
+candidate tiles; Mipmap then traverses each selected tile's maximum hierarchy,
+while BVH uses its detailed surface acceleration. The shared catalogue survives
+camera turns, image resizing, and backend switches, and rebuilds after XY or LOD
+changes. Mipmap retains grid selection on devices without Metal ray-tracing
+support. Coverage gaps still terminate rays.
+
+Metal BVH streams full-resolution tiles on demand; LOD is optional. Detailed tile
+BVHs and their immutable vertices are cached by tile and LOD. Rays retain their progress across batches, including when a frame's
 terrain exceeds the cache. Tiles are scheduled in outward grid shells to avoid
 rebuilding the same tile for successive groups of rays within a frame.
 
@@ -147,14 +154,18 @@ updates the small catalogue and batch instance hierarchies; LOD changes select
 separate cache entries. GPU traversal, tile loading/building, and instance setup
 are reported separately beneath inclusive `BVH streaming trace` time.
 Actual speed and compaction savings depend on the GPU. Devices without Metal
-ray-tracing support can use the software backend. Shadows currently use the
-existing software traversal with either primary backend.
+ray-tracing support can use the software backend. The viewer traces shadows
+against the resident BVH scene and falls back to software streaming when terrain
+is missing. It repairs incomplete primary or shadow results before publishing
+the image. The batch renderer retains the software shadow traversal.
 
 `make check-bvh` runs Metal API validation and software/BVH comparisons on
 generated terrain, including retained and expanded uint16, float samples,
 partial blocks, coverage gaps, range clipping, resizing, relocation, backend
-switching, shadows, and forced cache eviction. `make check-manifest` validates
-manifest versions, bounds across all LODs, and raw/compressed tile scans.
+switching, cold and resident shadows, producer fallback, and forced cache eviction.
+`make check-manifest` validates manifest versions, bounds across all LODs,
+raw/compressed tile scans, and generator upgrades of existing version-1 manifests
+without rewriting tiles.
 The test executable also accepts a Swiss prepared-tile directory, optional range
 in metres (default 21000), and BVH cache in MiB (default 512):
 

@@ -1,4 +1,5 @@
 #include "raytrace_gpu.h"
+#include "terrain_tile_bvh.h"
 
 #import <Foundation/Foundation.h>
 
@@ -6,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -141,6 +143,9 @@ struct GpuRaytraceResources::State {
   bool c1_normals;
   GpuTraceOutputRequirements outputs;
   bool capture_active = false;
+  std::unique_ptr<TerrainTileBvh> tile_bvh;
+  bvh_resources::BvhPipeline bvh_emit;
+  bool use_tile_bvh = false;
 
   [[nodiscard]] id<MTLComputePipelineState>
   make_trace_pipeline(bool bilinear, bool c1Normals) const {
@@ -422,6 +427,34 @@ id<MTLDevice> GpuRaytraceResources::device() const { return state_->device; }
 
 id<MTLCommandQueue> GpuRaytraceResources::command_queue() const { return state_->queue; }
 
+TerrainTileBvh &GpuRaytraceResources::tile_bvh() {
+  if (!state_->tile_bvh)
+    state_->tile_bvh = std::make_unique<TerrainTileBvh>(*this);
+  return *state_->tile_bvh;
+}
+
+void GpuRaytraceResources::prepare_tile_selection(
+    TileManager &tiles,
+    ObserverLocation observer,
+    const RaytraceParameters &parameters,
+    bool enabled,
+    Timer &timer
+) {
+  State &state = *state_;
+  state.use_tile_bvh = enabled && state.device.supportsRaytracing;
+  if (!state.use_tile_bvh)
+    return;
+  const auto started = std::chrono::steady_clock::now();
+  if (state.bvh_emit.state == nil)
+    state.bvh_emit = bvh_resources::make_bvh_pipeline(
+        *this,
+        @"emit_bvh_tile_frontier",
+        @"terrain_tile_intersection"
+    );
+  if (tile_bvh().prepare(tiles, observer, parameters))
+    timer.add_work("Shared tile BVH setup", std::chrono::steady_clock::now() - started);
+}
+
 id<MTLLibrary> GpuRaytraceResources::library() const { return state_->library; }
 
 id<MTLBuffer> GpuRaytraceResources::active_frontier() const { return state_->active; }
@@ -486,8 +519,9 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   // Phase two starts at those exits, skips catalogue tiles using manifest
   // maxima, and emits the first source which requires resident traversal.
   // Keeping both phases in one command buffer avoids a host round trip.
-  encoder.label = @"emit_tile_frontier";
-  [encoder setComputePipelineState:state.emit_pipeline];
+  encoder.label = state.use_tile_bvh ? @"emit_bvh_tile_frontier" : @"emit_tile_frontier";
+  const auto emit_pipeline = state.use_tile_bvh ? state.bvh_emit.state : state.emit_pipeline;
+  [encoder setComputePipelineState:emit_pipeline];
   [encoder setBuffer:state.active offset:0 atIndex:0];
   [encoder setBuffer:cache.metadata offset:0 atIndex:1];
   [encoder setBuffer:state.rays offset:0 atIndex:2];
@@ -502,8 +536,24 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
             atIndex:9];
   [encoder setBuffer:state.local_skip_count offset:0 atIndex:10];
   [encoder setBuffer:state.global_skip_count offset:0 atIndex:11];
+  if (state.use_tile_bvh) {
+    auto &catalogue = *state.tile_bvh;
+    const uint32_t count = static_cast<uint32_t>(catalogue.metadata().size());
+    [state.bvh_emit.table setBuffer:catalogue.tiles() offset:0 atIndex:0];
+    // The shared callback binds a resident mask even when filtering is disabled.
+    [state.bvh_emit.table setBuffer:state.local_skip_count offset:0 atIndex:1];
+    [encoder setAccelerationStructure:catalogue.acceleration() atBufferIndex:12];
+    [encoder setIntersectionFunctionTable:state.bvh_emit.table atBufferIndex:13];
+    [encoder setBytes:&count length:sizeof(count) atIndex:14];
+    [encoder setBuffer:catalogue.tiles() offset:0 atIndex:15];
+    [encoder useResource:catalogue.acceleration() usage:MTLResourceUsageRead];
+    [encoder useResource:catalogue.tiles() usage:MTLResourceUsageRead];
+    [encoder useResource:state.local_skip_count usage:MTLResourceUsageRead];
+    [encoder useResource:state.bvh_emit.table usage:MTLResourceUsageRead];
+  }
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+      threadsPerThreadgroup:
+          MTLSizeMake(std::min<NSUInteger>(32, emit_pipeline.maxTotalThreadsPerThreadgroup), 1, 1)];
   [encoder endEncoding];
   timer.stop("GPU command encoding");
 

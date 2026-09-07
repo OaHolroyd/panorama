@@ -63,6 +63,8 @@ public:
 
   /// Reallocate only image-sized targets while retaining compiled pipelines.
   void resize(ImageSize image);
+  /// Select a second target so a producer never overwrites the published image.
+  void begin_frame();
 
   /// Render a scalar diagnostic using viridis over a fixed value range.
   void render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer);
@@ -86,7 +88,8 @@ public:
       const SyntheticRenderOptions &options,
       ScalarColourRange range,
       bool use_surface_normals,
-      Timer &timer
+      Timer &timer,
+      id<MTLCommandBuffer> command = nil
   );
 
   /// Return the reusable GPU render target populated by the last render call.

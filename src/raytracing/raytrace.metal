@@ -109,6 +109,11 @@ inline float trace_tile_frontier_impl(
   const float y_entry = ray_origin.y + t_start * direction.y;
   const float x_classify = stepx == 0 ? x_entry : x_entry + copysign(boundary_nudge, direction.x);
   const float y_classify = stepy == 0 ? y_entry : y_entry + copysign(boundary_nudge, direction.y);
+  // An observer on a tile edge may point immediately into its neighbour.
+  // Hand off at t=0 instead of clamping an outside ray into this tile's cells.
+  if (t_start == 0.0F && (x_classify < tile_x_min || x_classify >= tile_x_min + float(n) * delta ||
+                          y_classify < tile_y_min || y_classify >= tile_y_min + float(n) * delta))
+    return 0.0F;
   int i = clamp(int(floor((y_classify - tile_y_min) * inverse_delta)), 0, n - 1);
   int j = clamp(int(floor((x_classify - tile_x_min) * inverse_delta)), 0, n - 1);
 

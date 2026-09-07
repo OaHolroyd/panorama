@@ -36,6 +36,16 @@ public:
   /// Trace a new view, resizing only ray-dependent GPU buffers when necessary.
   void trace(const RayField &field);
 
+  /// Append resident primary tracing to an uncommitted producer. Preparation
+  /// may build scene structures synchronously. False encodes nothing.
+  /// Do not mutate session resources until the producer has completed.
+  bool encode_trace(id<MTLCommandBuffer> command, const RayField &field);
+  /// After producer completion, false requires synchronous trace(field) and
+  /// a new presentation pass before publishing the image.
+  bool complete_encoded_trace(id<MTLCommandBuffer> command);
+  bool encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation);
+  bool complete_encoded_shadows(id<MTLCommandBuffer> command);
+
   /// Move the observer without rebuilding terrain resources when the new
   /// position belongs to any source retained by this session's catalogue.
   /// Returns false when the caller must construct a catalogue and session

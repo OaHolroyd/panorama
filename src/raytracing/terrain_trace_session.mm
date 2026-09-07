@@ -121,6 +121,28 @@ struct TerrainTraceSession::State {
   uint64_t shadow_revision = std::numeric_limits<uint64_t>::max();
   double shadow_azimuth = 0.0;
   double shadow_elevation = 0.0;
+  bool bvh_shadow_active = false;
+
+  void update_field(const RayField &field) {
+    const uint32_t next_ray_count = validate_ray_field(field);
+    bvh_shadow_active = false;
+    shadow_revision = std::numeric_limits<uint64_t>::max();
+    tiles->set_pixel_angle(field.minimum_pixel_angle);
+    const bool dimensions_changed = field.image.width != image.width ||
+                                    field.image.height != image.height ||
+                                    next_ray_count != ray_count;
+
+    // Ray-dependent storage changes with the viewport; catalogue discovery,
+    // terrain preparation, pipelines, and the resident atlas remain intact.
+    if (dimensions_changed) {
+      gpu->resize_rays(field.rays);
+      image = field.image;
+      ray_count = next_ray_count;
+      parameters.ray_count = next_ray_count;
+    } else {
+      gpu->update_rays(field.rays);
+    }
+  }
 
   State(
       const RaytraceConfig &config_value,
@@ -189,6 +211,7 @@ void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
     );
   }
   state.config.raytracer = raytracer;
+  state.bvh_shadow_active = false;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
 
@@ -202,6 +225,7 @@ bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
     return false;
   }
   state.config.observer = observer;
+  state.bvh_shadow_active = false;
   state.parameters.observer_elevation = static_cast<float>(observer.elevation);
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
   return true;
@@ -216,6 +240,7 @@ void TerrainTraceSession::set_lod_scale(float lod_scale) {
     return;
   }
   state.config.lod_scale = lod_scale;
+  state.bvh_shadow_active = false;
   state.tiles->set_lod_scale(lod_scale);
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
@@ -236,6 +261,7 @@ void TerrainTraceSession::set_collision_options(bool bilinear_collisions, bool c
   }
   state.config.bilinear_collisions = bilinear_collisions;
   state.config.c1_normals = c1_normals;
+  state.bvh_shadow_active = false;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
 
@@ -245,22 +271,7 @@ void TerrainTraceSession::trace(const RayField &field) {
   state.frame_bvh_before = bvh_statistics();
   state.frame_gpu_ms = 0.0;
   state.frame_passes = 0U;
-  const uint32_t ray_count = validate_ray_field(field);
-  state.tiles->set_pixel_angle(field.minimum_pixel_angle);
-  const bool dimensions_changed = field.image.width != state.image.width ||
-                                  field.image.height != state.image.height ||
-                                  ray_count != state.ray_count;
-
-  // Ray-dependent storage changes with the viewport; catalogue discovery,
-  // terrain preparation, pipelines, and the resident atlas remain intact.
-  if (dimensions_changed) {
-    state.gpu->resize_rays(field.rays);
-    state.image = field.image;
-    state.ray_count = ray_count;
-    state.parameters.ray_count = ray_count;
-  } else {
-    state.gpu->update_rays(field.rays);
-  }
+  state.update_field(field);
   if (state.config.raytracer == Raytracer::MetalBvh) {
     state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
     state.gpu->start_capture_if_requested();
@@ -286,6 +297,13 @@ void TerrainTraceSession::trace(const RayField &field) {
     state.trace_revision++;
     return;
   }
+  state.gpu->prepare_tile_selection(
+      *state.tiles,
+      state.config.observer,
+      state.parameters,
+      state.config.use_tile_bvh,
+      state.timer
+  );
   const uint32_t observer_slot = state.tiles->ensure_observer_resident(state.timer);
   state.gpu->initialise_frontier(observer_slot);
 
@@ -377,8 +395,62 @@ void TerrainTraceSession::trace(const RayField &field) {
   state.trace_revision++;
 }
 
+bool TerrainTraceSession::encode_trace(id<MTLCommandBuffer> command, const RayField &field) {
+  State &state = *state_;
+  if (command == nil || state.config.raytracer != Raytracer::MetalBvh)
+    return false;
+  state.update_field(field);
+  state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
+  return state.bvh->encode_scene(command, state.timer);
+}
+
+bool TerrainTraceSession::complete_encoded_trace(id<MTLCommandBuffer> command) {
+  if (command.status != MTLCommandBufferStatusCompleted)
+    throw std::logic_error("Primary producer has not completed successfully");
+  if (!state_->bvh->scene_complete())
+    return false;
+  ++state_->frames;
+  ++state_->trace_revision;
+  return true;
+}
+
+bool TerrainTraceSession::encode_shadows(
+    id<MTLCommandBuffer> command,
+    double azimuth,
+    double elevation
+) {
+  State &state = *state_;
+  if (!std::isfinite(azimuth) || !std::isfinite(elevation))
+    throw std::invalid_argument("Sun direction must be finite");
+  if (state.config.raytracer != Raytracer::MetalBvh || !state.outputs.elevations ||
+      !state.outputs.surface_gradients)
+    return false;
+  if (!state.bvh->encode_shadows(command, azimuth, elevation))
+    return false;
+  state.bvh_shadow_active = true;
+  state.shadow_azimuth = azimuth;
+  state.shadow_elevation = elevation;
+  return true;
+}
+
+bool TerrainTraceSession::complete_encoded_shadows(id<MTLCommandBuffer> command) {
+  if (command.status != MTLCommandBufferStatusCompleted)
+    throw std::logic_error("Shadow producer has not completed successfully");
+  if (!state_->bvh->shadows_complete()) {
+    state_->bvh_shadow_active = false;
+    state_->shadow_revision = std::numeric_limits<uint64_t>::max();
+    return false;
+  }
+  state_->shadow_revision = state_->trace_revision;
+  return true;
+}
+
 void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation) {
   State &state = *state_;
+  if (state.bvh_shadow_active) {
+    state.bvh_shadow_active = false;
+    state.shadow_revision = std::numeric_limits<uint64_t>::max();
+  }
   if (!std::isfinite(sun_azimuth) || !std::isfinite(sun_elevation)) {
     throw std::invalid_argument("Sun direction must be finite");
   }
@@ -538,6 +610,8 @@ id<MTLBuffer> TerrainTraceSession::num_evaluations() const {
 }
 
 id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
+  if (state_->bvh_shadow_active)
+    return state_->bvh->shadow_visibility();
   if (state_->shadows == nullptr || state_->shadow_revision != state_->trace_revision) {
     throw std::logic_error("Shadows have not been traced for the current terrain view");
   }
@@ -549,7 +623,9 @@ void TerrainTraceSession::print_trace_statistics() const {
   std::printf(
       "Trace %llu %s %ux%u: wall %.3f ms, GPU traversal sum %.3f ms, %llu passes",
       static_cast<unsigned long long>(state.frames),
-      state.config.raytracer == Raytracer::MetalBvh ? "BVH" : "Mipmap",
+      state.config.raytracer == Raytracer::MetalBvh                         ? "BVH"
+      : state.config.use_tile_bvh && state.gpu->device().supportsRaytracing ? "Mipmap/tile-BVH"
+                                                                            : "Mipmap/grid",
       state.image.width,
       state.image.height,
       state.frame_wall_ms,
@@ -625,7 +701,7 @@ void TerrainTraceSession::print_statistics() const {
   }
   const uint64_t skipped = state.locally_skipped_tiles + state.globally_skipped_tiles;
   std::printf(
-      "  Tile I/O: %llu requests (%llu unique, %llu duplicate); %llu skips "
+      "  Tile I/O: %llu requests (%llu unique, %llu duplicate); %llu grid skips "
       "(%llu local, %llu global; %s).\n",
       static_cast<unsigned long long>(tiles.requests),
       static_cast<unsigned long long>(tiles.unique_requests),

@@ -85,8 +85,10 @@ struct GpuImageRenderer::State {
   id<MTLComputePipelineState> colourmapped_synthetic;
   id<MTLComputePipelineState> pack_rgb;
   id<MTLTexture> output;
+  id<MTLTexture> spare_output;
   id<MTLTexture> feature_outline_mask;
   id<MTLBuffer> readback;
+  id<MTLBuffer> dummy_visibility;
   ImageSize image;
   NSUInteger bytes_per_row;
   MTLPixelFormat output_pixel_format;
@@ -150,6 +152,7 @@ struct GpuImageRenderer::State {
 
     image = next_image;
     output = next_output;
+    spare_output = nil;
     feature_outline_mask = next_feature_outline_mask;
     readback = next_readback;
     bytes_per_row = next_bytes_per_row;
@@ -207,6 +210,23 @@ GpuImageRenderer::GpuImageRenderer(
 GpuImageRenderer::~GpuImageRenderer() = default;
 
 void GpuImageRenderer::resize(ImageSize image) { state_->resize(image); }
+
+void GpuImageRenderer::begin_frame() {
+  State &state = *state_;
+  if (state.spare_output == nil) {
+    auto descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:state.output_pixel_format
+                                                           width:state.image.width
+                                                          height:state.image.height
+                                                       mipmapped:NO];
+    descriptor.storageMode = MTLStorageModePrivate;
+    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    state.spare_output = [state.device newTextureWithDescriptor:descriptor];
+    if (state.spare_output == nil)
+      throw std::runtime_error("Could not allocate producer image target");
+  }
+  std::swap(state.output, state.spare_output);
+}
 
 void GpuImageRenderer::render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer) {
   State &state = *state_;
@@ -271,7 +291,8 @@ void GpuImageRenderer::render_synthetic(
     const SyntheticRenderOptions &options,
     ScalarColourRange range,
     bool use_surface_normals,
-    Timer &timer
+    Timer &timer,
+    id<MTLCommandBuffer> command
 ) {
   State &state = *state_;
   const uint32_t colour_source = static_cast<uint32_t>(options.colour_source);
@@ -301,6 +322,15 @@ void GpuImageRenderer::render_synthetic(
     throw std::logic_error("Selected synthetic presentation pipeline was not enabled");
   }
   const uint32_t normal_lighting = use_surface_normals ? 1U : 0U;
+  if (shadow_visibility == nil) {
+    if (state.dummy_visibility == nil) {
+      state.dummy_visibility = [state.device newBufferWithLength:4
+                                                         options:MTLResourceStorageModeShared];
+      if (state.dummy_visibility == nil)
+        throw std::runtime_error("Could not allocate unused shadow visibility");
+    }
+    shadow_visibility = state.dummy_visibility;
+  }
   const uint32_t feature_outlines = options.feature_outlines ? 1U : 0U;
   const uint32_t use_shadows = use_surface_normals && options.raytraced_shadows ? 1U : 0U;
   const float azimuth = static_cast<float>(options.sun_azimuth);
@@ -313,12 +343,16 @@ void GpuImageRenderer::render_synthetic(
       options.ambient_light,
   };
 
-  timer.start_wall("Pixel conversion");
-  id<MTLCommandBuffer> command = [state.queue commandBuffer];
+  const bool submit = command == nil;
+  if (submit) {
+    timer.start_wall("Pixel conversion");
+    command = [state.queue commandBuffer];
+  }
   if (command == nil) {
     throw std::runtime_error("Could not create synthetic presentation command");
   }
-  command.label = @"Present synthetic terrain";
+  if (submit)
+    command.label = @"Present synthetic terrain";
 
   if (options.feature_outlines) {
     if (state.feature_outlines == nil || state.feature_outline_mask == nil) {
@@ -373,7 +407,13 @@ void GpuImageRenderer::render_synthetic(
   [encoder setTexture:state.feature_outline_mask atIndex:1];
   dispatch_image(encoder, pipeline, state.image);
   [encoder endEncoding];
-  complete_timed_command(command, timer, "Pixel conversion", @"GPU synthetic presentation failed");
+  if (submit)
+    complete_timed_command(
+        command,
+        timer,
+        "Pixel conversion",
+        @"GPU synthetic presentation failed"
+    );
 }
 
 id<MTLTexture> GpuImageRenderer::texture() const { return state_->output; }

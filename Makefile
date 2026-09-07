@@ -75,7 +75,7 @@ PANORAMA_OBJ := $(PANORAMA_APP_OBJ) $(RAYTRACE_OBJ) $(RENDERING_OBJ)
 PANORAMA_VIEWER_SRC := $(wildcard $(PANORAMA_APP_SRC_DIR)/*.mm)
 PANORAMA_VIEWER_OBJ := \
 	$(patsubst $(PANORAMA_APP_SRC_DIR)/%.mm,$(OBJ_DIR)/app/%.o,$(PANORAMA_VIEWER_SRC))
-PANORAMA_VIEWER_CORE_OBJ := $(RAYTRACE_OBJ) $(OBJ_DIR)/rendering/gpu_image_renderer.o
+PANORAMA_VIEWER_CORE_OBJ := $(RAYTRACE_OBJ) $(OBJ_DIR)/rendering/gpu_image_renderer.o $(OBJ_DIR)/rendering/gpu_terrain_frame.o
 TILE_GEN_SRC := $(wildcard $(TILE_GEN_SRC_DIR)/*.mm)
 TILE_GEN_OBJ := $(patsubst $(TILE_GEN_SRC_DIR)/%.mm,$(OBJ_DIR)/tile-gen/%.o,$(TILE_GEN_SRC))
 SHARED_SRC := $(wildcard $(SHARED_SRC_DIR)/*.mm)
@@ -179,8 +179,8 @@ clean:
 # between debug and release object directories.
 FORCE:
 
-$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(RAYTRACE_OBJ) $(SHARED_OBJ) $(METAL_LIB)
-	$(CXX) $(RAYTRACE_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(RAYTRACE_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
+$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB)
+	$(CXX) $(RAYTRACE_INCLUDES) $(RENDERING_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
 
 .PHONY: check-bvh
 check-bvh: $(OBJ_DIR)/metal-bvh-test
@@ -188,13 +188,15 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --edge-cases
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --tile-selection
 
 $(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(OBJ_DIR)/tile-gen/geotiff_writer.o $(SHARED_OBJ)
 	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $^ $(FRAMEWORKS) $(LDLIBS)
 
 .PHONY: check-manifest
-check-manifest: $(OBJ_DIR)/terrain-manifest-test
-	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/terrain-manifest-test
+check-manifest: $(OBJ_DIR)/terrain-manifest-test $(TILE_GEN_EXE)
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/terrain-manifest-test ./$(TILE_GEN_EXE)
 
 # Missing dependency files are harmless on the first build.
 -include $(DEPS)

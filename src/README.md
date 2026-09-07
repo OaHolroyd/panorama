@@ -4,7 +4,7 @@ Panorama turns prepared digital terrain model (DTM) tiles into distance,
 elevation, normal, shadow, and colour images. The expensive work is performed
 by Metal kernels. The software backend alternates between GPU traversal and
 host-side scheduling while terrain tiles are loaded asynchronously. The Metal
-BVH backend streams cached tile acceleration structures, with a manifest BVH
+BVH backend streams cached tile acceleration structures, with a shared manifest BVH
 selecting tiles and Metal instance transforms applying observer curvature.
 
 This document follows a request from an executable down to the terrain kernels.
@@ -98,7 +98,7 @@ The backend builds a primitive acceleration structure, reads back its compacted
 size, and completes copy-and-compact before releasing build storage. All
 indirect intersection-table resources are declared on every trace encoder.
 Submissions finish synchronously before parameters, outputs, or cache entries may
-change. A small catalogue BVH contains one conservative manifest box per tile.
+change. The shared `TerrainTileBvh` contains one conservative manifest box per tile.
 Version 2 manifests carry minima and maxima over all LODs; missing bounds use
 conservative finite columns.
 
@@ -140,8 +140,20 @@ the inclusive streaming trace, so cold construction cannot masquerade as tracing
 Per-frame diagnostics also report scene builds, scene passes and fallback-ray
 counts. The existing cache-hit counter counts streaming acquisitions; a warm
 scene can resolve all rays without any such acquisitions.
-The software shadow frontier remains available and consumes hardware primary
-outputs through the unchanged session interface.
+The viewer's `render_terrain_frame` encodes resident primary rays, shadows,
+colouring and dependent visibility projection into one producer command.
+Shadow rays use an affine change from their collision origin into the primary
+scene's curvature frame. Their callbacks still solve collisions relative to
+the shadow origin. A missing candidate triggers software shadow streaming;
+an already known occluder is sufficient to prove shadow. Cold shadow dispatches
+cover every image pixel, independently of the last primary streaming batch size.
+Primary view and configuration changes invalidate cached shadow visibility.
+
+Producer results remain unpublished until both missing-ray counters have been
+checked. A fallback repairs tracing and regenerates the image before publication.
+Producer timing covers its completed command buffers; synchronous hierarchy
+preparation and streaming are included only in wall latency. The software shadow
+frontier remains available through the ordinary synchronous session interface.
 
 ## One primary tracing pass
 
@@ -166,11 +178,15 @@ flowchart TD
 ```
 
 `GpuRaytraceResources::trace_frontier` encodes `trace_tile_frontier` and
-`emit_tile_frontier` into the same command buffer. The first kernel traverses
+`emit_bvh_tile_frontier` into the same command buffer. The first kernel traverses
 one resident tile and writes either a collision or the distance at which the
-ray leaves it. The second kernel walks across catalogue tiles whose published
-maximum elevation proves they cannot intersect the ray, then emits one
-`DeferredRayWork` for the first source that needs detailed traversal.
+ray leaves it. The second kernel selects the next conservative candidate using
+`TerrainTileBvh`, then emits one `DeferredRayWork` for detailed traversal.
+`GpuRaytraceResources` owns this catalogue; both backends share its construction,
+curvature bounds, tile intersection callback, selection helper, and coverage-gap
+checks. Function tables remain pipeline-local, and no detailed surface BVHs are
+built for Mipmap. Unsupported devices use `emit_tile_frontier` grid walking;
+`RaytraceConfig::use_tile_bvh = false` also selects that reference path in tests.
 
 After the command completes, `HostFrontier` groups those continuations by
 catalogue source. It activates resident work near the closest outstanding
@@ -235,7 +251,7 @@ coarser levels. The selected terrain LOD changes cell size and available
 mipmap depth but retains a common atlas-slot stride.
 
 The return value is deliberately a continuation distance rather than a tile
-identifier. `emit_tile_frontier` owns neighbor selection and catalogue lookup;
+identifier. The frontier emitter owns tile selection and catalogue lookup;
 the host later maps its source index to whichever atlas slot currently holds
 the selected variant.
 

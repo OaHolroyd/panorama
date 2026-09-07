@@ -1,6 +1,7 @@
 #include "arguments.h"
 #include "coordinate_input.h"
 #include "gpu_image_renderer.h"
+#include "gpu_terrain_frame.h"
 #include "minimap.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
@@ -75,7 +76,7 @@ struct ViewerSettings {
   float lod_scale = 0.0F;
   Raytracer raytracer = Raytracer::MetalBvh;
   uint32_t bvh_block_cells = 4U;
-  uint64_t bvh_cache_size_bytes = 512ULL * kBytesPerMiB;
+  uint64_t bvh_cache_size_bytes = 2048ULL * kBytesPerMiB;
   bool discard_quantized = false;
   bool trace_diagnostics = false;
   bool bilinear_collisions = false;
@@ -557,6 +558,8 @@ struct PresentedFrame {
   double vertical_field_of_view;
   uint64_t revision;
   double milliseconds;
+  double gpu_milliseconds;
+  bool streamed;
   std::string error;
   std::optional<PointInspection> inspection;
   uint64_t inspection_sequence;
@@ -609,8 +612,12 @@ public:
     }
   }
 
-  [[nodiscard]] id<MTLBuffer>
-  project(id<MTLBuffer> rays, id<MTLBuffer> distances, ImageSize image) const {
+  [[nodiscard]] id<MTLBuffer> project(
+      id<MTLBuffer> rays,
+      id<MTLBuffer> distances,
+      ImageSize image,
+      id<MTLCommandBuffer> command
+  ) const {
     const uint64_t count64 = static_cast<uint64_t>(image.width) * image.height;
     const uint64_t rayBytes = count64 * sizeof(RayDirection);
     const uint64_t distanceBytes = count64 * sizeof(float);
@@ -627,12 +634,10 @@ public:
     }
     points.label = @"Minimap visibility collision points";
 
-    id<MTLCommandBuffer> command = [queue_ commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     if (command == nil || encoder == nil) {
       throw std::runtime_error("Could not create visibility collision-point command");
     }
-    command.label = @"Project minimap visibility collisions";
     encoder.label = @"visibility_collision_points";
     [encoder setComputePipelineState:pipeline_];
     [encoder setBuffer:rays offset:0 atIndex:0];
@@ -644,15 +649,6 @@ public:
     [encoder dispatchThreads:MTLSizeMake(count, 1U, 1U)
         threadsPerThreadgroup:MTLSizeMake(groupWidth, 1U, 1U)];
     [encoder endEncoding];
-    [command commit];
-    [command waitUntilCompleted];
-    if (command.status != MTLCommandBufferStatusCompleted) {
-      const char *detail =
-          command.error == nil ? "unknown error" : command.error.localizedDescription.UTF8String;
-      throw std::runtime_error(
-          "GPU visibility collision-point projection failed: " + std::string(detail)
-      );
-    }
     return points;
   }
 
@@ -744,7 +740,7 @@ public:
       );
     }
     device_ = trace_->device();
-    display_queue_ = [device_ newCommandQueue];
+    display_queue_ = trace_->command_queue();
     library_ = trace_->library();
     if (display_queue_ == nil) {
       throw std::runtime_error("Could not create viewer display command queue");
@@ -981,6 +977,8 @@ public:
         .vertical_field_of_view = presented_vertical_field_of_view_,
         .revision = presented_revision_,
         .milliseconds = frame_ms_,
+        .gpu_milliseconds = frame_gpu_ms_,
+        .streamed = frame_streamed_,
         .error = error_,
         .inspection = presented_inspection_,
         .inspection_sequence = presented_inspection_sequence_,
@@ -1242,6 +1240,7 @@ private:
               target_requested = true;
             }
           }
+          GpuTerrainFrameTiming producer_timing;
           if (trace_requested) {
             RayField field = make_view(image, orientation, vertical_field_of_view);
             trace_->set_raytracer(raytracer);
@@ -1285,66 +1284,47 @@ private:
               }
               current_observer_ = observer;
             }
-            trace_->trace(field);
-            if (settings_.trace_diagnostics)
-              trace_->print_trace_statistics();
             current_field_ = std::move(field);
             current_orientation_ = orientation;
             current_vertical_field_of_view_ = vertical_field_of_view;
             current_revision_ = revision;
-            current_visibility_points_ = visibility_->project(
-                trace_->ray_directions(),
-                trace_->distances(),
-                current_field_.image
-            );
           }
 
           if (presentation_requested) {
-            Timer timer("GPU presentation");
-            presentation_->resize(current_field_.image);
-            if (presentation.use_surface_normals && presentation.appearance.raytraced_shadows) {
-              trace_->trace_shadows(
-                  presentation.appearance.sun_azimuth,
-                  presentation.appearance.sun_elevation
-              );
-            }
-
-            id<MTLBuffer> colour_values = nil;
-            switch (presentation.appearance.colour_source) {
-            case TerrainColourSource::White:
-              break;
-            case TerrainColourSource::Elevation:
-              colour_values = trace_->elevations();
-              break;
-            case TerrainColourSource::Distance:
-              colour_values = trace_->distances();
-              break;
-            case TerrainColourSource::NumSteps:
-              colour_values = trace_->num_steps();
-              break;
-            case TerrainColourSource::NumEvaluations:
-              colour_values = trace_->num_evaluations();
-              break;
-            }
-
-            presentation_->render_synthetic(
-                trace_->surface_gradients(),
-                trace_->distances(),
-                trace_->ray_directions(),
-                colour_values,
-                presentation.use_surface_normals && presentation.appearance.raytraced_shadows
-                    ? trace_->shadow_visibility()
-                    : nil,
-                presentation.appearance,
-                presentation.colour_range,
-                presentation.use_surface_normals,
-                timer
+            id<MTLBuffer> next_visibility_points = current_visibility_points_;
+            producer_timing = render_terrain_frame(
+                *trace_,
+                trace_requested ? &current_field_ : nullptr,
+                *presentation_,
+                presentation,
+                [&](id<MTLCommandBuffer> command) {
+                  if (trace_requested)
+                    next_visibility_points = visibility_->project(
+                        trace_->ray_directions(),
+                        trace_->distances(),
+                        current_field_.image,
+                        command
+                    );
+                }
             );
+            current_visibility_points_ = next_visibility_points;
             current_revision_ = revision;
           }
           const double milliseconds =
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                   .count();
+          if (settings_.trace_diagnostics && presentation_requested) {
+            std::printf(
+                "Frame %llu: wall %.3f ms, GPU producer %.3f ms, %u producer submission(s), %s\n",
+                static_cast<unsigned long long>(revision),
+                milliseconds,
+                producer_timing.gpu_milliseconds,
+                producer_timing.producer_submissions,
+                producer_timing.streamed ? "streaming work excluded from GPU producer timing"
+                                         : "resident trace and presentation combined"
+            );
+            std::fflush(stdout);
+          }
           const bool publish_inspection =
               inspection_requested || (inspection_pixel.has_value() && presentation_requested);
           std::optional<PointInspection> inspection;
@@ -1392,6 +1372,8 @@ private:
             // pass should not replace it with a misleadingly high frame rate.
             if (trace_requested) {
               frame_ms_ = milliseconds;
+              frame_gpu_ms_ = producer_timing.gpu_milliseconds;
+              frame_streamed_ = producer_timing.streamed;
             }
           }
           if (publish_inspection) {
@@ -1481,6 +1463,8 @@ private:
   uint64_t presented_roam_result_sequence_ = 0U;
   double observer_ground_clearance_ = 0.0;
   double frame_ms_ = 0.0;
+  double frame_gpu_ms_ = 0.0;
+  bool frame_streamed_ = false;
   float requested_lod_scale_ = 0.0F;
   Raytracer requested_raytracer_ = Raytracer::MetalBvh;
   bool requested_bilinear_collisions_ = false;
@@ -5169,6 +5153,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                    verticalFieldOfView:_verticalFieldOfView
                                  image:_image
                           milliseconds:0.0
+                       gpuMilliseconds:0.0
+                              streamed:NO
                               revision:0U];
   return viewController;
 }
@@ -5177,6 +5163,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                    verticalFieldOfView:(double)verticalFieldOfView
                                  image:(panorama::ImageSize)image
                           milliseconds:(double)milliseconds
+                       gpuMilliseconds:(double)gpuMilliseconds
+                              streamed:(BOOL)streamed
                               revision:(uint64_t)revision {
   if (_debugInfoLabel == nil) {
     return;
@@ -5191,8 +5179,12 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   NSString *performance =
       milliseconds > 0.0
           ? [NSString
-                stringWithFormat:@"FPS          %8.2f\nFrame time   %8.2f ms", fps, milliseconds]
-          : @"FPS                 —\nFrame time          —";
+                stringWithFormat:@"FPS          %8.2f\nWall latency %8.2f ms", fps, milliseconds]
+          : @"FPS                 —\nWall latency        —";
+  performance = [performance
+      stringByAppendingString:streamed ? @"\nGPU frame      streaming"
+                                       : [NSString stringWithFormat:@"\nGPU frame    %8.2f ms",
+                                                                    gpuMilliseconds]];
   _debugInfoLabel.stringValue = [NSString
       stringWithFormat:@"%@\nRevision     %8llu\n\n"
                         "Easting    %11.2f m\nNorthing   %11.2f m\nElevation  %11.2f m\n\n"
@@ -6053,6 +6045,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                      verticalFieldOfView:frame.vertical_field_of_view
                                    image:frame.image
                             milliseconds:frame.milliseconds
+                         gpuMilliseconds:frame.gpu_milliseconds
+                                streamed:frame.streamed
                                 revision:frame.revision];
     [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                 verticalFieldOfView:frame.vertical_field_of_view

@@ -13,6 +13,8 @@
 
 namespace panorama {
 
+class TerrainTileBvh;
+
 /// Scalar-only tracing ABI shared with the Metal frontier kernels.
 struct RaytraceParameters {
   /// Metres between adjacent vertices in the reference LOD-1 surface.
@@ -122,6 +124,18 @@ public:
 
   /// Return the queue shared with post-trace GPU presentation work.
   [[nodiscard]] id<MTLCommandQueue> command_queue() const;
+
+  /// Lazily allocate catalogue acceleration shared by both tracing backends.
+  TerrainTileBvh &tile_bvh();
+
+  /// Prepare mipmap catalogue selection; unsupported devices retain grid walking.
+  void prepare_tile_selection(
+      TileManager &tiles,
+      ObserverLocation observer,
+      const RaytraceParameters &parameters,
+      bool enabled,
+      Timer &timer
+  );
 
   /// Return the library containing both tracing and presentation kernels.
   [[nodiscard]] id<MTLLibrary> library() const;

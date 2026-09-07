@@ -55,6 +55,9 @@ struct RaytraceConfig {
   /// Detailed BVHs, owned samples, metadata, and peak construction workspace.
   /// Independent of the terrain atlas and ray-sized working buffers.
   uint64_t bvh_cache_size_bytes = 512ULL * 1024ULL * 1024ULL;
+  /// Use shared catalogue acceleration for mipmap tile selection when supported.
+  /// Disabling this retains grid walking as a reference and compatibility path.
+  bool use_tile_bvh = true;
 };
 
 } // namespace panorama
