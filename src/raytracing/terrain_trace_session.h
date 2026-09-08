@@ -23,10 +23,13 @@ namespace panorama {
 /// cached terrain.
 class TerrainTraceSession {
 public:
+  /// Reuse shared_queue and its device when rebuilding a viewer's catalogue.
+  /// With no supplied queue, the session creates its own default device/queue.
   TerrainTraceSession(
       const RaytraceConfig &config,
       const RayField &initial_field,
-      GpuTraceOutputRequirements outputs
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue = nil
   );
 
   TerrainTraceSession(const TerrainTraceSession &) = delete;

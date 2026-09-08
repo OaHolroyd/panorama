@@ -154,7 +154,8 @@ The viewer also rolls back a completed target if later inspection fails before
 publication. Display commits check the snapshot revision and texture under the
 publication mutex; stale snapshots are dropped. This places presentation ahead
 of any subsequent reuse of that texture on the shared queue without adding a
-GPU wait.
+GPU wait. Replacement trace sessions inherit that same queue and its device when
+the observer leaves the retained catalogue; presentation resources remain valid.
 
 Producer results remain unpublished until both missing-ray counters have been
 checked. A fallback repairs tracing and regenerates the image before publication.

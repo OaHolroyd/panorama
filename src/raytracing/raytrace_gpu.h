@@ -91,13 +91,15 @@ public:
   ///
   /// Optional outputs specialize the trace pipeline, removing their collision
   /// arithmetic, buffer writes, and full-size allocations when disabled.
+  /// A supplied queue also selects its device; otherwise create a default pair.
   GpuRaytraceResources(
       std::span<const RayDirection> rays,
       std::span<const TerrainSource> sources,
       bool trace_quantized,
       bool bilinear_collisions,
       bool c1_normals,
-      GpuTraceOutputRequirements outputs
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue = nil
   );
 
   GpuRaytraceResources(const GpuRaytraceResources &) = delete;

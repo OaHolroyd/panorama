@@ -542,6 +542,78 @@ void check_scene_misses(const std::filesystem::path &directory) {
   );
 }
 
+void check_session_replacement(const std::filesystem::path &directory, Raytracer backend) {
+  const auto field = make_angular_ray_field({97, 33}, {0, 6.3, -1.3, 0.1});
+  // One retained tile forces the same replacement path as leaving the viewer's catalogue.
+  RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 1, 16384, 2, true, true, false};
+  config.raytracer = backend;
+  const GpuTraceOutputRequirements outputs{true, true, true};
+  auto session = std::make_unique<TerrainTraceSession>(config, field, outputs);
+  const auto device = session->device();
+  const auto queue = session->command_queue();
+  const GpuPresentationRequirements products{false, false, false, true, true, true};
+  GpuImageRenderer image(device, queue, session->library(), field.image, products);
+  TerrainPresentationSettings settings{};
+  settings.colour_range = {0, 480};
+  settings.appearance.colour_source = TerrainColourSource::Distance;
+  settings.appearance.raytraced_shadows = true;
+  settings.appearance.sun_azimuth = 2.1;
+  settings.appearance.sun_elevation = 0.35;
+  Timer timer("Session replacement");
+  (void)render_terrain_frame(*session, &field, image, settings);
+
+  for (const ObserverLocation observer :
+       {ObserverLocation{2599965, 1199975, 1120}, ObserverLocation{2600045, 1199945, 1120}}) {
+    @autoreleasepool {
+      require(!session->relocate_observer(observer), "Fixture did not leave the catalogue");
+      config.observer = observer;
+      session = std::make_unique<TerrainTraceSession>(config, field, outputs, queue);
+      require(
+          session->command_queue() == queue && session->device() == device,
+          "Session replacement changed the viewer's device or queue"
+      );
+      // Keep the original presentation renderer and queue alive across replacements.
+      (void)render_terrain_frame(*session, &field, image, settings);
+      const auto rendered = image.readback(timer);
+
+      auto reference_config = config;
+      reference_config.raytracer = Raytracer::Software;
+      reference_config.use_tile_bvh = false;
+      TerrainTraceSession reference(reference_config, field, outputs);
+      GpuImageRenderer expected(
+          reference.device(),
+          reference.command_queue(),
+          reference.library(),
+          field.image,
+          products
+      );
+      (void)render_terrain_frame(reference, &field, expected, settings);
+      const auto baseline = expected.readback(timer);
+      require(
+          rendered.bytes.size() == baseline.bytes.size(),
+          "Replacement image dimensions changed"
+      );
+      require(
+          std::any_of(
+              baseline.bytes.begin(),
+              baseline.bytes.end(),
+              [](uint8_t value) { return value != 0; }
+          ),
+          "Replacement fixture did not render terrain"
+      );
+      for (size_t i = 0; i < rendered.bytes.size(); ++i)
+        require(
+            std::abs(int(rendered.bytes[i]) - int(baseline.bytes[i])) <= 2,
+            "Replacement session changed rendered terrain"
+        );
+    }
+  }
+  std::printf(
+      "Session replacement preserved device, queue and image parity (%s).\n",
+      backend == Raytracer::Software ? "Mipmap" : "BVH"
+  );
+}
+
 void check_producer(const std::filesystem::path &directory, bool bilinear, bool partial = false) {
   RaytraceConfig
       config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
@@ -820,6 +892,11 @@ int main(int argc, const char *argv[]) {
             check_tile_selection(root / "distant", true, 1000.0);
           }
         } else if (producer) {
+          for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
+            @autoreleasepool {
+              check_session_replacement(root / "quantized", backend);
+            }
+          }
           for (bool bilinear : {false, true}) {
             @autoreleasepool {
               check_producer(root / "quantized", bilinear);

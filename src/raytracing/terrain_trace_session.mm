@@ -147,7 +147,8 @@ struct TerrainTraceSession::State {
   State(
       const RaytraceConfig &config_value,
       const RayField &initial_field,
-      GpuTraceOutputRequirements outputs
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue
   )
       : config(config_value), image(initial_field.image),
         ray_count(validate_ray_field(initial_field)), outputs(outputs) {
@@ -167,7 +168,8 @@ struct TerrainTraceSession::State {
         tiles->traces_quantized(),
         config.bilinear_collisions,
         config.c1_normals,
-        outputs
+        outputs,
+        shared_queue
     );
     tiles->attach_gpu(gpu->device(), timer);
     if (config.raytracer == Raytracer::MetalBvh) {
@@ -185,9 +187,10 @@ struct TerrainTraceSession::State {
 TerrainTraceSession::TerrainTraceSession(
     const RaytraceConfig &config,
     const RayField &initial_field,
-    GpuTraceOutputRequirements outputs
+    GpuTraceOutputRequirements outputs,
+    id<MTLCommandQueue> shared_queue
 )
-    : state_(std::make_unique<State>(config, initial_field, outputs)) {}
+    : state_(std::make_unique<State>(config, initial_field, outputs, shared_queue)) {}
 
 TerrainTraceSession::~TerrainTraceSession() = default;
 

@@ -1288,11 +1288,9 @@ private:
                         .surface_gradients = true,
                         .elevations = true,
                         .debugging_info = true,
-                    }
+                    },
+                    display_queue_
                 );
-                if (replacement->device() != device_) {
-                  throw std::runtime_error("Observer relocation selected a different Metal device");
-                }
                 trace_ = std::move(replacement);
               }
               current_observer_ = observer;

@@ -282,7 +282,8 @@ GpuRaytraceResources::GpuRaytraceResources(
     bool trace_quantized,
     bool bilinear_collisions,
     bool c1_normals,
-    GpuTraceOutputRequirements outputs
+    GpuTraceOutputRequirements outputs,
+    id<MTLCommandQueue> shared_queue
 ) {
   if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
       sources.size() > std::numeric_limits<uint32_t>::max()) {
@@ -294,11 +295,11 @@ GpuRaytraceResources::GpuRaytraceResources(
   state->bilinear_collisions = bilinear_collisions;
   state->c1_normals = c1_normals;
   state->outputs = outputs;
-  state->device = MTLCreateSystemDefaultDevice();
+  state->device = shared_queue == nil ? MTLCreateSystemDefaultDevice() : shared_queue.device;
   if (state->device == nil) {
     throw std::runtime_error("No Metal device is available");
   }
-  state->queue = [state->device newCommandQueue];
+  state->queue = shared_queue == nil ? [state->device newCommandQueue] : shared_queue;
   if (state->queue == nil) {
     throw std::runtime_error("Could not create Metal command queue");
   }
