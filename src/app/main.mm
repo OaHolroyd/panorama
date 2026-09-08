@@ -74,7 +74,7 @@ struct ViewerSettings {
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
-  float lod_scale = 0.0F;
+  float lod_scale = 1.5F;
   Raytracer raytracer = Raytracer::MetalBvh;
   uint32_t bvh_block_cells = 4U;
   uint64_t bvh_cache_size_bytes = 2048ULL * kBytesPerMiB;
@@ -274,7 +274,7 @@ void print_usage(const char *program) {
       "  --workers N           tile preparation workers (default: 8)\n"
       "  --max-distance M      horizontal range in metres (default: 600000)\n"
       "  --lod-scale V         terrain cell footprint multiplier; 0 keeps full detail\n"
-      "                        (default: 0)\n"
+      "                        (default: 1.5)\n"
       "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
       "                        (default: retain uint16)\n"
       "  --trace-diagnostics   log frame timing, BVH cache, memory and display progress\n"

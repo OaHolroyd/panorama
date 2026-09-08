@@ -125,7 +125,9 @@ working set resident, or `--lod-scale 1` to fit coarser distant terrain within
 the default cache. Repeated views then avoid per-tile submissions and CPU ray
 grouping; cold views and cache misses still incur loading/building work.
 
-The viewer defaults to the `metal-bvh` terrain backend. In Viewer Settings →
+The viewer defaults to the `metal-bvh` terrain backend and LOD scale `1.5` to
+reduce distant-terrain cache pressure. Use `--lod-scale 0` for full detail.
+In Viewer Settings →
 Terrain, the Raytracer selector switches between Mipmap and BVH and redraws the
 current view. The Raytracer menu provides the same choices. Mipmap uses the
 `software` backend; both executables also accept
