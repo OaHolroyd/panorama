@@ -151,10 +151,13 @@ Primary view and configuration changes invalidate cached shadow visibility.
 
 Failed producers restore the previous output target before another frame begins.
 The viewer also rolls back a completed target if later inspection fails before
-publication. Display commits check the snapshot revision and texture under the
-publication mutex; stale snapshots are dropped. This places presentation ahead
-of any subsequent reuse of that texture on the shared queue without adding a
-GPU wait. Replacement trace sessions inherit that same queue and its device when
+publication. After acquiring a drawable, display callbacks refresh their snapshot
+under the publication mutex and hold it through blit encoding and commit. This
+places presentation ahead of any subsequent reuse of that texture on the shared
+queue without adding a GPU wait. A newer frame arriving during drawable acquisition
+does not abandon an encoded presentation. Both Metal view callbacks use local
+autorelease pools to release temporary drawable references promptly. Replacement
+trace sessions inherit that same queue and its device when
 the observer leaves the retained catalogue; presentation resources remain valid.
 
 Producer results remain unpublished until both missing-ray counters have been

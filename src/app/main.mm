@@ -11,6 +11,7 @@
 #include "terrain_presentation_settings.h"
 #include "terrain_trace_session.h"
 #include "timer.h"
+#include "trace_diagnostics.h"
 
 #import <AppKit/AppKit.h>
 #import <MapKit/MapKit.h>
@@ -267,7 +268,7 @@ void print_usage(const char *program) {
       "Input and camera options:\n"
       "  --raytracer MODE     metal-bvh (default) or software\n"
       "  --bvh-block-cells N  cells per BVH block axis (default: 4)\n"
-      "  --bvh-cache-mib N    BVH cache and build budget (default: 512)\n"
+      "  --bvh-cache-mib N    BVH cache and build budget (default: 2048)\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
@@ -276,7 +277,7 @@ void print_usage(const char *program) {
       "                        (default: 0)\n"
       "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
       "                        (default: retain uint16)\n"
-      "  --trace-diagnostics   log per-trace wall/GPU timing and BVH cache activity\n"
+      "  --trace-diagnostics   log frame timing, BVH cache, memory and display progress\n"
       "  --easting M           fixed observer easting (default: 2623452.4)\n"
       "  --northing M          fixed observer northing (default: 1100502.2)\n"
       "  --elevation M         fixed observer elevation (default: 3415)\n"
@@ -771,6 +772,8 @@ public:
     requested_bilinear_collisions_ = settings_.bilinear_collisions;
     requested_c1_normals_ = settings_.c1_normals;
     presented_observer_ = settings_.observer;
+    if (settings_.trace_diagnostics)
+      diagnostics_ = std::make_unique<diagnostics::Monitor>(device_);
     worker_ = std::thread([this] { render_loop(); });
     request_view(settings_.orientation, settings_.vertical_field_of_view, settings_.image);
   }
@@ -969,6 +972,12 @@ public:
 
   [[nodiscard]] PresentedFrame presented_frame() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return presented_frame_locked();
+  }
+
+private:
+  /// Caller holds mutex_ so image resources and UI metadata describe one frame.
+  [[nodiscard]] PresentedFrame presented_frame_locked() const {
     return {
         .texture = presented_texture_,
         .visibility_points = presented_visibility_points_,
@@ -994,14 +1003,59 @@ public:
     };
   }
 
-  /// Commit while publication is locked. A producer cannot recycle this
-  /// snapshot's texture until a newer frame is published under the same mutex.
-  /// Queue ordering then keeps this blit ahead of the texture's next write.
-  [[nodiscard]] bool
-  submit_presentation(id<MTLCommandBuffer> command, const PresentedFrame &frame) const {
+public:
+  /// Select the latest frame after drawable acquisition, then encode and commit
+  /// while publication is locked. Never abandon an encoded drawable because a
+  /// newer frame arrived during acquisition. Queue ordering keeps this blit
+  /// ahead of the source texture's next write after the publication lock opens.
+  [[nodiscard]] bool submit_presentation(
+      id<MTLCommandBuffer> command,
+      PresentedFrame &frame,
+      id<CAMetalDrawable> drawable
+  ) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (frame.revision != presented_revision_ || frame.texture != presented_texture_)
+    if (frame.revision != presented_revision_ || frame.texture != presented_texture_) {
+      if (diagnostics::enabled)
+        ++diagnostics::display.refreshed;
+    }
+    frame = presented_frame_locked();
+    // A resolution change needs a new drawable on the next callback. Reject
+    // before encoding any reference to the drawable or scheduling presentation.
+    if (frame.texture != nil && (drawable.texture.width != frame.texture.width ||
+                                 drawable.texture.height != frame.texture.height)) {
+      if (diagnostics::enabled)
+        ++diagnostics::display.stale;
       return false;
+    }
+    diagnostics::display.mark("encode");
+    if (frame.texture != nil) {
+      id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+      if (blit == nil)
+        return false;
+      [blit copyFromTexture:frame.texture
+                sourceSlice:0U
+                sourceLevel:0U
+               sourceOrigin:MTLOriginMake(0U, 0U, 0U)
+                 sourceSize:MTLSizeMake(frame.texture.width, frame.texture.height, 1U)
+                  toTexture:drawable.texture
+           destinationSlice:0U
+           destinationLevel:0U
+          destinationOrigin:MTLOriginMake(0U, 0U, 0U)];
+      [blit endEncoding];
+    } else {
+      MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.colorAttachments[0].texture = drawable.texture;
+      pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+      id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+      if (encoder == nil)
+        return false;
+      [encoder endEncoding];
+    }
+    diagnostics::display.mark("submit");
+    diagnostics::track_submission(diagnostics::display, command, drawable);
+    [command presentDrawable:drawable];
     [command commit];
     return true;
   }
@@ -1219,8 +1273,10 @@ private:
       }
 
       bool unpublished_frame = false;
+      diagnostics::Scope diagnostic_scope(diagnostics::worker);
       try {
         @autoreleasepool {
+          diagnostics::worker.mark("prepare");
           const auto started = std::chrono::steady_clock::now();
           std::optional<RoamResult> roam_result;
           double next_ground_clearance = current_ground_clearance;
@@ -1302,6 +1358,7 @@ private:
           }
 
           if (presentation_requested) {
+            diagnostics::worker.mark("render");
             id<MTLBuffer> next_visibility_points = current_visibility_points_;
             producer_timing = render_terrain_frame(
                 *trace_,
@@ -1326,17 +1383,29 @@ private:
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                   .count();
           if (settings_.trace_diagnostics && presentation_requested) {
+            diagnostics::worker.mark("log");
+            const auto bvh = trace_->bvh_statistics();
             std::printf(
-                "Frame %llu: wall %.3f ms, GPU producer %.3f ms, %u producer submission(s), %s\n",
+                "Frame %llu: wall %.3f ms, GPU producer %.3f ms, %u producer submission(s), %s; "
+                "t=%.3f, BVH resident/budget %.1f/%.1f MiB, "
+                "builds/hits/evictions=%llu/%llu/%llu, scene builds=%llu\n",
                 static_cast<unsigned long long>(revision),
                 milliseconds,
                 producer_timing.gpu_milliseconds,
                 producer_timing.producer_submissions,
                 producer_timing.streamed ? "streaming work excluded from GPU producer timing"
-                                         : "resident trace and presentation combined"
+                                         : "resident trace and presentation combined",
+                diagnostics::seconds(),
+                double(bvh.resident_bytes) / 1048576.0,
+                double(bvh.budget_bytes) / 1048576.0,
+                static_cast<unsigned long long>(bvh.builds),
+                static_cast<unsigned long long>(bvh.cache_hits),
+                static_cast<unsigned long long>(bvh.evictions),
+                static_cast<unsigned long long>(bvh.scene_builds)
             );
             std::fflush(stdout);
           }
+          diagnostics::worker.mark("inspection");
           const bool publish_inspection =
               inspection_requested || (inspection_pixel.has_value() && presentation_requested);
           std::optional<PointInspection> inspection;
@@ -1369,6 +1438,7 @@ private:
             };
           }
 
+          diagnostics::worker.mark("publish");
           std::lock_guard<std::mutex> lock(mutex_);
           if (trace_requested)
             error_.clear();
@@ -1379,6 +1449,8 @@ private:
             presented_orientation_ = orientation;
             presented_vertical_field_of_view_ = vertical_field_of_view;
             presented_revision_ = revision;
+            if (diagnostics::enabled)
+              diagnostics::worker.revision = revision;
             presented_observer_ = current_observer_;
             unpublished_frame = false;
             // The title reports camera-update throughput. A cheap appearance-only
@@ -1416,6 +1488,7 @@ private:
               }
             }
           }
+          diagnostics::worker.mark("pool-drain");
         }
       } catch (const std::exception &exception) {
         if (unpublished_frame)
@@ -1434,6 +1507,7 @@ private:
   id<MTLDevice> device_;
   id<MTLCommandQueue> display_queue_;
   id<MTLLibrary> library_;
+  std::unique_ptr<diagnostics::Monitor> diagnostics_;
   RayField current_field_;
   ObserverLocation current_observer_ = {};
   CameraOrientation current_orientation_ = {};
@@ -5826,45 +5900,44 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)drawInMTKView:(MTKView *)view {
-  const panorama::app::PresentedFrame frame = _renderer->presented_frame();
+  panorama::app::diagnostics::Scope diagnostic_scope(panorama::app::diagnostics::display);
+  @autoreleasepool {
+    [self drawPanoramaInView:view];
+    panorama::app::diagnostics::display.mark("pool-drain");
+  }
+}
+
+- (void)drawPanoramaInView:(MTKView *)view {
+  namespace diagnostics = panorama::app::diagnostics;
+  diagnostics::display.mark("snapshot");
+  panorama::app::PresentedFrame frame = _renderer->presented_frame();
+  diagnostics::display.mark("resize");
   if (frame.texture != nil && (view.drawableSize.width != frame.image.width ||
                                view.drawableSize.height != frame.image.height)) {
     view.drawableSize = CGSizeMake(frame.image.width, frame.image.height);
     [_aspectFitView setAspectRatio:static_cast<CGFloat>(frame.image.width) /
                                    static_cast<CGFloat>(frame.image.height)];
   }
+  diagnostics::display.mark("drawable");
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (drawable == nil) {
+    if (diagnostics::enabled)
+      ++diagnostics::display.unavailable;
     return;
   }
+  diagnostics::display.mark("command-buffer");
   id<MTLCommandBuffer> command = [_renderer->command_queue() commandBuffer];
   if (command == nil) {
     return;
   }
 
-  if (frame.texture != nil) {
-    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-    [blit copyFromTexture:frame.texture
-              sourceSlice:0U
-              sourceLevel:0U
-             sourceOrigin:MTLOriginMake(0U, 0U, 0U)
-               sourceSize:MTLSizeMake(frame.texture.width, frame.texture.height, 1U)
-                toTexture:drawable.texture
-         destinationSlice:0U
-         destinationLevel:0U
-        destinationOrigin:MTLOriginMake(0U, 0U, 0U)];
-    [blit endEncoding];
-  } else {
-    MTLRenderPassDescriptor *pass = view.currentRenderPassDescriptor;
-    if (pass != nil) {
-      pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-      id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-      [encoder endEncoding];
-    }
-  }
-  [command presentDrawable:drawable];
-  if (!_renderer->submit_presentation(command, frame))
+  command.label = @"Present panorama";
+  diagnostics::display.mark("publication-lock");
+  if (!_renderer->submit_presentation(command, frame, drawable))
     return;
+  if (diagnostics::enabled)
+    diagnostics::display.revision = frame.revision;
+  diagnostics::display.mark("ui-update");
 
   if (frame.target_visibility_sequence != _displayedTargetVisibilitySequence) {
     _displayedTargetVisibilitySequence = frame.target_visibility_sequence;
@@ -6319,6 +6392,7 @@ int main(int argc, const char *argv[]) {
   try {
     @autoreleasepool {
       panorama::app::ViewerSettings settings = panorama::app::parse_arguments(argc, argv);
+      panorama::app::diagnostics::enabled = settings.trace_diagnostics;
       NSApplication *application = NSApplication.sharedApplication;
       application.activationPolicy = NSApplicationActivationPolicyRegular;
       PanoramaAppDelegate *delegate =

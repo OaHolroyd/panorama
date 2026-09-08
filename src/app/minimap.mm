@@ -1,4 +1,5 @@
 #include "minimap.h"
+#include "trace_diagnostics.h"
 
 #include "crs.h"
 
@@ -265,16 +266,31 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 }
 
 - (void)drawInMTKView:(MTKView *)view {
+  panorama::app::diagnostics::Scope diagnostic_scope(panorama::app::diagnostics::minimap);
+  @autoreleasepool {
+    [self drawVisibilityInView:view];
+    panorama::app::diagnostics::minimap.mark("pool-drain");
+  }
+}
+
+- (void)drawVisibilityInView:(MTKView *)view {
+  namespace diagnostics = panorama::app::diagnostics;
+  diagnostics::minimap.mark("drawable");
   id<CAMetalDrawable> drawable = view.currentDrawable;
+  diagnostics::minimap.mark("render-pass");
   MTLRenderPassDescriptor *pass = view.currentRenderPassDescriptor;
   if (drawable == nil || pass == nil) {
+    if (diagnostics::enabled)
+      ++diagnostics::minimap.unavailable;
     return;
   }
   pass.colorAttachments[0].loadAction = MTLLoadActionClear;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 
+  diagnostics::minimap.mark("command-buffer");
   id<MTLCommandBuffer> command = [_visibilityCommandQueue commandBuffer];
+  diagnostics::minimap.mark("encode");
   id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
   if (command == nil || encoder == nil) {
     return;
@@ -291,6 +307,8 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   }
   [encoder endEncoding];
   [command presentDrawable:drawable];
+  diagnostics::minimap.mark("submit");
+  diagnostics::track_submission(diagnostics::minimap, command, drawable);
   [command commit];
 }
 

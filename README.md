@@ -104,6 +104,20 @@ GPU producer time excludes synchronous BVH preparation and streaming work;
 wall latency includes them. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
 for measurements, cache guidance and a repeatable camera benchmark.
 
+For intermittent viewer stalls, capture `./panorama-app --trace-diagnostics >
+diagnostics.log 2>&1` (with your usual options). Frame lines include elapsed
+timestamps and cumulative BVH cache counts. An independent monitor prints
+`Health` lines every second, including process footprint, Metal allocations,
+thermal state, and the current worker/display/minimap stage and its age. These
+continue even while the render worker or UI thread is blocked. Submission,
+completion, presentation, stale-frame rejection and missing-drawable counts are
+cumulative. `refreshed` counts snapshots replaced with newer frames after drawable
+acquisition; `stale` now counts resolution mismatches rejected before encoding.
+Display revisions distinguish new camera images from repeated
+presentations. `idle` means that path is outside its instrumented callback, not
+necessarily that the whole UI is responsive. Keep capturing for about ten seconds
+after the slowdown begins before closing the app.
+
 The BVH backend automatically reuses a resident scene hierarchy to trace across
 cached tiles in one GPU pass. Uncached candidates fall back to bounded streaming.
 For the default full-detail Swiss view, use `--bvh-cache-mib 2048` to keep its
