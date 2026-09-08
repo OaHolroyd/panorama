@@ -653,6 +653,38 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
         ++different;
     std::printf("Producer image mismatched channels: %u\n", different);
     require(different == 0, "Producer colouring parity failed");
+    if (frame == 6) {
+      const auto published_texture = actual.texture();
+      const std::vector<uint8_t> published_bytes(b.bytes.begin(), b.bytes.end());
+      // Abandon two successive encodes. Neither may rotate a published target
+      // back into the producer, and a subsequent valid frame must still work.
+      for (uint32_t attempt = 0; attempt < 2; ++attempt) {
+        bool callback_reached = false, rejected = false;
+        try {
+          (void)render_terrain_frame(trace, nullptr, actual, settings, [&](id<MTLCommandBuffer>) {
+            callback_reached = true;
+            throw std::runtime_error("Injected producer failure");
+          });
+        } catch (const std::runtime_error &) {
+          rejected = true;
+        }
+        require(callback_reached && rejected, "Failed producer was not exercised");
+        require(
+            actual.texture() == published_texture,
+            "Failed producer rotated the published target"
+        );
+        const auto retained = actual.readback(timer);
+        require(
+            std::equal(published_bytes.begin(), published_bytes.end(), retained.bytes.begin()),
+            "Failed producer changed the completed image"
+        );
+      }
+      const auto recovered = render_terrain_frame(trace, nullptr, actual, settings);
+      require(
+          recovered.producer_submissions == 1U && !recovered.streamed,
+          "Producer did not recover after an abandoned frame"
+      );
+    }
   }
   trace.trace(field);
   bool rejected = false;

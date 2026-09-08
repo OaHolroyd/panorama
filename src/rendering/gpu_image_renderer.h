@@ -65,6 +65,9 @@ public:
   void resize(ImageSize image);
   /// Select a second target so a producer never overwrites the published image.
   void begin_frame();
+  /// Undo begin_frame after an abandoned or completed-but-failed producer.
+  /// The previous texture remains available; no pending GPU work may use it.
+  void cancel_frame() noexcept;
 
   /// Render a scalar diagnostic using viridis over a fixed value range.
   void render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer);

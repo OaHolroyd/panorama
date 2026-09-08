@@ -430,7 +430,7 @@ kernel void trace_terrain_scene(
   intersector<> missing_tracer;
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
-  TileSelection missing_payload = {0xffffffffU, 0, r.direction, true, float2(0), 0xffffffffU};
+  TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU};
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {
@@ -538,7 +538,7 @@ kernel void trace_scene_shadows(
   intersector<> missing_tracer;
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
-  TileSelection missing_payload = {0xffffffffU, 0, sun.xyz, true, origin.xy, 0xffffffffU};
+  TileSelection missing_payload = {sun.xyz, true, origin.xy, 0xffffffffU};
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none)

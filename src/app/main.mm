@@ -994,6 +994,18 @@ public:
     };
   }
 
+  /// Commit while publication is locked. A producer cannot recycle this
+  /// snapshot's texture until a newer frame is published under the same mutex.
+  /// Queue ordering then keeps this blit ahead of the texture's next write.
+  [[nodiscard]] bool
+  submit_presentation(id<MTLCommandBuffer> command, const PresentedFrame &frame) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (frame.revision != presented_revision_ || frame.texture != presented_texture_)
+      return false;
+    [command commit];
+    return true;
+  }
+
   [[nodiscard]] id<MTLDevice> device() const { return device_; }
   [[nodiscard]] id<MTLCommandQueue> command_queue() const { return display_queue_; }
   [[nodiscard]] id<MTLLibrary> library() const { return library_; }
@@ -1206,6 +1218,7 @@ private:
         collision_settings_pending_ = false;
       }
 
+      bool unpublished_frame = false;
       try {
         @autoreleasepool {
           const auto started = std::chrono::steady_clock::now();
@@ -1307,6 +1320,7 @@ private:
                     );
                 }
             );
+            unpublished_frame = true;
             current_visibility_points_ = next_visibility_points;
             current_revision_ = revision;
           }
@@ -1368,6 +1382,7 @@ private:
             presented_vertical_field_of_view_ = vertical_field_of_view;
             presented_revision_ = revision;
             presented_observer_ = current_observer_;
+            unpublished_frame = false;
             // The title reports camera-update throughput. A cheap appearance-only
             // pass should not replace it with a misleadingly high frame rate.
             if (trace_requested) {
@@ -1405,6 +1420,8 @@ private:
           }
         }
       } catch (const std::exception &exception) {
+        if (unpublished_frame)
+          presentation_->cancel_frame();
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = exception.what();
         printf("ERROR: %s\n", error_.c_str());
@@ -5848,7 +5865,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     }
   }
   [command presentDrawable:drawable];
-  [command commit];
+  if (!_renderer->submit_presentation(command, frame))
+    return;
 
   if (frame.target_visibility_sequence != _displayedTargetVisibilitySequence) {
     _displayedTargetVisibilitySequence = frame.target_visibility_sequence;

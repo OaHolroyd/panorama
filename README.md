@@ -130,11 +130,13 @@ candidate tiles; Mipmap then traverses each selected tile's maximum hierarchy,
 while BVH uses its detailed surface acceleration. The shared catalogue survives
 camera turns, image resizing, and backend switches, and rebuilds after XY or LOD
 changes. Mipmap retains grid selection on devices without Metal ray-tracing
-support. Coverage gaps still terminate rays.
+support. Coverage gaps still terminate rays. Sharing the catalogue alone did not
+improve Mipmap timings in the tested M2 view; performance depends on the camera
+and device.
 
 Metal BVH streams full-resolution tiles on demand; LOD is optional. Detailed tile
-BVHs and their immutable vertices are cached by tile and LOD. Rays retain their progress across batches, including when a frame's
-terrain exceeds the cache. Tiles are scheduled in outward grid shells to avoid
+BVHs and their immutable vertices are cached by tile and LOD. Rays retain their
+progress across batches, including when a frame's terrain exceeds the cache. Tiles are scheduled in outward grid shells to avoid
 rebuilding the same tile for successive groups of rays within a frame.
 
 `--bvh-cache-mib` bounds the requested Metal storage for detailed BVHs, owned

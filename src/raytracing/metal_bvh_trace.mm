@@ -37,6 +37,7 @@ void dispatch(
                                 1
                             )];
 }
+enum class TraceMode { Batch, Scene, Shadows };
 using Pipeline = BvhPipeline;
 struct Hierarchy {
   id<MTLBuffer> instances, chunks;
@@ -62,7 +63,6 @@ struct MetalBvhTrace::State {
   std::span<const BvhTile> tile_metadata;
   uint64_t catalogue_generation = 0;
   std::vector<double> tile_shells;
-  std::vector<uint32_t> selected_lods;
   uint32_t ray_capacity = 0;
   uint64_t clock = 0;
 
@@ -115,18 +115,18 @@ struct MetalBvhTrace::State {
     selector = make_bvh_pipeline(gpu, @"select_terrain_tiles", @"terrain_tile_intersection");
   }
 
-  Pipeline &pipeline(uint32_t mode = 0U) {
-    const bool scene_mode = mode != 0U;
+  Pipeline &pipeline(TraceMode mode = TraceMode::Batch) {
+    const bool scene_mode = mode != TraceMode::Batch;
     const uint32_t index = (gpu.bilinear_collisions() ? 1U : 0U) | (gpu.c1_normals() ? 2U : 0U);
-    auto &result = mode == 2U   ? shadow_pipelines[index]
-                   : scene_mode ? scene_pipelines[index]
-                                : pipelines[index];
+    auto &result = mode == TraceMode::Shadows ? shadow_pipelines[index]
+                   : scene_mode               ? scene_pipelines[index]
+                                              : pipelines[index];
     if (result.state == nil) {
       const bool bilinear = gpu.bilinear_collisions(), smooth = gpu.c1_normals();
       auto *constants = [[MTLFunctionConstantValues alloc] init];
-      const bool gradients = mode != 2U && outputs.surface_gradients;
-      const bool elevations = mode != 2U && outputs.elevations;
-      const bool debugging = mode != 2U && outputs.debugging_info;
+      const bool gradients = mode != TraceMode::Shadows && outputs.surface_gradients;
+      const bool elevations = mode != TraceMode::Shadows && outputs.elevations;
+      const bool debugging = mode != TraceMode::Shadows && outputs.debugging_info;
       [constants setConstantValue:&gradients type:MTLDataTypeBool atIndex:0];
       [constants setConstantValue:&elevations type:MTLDataTypeBool atIndex:1];
       [constants setConstantValue:&debugging type:MTLDataTypeBool atIndex:2];
@@ -134,9 +134,9 @@ struct MetalBvhTrace::State {
       [constants setConstantValue:&smooth type:MTLDataTypeBool atIndex:4];
       result = make_bvh_pipeline(
           gpu,
-          mode == 2U   ? @"trace_scene_shadows"
-          : scene_mode ? @"trace_terrain_scene"
-                       : @"trace_terrain_bvh",
+          mode == TraceMode::Shadows ? @"trace_scene_shadows"
+          : scene_mode               ? @"trace_terrain_scene"
+                                     : @"trace_terrain_bvh",
           @"terrain_bvh_intersection",
           constants,
           scene_mode
@@ -158,7 +158,7 @@ struct MetalBvhTrace::State {
         @"build scratch",
         MTLResourceStorageModePrivate
     );
-    auto size_buffer = buffer(gpu.device(), 1, sizeof(uint64_t), @"compacted size");
+    auto size_buffer = compact ? buffer(gpu.device(), 1, sizeof(uint64_t), @"compacted size") : nil;
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command accelerationStructureCommandEncoder];
     if (encoder == nil)
@@ -392,7 +392,11 @@ struct MetalBvhTrace::State {
       bool shadows = false
   ) {
     std::memcpy(parameters.contents, &current, sizeof(current));
-    auto &p = pipeline(shadows ? 2U : scene_mode ? 1U : 0U);
+    auto &p = pipeline(
+        shadows      ? TraceMode::Shadows
+        : scene_mode ? TraceMode::Scene
+                     : TraceMode::Batch
+    );
     [p.table setBuffer:hierarchy.chunks offset:0 atIndex:0];
     [p.table setBuffer:parameters offset:0 atIndex:1];
     const bool submit = command == nil;
@@ -476,7 +480,7 @@ struct MetalBvhTrace::State {
     if (scene.acceleration == nil) {
       std::vector<Entry *> entries;
       for (auto &[key, entry] : cache) {
-        if (key.lod == selected_lods[key.source_index])
+        if (key.lod == manager->lod_for_source(key.source_index))
           entries.push_back(entry.get());
       }
       if (entries.empty())
@@ -600,10 +604,6 @@ void MetalBvhTrace::prepare(
     Timer &timer
 ) {
   State &state = *state_;
-  std::vector<uint32_t> lods;
-  for (uint32_t i = 0; i < tiles.sources().size(); ++i)
-    lods.push_back(tiles.lod_for_source(i));
-  state.selected_lods = std::move(lods);
   state.manager = &tiles;
   state.observer = observer;
   state.current.trace = parameters;
@@ -613,7 +613,7 @@ void MetalBvhTrace::prepare(
   state.current.hash_capacity = state.gpu.catalogue_hash_capacity();
   @autoreleasepool {
     (void)state.pipeline();
-    (void)state.pipeline(true);
+    (void)state.pipeline(TraceMode::Scene);
     auto &shared = state.gpu.tile_bvh();
     const auto started = std::chrono::steady_clock::now();
     if (shared.prepare(tiles, observer, parameters)) {

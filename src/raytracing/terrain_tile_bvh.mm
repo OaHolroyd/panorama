@@ -22,10 +22,10 @@ struct TerrainTileBvh::State {
   double build_ms = 0;
   explicit State(GpuRaytraceResources &resources) : gpu(resources) {}
 
-  void rebuild(TileManager *manager, const RaytraceParameters &parameters) {
-    const auto &grid = manager->catalogue().grid();
-    const auto &sources = manager->sources();
-    const auto &geometry = manager->origin_geometry();
+  void rebuild(TileManager &manager, const RaytraceParameters &parameters) {
+    const auto &grid = manager.catalogue().grid();
+    const auto &sources = manager.sources();
+    const auto &geometry = manager.origin_geometry();
     tile_metadata.resize(sources.size());
     std::vector<BvhBounds> boxes(sources.size());
     const double k = parameters.curvature_coefficient;
@@ -113,18 +113,20 @@ bool TerrainTileBvh::prepare(
     const RaytraceParameters &parameters
 ) {
   State &state = *state_;
-  std::vector<uint32_t> lods;
-  for (uint32_t i = 0; i < manager.sources().size(); ++i)
-    lods.push_back(manager.lod_for_source(i));
+  bool lods_changed = state.selected_lods.size() != manager.sources().size();
+  for (uint32_t i = 0; !lods_changed && i < state.selected_lods.size(); ++i)
+    lods_changed = state.selected_lods[i] != manager.lod_for_source(i);
   if (state.catalogue != nil && state.observer.easting == observer.easting &&
-      state.observer.northing == observer.northing && state.selected_lods == lods &&
+      state.observer.northing == observer.northing && !lods_changed &&
       state.curvature == parameters.curvature_coefficient)
     return false;
+  state.selected_lods.resize(manager.sources().size());
+  for (uint32_t i = 0; i < state.selected_lods.size(); ++i)
+    state.selected_lods[i] = manager.lod_for_source(i);
   state.observer = observer;
-  state.selected_lods = std::move(lods);
   state.curvature = parameters.curvature_coefficient;
   state.catalogue = nil; // Failed construction must be retried on the next frame.
-  state.rebuild(&manager, parameters);
+  state.rebuild(manager, parameters);
   return true;
 }
 id<MTLAccelerationStructure> TerrainTileBvh::acceleration() const { return state_->catalogue; }

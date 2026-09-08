@@ -149,6 +149,13 @@ an already known occluder is sufficient to prove shadow. Cold shadow dispatches
 cover every image pixel, independently of the last primary streaming batch size.
 Primary view and configuration changes invalidate cached shadow visibility.
 
+Failed producers restore the previous output target before another frame begins.
+The viewer also rolls back a completed target if later inspection fails before
+publication. Display commits check the snapshot revision and texture under the
+publication mutex; stale snapshots are dropped. This places presentation ahead
+of any subsequent reuse of that texture on the shared queue without adding a
+GPU wait.
+
 Producer results remain unpublished until both missing-ray counters have been
 checked. A fallback repairs tracing and regenerates the image before publication.
 Producer timing covers its completed command buffers; synchronous hierarchy

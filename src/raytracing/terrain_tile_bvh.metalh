@@ -28,8 +28,6 @@ struct BvhIntersection {
 };
 
 struct TileSelection {
-  uint source;
-  float exit;
   float3 world_direction;
   bool skip_resident;
   float2 origin;
@@ -132,7 +130,7 @@ inline SelectedTerrainTile select_next_terrain_tile(
   r.max_distance = limit;
   intersector<> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
-  TileSelection payload = {0xffffffffU, 0, r.direction, false, float2(0), excluded_source};
+  TileSelection payload = {r.direction, false, float2(0), excluded_source};
   const auto hit = tracer.intersect(r, catalogue, functions, payload);
   if (hit.type == intersection_type::none)
     return {0xffffffffU, limit, limit};

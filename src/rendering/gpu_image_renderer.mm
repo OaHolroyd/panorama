@@ -228,6 +228,8 @@ void GpuImageRenderer::begin_frame() {
   std::swap(state.output, state.spare_output);
 }
 
+void GpuImageRenderer::cancel_frame() noexcept { std::swap(state_->output, state_->spare_output); }
+
 void GpuImageRenderer::render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer) {
   State &state = *state_;
   if (state.scalar == nil) {

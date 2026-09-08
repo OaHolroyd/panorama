@@ -39,8 +39,6 @@ BvhIntersection terrain_tile_intersection(
   if ((payload.world_direction.x == 0 && tile.x_min + width <= payload.origin.x) ||
       (payload.world_direction.y == 0 && tile.y_min + width <= payload.origin.y))
     return {false, 0};
-  payload.source = primitive;
-  payload.exit = exit;
   return {true, max(entry, min_distance)};
 }
 

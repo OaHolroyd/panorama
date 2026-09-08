@@ -92,7 +92,7 @@ METAL_LIB := $(OBJ_DIR)/panorama.metallib
 PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
 DEPS := $(PANORAMA_OBJ:.o=.d) $(PANORAMA_VIEWER_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) \
-	$(SHARED_OBJ:.o=.d)
+	$(SHARED_OBJ:.o=.d) $(OBJ_DIR)/metal-bvh-test.d $(OBJ_DIR)/terrain-manifest-test.d
 
 .PHONY: all clean rebuild compile_commands FORCE
 
@@ -192,7 +192,7 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --tile-selection
 
 $(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(OBJ_DIR)/tile-gen/geotiff_writer.o $(SHARED_OBJ)
-	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $^ $(FRAMEWORKS) $(LDLIBS)
+	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
 
 .PHONY: check-manifest
 check-manifest: $(OBJ_DIR)/terrain-manifest-test $(TILE_GEN_EXE)
