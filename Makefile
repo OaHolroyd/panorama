@@ -92,7 +92,8 @@ METAL_LIB := $(OBJ_DIR)/panorama.metallib
 PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
 DEPS := $(PANORAMA_OBJ:.o=.d) $(PANORAMA_VIEWER_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) \
-	$(SHARED_OBJ:.o=.d) $(OBJ_DIR)/metal-bvh-test.d $(OBJ_DIR)/terrain-manifest-test.d
+	$(SHARED_OBJ:.o=.d) $(OBJ_DIR)/metal-bvh-test.d $(OBJ_DIR)/terrain-manifest-test.d \
+	$(OBJ_DIR)/minimap-test.d
 
 .PHONY: all clean rebuild compile_commands FORCE
 
@@ -190,6 +191,13 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --tile-selection
+
+$(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(METAL_LIB)
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
+
+.PHONY: check-minimap
+check-minimap: $(OBJ_DIR)/minimap-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/minimap-test
 
 $(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(OBJ_DIR)/tile-gen/geotiff_writer.o $(SHARED_OBJ)
 	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)

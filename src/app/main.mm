@@ -12,6 +12,7 @@
 #include "terrain_trace_session.h"
 #include "timer.h"
 #include "trace_diagnostics.h"
+#include "visibility_mask.h"
 
 #import <AppKit/AppKit.h>
 #import <MapKit/MapKit.h>
@@ -584,81 +585,6 @@ struct PresentedFrame {
   return static_cast<float>(value);
 }
 
-/// GPU-only conversion from reusable trace buffers to an immutable buffer of
-/// observer-relative east/north collision points. Publishing a fresh buffer
-/// per trace prevents continuous camera input from exposing the minimap to
-/// ray storage which the next trace is already clearing or replacing.
-class GpuVisibilityPointProjector {
-public:
-  GpuVisibilityPointProjector(
-      id<MTLDevice> device,
-      id<MTLCommandQueue> queue,
-      id<MTLLibrary> library
-  )
-      : device_(device), queue_(queue) {
-    if (device_ == nil || queue_ == nil || library == nil) {
-      throw std::invalid_argument("Visibility projection requires valid Metal resources");
-    }
-    id<MTLFunction> function = [library newFunctionWithName:@"visibility_collision_points"];
-    if (function == nil) {
-      throw std::runtime_error("Visibility collision-point kernel is missing");
-    }
-    NSError *error = nil;
-    pipeline_ = [device_ newComputePipelineStateWithFunction:function error:&error];
-    if (pipeline_ == nil) {
-      const char *detail = error == nil ? "unknown error" : error.localizedDescription.UTF8String;
-      throw std::runtime_error(
-          "Could not create visibility collision-point pipeline: " + std::string(detail)
-      );
-    }
-  }
-
-  [[nodiscard]] id<MTLBuffer> project(
-      id<MTLBuffer> rays,
-      id<MTLBuffer> distances,
-      ImageSize image,
-      id<MTLCommandBuffer> command
-  ) const {
-    const uint64_t count64 = static_cast<uint64_t>(image.width) * image.height;
-    const uint64_t rayBytes = count64 * sizeof(RayDirection);
-    const uint64_t distanceBytes = count64 * sizeof(float);
-    if (count64 == 0U || count64 > std::numeric_limits<uint32_t>::max() || rays == nil ||
-        distances == nil || rays.length < rayBytes || distances.length < distanceBytes) {
-      throw std::invalid_argument("Visibility projection requires valid trace buffers");
-    }
-    const uint32_t count = static_cast<uint32_t>(count64);
-    const NSUInteger length = static_cast<NSUInteger>(count64 * 2U * sizeof(float));
-    id<MTLBuffer> points = [device_ newBufferWithLength:length
-                                                options:MTLResourceStorageModePrivate];
-    if (points == nil) {
-      throw std::runtime_error("Could not allocate visibility collision-point buffer");
-    }
-    points.label = @"Minimap visibility collision points";
-
-    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    if (command == nil || encoder == nil) {
-      throw std::runtime_error("Could not create visibility collision-point command");
-    }
-    encoder.label = @"visibility_collision_points";
-    [encoder setComputePipelineState:pipeline_];
-    [encoder setBuffer:rays offset:0 atIndex:0];
-    [encoder setBuffer:distances offset:0 atIndex:1];
-    [encoder setBuffer:points offset:0 atIndex:2];
-    [encoder setBytes:&count length:sizeof(count) atIndex:3];
-    const NSUInteger groupWidth =
-        std::min<NSUInteger>(256U, pipeline_.maxTotalThreadsPerThreadgroup);
-    [encoder dispatchThreads:MTLSizeMake(count, 1U, 1U)
-        threadsPerThreadgroup:MTLSizeMake(groupWidth, 1U, 1U)];
-    [encoder endEncoding];
-    return points;
-  }
-
-private:
-  id<MTLDevice> device_;
-  id<MTLCommandQueue> queue_;
-  id<MTLComputePipelineState> pipeline_;
-};
-
 /// Serial background renderer which coalesces input to the latest camera view.
 class ViewerRenderer {
 public:
@@ -790,6 +716,27 @@ public:
     if (worker_.joinable()) {
       worker_.join();
     }
+  }
+
+  /// Hidden maps neither produce nor retain full-frame visibility snapshots.
+  /// A generation prevents an already encoded producer from publishing after
+  /// hide/show. Showing requests one fresh trace, even with a stationary camera.
+  void request_minimap_enabled(bool enabled) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (minimap_enabled_ == enabled)
+        return;
+      minimap_enabled_ = enabled;
+      ++minimap_generation_;
+      minimap_changed_ = true;
+      presented_visibility_points_ = nil;
+      if (enabled) {
+        ++requested_revision_;
+        trace_pending_ = true;
+        presentation_pending_ = true;
+      }
+    }
+    changed_.notify_one();
   }
 
   /// Request a new camera trace; intermediate input events are coalesced.
@@ -1197,6 +1144,8 @@ private:
       ImageSize image = {};
       TerrainPresentationSettings presentation = {};
       uint64_t revision = 0U;
+      uint64_t minimap_generation = 0;
+      bool minimap_enabled = false;
       bool trace_requested = false;
       bool presentation_requested = false;
       bool inspection_requested = false;
@@ -1226,11 +1175,17 @@ private:
         std::unique_lock<std::mutex> lock(mutex_);
         changed_.wait(lock, [this] {
           return stopping_ || trace_pending_ || presentation_pending_ || inspection_pending_ ||
-                 observer_pending_ || map_point_pending_ || target_pending_ || roam_pending_;
+                 observer_pending_ || map_point_pending_ || target_pending_ || roam_pending_ ||
+                 minimap_changed_;
         });
         if (stopping_) {
           return;
         }
+        minimap_enabled = minimap_enabled_;
+        minimap_generation = minimap_generation_;
+        minimap_changed_ = false;
+        if (!minimap_enabled)
+          current_visibility_points_ = nil;
         orientation = requested_orientation_;
         vertical_field_of_view = requested_vertical_field_of_view_;
         image = requested_image_;
@@ -1366,7 +1321,12 @@ private:
                 *presentation_,
                 presentation,
                 [&](id<MTLCommandBuffer> command) {
-                  if (trace_requested)
+                  // Recheck at encoding time: hiding may have arrived while
+                  // the trace was preparing. The producer's repair callback can
+                  // run again; only its final snapshot is published.
+                  std::lock_guard<std::mutex> lock(mutex_);
+                  if (trace_requested && minimap_enabled_ &&
+                      minimap_generation == minimap_generation_)
                     next_visibility_points = visibility_->project(
                         trace_->ray_directions(),
                         trace_->distances(),
@@ -1444,6 +1404,8 @@ private:
             error_.clear();
           if (presentation_requested) {
             presented_texture_ = presentation_->texture();
+            if (!minimap_enabled_ || minimap_generation != minimap_generation_)
+              current_visibility_points_ = nil;
             presented_visibility_points_ = current_visibility_points_;
             presented_image_ = current_field_.image;
             presented_orientation_ = orientation;
@@ -1559,6 +1521,9 @@ private:
   bool requested_bilinear_collisions_ = false;
   bool requested_c1_normals_ = false;
   std::string error_;
+  bool minimap_enabled_ = false;
+  bool minimap_changed_ = false;
+  uint64_t minimap_generation_ = 0;
   bool trace_pending_ = false;
   bool presentation_pending_ = false;
   bool inspection_pending_ = false;
@@ -4016,6 +3981,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _miniMapPanel.interactionDelegate = self;
 
   _pointInspectionEnabled = true;
+  _renderer->request_minimap_enabled(true);
   [_panoramaView setPointInspectionEnabled:true];
   [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled] && !_viewerPaused];
   [_panoramaView setCruiseSteeringEnabled:[self isCruisingEnabled] && !_viewerPaused];
@@ -4235,6 +4201,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 
 - (void)toggleMapAndPointInspection:(id)sender {
   _pointInspectionEnabled = !_pointInspectionEnabled;
+  _renderer->request_minimap_enabled(_pointInspectionEnabled);
   _pointInspectionLocked = false;
   _pointLockPending = false;
   _pointerOwner = panorama::app::PointerOwner::None;
@@ -4250,6 +4217,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [self invalidatePanoramaHover];
   }
   [self updatePointInfo:std::nullopt];
+  [self updateMiniMapTelemetry];
 
   if ([sender isKindOfClass:NSToolbarItem.class]) {
     NSToolbarItem *item = sender;
@@ -5593,7 +5561,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 /// Compact projected coordinates are more useful here than place names: they
 /// update immediately during movement and match the terrain dataset's grid.
 - (void)updateMiniMapTelemetry {
-  if (_observerInfoLabel == nil) {
+  if (!_pointInspectionEnabled || _observerInfoLabel == nil) {
     return;
   }
   _observerInfoLabel.stringValue =
@@ -5737,6 +5705,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   [self updateDebugPointInfo:inspection];
+  if (!_pointInspectionEnabled)
+    return;
   if (!inspection.has_value()) {
     if (!_pointInspectionLocked) {
       [_miniMapPanel clearInspectedPoint];

@@ -60,7 +60,8 @@
          verticalFieldOfView:(double)verticalFieldOfView
                        image:(panorama::ImageSize)image;
 
-/// Display one projected point for every valid collision in a completed trace.
+/// Coalesce a coverage-mask update from a completed, immutable hit snapshot.
+/// Hidden panels discard it; map-only navigation reuses the visible snapshot.
 - (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image;
 
 /// Move all observer-relative map graphics after an interactive relocation.

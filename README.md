@@ -99,7 +99,8 @@ or rendered non-interactively:
 
 Use `./panorama-app --trace-diagnostics` to log frame wall latency, GPU producer
 time, submission count, and whether streaming was needed. Resident frames encode
-primary tracing, shadows, colouring and visibility projection into one command.
+primary tracing, shadows, colouring and (when the minimap is visible) collision
+point projection into one command.
 GPU producer time excludes synchronous BVH preparation and streaming work;
 wall latency includes them. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
 for measurements, cache guidance and a repeatable camera benchmark.
@@ -111,12 +112,29 @@ timestamps and cumulative BVH cache counts. An independent monitor prints
 thermal state, and the current worker/display/minimap stage and its age. These
 continue even while the render worker or UI thread is blocked. Submission,
 completion, presentation, stale-frame rejection and missing-drawable counts are
-cumulative. `refreshed` counts snapshots replaced with newer frames after drawable
-acquisition; `stale` now counts resolution mismatches rejected before encoding.
+cumulative. On the display path, `refreshed` counts snapshots replaced with newer
+frames after drawable acquisition; `stale` counts resolution mismatches rejected
+before encoding.
 Display revisions distinguish new camera images from repeated
 presentations. `idle` means that path is outside its instrumented callback, not
 necessarily that the whole UI is responsive. Keep capturing for about ten seconds
 after the slowdown begins before closing the app.
+
+The minimap retains the camera cone and visible-terrain coverage. Coverage uses a
+compute-generated bitmap displayed by MapKit, with no separate transparent Metal
+view. Map panning and zooming reuse the latest collision snapshot. Updates are
+bounded to one active job and one replaceable pending job; hiding the map stops
+new collision projection and mask work, drops pending results and releases the
+visibility buffers once active work drains. Reopening requests a fresh trace even
+when the camera is stationary.
+
+With diagnostics enabled, `Minimap mask` reports worker time (including CRS-grid
+preparation and image creation) and GPU time. `Minimap publish` reports latency
+from requesting the bitmap to handing it to MapKit; this excludes MapKit's own
+subsequent drawing/composition. In the minimap `Health` line, `refreshed` counts
+collision snapshot encodes, `submitted/completed` counts mask commands,
+`presented` counts image publications, and `stale` counts cancelled generations.
+These should stop increasing after hiding the map and draining active work.
 
 The BVH backend automatically reuses a resident scene hierarchy to trace across
 cached tiles in one GPU pass. Uncached candidates fall back to bounded streaming.
@@ -181,6 +199,11 @@ the image. The batch renderer retains the software shadow traversal.
 generated terrain, including retained and expanded uint16, float samples,
 partial blocks, coverage gaps, range clipping, resizing, relocation, backend
 switching, cold and resident shadows, producer fallback, and forced cache eviction.
+`make check-minimap` compares compute coverage with the former point rasterizer
+and a CPU reference under Metal validation. It checks invalid hits, duplicate
+opacity, backing dimensions, image lifetime, horizontal-distance reconstruction,
+and projection accuracy in all three supported terrain CRSs.
+
 `make check-manifest` validates manifest versions, bounds across all LODs,
 raw/compressed tile scans, and generator upgrades of existing version-1 manifests
 without rewriting tiles.
