@@ -9,10 +9,19 @@ GpuTerrainFrameTiming render_terrain_frame(
     const RayField *field,
     GpuImageRenderer &image,
     const TerrainPresentationSettings &settings,
-    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent
+    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent,
+    const CameraRayRequest *camera
 ) {
   const auto started = std::chrono::steady_clock::now();
   GpuTerrainFrameTiming timing;
+  if (field != nullptr && camera != nullptr)
+    throw std::invalid_argument("Choose either CPU rays or a GPU camera");
+  const auto repair = [&] {
+    if (camera != nullptr)
+      trace.trace_prepared();
+    else
+      trace.trace(*field);
+  };
   Timer timer("Terrain producer");
   const bool shadows = settings.use_surface_normals && settings.appearance.raytraced_shadows;
   const auto make_command = [&] {
@@ -23,9 +32,11 @@ GpuTerrainFrameTiming render_terrain_frame(
     return command;
   };
   auto command = make_command();
-  bool encoded_primary = field != nullptr && trace.encode_trace(command, *field);
-  if (field != nullptr && !encoded_primary) {
-    trace.trace(*field);
+  bool encoded_primary = camera != nullptr
+                             ? trace.encode_trace(command, *camera)
+                             : field != nullptr && trace.encode_trace(command, *field);
+  if ((field != nullptr || camera != nullptr) && !encoded_primary) {
+    repair();
     timing.streamed = true;
   }
   const auto finish = [&](id<MTLCommandBuffer> producer) {
@@ -53,7 +64,7 @@ GpuTerrainFrameTiming render_terrain_frame(
     if (encoded_primary) {
       finish(command);
       if (!trace.complete_encoded_trace(command))
-        trace.trace(*field);
+        repair();
       encoded_primary = false;
       command = make_command();
     }
@@ -106,7 +117,7 @@ GpuTerrainFrameTiming render_terrain_frame(
     if (!primary_complete || !shadows_complete) {
       timing.streamed = true;
       if (!primary_complete)
-        trace.trace(*field);
+        repair();
       if (shadows)
         trace.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
       command = make_command();

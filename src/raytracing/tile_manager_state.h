@@ -72,6 +72,7 @@ struct TileManager::State {
   std::vector<uint32_t> lod_by_source;
   /// Conservative angular span of a current output pixel, in radians.
   float pixel_angle = 0.0F;
+  bool gpu_lod = false;
   /// Source containing `config.observer` after the latest relocation.
   uint32_t observer_source_index = 0U;
   /// Number of maximum-hierarchy samples reserved per atlas slot.

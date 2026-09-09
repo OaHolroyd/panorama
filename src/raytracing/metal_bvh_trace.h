@@ -60,6 +60,8 @@ public:
   /// Encode a resident primary pass without committing or waiting. False
   /// means no scene is available and the caller must use synchronous tracing.
   bool encode_scene(id<MTLCommandBuffer> command, Timer &timer);
+  /// Prepare a resident scene before encoding its GPU camera dependency.
+  bool prepare_scene(Timer &timer);
   /// Inspect the primary missing-ray counter after the caller completes its command.
   bool scene_complete();
   /// Encode sun visibility using the same scene. Resources remain stable

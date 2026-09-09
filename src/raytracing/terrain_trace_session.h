@@ -1,6 +1,7 @@
 #pragma once
 
 #include "crs.h"
+#include "gpu_camera.h"
 #include "metal_bvh_trace.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
@@ -31,6 +32,12 @@ public:
       GpuTraceOutputRequirements outputs,
       id<MTLCommandQueue> shared_queue = nil
   );
+  TerrainTraceSession(
+      const RaytraceConfig &config,
+      const CameraRayRequest &camera,
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue = nil
+  );
 
   TerrainTraceSession(const TerrainTraceSession &) = delete;
   TerrainTraceSession &operator=(const TerrainTraceSession &) = delete;
@@ -38,11 +45,16 @@ public:
 
   /// Trace a new view, resizing only ray-dependent GPU buffers when necessary.
   void trace(const RayField &field);
+  void trace(const CameraRayRequest &camera);
+  /// Finish the current prepared input, including streaming repairs, without regenerating rays.
+  void trace_prepared();
 
   /// Append resident primary tracing to an uncommitted producer. Preparation
   /// may build scene structures synchronously. False encodes nothing.
   /// Do not mutate session resources until the producer has completed.
   bool encode_trace(id<MTLCommandBuffer> command, const RayField &field);
+  bool encode_trace(id<MTLCommandBuffer> command, const CameraRayRequest &camera);
+  [[nodiscard]] GpuCameraStatistics camera_statistics() const;
   /// After producer completion, false requires synchronous trace(field) and
   /// a new presentation pass before publishing the image.
   bool complete_encoded_trace(id<MTLCommandBuffer> command);

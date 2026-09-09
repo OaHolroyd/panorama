@@ -1,0 +1,27 @@
+#pragma once
+
+#ifndef __METAL_VERSION__
+#include <cstdint>
+#endif
+
+namespace panorama::camera_gpu {
+#ifdef __METAL_VERSION__
+using uint32_t = uint;
+#endif
+
+struct Camera {
+  uint32_t width, height;
+  float focal_x, focal_y, principal_x, principal_y;
+  float forward[3], right[3], up[3];
+};
+
+struct Source {
+  float x, y;
+  uint32_t lod_count;
+};
+
+struct Lod {
+  float observer_x, observer_y, tile_width, cell_size, scale;
+  uint32_t count;
+};
+} // namespace panorama::camera_gpu

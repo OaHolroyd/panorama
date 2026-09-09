@@ -42,6 +42,8 @@ void validate_tile_position(const TileGeometry &tile, TileKey key, const TileGri
 } // namespace
 
 void TileManager::State::rebuild_lod_plan(float angle) {
+  if (gpu_lod)
+    return;
   if (!std::isfinite(angle) || angle <= 0.0F) {
     throw std::invalid_argument("Terrain LOD planning requires a positive pixel angle");
   }
@@ -234,7 +236,7 @@ void TileManager::State::stop_workers() {
   }
 }
 
-TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle)
+TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle, bool gpu_lod)
     : state_(std::make_unique<State>()) {
   State &state = *state_;
   state.config = config;
@@ -259,7 +261,21 @@ TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle
     throw std::overflow_error("Terrain tile mipmap exceeds Metal uint indexing");
   }
   state.mipmap_values = static_cast<uint32_t>(mip_count);
+  state.gpu_lod = gpu_lod;
+  state.lod_by_source.resize(state.catalogue->sources().size(), 1U);
   state.rebuild_lod_plan(initial_pixel_angle);
+}
+
+void TileManager::use_gpu_lod(bool enabled) { state_->gpu_lod = enabled; }
+
+void TileManager::install_lod_plan(std::span<const uint32_t> lods) {
+  if (lods.size() != sources().size())
+    throw std::invalid_argument("GPU LOD plan has the wrong source count");
+  for (size_t i = 0; i < lods.size(); ++i)
+    if (lods[i] == 0 || lods[i] > sources()[i].lod_count)
+      throw std::invalid_argument("GPU LOD plan contains an invalid level");
+  state_->lod_by_source.assign(lods.begin(), lods.end());
+  state_->gpu_lod = true;
 }
 
 TileManager::~TileManager() { stop(); }

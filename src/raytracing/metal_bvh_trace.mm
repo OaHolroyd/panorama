@@ -54,6 +54,7 @@ struct MetalBvhTrace::State {
   ObserverLocation observer = {};
   BvhParameters current = {};
   id<MTLComputePipelineState> bounds_pipeline;
+  id<MTLComputePipelineState> initialize_pipeline;
   std::array<Pipeline, 4> pipelines = {};
   std::array<Pipeline, 4> scene_pipelines = {};
   std::array<Pipeline, 4> shadow_pipelines = {};
@@ -108,6 +109,12 @@ struct MetalBvhTrace::State {
     bounds_pipeline = [gpu.device() newComputePipelineStateWithFunction:function error:&error];
     if (bounds_pipeline == nil)
       throw std::runtime_error("Could not create BVH bounds pipeline: " + error_text(error));
+    function = [gpu.library() newFunctionWithName:@"initialize_bvh_continuations"];
+    initialize_pipeline = [gpu.device() newComputePipelineStateWithFunction:function error:&error];
+    if (initialize_pipeline == nil)
+      throw std::runtime_error(
+          "Could not create BVH initialization pipeline: " + error_text(error)
+      );
     parameters = buffer(gpu.device(), 1, sizeof(BvhParameters), @"parameters");
     dummy = buffer(gpu.device(), 1, sizeof(uint32_t), @"unused output");
     scene_missing_count = buffer(gpu.device(), 1, sizeof(uint32_t), @"scene missing ray count");
@@ -551,6 +558,8 @@ MetalBvhTrace::MetalBvhTrace(
 MetalBvhTrace::~MetalBvhTrace() = default;
 MetalBvhStatistics MetalBvhTrace::statistics() const { return state_->stats; }
 
+bool MetalBvhTrace::prepare_scene(Timer &timer) { return state_->prepare_scene(timer); }
+
 bool MetalBvhTrace::encode_scene(id<MTLCommandBuffer> command, Timer &timer) {
   State &state = *state_;
   if (command == nil || !state.prepare_scene(timer))
@@ -638,29 +647,27 @@ void MetalBvhTrace::prepare(
 void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
   State &state = *state_;
   state.current.trace = parameters;
-  auto *continuations = static_cast<BvhRayState *>(state.rays.contents);
-  for (uint32_t i = 0; i < parameters.ray_count; ++i)
-    continuations[i] = {0, 0, 0xffffffffU, 0};
-  std::memset(state.gpu.distances().contents, 0, size_t(parameters.ray_count) * sizeof(float));
-  if (state.outputs.elevations)
-    std::memset(state.gpu.elevations().contents, 0, size_t(parameters.ray_count) * sizeof(float));
-  if (state.outputs.surface_gradients)
-    std::memset(
-        state.gpu.surface_gradients().contents,
-        0,
-        size_t(parameters.ray_count) * sizeof(uint32_t)
-    );
-  if (state.outputs.debugging_info) {
-    std::memset(state.gpu.num_steps().contents, 0, size_t(parameters.ray_count) * sizeof(float));
-    std::memset(
-        state.gpu.num_evaluations().contents,
-        0,
-        size_t(parameters.ray_count) * sizeof(float)
-    );
-  }
   @autoreleasepool {
-    if (state.trace_scene(timer))
+    const bool has_scene = state.prepare_scene(timer);
+    if (has_scene && state.trace_scene(timer))
       return;
+    if (!has_scene) {
+      // Resident tracing initializes every ray itself. Only a cold streaming
+      // pass needs separate initialization, and it need not touch CPU ray data.
+      auto command = [state.gpu.command_queue() commandBuffer];
+      if (command == nil)
+        throw std::runtime_error("Could not create BVH initialization command");
+      state.gpu.encode_clear_outputs(command);
+      auto encoder = [command computeCommandEncoder];
+      if (encoder == nil)
+        throw std::runtime_error("Could not encode BVH initialization");
+      [encoder setComputePipelineState:state.initialize_pipeline];
+      [encoder setBuffer:state.rays offset:0 atIndex:0];
+      dispatch(encoder, state.initialize_pipeline, parameters.ray_count);
+      [encoder endEncoding];
+      state.stats.trace_gpu_ms += complete(command);
+      ++state.stats.submissions;
+    }
   }
   for (uint32_t round = 0; round <= state.current.source_count; ++round) {
     @autoreleasepool {

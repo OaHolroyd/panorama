@@ -102,6 +102,19 @@ public:
       id<MTLCommandQueue> shared_queue = nil
   );
 
+  /// Allocate ray storage without a CPU field; a GPU producer fills it before tracing.
+  GpuRaytraceResources(
+      uint32_t ray_count,
+      std::span<const TerrainSource> sources,
+      bool trace_quantized,
+      bool bilinear_collisions,
+      bool c1_normals,
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue = nil
+  );
+  void resize_rays(uint32_t ray_count);
+  void encode_clear_outputs(id<MTLCommandBuffer> command);
+
   GpuRaytraceResources(const GpuRaytraceResources &) = delete;
   GpuRaytraceResources &operator=(const GpuRaytraceResources &) = delete;
 

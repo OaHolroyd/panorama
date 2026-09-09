@@ -381,22 +381,27 @@ void print_usage(const char *program) {
   return settings;
 }
 
-[[nodiscard]] RayField
+[[nodiscard]] CameraRayRequest
 make_view(ImageSize image, CameraOrientation orientation, double vertical_field_of_view) {
-  return make_camera_ray_field(
+  return CameraRayRequest{
       image,
       {
           orientation,
           CameraIntrinsics::from_vertical_field_of_view(image, vertical_field_of_view),
           NoDistortion{},
-      }
-  );
+      }};
 }
 
 /// One output pixel selected in the top-left-origin ray image.
 struct InspectionPixel {
   uint32_t x;
   uint32_t y;
+};
+
+/// Resolution-independent cursor request, with a top-left origin.
+struct InspectionLocation {
+  double x;
+  double y;
 };
 
 /// Immutable values sampled from one completed raytrace revision.
@@ -594,7 +599,7 @@ public:
         requested_image_(settings_.image), requested_presentation_(settings_.presentation),
         presented_vertical_field_of_view_(settings_.vertical_field_of_view),
         presented_image_(settings_.image) {
-    RayField initial_field =
+    CameraRayRequest initial_field =
         make_view(settings_.image, settings_.orientation, settings_.vertical_field_of_view);
     const auto traceConfig =
         [&](ObserverLocation observer, bool allowFallback, bool bilinear, bool c1Normals) {
@@ -814,9 +819,9 @@ public:
     changed_.notify_one();
   }
 
-  /// Coalesce hover events to the latest output pixel. A missing pixel clears
-  /// the published sample when inspection is disabled or leaves the image.
-  uint64_t request_inspection(std::optional<InspectionPixel> pixel) {
+  /// Coalesce hover events to the latest view-relative location. A missing
+  /// location clears the sample when inspection is disabled or leaves the image.
+  uint64_t request_inspection(std::optional<InspectionLocation> pixel) {
     uint64_t token = 0U;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1083,17 +1088,24 @@ private:
     return static_cast<double>(collision_distance) + tolerance < target_distance;
   }
 
-  [[nodiscard]] PointInspection inspect_pixel(InspectionPixel pixel, uint64_t revision) const {
-    if (pixel.x >= current_field_.image.width || pixel.y >= current_field_.image.height) {
-      throw std::out_of_range("Inspection pixel lies outside the ray image");
-    }
+  [[nodiscard]] std::optional<PointInspection>
+  inspect_pixel(InspectionLocation location, uint64_t revision) const {
+    const ImageSize image = current_field_.image;
+    if (image.width == 0 || image.height == 0 || !std::isfinite(location.x) ||
+        !std::isfinite(location.y) || location.x < 0 || location.x > 1 || location.y < 0 ||
+        location.y > 1)
+      return std::nullopt;
+    const InspectionPixel pixel{
+        static_cast<uint32_t>(std::min(location.x * image.width, double(image.width - 1))),
+        static_cast<uint32_t>(std::min(location.y * image.height, double(image.height - 1)))};
+
     const size_t index =
         static_cast<size_t>(pixel.y) * static_cast<size_t>(current_field_.image.width) + pixel.x;
     const auto *distances = static_cast<const float *>(trace_->distances().contents);
     const auto *elevations = static_cast<const float *>(trace_->elevations().contents);
     const auto *gradients = static_cast<const uint32_t *>(trace_->surface_gradients().contents);
     if (distances == nullptr || elevations == nullptr || gradients == nullptr ||
-        index >= current_field_.rays.size()) {
+        index >= trace_->ray_directions().length / sizeof(RayDirection)) {
       throw std::runtime_error("Could not map point-inspection buffers");
     }
 
@@ -1114,7 +1126,8 @@ private:
       return result;
     }
 
-    const RayDirection &ray = current_field_.rays[index];
+    const RayDirection &ray =
+        static_cast<const RayDirection *>(trace_->ray_directions().contents)[index];
     const uint32_t packed_gradients = gradients[index];
     const float east_gradient =
         float_from_half_bits(static_cast<uint16_t>(packed_gradients & 0xffffU));
@@ -1159,7 +1172,7 @@ private:
       bool c1_normals = false;
       Raytracer raytracer = Raytracer::Software;
       float lod_scale = 0.0F;
-      std::optional<InspectionPixel> inspection_pixel;
+      std::optional<InspectionLocation> inspection_pixel;
       uint64_t inspection_token = 0U;
       ObserverLocation observer = {};
       MapCoordinate map_coordinate = {};
@@ -1266,7 +1279,7 @@ private:
           }
           GpuTerrainFrameTiming producer_timing;
           if (trace_requested) {
-            RayField field = make_view(image, orientation, vertical_field_of_view);
+            CameraRayRequest field = make_view(image, orientation, vertical_field_of_view);
             trace_->set_raytracer(raytracer);
             if (lod_scale_requested) {
               trace_->set_lod_scale(lod_scale);
@@ -1317,7 +1330,7 @@ private:
             id<MTLBuffer> next_visibility_points = current_visibility_points_;
             producer_timing = render_terrain_frame(
                 *trace_,
-                trace_requested ? &current_field_ : nullptr,
+                nullptr,
                 *presentation_,
                 presentation,
                 [&](id<MTLCommandBuffer> command) {
@@ -1333,7 +1346,8 @@ private:
                         current_field_.image,
                         command
                     );
-                }
+                },
+                trace_requested ? &current_field_ : nullptr
             );
             unpublished_frame = true;
             current_visibility_points_ = next_visibility_points;
@@ -1365,12 +1379,22 @@ private:
             );
             std::fflush(stdout);
           }
+          if (settings_.trace_diagnostics && trace_requested) {
+            const auto camera = trace_->camera_statistics();
+            std::printf(
+                "Camera preparation: wall %.3f ms, GPU LOD %.3f ms, plans/footprints=%llu/%llu\n",
+                camera.preparation_wall_ms,
+                camera.preparation_gpu_ms,
+                static_cast<unsigned long long>(camera.plan_updates),
+                static_cast<unsigned long long>(camera.footprint_updates)
+            );
+          }
           diagnostics::worker.mark("inspection");
           const bool publish_inspection =
               inspection_requested || (inspection_pixel.has_value() && presentation_requested);
           std::optional<PointInspection> inspection;
           if (publish_inspection && inspection_pixel.has_value()) {
-            inspection = inspect_pixel(*inspection_pixel, revision);
+            inspection = inspect_pixel(*inspection_pixel, current_revision_);
           }
           std::optional<TerrainPoint> map_point;
           if (map_point_requested) {
@@ -1470,7 +1494,7 @@ private:
   id<MTLCommandQueue> display_queue_;
   id<MTLLibrary> library_;
   std::unique_ptr<diagnostics::Monitor> diagnostics_;
-  RayField current_field_;
+  CameraRayRequest current_field_;
   ObserverLocation current_observer_ = {};
   CameraOrientation current_orientation_ = {};
   double current_vertical_field_of_view_ = 0.0;
@@ -1482,7 +1506,7 @@ private:
   double requested_vertical_field_of_view_ = 0.0;
   ImageSize requested_image_ = {};
   TerrainPresentationSettings requested_presentation_ = {};
-  std::optional<InspectionPixel> requested_inspection_;
+  std::optional<InspectionLocation> requested_inspection_;
   MapCoordinate requested_map_coordinate_ = {};
   MapCoordinate requested_roam_coordinate_ = {};
   RoamAltitudeMode requested_roam_altitude_mode_ = RoamAltitudeMode::FollowTerrain;
@@ -2056,11 +2080,11 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
                overlayView:(ViewerOverlayView *)overlayView
              aspectFitView:(AspectFitContainerView *)aspectFitView
               miniMapPanel:(MiniMapPanelView *)miniMapPanel;
-- (void)inspectPixelX:(uint32_t)x y:(uint32_t)y;
+- (void)inspectLocationX:(double)x y:(double)y;
 - (void)pointerMovedOverPanorama;
 - (void)pointerMovedOverOccludingView:(NSView *)view;
 - (void)panoramaPointerExited;
-- (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y;
+- (void)togglePointLockAtLocationX:(double)x y:(double)y;
 - (void)toggleMapAndPointInspection:(id)sender;
 - (BOOL)isMapAndPointInspectionEnabled;
 - (BOOL)isRoamingEnabled;
@@ -2341,13 +2365,11 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   [self.window invalidateCursorRectsForView:self];
 }
 
-/// Convert an AppKit event location into the current top-left-origin ray image.
-- (BOOL)inspectionPixelForEvent:(NSEvent *)event x:(uint32_t *)x y:(uint32_t *)y {
+/// Defer resolution mapping until the worker samples the completed GPU ray image.
+- (BOOL)inspectionLocationForEvent:(NSEvent *)event x:(double *)x y:(double *)y {
   const NSRect bounds = self.bounds;
   const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
-  const uint32_t width = static_cast<uint32_t>(self.drawableSize.width);
-  const uint32_t height = static_cast<uint32_t>(self.drawableSize.height);
-  if (bounds.size.width <= 0.0 || bounds.size.height <= 0.0 || width == 0U || height == 0U) {
+  if (bounds.size.width <= 0.0 || bounds.size.height <= 0.0 || !NSPointInRect(location, bounds)) {
     return NO;
   }
 
@@ -2357,8 +2379,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
       std::clamp((location.x - NSMinX(bounds)) / bounds.size.width, 0.0, 1.0);
   const double normalised_y =
       std::clamp((NSMaxY(bounds) - location.y) / bounds.size.height, 0.0, 1.0);
-  *x = std::min(width - 1U, static_cast<uint32_t>(normalised_x * static_cast<double>(width)));
-  *y = std::min(height - 1U, static_cast<uint32_t>(normalised_y * static_cast<double>(height)));
+  *x = normalised_x;
+  *y = normalised_y;
   return YES;
 }
 
@@ -2394,12 +2416,12 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   if (!_pointInspectionEnabled) {
     return;
   }
-  uint32_t x = 0U;
-  uint32_t y = 0U;
-  if (![self inspectionPixelForEvent:event x:&x y:&y]) {
+  double x = 0.0;
+  double y = 0.0;
+  if (![self inspectionLocationForEvent:event x:&x y:&y]) {
     return;
   }
-  [self.panoramaController inspectPixelX:x y:y];
+  [self.panoramaController inspectLocationX:x y:y];
 }
 
 /// Right-click locks the current terrain sample without consuming ordinary
@@ -2409,10 +2431,10 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
     [super rightMouseDown:event];
     return;
   }
-  uint32_t x = 0U;
-  uint32_t y = 0U;
-  if ([self inspectionPixelForEvent:event x:&x y:&y]) {
-    [self.panoramaController togglePointLockAtPixelX:x y:y];
+  double x = 0.0;
+  double y = 0.0;
+  if ([self inspectionLocationForEvent:event x:&x y:&y]) {
+    [self.panoramaController togglePointLockAtLocationX:x y:y];
   }
 }
 
@@ -3992,10 +4014,11 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_miniMapPanel informationFooterContentDidChange];
 }
 
-- (void)inspectPixelX:(uint32_t)x y:(uint32_t)y {
+- (void)inspectLocationX:(double)x y:(double)y {
   if (_pointerOwner == panorama::app::PointerOwner::Panorama && _pointInspectionEnabled &&
       !_pointInspectionLocked && !_pointLockPending) {
-    _inspectionRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+    _inspectionRequestToken =
+        _renderer->request_inspection(panorama::app::InspectionLocation{x, y});
   }
 }
 
@@ -4076,7 +4099,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [self invalidatePanoramaHover];
 }
 
-- (void)togglePointLockAtPixelX:(uint32_t)x y:(uint32_t)y {
+- (void)togglePointLockAtLocationX:(double)x y:(double)y {
   if (!_pointInspectionEnabled) {
     return;
   }
@@ -4088,13 +4111,14 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     [_miniMapPanel clearInspectedPoint];
     [_panoramaView setTerrainPointIndicator:std::nullopt locked:true occluded:false];
     [self setPointInfoStatus:@""];
-    _inspectionRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+    _inspectionRequestToken =
+        _renderer->request_inspection(panorama::app::InspectionLocation{x, y});
     return;
   }
 
   _pointLockPending = true;
   [self setPointInfoStatus:@"Locking point…"];
-  _pointLockRequestToken = _renderer->request_inspection(panorama::app::InspectionPixel{x, y});
+  _pointLockRequestToken = _renderer->request_inspection(panorama::app::InspectionLocation{x, y});
 }
 
 - (void)miniMapPanel:(MiniMapPanelView *)panel
@@ -6037,9 +6061,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     const bool matches_visible_frame =
         !frame.inspection.has_value() || frame.inspection->revision == frame.revision;
     if (_pointLockPending && frame.inspection_request_token == _pointLockRequestToken &&
-        matches_visible_frame && frame.inspection.has_value()) {
+        matches_visible_frame) {
       _pointLockPending = false;
-      if (frame.inspection->hit) {
+      if (frame.inspection.has_value() && frame.inspection->hit) {
         _pointInspectionLocked = true;
         _lockedPoint = frame.inspection;
         [self updatePointInfo:frame.inspection];

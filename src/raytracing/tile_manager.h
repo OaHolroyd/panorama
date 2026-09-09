@@ -70,7 +70,10 @@ class TileManager {
 public:
   /// Discover the finite source catalogue and calculate the initial LOD plan.
   /// GPU resources are deliberately deferred until `attach_gpu`.
-  TileManager(const RaytraceConfig &config, float initial_pixel_angle);
+  TileManager(const RaytraceConfig &config, float initial_pixel_angle, bool gpu_lod = false);
+  /// Install GPU decisions only after their command completes on the owning thread.
+  void install_lod_plan(std::span<const uint32_t> lods);
+  void use_gpu_lod(bool enabled);
 
   /// Stop loading workers before releasing Metal and catalogue resources.
   ~TileManager();

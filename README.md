@@ -97,6 +97,13 @@ or rendered non-interactively:
 
 ## Interactive viewer
 
+The viewer generates camera ray directions/slopes and selects terrain LOD on
+the GPU. Pixel footprint and LOD plans are cached across camera rotations;
+movement, zoom, resolution or LOD changes update the relevant GPU plan. The CPU
+receives per-source LOD decisions for loading and BVH preparation. Missing terrain
+and shadows still finish before a frame is published; the viewer displays only
+complete frames.
+
 Use `./panorama-app --trace-diagnostics` to log frame wall latency, GPU producer
 time, submission count, and whether streaming was needed. Resident frames encode
 primary tracing, shadows, colouring and (when the minimap is visible) collision
@@ -104,6 +111,9 @@ point projection into one command.
 GPU producer time excludes synchronous BVH preparation and streaming work;
 wall latency includes them. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
 for measurements, cache guidance and a repeatable camera benchmark.
+`Camera preparation` lines separately report GPU LOD-plan wall/device time and
+cumulative plan/footprint updates. Ray generation is included in the producer's
+GPU time on the resident path. Plan preparation is included in frame wall time.
 
 For intermittent viewer stalls, capture `./panorama-app --trace-diagnostics >
 diagnostics.log 2>&1` (with your usual options). Frame lines include elapsed
@@ -199,6 +209,17 @@ the image. The batch renderer retains the software shadow traversal.
 generated terrain, including retained and expanded uint16, float samples,
 partial blocks, coverage gaps, range clipping, resizing, relocation, backend
 switching, cold and resident shadows, producer fallback, and forced cache eviction.
+`make check-camera` compares GPU rays and LOD decisions with the CPU reference,
+checks projection-cache reuse, and exercises complete GPU-camera producers through
+streaming repair, resizing, relocation, shadows, and backend changes.
+For a headless 1600×900 comparison including ray preparation, LOD, and complete
+rendering (without shadows or minimap), run these separately:
+
+```sh
+obj/release/metal-bvh-test --benchmark-camera data/swissalti3d-10-level-0-metal-u16-none-lod-point cpu
+obj/release/metal-bvh-test --benchmark-camera data/swissalti3d-10-level-0-metal-u16-none-lod-point gpu
+```
+
 `make check-minimap` compares compute coverage with the former point rasterizer
 and a CPU reference under Metal validation. It checks invalid hits, duplicate
 opacity, backing dimensions, image lifetime, horizontal-distance reconstruction,

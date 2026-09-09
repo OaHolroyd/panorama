@@ -192,6 +192,10 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --tile-selection
 
+.PHONY: check-camera
+check-camera: $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --camera
+
 $(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(METAL_LIB)
 	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
 

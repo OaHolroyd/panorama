@@ -4,6 +4,13 @@
 
 using namespace metal::raytracing;
 
+kernel void initialize_bvh_continuations(
+    device BvhRayState *states [[buffer(0)]],
+    uint index [[thread_position_in_grid]]
+) {
+  states[index] = {0, 0, 0xffffffffU, 0};
+}
+
 inline float bvh_height(device const uchar *vertices, BvhTile tile, uint index, bool quantized) {
   device const uchar *data = vertices + tile.vertex_offset;
   return quantized ? sample_elevation(
