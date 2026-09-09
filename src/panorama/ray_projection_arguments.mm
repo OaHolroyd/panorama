@@ -91,17 +91,15 @@ void RayProjectionArguments::validate() const {
   }
 }
 
-RayField RayProjectionArguments::make_ray_field() const {
+RayFieldRequest RayProjectionArguments::make_request() const {
   if (mode_ == Mode::Angular) {
-    return make_angular_ray_field(
-        {azimuth_count_, polar_count_},
-        {
-            0.0,
-            2.0 * std::numbers::pi_v<double>,
-            -0.5 * std::numbers::pi_v<double>,
-            0.5 * std::numbers::pi_v<double>,
-        }
-    );
+    return RayFieldRequest{{azimuth_count_, polar_count_},
+                           AngularProjection{
+                               0.0,
+                               2.0 * std::numbers::pi_v<double>,
+                               -0.5 * std::numbers::pi_v<double>,
+                               0.5 * std::numbers::pi_v<double>,
+                           }};
   }
 
   const ImageSize image = {image_width_, image_height_};
@@ -109,17 +107,15 @@ RayField RayProjectionArguments::make_ray_field() const {
   if (distortion_specified_) {
     distortion = distortion_;
   }
-  return make_camera_ray_field(
-      image,
-      {
-          {radians(heading_), radians(pitch_), radians(roll_)},
-          CameraIntrinsics::from_horizontal_field_of_view(
-              image,
-              radians(horizontal_field_of_view_)
-          ),
-          distortion,
-      }
-  );
+  return RayFieldRequest{image,
+                         CameraProjection{
+                             {radians(heading_), radians(pitch_), radians(roll_)},
+                             CameraIntrinsics::from_horizontal_field_of_view(
+                                 image,
+                                 radians(horizontal_field_of_view_)
+                             ),
+                             distortion,
+                         }};
 }
 
 void RayProjectionArguments::print_settings() const {

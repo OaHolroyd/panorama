@@ -5,13 +5,8 @@
 
 namespace panorama {
 
-struct CameraRayRequest {
-  ImageSize image;
-  CameraProjection projection;
-};
-
 /// Validate only the small camera descriptor, never an image-sized CPU array.
-uint32_t validate_camera_request(const CameraRayRequest &camera);
+uint32_t validate_camera_request(const RayFieldRequest &camera);
 
 struct GpuCameraStatistics {
   uint64_t plan_updates = 0;
@@ -35,7 +30,7 @@ public:
   GpuCamera &operator=(const GpuCamera &) = delete;
 
   void prepare(
-      const CameraRayRequest &camera,
+      const RayFieldRequest &camera,
       ObserverLocation observer,
       float lod_scale,
       TileManager &tiles
@@ -43,7 +38,6 @@ public:
   void encode_rays(id<MTLCommandBuffer> command, id<MTLBuffer> destination);
   /// Call only after the ray-producing command completes.
   void validate_completed_rays() const;
-  void invalidate_plan();
   GpuCameraStatistics statistics() const;
   /// Diagnostic/reference tests only; normal preparation never reads the angle.
   id<MTLBuffer> pixel_angle() const;

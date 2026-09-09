@@ -24,13 +24,12 @@ struct GpuTerrainFrameTiming {
 /// shadows, colouring and optional dependent work into one producer command.
 /// On a cache miss, streaming repairs the trace and the image is regenerated
 /// before returning. Pass nullptr for an appearance-only update.
-/// To generate rays and select LOD on the GPU, supply camera and leave field null.
+/// Projection requests generate rays and select source LODs on the GPU.
 GpuTerrainFrameTiming render_terrain_frame(
     TerrainTraceSession &trace,
-    const RayField *field,
+    const RayFieldRequest *field,
     GpuImageRenderer &image,
     const TerrainPresentationSettings &settings,
-    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent = {},
-    const CameraRayRequest *camera = nullptr
+    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent = {}
 );
 } // namespace panorama

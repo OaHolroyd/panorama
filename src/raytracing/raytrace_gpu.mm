@@ -96,15 +96,6 @@ make_buffer(id<MTLDevice> device, const void *data, NSUInteger length, const cha
   return buffer;
 }
 
-/// Clear a newly allocated shared output/counter buffer before first use.
-void clear_buffer(id<MTLBuffer> buffer, const char *name) {
-  void *contents = buffer.contents;
-  if (contents == nullptr) {
-    throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
-  }
-  std::memset(contents, 0, buffer.length);
-}
-
 } // namespace
 
 /// Mutable Objective-C++ state hidden from the scheduling implementation.
@@ -187,14 +178,14 @@ struct GpuRaytraceResources::State {
   /// Allocate a complete ray-dependent resource set before publishing it.
   /// Keeping the old set intact until every allocation succeeds makes a
   /// failed interactive resize recoverable by the caller.
-  void replace_ray_buffers(size_t count, const RayDirection *data = nullptr) {
+  void replace_ray_buffers(size_t count) {
     if (count == 0 || count > std::numeric_limits<uint32_t>::max()) {
       throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
     }
     const uint32_t next_capacity = static_cast<uint32_t>(count);
     id<MTLBuffer> next_ray_buffer = make_buffer(
         device,
-        data,
+        nullptr,
         checked_buffer_length(count, sizeof(RayDirection), "ray directions"),
         "ray directions"
     );
@@ -252,16 +243,6 @@ struct GpuRaytraceResources::State {
         checked_buffer_length(count, sizeof(DeferredRayWork), "deferred frontier"),
         "deferred frontier"
     );
-    if (data != nullptr) {
-      clear_buffer(next_distance_output, "distance output");
-      if (outputs.elevations) {
-        clear_buffer(next_elevation_output, "elevation output");
-      }
-      if (outputs.debugging_info) {
-        clear_buffer(next_num_steps_output, "num steps output");
-        clear_buffer(next_num_evaluations_output, "num evaluations output");
-      }
-    }
     frontier_capacity = next_capacity;
     rays = next_ray_buffer;
     distance_output = next_distance_output;
@@ -371,31 +352,6 @@ GpuRaytraceResources::GpuRaytraceResources(
   state_ = std::move(state);
 }
 
-GpuRaytraceResources::GpuRaytraceResources(
-    std::span<const RayDirection> rays,
-    std::span<const TerrainSource> sources,
-    bool quantized,
-    bool bilinear,
-    bool c1,
-    GpuTraceOutputRequirements outputs,
-    id<MTLCommandQueue> queue
-)
-    : GpuRaytraceResources(
-          [&] {
-            if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max())
-              throw std::invalid_argument("Invalid ray count");
-            return static_cast<uint32_t>(rays.size());
-          }(),
-          sources,
-          quantized,
-          bilinear,
-          c1,
-          outputs,
-          queue
-      ) {
-  update_rays(rays);
-}
-
 void GpuRaytraceResources::resize_rays(uint32_t ray_count) {
   if (ray_count != state_->frontier_capacity)
     state_->replace_ray_buffers(ray_count);
@@ -417,37 +373,6 @@ void GpuRaytraceResources::encode_clear_outputs(id<MTLCommandBuffer> command) {
 }
 
 GpuRaytraceResources::~GpuRaytraceResources() { stop_capture(); }
-
-void GpuRaytraceResources::update_rays(std::span<const RayDirection> rays) {
-  State &state = *state_;
-  if (rays.size() != state.frontier_capacity) {
-    throw std::invalid_argument("Updated ray field has the wrong size");
-  }
-
-  void *ray_contents = state.rays.contents;
-  if (ray_contents == nullptr) {
-    throw std::runtime_error("Could not map reusable raytrace buffers");
-  }
-  std::memcpy(ray_contents, rays.data(), rays.size_bytes());
-
-  clear_buffer(state.distance_output, "distance output");
-  if (state.outputs.debugging_info) {
-    clear_buffer(state.num_steps_output, "num steps output");
-    clear_buffer(state.num_evaluations_output, "num evaluations output");
-  }
-  if (state.outputs.elevations) {
-    clear_buffer(state.elevation_output, "elevation output");
-  }
-}
-
-void GpuRaytraceResources::resize_rays(std::span<const RayDirection> rays) {
-  State &state = *state_;
-  if (rays.size() == state.frontier_capacity) {
-    update_rays(rays);
-    return;
-  }
-  state.replace_ray_buffers(rays.size(), rays.data());
-}
 
 void GpuRaytraceResources::set_collision_options(bool bilinear_collisions, bool c1_normals) {
   // TerrainTraceSession calls this only on its render-owning thread, after all

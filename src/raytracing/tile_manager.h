@@ -68,12 +68,11 @@ struct TileManagerStatistics {
 /// construction-order dependency on the ray frontier.
 class TileManager {
 public:
-  /// Discover the finite source catalogue and calculate the initial LOD plan.
+  /// Discover the finite source catalogue; use LOD 1 until GPU decisions arrive.
   /// GPU resources are deliberately deferred until `attach_gpu`.
-  TileManager(const RaytraceConfig &config, float initial_pixel_angle, bool gpu_lod = false);
+  TileManager(const RaytraceConfig &config);
   /// Install GPU decisions only after their command completes on the owning thread.
   void install_lod_plan(std::span<const uint32_t> lods);
-  void use_gpu_lod(bool enabled);
 
   /// Stop loading workers before releasing Metal and catalogue resources.
   ~TileManager();
@@ -83,11 +82,6 @@ public:
 
   /// Allocate the atlas, install the origin tile, and start loading workers.
   void attach_gpu(id<MTLDevice> device, Timer &timer);
-
-  /// Recompute the per-source LOD plan for this pixel angle.
-  void set_pixel_angle(float pixel_angle);
-  /// Change the footprint multiplier and rebuild the plan for the current view.
-  void set_lod_scale(float lod_scale);
 
   /// Rebase retained tile metadata and select the observer source.
   /// Return false when the point lies outside this manager's finite catalogue.
@@ -105,8 +99,6 @@ public:
   [[nodiscard]] float tile_width() const;
   /// Catalogue source containing the current observer.
   [[nodiscard]] uint32_t observer_source_index() const;
-  /// Conservative angular size currently used by the LOD policy.
-  [[nodiscard]] float pixel_angle() const;
   /// Fixed per-slot element stride of the LOD-1 maximum hierarchy.
   [[nodiscard]] uint32_t mipmap_value_count() const;
   /// Whether traversal reads retained uint16 records rather than Float32.

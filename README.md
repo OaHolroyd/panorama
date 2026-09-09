@@ -97,8 +97,8 @@ or rendered non-interactively:
 
 ## Interactive viewer
 
-The viewer generates camera ray directions/slopes and selects terrain LOD on
-the GPU. Pixel footprint and LOD plans are cached across camera rotations;
+The viewer and CLI generate ray directions/slopes and select terrain LOD on
+the GPU, including angular panoramas and Brown–Conrady camera distortion. Pixel footprint and LOD plans are cached across camera rotations;
 movement, zoom, resolution or LOD changes update the relevant GPU plan. The CPU
 receives per-source LOD decisions for loading and BVH preparation. Missing terrain
 and shadows still finish before a frame is published; the viewer displays only
@@ -228,14 +228,14 @@ against software visibility, using float/quantized terrain and both collision mo
 generated terrain, including retained and expanded uint16, float samples,
 partial blocks, coverage gaps, range clipping, resizing, relocation, backend
 switching, cold and resident shadows, producer fallback, and forced cache eviction.
-`make check-camera` compares GPU rays and LOD decisions with the CPU reference,
+`make check-camera` checks projection/reprojection, angular pixel centres, inverse
+lens distortion, LOD bounds and footprint decisions,
 checks projection-cache reuse, and exercises complete GPU-camera producers through
 streaming repair, resizing, relocation, shadows, and backend changes.
-For a headless 1600×900 comparison including ray preparation, LOD, and complete
-rendering (without shadows or minimap), run these separately:
+For a headless 1600×900 benchmark including GPU ray preparation, LOD and complete
+rendering (without shadows or minimap), run:
 
 ```sh
-obj/release/metal-bvh-test --benchmark-camera data/swissalti3d-10-level-0-metal-u16-none-lod-point cpu
 obj/release/metal-bvh-test --benchmark-camera data/swissalti3d-10-level-0-metal-u16-none-lod-point gpu
 ```
 

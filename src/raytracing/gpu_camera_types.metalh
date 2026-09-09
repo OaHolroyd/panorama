@@ -13,6 +13,9 @@ struct Camera {
   uint32_t width, height;
   float focal_x, focal_y, principal_x, principal_y;
   float forward[3], right[3], up[3];
+  uint32_t angular;
+  float azimuth_start, azimuth_step, elevation_start, elevation_step;
+  float radial_1, radial_2, radial_3, tangential_1, tangential_2;
 };
 
 struct Source {

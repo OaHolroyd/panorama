@@ -28,13 +28,7 @@ public:
   /// With no supplied queue, the session creates its own default device/queue.
   TerrainTraceSession(
       const RaytraceConfig &config,
-      const RayField &initial_field,
-      GpuTraceOutputRequirements outputs,
-      id<MTLCommandQueue> shared_queue = nil
-  );
-  TerrainTraceSession(
-      const RaytraceConfig &config,
-      const CameraRayRequest &camera,
+      const RayFieldRequest &camera,
       GpuTraceOutputRequirements outputs,
       id<MTLCommandQueue> shared_queue = nil
   );
@@ -44,18 +38,16 @@ public:
   ~TerrainTraceSession();
 
   /// Trace a new view, resizing only ray-dependent GPU buffers when necessary.
-  void trace(const RayField &field);
-  void trace(const CameraRayRequest &camera);
+  void trace(const RayFieldRequest &camera);
   /// Finish the current prepared input, including streaming repairs, without regenerating rays.
   void trace_prepared();
 
   /// Append resident primary tracing to an uncommitted producer. Preparation
   /// may build scene structures synchronously. False encodes nothing.
   /// Do not mutate session resources until the producer has completed.
-  bool encode_trace(id<MTLCommandBuffer> command, const RayField &field);
-  bool encode_trace(id<MTLCommandBuffer> command, const CameraRayRequest &camera);
+  bool encode_trace(id<MTLCommandBuffer> command, const RayFieldRequest &camera);
   [[nodiscard]] GpuCameraStatistics camera_statistics() const;
-  /// After producer completion, false requires synchronous trace(field) and
+  /// After producer completion, false requires synchronous trace_prepared() and
   /// a new presentation pass before publishing the image.
   bool complete_encoded_trace(id<MTLCommandBuffer> command);
   bool encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation);

@@ -7,22 +7,16 @@
 namespace panorama {
 GpuTerrainFrameTiming render_terrain_frame(
     TerrainTraceSession &trace,
-    const RayField *field,
+    const RayFieldRequest *field,
     GpuImageRenderer &image,
     const TerrainPresentationSettings &settings,
-    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent,
-    const CameraRayRequest *camera
+    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent
 ) {
   const auto started = std::chrono::steady_clock::now();
   GpuTerrainFrameTiming timing;
-  if (field != nullptr && camera != nullptr)
-    throw std::invalid_argument("Choose either CPU rays or a GPU camera");
   const auto repair = [&] {
     trace_activity::Scope activity("primary repair", &timing.primary_repair_milliseconds);
-    if (camera != nullptr)
-      trace.trace_prepared();
-    else
-      trace.trace(*field);
+    trace.trace_prepared();
   };
   const auto repair_shadows = [&] {
     trace_activity::Scope activity("shadow repair", &timing.shadow_repair_milliseconds);
@@ -41,10 +35,9 @@ GpuTerrainFrameTiming render_terrain_frame(
   bool encoded_primary;
   {
     trace_activity::Scope activity("primary preparation", &timing.preparation_milliseconds);
-    encoded_primary = camera != nullptr ? trace.encode_trace(command, *camera)
-                                        : field != nullptr && trace.encode_trace(command, *field);
+    encoded_primary = field != nullptr && trace.encode_trace(command, *field);
   }
-  if ((field != nullptr || camera != nullptr) && !encoded_primary) {
+  if (field != nullptr && !encoded_primary) {
     repair();
     timing.streamed = true;
   }

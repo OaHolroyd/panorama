@@ -381,11 +381,11 @@ void print_usage(const char *program) {
   return settings;
 }
 
-[[nodiscard]] CameraRayRequest
+[[nodiscard]] RayFieldRequest
 make_view(ImageSize image, CameraOrientation orientation, double vertical_field_of_view) {
-  return CameraRayRequest{
+  return RayFieldRequest{
       image,
-      {
+      CameraProjection{
           orientation,
           CameraIntrinsics::from_vertical_field_of_view(image, vertical_field_of_view),
           NoDistortion{},
@@ -599,7 +599,7 @@ public:
         requested_image_(settings_.image), requested_presentation_(settings_.presentation),
         presented_vertical_field_of_view_(settings_.vertical_field_of_view),
         presented_image_(settings_.image) {
-    CameraRayRequest initial_field =
+    RayFieldRequest initial_field =
         make_view(settings_.image, settings_.orientation, settings_.vertical_field_of_view);
     const auto traceConfig =
         [&](ObserverLocation observer, bool allowFallback, bool bilinear, bool c1Normals) {
@@ -1289,7 +1289,7 @@ private:
           }
           GpuTerrainFrameTiming producer_timing;
           if (trace_requested) {
-            CameraRayRequest field = make_view(image, orientation, vertical_field_of_view);
+            RayFieldRequest field = make_view(image, orientation, vertical_field_of_view);
             trace_->set_raytracer(raytracer);
             if (lod_scale_requested) {
               trace_->set_lod_scale(lod_scale);
@@ -1345,7 +1345,7 @@ private:
             id<MTLBuffer> next_visibility_points = current_visibility_points_;
             producer_timing = render_terrain_frame(
                 *trace_,
-                nullptr,
+                trace_requested ? &current_field_ : nullptr,
                 *presentation_,
                 presentation,
                 [&](id<MTLCommandBuffer> command) {
@@ -1361,8 +1361,7 @@ private:
                         current_field_.image,
                         command
                     );
-                },
-                trace_requested ? &current_field_ : nullptr
+                }
             );
             unpublished_frame = true;
             current_visibility_points_ = next_visibility_points;
@@ -1579,7 +1578,7 @@ private:
   id<MTLCommandQueue> display_queue_;
   id<MTLLibrary> library_;
   std::unique_ptr<diagnostics::Monitor> diagnostics_;
-  CameraRayRequest current_field_;
+  RayFieldRequest current_field_;
   ObserverLocation current_observer_ = {};
   CameraOrientation current_orientation_ = {};
   double current_vertical_field_of_view_ = 0.0;
@@ -2458,7 +2457,7 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
     return NO;
   }
 
-  // AppKit view coordinates rise from the bottom-left, whereas RayField rows
+  // AppKit view coordinates rise from the bottom-left, whereas ray-image rows
   // use image coordinates from the top-left.
   const double normalised_x =
       std::clamp((location.x - NSMinX(bounds)) / bounds.size.width, 0.0, 1.0);

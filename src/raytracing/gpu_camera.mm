@@ -5,11 +5,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 
 namespace panorama {
-static_assert(sizeof(camera_gpu::Camera) == 60);
+static_assert(sizeof(camera_gpu::Camera) == 100);
 static_assert(sizeof(camera_gpu::Source) == 12);
 static_assert(sizeof(camera_gpu::Lod) == 24);
 static_assert(sizeof(RayDirection) == 20);
@@ -24,38 +25,91 @@ float checked_float(double value) {
     throw std::invalid_argument("GPU camera parameters exceed finite Float32 range");
   return result;
 }
-camera_gpu::Camera uniforms(const CameraRayRequest &request) {
+camera_gpu::Camera uniforms(const RayFieldRequest &request) {
   validate_camera_request(request);
-  const auto &intrinsics = request.projection.intrinsics;
-  const auto &orientation = request.projection.orientation;
+  if (const auto *angular = std::get_if<AngularProjection>(&request.projection)) {
+    camera_gpu::Camera result{};
+    result.width = request.image.width;
+    result.height = request.image.height;
+    result.angular = 1;
+    result.azimuth_start = checked_float(angular->azimuth_start);
+    result.azimuth_step =
+        checked_float((angular->azimuth_end - angular->azimuth_start) / request.image.width);
+    result.elevation_start = checked_float(angular->elevation_start);
+    result.elevation_step =
+        checked_float((angular->elevation_end - angular->elevation_start) / request.image.height);
+    return result;
+  }
+  const auto &projection = std::get<CameraProjection>(request.projection);
+  const auto &intrinsics = projection.intrinsics;
+  const auto &orientation = projection.orientation;
   const double sh = std::sin(orientation.heading), ch = std::cos(orientation.heading);
   const double sp = std::sin(orientation.pitch), cp = std::cos(orientation.pitch);
   const double sr = std::sin(orientation.roll), cr = std::cos(orientation.roll);
-  return {request.image.width,
-          request.image.height,
-          checked_float(intrinsics.focal_x),
-          checked_float(intrinsics.focal_y),
-          checked_float(intrinsics.principal_x),
-          checked_float(intrinsics.principal_y),
-          {float(cp * sh), float(cp * ch), float(sp)},
-          {float(cr * ch - sr * sp * sh), float(-cr * sh - sr * sp * ch), float(sr * cp)},
-          {float(-sr * ch - cr * sp * sh), float(sr * sh - cr * sp * ch), float(cr * cp)}};
+  camera_gpu::Camera result{
+      request.image.width,
+      request.image.height,
+      checked_float(intrinsics.focal_x),
+      checked_float(intrinsics.focal_y),
+      checked_float(intrinsics.principal_x),
+      checked_float(intrinsics.principal_y),
+      {float(cp * sh), float(cp * ch), float(sp)},
+      {float(cr * ch - sr * sp * sh), float(-cr * sh - sr * sp * ch), float(sr * cp)},
+      {float(-sr * ch - cr * sp * sh), float(sr * sh - cr * sp * ch), float(cr * cp)},
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0};
+  if (const auto *d = std::get_if<BrownConradyDistortion>(&projection.distortion)) {
+    result.radial_1 = checked_float(d->radial_1);
+    result.radial_2 = checked_float(d->radial_2);
+    result.radial_3 = checked_float(d->radial_3);
+    result.tangential_1 = checked_float(d->tangential_1);
+    result.tangential_2 = checked_float(d->tangential_2);
+  }
+  return result;
 }
-bool same_projection(const CameraRayRequest &a, const CameraRayRequest &b) {
-  const auto &x = a.projection.intrinsics, &y = b.projection.intrinsics;
-  return a.image.width == b.image.width && a.image.height == b.image.height &&
-         x.focal_x == y.focal_x && x.focal_y == y.focal_y && x.principal_x == y.principal_x &&
-         x.principal_y == y.principal_y;
+bool same_projection(const RayFieldRequest &a, const RayFieldRequest &b) {
+  auto x = uniforms(a), y = uniforms(b);
+  // The footprint depends on the lens/projection, not the world orientation.
+  std::fill_n(x.forward, 3, 0);
+  std::fill_n(y.forward, 3, 0);
+  std::fill_n(x.right, 3, 0);
+  std::fill_n(y.right, 3, 0);
+  std::fill_n(x.up, 3, 0);
+  std::fill_n(y.up, 3, 0);
+  return std::memcmp(&x, &y, sizeof(x)) == 0;
 }
 } // namespace
 
-uint32_t validate_camera_request(const CameraRayRequest &camera) {
+uint32_t validate_camera_request(const RayFieldRequest &camera) {
   const uint64_t count = uint64_t(camera.image.width) * camera.image.height;
   if (count == 0 || count > std::numeric_limits<uint32_t>::max())
     throw std::invalid_argument("GPU camera has invalid image dimensions");
-  const auto &p = camera.projection;
-  if (!std::holds_alternative<NoDistortion>(p.distortion))
-    throw std::invalid_argument("GPU camera currently supports undistorted pinhole projection");
+  if (const auto *angular = std::get_if<AngularProjection>(&camera.projection)) {
+    for (double value : {angular->azimuth_start,
+                         angular->azimuth_end,
+                         angular->elevation_start,
+                         angular->elevation_end})
+      (void)checked_float(value);
+    const float dx =
+        checked_float((angular->azimuth_end - angular->azimuth_start) / camera.image.width);
+    const float dy =
+        checked_float((angular->elevation_end - angular->elevation_start) / camera.image.height);
+    if (dx == 0 || dy == 0)
+      throw std::invalid_argument("Angular projection requires a positive pixel footprint");
+    return static_cast<uint32_t>(count);
+  }
+  const auto &p = std::get<CameraProjection>(camera.projection);
+  if (const auto *d = std::get_if<BrownConradyDistortion>(&p.distortion))
+    for (double value : {d->radial_1, d->radial_2, d->radial_3, d->tangential_1, d->tangential_2})
+      (void)checked_float(value);
   for (double value : {p.orientation.heading,
                        p.orientation.pitch,
                        p.orientation.roll,
@@ -88,7 +142,7 @@ struct GpuCamera::State {
   double anchor_x, anchor_y;
   camera_gpu::Camera camera{};
   camera_gpu::Lod settings{};
-  CameraRayRequest cached{};
+  RayFieldRequest cached{};
   ObserverLocation cached_observer{};
   float cached_scale = -1;
   bool footprint_valid = false, plan_valid = false;
@@ -161,7 +215,7 @@ GpuCamera::GpuCamera(
 GpuCamera::~GpuCamera() = default;
 
 void GpuCamera::prepare(
-    const CameraRayRequest &camera,
+    const RayFieldRequest &camera,
     ObserverLocation observer,
     float scale,
     TileManager &tiles
@@ -272,7 +326,6 @@ void GpuCamera::validate_completed_rays() const {
   if (*static_cast<const uint32_t *>(state_->invalid.contents) != 0)
     throw std::runtime_error("Camera projection produced a vertical or non-finite terrain ray");
 }
-void GpuCamera::invalidate_plan() { state_->plan_valid = false; }
 GpuCameraStatistics GpuCamera::statistics() const { return state_->stats; }
 id<MTLBuffer> GpuCamera::pixel_angle() const { return state_->angle; }
 } // namespace panorama

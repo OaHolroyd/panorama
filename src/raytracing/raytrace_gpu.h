@@ -87,21 +87,6 @@ struct GpuTraceOutputRequirements {
 /// continuation-culling kernels.
 class GpuRaytraceResources {
 public:
-  /// Create all reusable Metal resources for an initial per-pixel ray field.
-  ///
-  /// Optional outputs specialize the trace pipeline, removing their collision
-  /// arithmetic, buffer writes, and full-size allocations when disabled.
-  /// A supplied queue also selects its device; otherwise create a default pair.
-  GpuRaytraceResources(
-      std::span<const RayDirection> rays,
-      std::span<const TerrainSource> sources,
-      bool trace_quantized,
-      bool bilinear_collisions,
-      bool c1_normals,
-      GpuTraceOutputRequirements outputs,
-      id<MTLCommandQueue> shared_queue = nil
-  );
-
   /// Allocate ray storage without a CPU field; a GPU producer fills it before tracing.
   GpuRaytraceResources(
       uint32_t ray_count,
@@ -120,12 +105,6 @@ public:
 
   /// Stop an active capture before releasing the owned command queue.
   ~GpuRaytraceResources();
-
-  /// Replace the fixed-size ray field and clear outputs from the preceding frame.
-  void update_rays(std::span<const RayDirection> rays);
-
-  /// Reallocate ray-dependent buffers for a differently sized output image.
-  void resize_rays(std::span<const RayDirection> rays);
 
   /// Select precompiled collision and normal-interpolation specializations.
   /// The atlas, ray buffers, catalogue, and command queue are unchanged.
