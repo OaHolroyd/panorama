@@ -89,9 +89,12 @@ void benchmark(int argc, const char *argv[]) {
 // producer. Run CPU and GPU modes separately to avoid overlapping GPU work.
 void benchmark_camera(int argc, const char *argv[]) {
   if (argc != 4)
-    throw std::invalid_argument("usage: metal-bvh-test --benchmark-camera TILE_DIR cpu|gpu");
-  const bool gpu = std::string_view(argv[3]) == "gpu";
-  require(gpu || std::string_view(argv[3]) == "cpu", "Choose cpu or gpu camera preparation");
+    throw std::invalid_argument(
+        "usage: metal-bvh-test --benchmark-camera TILE_DIR cpu|gpu|gpu-shadows"
+    );
+  const bool shadows = std::string_view(argv[3]) == "gpu-shadows";
+  const bool gpu = shadows || std::string_view(argv[3]) == "gpu";
+  require(gpu || std::string_view(argv[3]) == "cpu", "Choose cpu, gpu or gpu-shadows");
   RaytraceConfig config{argv[2],
                         {2623452.4, 1100502.2, 3415},
                         21000,
@@ -104,6 +107,8 @@ void benchmark_camera(int argc, const char *argv[]) {
   config.lod_scale = 1.5F;
   config.raytracer = Raytracer::MetalBvh;
   config.bvh_cache_size_bytes = 2048ULL * 1048576;
+  if (shadows)
+    config.max_distance = 600000;
   const ImageSize image{1600, 900};
   CameraRayRequest camera{
       image,
@@ -131,7 +136,9 @@ void benchmark_camera(int argc, const char *argv[]) {
       {false, false, false, true, true, true}
   );
   TerrainPresentationSettings settings{};
-  settings.appearance.raytraced_shadows = false;
+  settings.appearance.raytraced_shadows = shadows;
+  settings.appearance.sun_azimuth = 2.1;
+  settings.appearance.sun_elevation = 0.35;
   settings.colour_range = {0, 21000};
   std::vector<double> warm;
   for (uint32_t frame = 0; frame < 18; ++frame) {
@@ -145,6 +152,8 @@ void benchmark_camera(int argc, const char *argv[]) {
       if (frame == 16)
         camera.projection.intrinsics = CameraIntrinsics::from_vertical_field_of_view(image, 1.1);
       const auto started = std::chrono::steady_clock::now();
+      const auto before = session->bvh_statistics();
+      const auto io_before = session->tile_statistics().bytes_loaded_with_metal_io;
       if (!gpu)
         field = make_camera_ray_field(image, camera.projection);
       const auto generated = std::chrono::steady_clock::now();
@@ -162,10 +171,27 @@ void benchmark_camera(int argc, const char *argv[]) {
       const double cpu_rays =
           std::chrono::duration<double, std::milli>(generated - started).count();
       const auto preparation = session->camera_statistics();
+      if (shadows) {
+        const auto after = session->bvh_statistics();
+        std::printf(
+            "Shadow frame %u: repair %.3f ms, caster builds=%llu, repair passes=%llu, "
+            "capacity fallbacks=%llu, terrain I/O %.3f MiB\n",
+            frame,
+            timing.shadow_repair_milliseconds,
+            static_cast<unsigned long long>(after.shadow_tiles_built - before.shadow_tiles_built),
+            static_cast<unsigned long long>(after.shadow_passes - before.shadow_passes),
+            static_cast<unsigned long long>(
+                after.shadow_cache_fallbacks - before.shadow_cache_fallbacks
+            ),
+            double(session->tile_statistics().bytes_loaded_with_metal_io - io_before) / 1048576.0
+        );
+      }
       std::printf(
           "Camera benchmark %s frame=%u: total %.3f ms, CPU rays %.3f ms, "
           "GPU plan wall/device %.3f/%.3f ms, producer %.3f ms, streamed=%d\n",
-          gpu ? "gpu" : "cpu",
+          shadows ? "gpu-shadows"
+          : gpu   ? "gpu"
+                  : "cpu",
           frame,
           wall,
           cpu_rays,
@@ -181,7 +207,9 @@ void benchmark_camera(int argc, const char *argv[]) {
   std::sort(warm.begin(), warm.end());
   std::printf(
       "Camera benchmark %s warm pan median %.3f ms, p95 %.3f ms (%zu samples)\n",
-      gpu ? "gpu" : "cpu",
+      shadows ? "gpu-shadows"
+      : gpu   ? "gpu"
+              : "cpu",
       0.5 * (warm[5] + warm[6]),
       warm.back(),
       warm.size()
@@ -1098,6 +1126,115 @@ void check_producer(
   require(rejected, "Primary update exposed stale resident shadows");
 }
 
+void check_shadow_reuse(const std::filesystem::path &directory, bool bilinear, bool bounded) {
+  RaytraceConfig
+      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
+  auto camera = camera_request({129, 65});
+  auto field = make_camera_ray_field(camera.image, camera.projection);
+  TerrainTraceSession reference(config, field, {true, true, true});
+  config.raytracer = Raytracer::MetalBvh;
+  if (bounded) {
+    auto *geometry = [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+    geometry.boundingBoxCount = 16;
+    geometry.boundingBoxStride = 24;
+    geometry.opaque = NO;
+    geometry.allowDuplicateIntersectionFunctionInvocation = NO;
+    auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    descriptor.geometryDescriptors = @[ geometry ];
+    const auto sizes = [reference.device() accelerationStructureSizesWithDescriptor:descriptor];
+    const bool quantized =
+        read_metal_tile_header(
+            TerrainCatalogue::discover(directory, config.observer, config.max_distance, 0)
+                .origin()
+                .path
+        )
+            .sample_type == MetalTileSampleType::Uint16Decimeters;
+    config.bvh_cache_size_bytes = 17U * 17U * (quantized ? 2U : 4U) + 16U * (20U + 24U) + 48U + 8U +
+                                  2U * sizes.accelerationStructureSize +
+                                  sizes.buildScratchBufferSize;
+  }
+  TerrainTraceSession trace(config, camera, {true, true, true});
+  GpuImageRenderer image(
+      trace.device(),
+      trace.command_queue(),
+      trace.library(),
+      camera.image,
+      {false, false, false, true, true, true}
+  );
+  TerrainPresentationSettings settings{};
+  settings.appearance.raytraced_shadows = false;
+  settings.appearance.sun_azimuth = 2.1;
+  settings.colour_range = {0, 480};
+  settings.appearance.sun_elevation = 0.35;
+  (void)render_terrain_frame(trace, nullptr, image, settings, {}, &camera);
+  require(trace.bvh_statistics().shadow_tiles_built == 0, "Disabled shadows loaded BVH casters");
+  settings.appearance.raytraced_shadows = true;
+  for (uint32_t frame = 0; frame < 8; ++frame) {
+    // Odd frames repeat a view exactly; even frames exercise invalidation.
+    if (frame == 2) {
+      config.observer.easting -= 1;
+      require(
+          reference.relocate_observer(config.observer) && trace.relocate_observer(config.observer),
+          "Shadow reuse relocation failed"
+      );
+      camera.projection.orientation.heading += 0.02;
+    }
+    if (frame == 4) {
+      settings.appearance.sun_azimuth = -1.2;
+      settings.appearance.sun_elevation = 0.15;
+    }
+    if (frame == 6) {
+      reference.set_lod_scale(3);
+      trace.set_lod_scale(3);
+    }
+    field = make_camera_ray_field(camera.image, camera.projection);
+    reference.trace(field);
+    reference.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
+    const auto before = trace.bvh_statistics();
+    const auto io_before = trace.tile_statistics().bytes_loaded_with_metal_io;
+    const auto timing = render_terrain_frame(trace, nullptr, image, settings, {}, &camera);
+    const auto after = trace.bvh_statistics();
+    require(
+        std::memcmp(
+            reference.shadow_visibility().contents,
+            trace.shadow_visibility().contents,
+            field.rays.size()
+        ) == 0,
+        "Cached shadow repair changed visibility"
+    );
+    require(
+        after.peak_bytes <= config.bvh_cache_size_bytes &&
+            after.resident_bytes <= config.bvh_cache_size_bytes,
+        "Shadow reuse exceeded BVH cache budget"
+    );
+    if (!bounded && frame % 2 == 1) {
+      require(
+          !timing.streamed && timing.producer_submissions == 1,
+          "Repeated shadows required repair after warming"
+      );
+      require(
+          after.builds == before.builds &&
+              trace.tile_statistics().bytes_loaded_with_metal_io == io_before,
+          "Repeated shadows rebuilt or reloaded terrain"
+      );
+    }
+  }
+  const auto stats = trace.bvh_statistics();
+  std::printf(
+      "Shadow reuse bilinear=%d bounded=%d: caster builds=%llu, capacity fallbacks=%llu\n",
+      bilinear,
+      bounded,
+      static_cast<unsigned long long>(stats.shadow_tiles_built),
+      static_cast<unsigned long long>(stats.shadow_cache_fallbacks)
+  );
+  if (bounded)
+    require(stats.shadow_cache_fallbacks > 0, "Small cache did not exercise exact shadow fallback");
+  else {
+    require(stats.shadow_tiles_built > 0, "Fixture did not request off-screen shadow terrain");
+    require(stats.shadow_cache_fallbacks == 0, "Roomy shadow cache unexpectedly fell back");
+  }
+}
+
 void check_streaming(const std::filesystem::path &directory) {
   const auto field = make_angular_ray_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
   RaytraceConfig
@@ -1155,9 +1292,13 @@ int main(int argc, const char *argv[]) {
       const bool tile_selection = argc == 2 && std::string_view(argv[1]) == "--tile-selection";
       const bool camera = argc == 2 && std::string_view(argv[1]) == "--camera";
       const bool producer = argc == 2 && std::string_view(argv[1]) == "--producer";
+      const bool shadow_float = argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-float";
+      const bool shadow_quantized =
+          argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-quantized";
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
-      if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera) {
+      if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
+          !shadow_float && !shadow_quantized) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -1216,7 +1357,19 @@ int main(int argc, const char *argv[]) {
         write_fixture(root / "float", false, 10.0);
         write_fixture(root / "quantized", true, 10.0);
         write_fixture(root / "distant", true, 1000.0);
-        if (camera) {
+        if (shadow_float || shadow_quantized) {
+          for (bool bilinear : {false, true}) {
+            for (bool bounded : {false, true}) {
+              @autoreleasepool {
+                check_shadow_reuse(
+                    root / (shadow_float ? "float" : "quantized"),
+                    bilinear,
+                    bounded
+                );
+              }
+            }
+          }
+        } else if (camera) {
           @autoreleasepool {
             check_gpu_camera(root / "quantized");
           }

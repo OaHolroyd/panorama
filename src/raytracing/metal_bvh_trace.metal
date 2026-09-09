@@ -485,6 +485,7 @@ kernel void trace_scene_shadows(
     device atomic_uint *missing_count [[buffer(15)]],
     constant float4 &sun [[buffer(16)]],
     device uchar *visibility [[buffer(17)]],
+    device atomic_uint *requested_sources [[buffer(18)]],
     uint index [[thread_position_in_grid]]
 ) {
   if (index >= params.trace.ray_count)
@@ -548,6 +549,8 @@ kernel void trace_scene_shadows(
   TileSelection missing_payload = {sun.xyz, true, origin.xy, 0xffffffffU};
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
-  if (missing.type != intersection_type::none)
+  if (missing.type != intersection_type::none) {
+    atomic_store_explicit(requested_sources + missing.primitive_id, 1U, memory_order_relaxed);
     atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
+  }
 }

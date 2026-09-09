@@ -1,4 +1,5 @@
 #include "terrain_trace_session.h"
+#include "trace_activity.h"
 
 #include "host_frontier.h"
 #include "metal_bvh_trace.h"
@@ -288,6 +289,7 @@ void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
 }
 
 bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
+  trace_activity::Scope activity("observer relocation");
   State &state = *state_;
   if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing) ||
       !std::isfinite(observer.elevation)) {
@@ -574,6 +576,15 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
   if (!std::isfinite(sun_azimuth) || !std::isfinite(sun_elevation)) {
     throw std::invalid_argument("Sun direction must be finite");
   }
+  if (state.config.raytracer == Raytracer::MetalBvh && state.outputs.elevations &&
+      state.outputs.surface_gradients &&
+      state.bvh->trace_shadows(sun_azimuth, sun_elevation, state.timer)) {
+    state.bvh_shadow_active = true;
+    state.shadow_revision = state.trace_revision;
+    state.shadow_azimuth = sun_azimuth;
+    state.shadow_elevation = sun_elevation;
+    return;
+  }
   if (state.shadows == nullptr) {
     // Construction is deliberately lazy: disabled shadows allocate no
     // per-pixel storage and compile no secondary pipelines.
@@ -702,7 +713,12 @@ const TerrainCoverage &TerrainTraceSession::terrain_coverage() const {
 }
 
 std::optional<float> TerrainTraceSession::sample_terrain(double easting, double northing) {
+  trace_activity::Scope activity("full-resolution ground sampling");
   return state_->tiles->sample_terrain(easting, northing);
+}
+
+TileManagerStatistics TerrainTraceSession::tile_statistics() const {
+  return state_->tiles->statistics();
 }
 
 id<MTLDevice> TerrainTraceSession::device() const { return state_->gpu->device(); }

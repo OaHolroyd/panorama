@@ -11,6 +11,11 @@ struct GpuTerrainFrameTiming {
   // Sum of completed producer command durations. Synchronous BVH preparation
   // and separate terrain-loading/tracing submissions are not included here.
   double gpu_milliseconds = 0.0;
+  // Disjoint host wall phases, including GPU waits and synchronous I/O.
+  double preparation_milliseconds = 0.0;
+  double primary_repair_milliseconds = 0.0;
+  double shadow_repair_milliseconds = 0.0;
+  double producer_wait_milliseconds = 0.0;
   uint32_t producer_submissions = 0U;
   bool streamed = false;
 };

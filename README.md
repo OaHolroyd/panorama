@@ -125,6 +125,16 @@ completion, presentation, stale-frame rejection and missing-drawable counts are
 cumulative. On the display path, `refreshed` counts snapshots replaced with newer
 frames after drawable acquisition; `stale` counts resolution mismatches rejected
 before encoding.
+`Frame shadows` reports newly cached shadow casters, BVH repair passes, their GPU
+time and capacity fallbacks. Warm shadow views should need no repair or terrain I/O.
+`Frame phases` separates preparation, primary/shadow streaming repair and producer
+waits. `Frame work` reports per-frame BVH builds/evictions, scene size, streaming
+passes and terrain I/O. Its detail GPU time covers synchronous traversal;
+resident producer GPU time remains on the main `Frame` line. Cache hits count
+streaming tile lookups, not individual GPU accesses. `Health` also samples the
+innermost terrain stage, and `Slow stage` records inclusive wall durations over
+100 ms (nested durations overlap). This instrumentation is enabled only by
+`--trace-diagnostics`, apart from the inexpensive per-frame phase timers.
 Display revisions distinguish new camera images from repeated
 presentations. `idle` means that path is outside its instrumented callback, not
 necessarily that the whole UI is responsive. Keep capturing for about ten seconds
@@ -201,9 +211,18 @@ separate cache entries. GPU traversal, tile loading/building, and instance setup
 are reported separately beneath inclusive `BVH streaming trace` time.
 Actual speed and compaction savings depend on the GPU. Devices without Metal
 ray-tracing support can use the software backend. The viewer traces shadows
-against the resident BVH scene and falls back to software streaming when terrain
-is missing. It repairs incomplete primary or shadow results before publishing
-the image. The batch renderer retains the software shadow traversal.
+against the resident BVH scene. Missing shadow casters are requested by the GPU,
+loaded into the ordinary detailed BVH cache at the selected LOD, and retained for
+later frames. Shadow repair pins the current scene and its new casters, with
+exact software streaming as a fallback if they cannot fit within the cache budget.
+It repairs incomplete primary or shadow results before publishing the image.
+The batch renderer retains the software shadow traversal.
+
+For a headless shadow-cache check with the viewer's 600 km range and 1.5 LOD,
+run `obj/release/metal-bvh-test --benchmark-camera TILE_DIR gpu-shadows`.
+This logs caster loads, repair passes and terrain I/O through warm pans, movement
+and zoom. `make check-bvh` also checks shadow reuse and bounded-cache fallback
+against software visibility, using float/quantized terrain and both collision modes.
 
 `make check-bvh` runs Metal API validation and software/BVH comparisons on
 generated terrain, including retained and expanded uint16, float samples,

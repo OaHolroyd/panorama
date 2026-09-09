@@ -72,7 +72,7 @@ constexpr double kFallbackEyeHeight = 2.0;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
-  uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
+  uint64_t tile_cache_size_bytes = 2048ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
   float lod_scale = 1.5F;
@@ -1242,10 +1242,20 @@ private:
 
       bool unpublished_frame = false;
       diagnostics::Scope diagnostic_scope(diagnostics::worker);
+      trace_activity::Binding diagnostic_binding(
+          settings_.trace_diagnostics ? &diagnostics::terrain : nullptr
+      );
+      trace_activity::Scope terrain_activity("worker iteration");
       try {
         @autoreleasepool {
           diagnostics::worker.mark("prepare");
           const auto started = std::chrono::steady_clock::now();
+          auto bvh_before =
+              settings_.trace_diagnostics ? trace_->bvh_statistics() : MetalBvhStatistics{};
+          auto tiles_before =
+              settings_.trace_diagnostics ? trace_->tile_statistics() : TileManagerStatistics{};
+          const ObserverLocation previous_observer = current_observer_;
+          bool session_replaced = false;
           std::optional<RoamResult> roam_result;
           double next_ground_clearance = current_ground_clearance;
           if (roam_requested) {
@@ -1289,6 +1299,7 @@ private:
             }
             if (observer_requested) {
               if (!trace_->relocate_observer(observer)) {
+                trace_activity::Scope activity("terrain session replacement");
                 const RaytraceConfig config = {
                     settings_.tile_dir,
                     observer,
@@ -1316,6 +1327,9 @@ private:
                     display_queue_
                 );
                 trace_ = std::move(replacement);
+                session_replaced = true;
+                bvh_before = {};
+                tiles_before = {};
               }
               current_observer_ = observer;
             }
@@ -1327,6 +1341,7 @@ private:
 
           if (presentation_requested) {
             diagnostics::worker.mark("render");
+            trace_activity::Scope activity("terrain frame");
             id<MTLBuffer> next_visibility_points = current_visibility_points_;
             producer_timing = render_terrain_frame(
                 *trace_,
@@ -1359,6 +1374,7 @@ private:
           if (settings_.trace_diagnostics && presentation_requested) {
             diagnostics::worker.mark("log");
             const auto bvh = trace_->bvh_statistics();
+            const auto tiles = trace_->tile_statistics();
             std::printf(
                 "Frame %llu: wall %.3f ms, GPU producer %.3f ms, %u producer submission(s), %s; "
                 "t=%.3f, BVH resident/budget %.1f/%.1f MiB, "
@@ -1376,6 +1392,75 @@ private:
                 static_cast<unsigned long long>(bvh.cache_hits),
                 static_cast<unsigned long long>(bvh.evictions),
                 static_cast<unsigned long long>(bvh.scene_builds)
+            );
+            std::printf(
+                "Frame phases %llu: pre-render %.3f ms, prepare %.3f ms, primary repair %.3f ms, "
+                "shadow repair %.3f ms, producer wait %.3f ms; "
+                "observer=%.2f/%.2f/%.2f, moved=%.2f m, roam=%d, replaced=%d, "
+                "image=%ux%u, LOD=%.3f, shadows=%d, minimap=%d\n",
+                static_cast<unsigned long long>(revision),
+                milliseconds - producer_timing.wall_milliseconds,
+                producer_timing.preparation_milliseconds,
+                producer_timing.primary_repair_milliseconds,
+                producer_timing.shadow_repair_milliseconds,
+                producer_timing.producer_wait_milliseconds,
+                current_observer_.easting,
+                current_observer_.northing,
+                current_observer_.elevation,
+                std::hypot(
+                    current_observer_.easting - previous_observer.easting,
+                    current_observer_.northing - previous_observer.northing
+                ),
+                int(roam_requested),
+                int(session_replaced),
+                image.width,
+                image.height,
+                double(lod_scale),
+                int(presentation.use_surface_normals && presentation.appearance.raytraced_shadows),
+                int(minimap_enabled)
+            );
+            const auto delta = [](uint64_t after, uint64_t before) {
+              return static_cast<unsigned long long>(after >= before ? after - before : after);
+            };
+            std::printf(
+                "Frame work %llu: BVH built/hit/evicted=%llu/%llu/%llu, "
+                "catalogue/instance/scene builds=%llu/%llu/%llu, "
+                "cached/scene tiles=%llu/%llu, scene %.1f MiB, "
+                "selection/detail passes=%llu/%llu, fallback ray attempts=%llu, "
+                "GPU build/selection/detail=%.3f/%.3f/%.3f ms, CPU grouping=%.3f ms; "
+                "atlas installed/evicted=%llu/%llu, I/O=%.3f MiB, resident=%u/%u\n",
+                static_cast<unsigned long long>(revision),
+                delta(bvh.builds, bvh_before.builds),
+                delta(bvh.cache_hits, bvh_before.cache_hits),
+                delta(bvh.evictions, bvh_before.evictions),
+                delta(bvh.catalogue_builds, bvh_before.catalogue_builds),
+                delta(bvh.instance_builds, bvh_before.instance_builds),
+                delta(bvh.scene_builds, bvh_before.scene_builds),
+                static_cast<unsigned long long>(bvh.cached_tiles),
+                static_cast<unsigned long long>(bvh.scene_tiles),
+                double(bvh.scene_bytes) / 1048576.0,
+                delta(bvh.selection_passes, bvh_before.selection_passes),
+                delta(bvh.trace_passes, bvh_before.trace_passes),
+                delta(bvh.scene_fallback_rays, bvh_before.scene_fallback_rays),
+                bvh.build_gpu_ms - bvh_before.build_gpu_ms,
+                bvh.selection_gpu_ms - bvh_before.selection_gpu_ms,
+                bvh.trace_gpu_ms - bvh_before.trace_gpu_ms,
+                bvh.grouping_cpu_ms - bvh_before.grouping_cpu_ms,
+                delta(tiles.installations, tiles_before.installations),
+                delta(tiles.evictions, tiles_before.evictions),
+                double(tiles.bytes_loaded_with_metal_io - tiles_before.bytes_loaded_with_metal_io) /
+                    1048576.0,
+                tiles.resident_tiles,
+                tiles.slot_capacity
+            );
+            std::printf(
+                "Frame shadows %llu: BVH caster builds=%llu, repair passes=%llu, "
+                "repair GPU=%.3f ms, capacity fallbacks=%llu\n",
+                static_cast<unsigned long long>(revision),
+                delta(bvh.shadow_tiles_built, bvh_before.shadow_tiles_built),
+                delta(bvh.shadow_passes, bvh_before.shadow_passes),
+                bvh.shadow_gpu_ms - bvh_before.shadow_gpu_ms,
+                delta(bvh.shadow_cache_fallbacks, bvh_before.shadow_cache_fallbacks)
             );
             std::fflush(stdout);
           }

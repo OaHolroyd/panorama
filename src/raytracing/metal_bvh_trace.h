@@ -25,6 +25,14 @@ struct MetalBvhStatistics {
   uint64_t scene_fallback_rays = 0U;
   // Small scene metadata/TLAS overhead, separate from detailed tile storage.
   uint64_t scene_bytes = 0U;
+  uint64_t cached_tiles = 0U;
+  uint64_t scene_tiles = 0U;
+  // Synchronous shadow repair only; resident shadow GPU time belongs to the
+  // combined producer. Caster builds are also included in the total builds.
+  uint64_t shadow_passes = 0U;
+  uint64_t shadow_tiles_built = 0U;
+  uint64_t shadow_cache_fallbacks = 0U;
+  double shadow_gpu_ms = 0.0;
   double build_gpu_ms = 0.0;
   double selection_gpu_ms = 0.0;
   double trace_gpu_ms = 0.0;
@@ -65,9 +73,13 @@ public:
   /// Inspect the primary missing-ray counter after the caller completes its command.
   bool scene_complete();
   /// Encode sun visibility using the same scene. Resources remain stable
-  /// until completion; false from shadows_complete requires streaming shadows.
+  /// until completion; false from shadows_complete requires trace_shadows repair.
   bool encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation);
-  bool shadows_complete() const;
+  bool shadows_complete();
+  /// Load GPU-requested shadow casters into the ordinary BVH cache and retry.
+  /// False means the working set cannot fit; use exact software streaming.
+  /// Primary outputs must be complete and no command may be in flight.
+  bool trace_shadows(double azimuth, double elevation, Timer &timer);
   id<MTLBuffer> shadow_visibility() const;
 
 private:

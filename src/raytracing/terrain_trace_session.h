@@ -79,6 +79,7 @@ public:
   /// software shadow path keep the same device, queue, and buffer ABI.
   void set_raytracer(Raytracer raytracer);
   [[nodiscard]] MetalBvhStatistics bvh_statistics() const;
+  [[nodiscard]] TileManagerStatistics tile_statistics() const;
 
   /// Trace one directional sun ray from each eligible primary collision.
   /// Angles are radians; azimuth is clockwise from grid north and elevation

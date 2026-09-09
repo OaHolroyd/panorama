@@ -1,5 +1,6 @@
 #include "gpu_camera.h"
 #include "gpu_camera_types.metalh"
+#include "trace_activity.h"
 
 #include <algorithm>
 #include <chrono>
@@ -166,6 +167,7 @@ void GpuCamera::prepare(
     TileManager &tiles
 ) {
   auto &s = *state_;
+  trace_activity::Scope activity("GPU camera/LOD preparation");
   const auto started = Clock::now();
   s.stats.preparation_gpu_ms = 0;
   if (&tiles != s.owner || !std::isfinite(scale) || scale < 0)
@@ -219,6 +221,23 @@ void GpuCamera::prepare(
     [command waitUntilCompleted];
     if (command.status != MTLCommandBufferStatusCompleted)
       throw std::runtime_error("GPU camera LOD preparation failed");
+    if (trace_activity::current != nullptr) {
+      const auto *levels = static_cast<const uint32_t *>(s.levels.contents);
+      uint32_t finer = 0, coarser = 0, finest = 0;
+      for (uint32_t source = 0; source < s.settings.count; ++source) {
+        const uint32_t previous = tiles.lod_for_source(source);
+        finer += levels[source] < previous;
+        coarser += levels[source] > previous;
+        finest += levels[source] == 1U;
+      }
+      std::printf(
+          "LOD plan: sources=%u, changed finer/coarser=%u/%u, selected LOD-1=%u\n",
+          s.settings.count,
+          finer,
+          coarser,
+          finest
+      );
+    }
     tiles.install_lod_plan({static_cast<const uint32_t *>(s.levels.contents), s.settings.count});
     s.stats.preparation_gpu_ms = 1000 * (command.GPUEndTime - command.GPUStartTime);
     ++s.stats.plan_updates;
