@@ -92,6 +92,7 @@ struct GpuImageRenderer::State {
   ImageSize image;
   NSUInteger bytes_per_row;
   MTLPixelFormat output_pixel_format;
+  MTLTextureUsage output_texture_usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   bool host_readback;
   bool supports_synthetic;
 
@@ -100,7 +101,8 @@ struct GpuImageRenderer::State {
     if (pixel_count == 0U || pixel_count > std::numeric_limits<uint32_t>::max()) {
       throw std::invalid_argument("GPU image dimensions are invalid");
     }
-    if (output != nil && image.width == next_image.width && image.height == next_image.height) {
+    if (output != nil && image.width == next_image.width && image.height == next_image.height &&
+        output.usage == output_texture_usage) {
       return;
     }
 
@@ -110,7 +112,7 @@ struct GpuImageRenderer::State {
                                                           height:next_image.height
                                                        mipmapped:NO];
     texture_descriptor.storageMode = MTLStorageModePrivate;
-    texture_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    texture_descriptor.usage = output_texture_usage;
     id<MTLTexture> next_output = [device newTextureWithDescriptor:texture_descriptor];
     if (next_output == nil) {
       throw std::runtime_error("Could not allocate GPU presentation texture");
@@ -182,6 +184,8 @@ GpuImageRenderer::GpuImageRenderer(
   state->queue = queue;
   state->output_pixel_format = output_pixel_format;
   state->host_readback = requirements.host_readback;
+  state->output_texture_usage =
+      MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | requirements.output_texture_usage;
   state->supports_synthetic = requirements.white_synthetic || requirements.synthetic_scalar_colour;
   if (requirements.scalar_diagnostics || requirements.debugging_diagnostics) {
     state->scalar = make_pipeline(device, library, @"present_scalar_viridis");
@@ -211,6 +215,11 @@ GpuImageRenderer::~GpuImageRenderer() = default;
 
 void GpuImageRenderer::resize(ImageSize image) { state_->resize(image); }
 
+void GpuImageRenderer::set_output_texture_usage(MTLTextureUsage usage) {
+  state_->output_texture_usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | usage;
+  state_->resize(state_->image);
+}
+
 void GpuImageRenderer::begin_frame() {
   State &state = *state_;
   if (state.spare_output == nil) {
@@ -220,7 +229,7 @@ void GpuImageRenderer::begin_frame() {
                                                           height:state.image.height
                                                        mipmapped:NO];
     descriptor.storageMode = MTLStorageModePrivate;
-    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    descriptor.usage = state.output_texture_usage;
     state.spare_output = [state.device newTextureWithDescriptor:descriptor];
     if (state.spare_output == nil)
       throw std::runtime_error("Could not allocate producer image target");

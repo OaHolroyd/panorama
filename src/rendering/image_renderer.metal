@@ -2,6 +2,25 @@
 
 using namespace metal;
 
+struct FullscreenPresentationVertex {
+  float4 position [[position]];
+  float2 uv;
+};
+
+vertex FullscreenPresentationVertex fullscreen_presentation_vertex(uint index [[vertex_id]]) {
+  constexpr float2 positions[3] = {float2(-1.0F, -1.0F), float2(3.0F, -1.0F), float2(-1.0F, 3.0F)};
+  constexpr float2 coordinates[3] = {float2(0.0F, 1.0F), float2(2.0F, 1.0F), float2(0.0F, -1.0F)};
+  return {float4(positions[index], 0.0F, 1.0F), coordinates[index]};
+}
+
+fragment float4 fullscreen_presentation_fragment(
+    FullscreenPresentationVertex input [[stage_in]],
+    texture2d<float> source [[texture(0)]]
+) {
+  constexpr sampler source_sampler(coord::normalized, filter::linear, address::clamp_to_edge);
+  return source.sample(source_sampler, input.uv);
+}
+
 /// Per-pixel terrain ray ABI shared with `RayDirection` in ray_projection.h.
 /// Keeping the complete layout lets the minimap and outline passes consume the
 /// tracer's buffer directly without a repacking pass.

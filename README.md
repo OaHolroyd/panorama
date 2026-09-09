@@ -105,6 +105,17 @@ GPU producer time excludes synchronous BVH preparation and streaming work;
 wall latency includes them. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
 for measurements, cache guidance and a repeatable camera benchmark.
 
+The Camera inspector exposes MetalFX activation (`Disabled`, `Pan/move only`,
+or `Always`) and an independent preset (`Off`, `Quality`, `Balanced`, or
+`Performance`). Quality, Balanced and Performance trace at 75%, 50% and 33%
+of the configured output dimensions respectively, then spatially upscale into a
+private texture before presentation. Pan/move only returns to a native trace 200
+ms after the last pan or keyboard rotation. The default is Disabled with Balanced
+remembered. Devices without MetalFX keep rendering natively and show that state
+in the inspector. The drawable follows live window resizing; the presentation
+pass stretches the last completed frame while rendering retains its current
+resource size.
+
 For intermittent viewer stalls, capture `./panorama-app --trace-diagnostics >
 diagnostics.log 2>&1` (with your usual options). Frame lines include elapsed
 timestamps and cumulative BVH cache counts. An independent monitor prints
@@ -203,6 +214,8 @@ switching, cold and resident shadows, producer fallback, and forced cache evicti
 and a CPU reference under Metal validation. It checks invalid hits, duplicate
 opacity, backing dimensions, image lifetime, horizontal-distance reconstruction,
 and projection accuracy in all three supported terrain CRSs.
+`make check-metalfx` verifies the resolution policy and, where supported, creates
+and executes a MetalFX spatial-scaling command on the active GPU.
 
 `make check-manifest` validates manifest versions, bounds across all LODs,
 raw/compressed tile scans, and generator upgrades of existing version-1 manifests
