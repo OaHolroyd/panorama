@@ -1,3 +1,4 @@
+#include "threadgroup_sizes.h"
 #include "tile_manager_state.h"
 
 #import <Foundation/Foundation.h>
@@ -247,7 +248,7 @@ void TileManager::State::load_custom_vertices(
     const uint32_t tile_count = static_cast<uint32_t>(wave_size);
     [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
     [encoder dispatchThreads:MTLSizeMake(vertex_value_count, tile_count, 1U)
-        threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+        threadsPerThreadgroup:threadgroups::spatial];
     [encoder endEncoding];
 
     timer.start_wall("GPU vertex conversion");
@@ -379,7 +380,7 @@ id<MTLCommandBuffer> TileManager::State::submit_mipmaps(
   [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
   const uint32_t initial_output_side = fuse_initial_levels ? cell_count / 2U : cell_count;
   [encoder dispatchThreads:MTLSizeMake(initial_output_side, initial_output_side, tile_count)
-      threadsPerThreadgroup:MTLSizeMake(32U, 8U, 1U)];
+      threadsPerThreadgroup:threadgroups::spatial];
   [encoder endEncoding];
 
   size_t previous_offset = 0U;
@@ -413,7 +414,7 @@ id<MTLCommandBuffer> TileManager::State::submit_mipmaps(
     [encoder setBytes:&destination_tile_stride length:sizeof(destination_tile_stride) atIndex:6];
     [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
     [encoder dispatchThreads:MTLSizeMake(output_side, output_side, tile_count)
-        threadsPerThreadgroup:MTLSizeMake(32U, 8U, 1U)];
+        threadsPerThreadgroup:threadgroups::spatial];
     [encoder endEncoding];
 
     previous_offset = output_offset;

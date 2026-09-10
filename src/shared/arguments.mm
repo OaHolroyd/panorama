@@ -1,5 +1,7 @@
 #include "arguments.h"
 
+#include "../raytracing/raytrace_config.h"
+
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -10,6 +12,16 @@
 #include <system_error>
 
 namespace panorama::arguments {
+
+Raytracer parse_raytracer(std::string_view text) {
+  if (text == "software")
+    return Raytracer::Software;
+  if (text == "metal-bvh")
+    return Raytracer::MetalBvh;
+  throw std::invalid_argument(
+      "Invalid raytracer (expected software or metal-bvh): " + std::string(text)
+  );
+}
 
 std::string_view option_value(int argc, const char *argv[], int &index, std::string_view option) {
   if (index + 1 >= argc) {

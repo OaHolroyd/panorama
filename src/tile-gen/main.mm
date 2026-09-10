@@ -418,15 +418,15 @@ int main(int argc, const char *argv[]) {
     }
 
     std::filesystem::create_directories(options.output_directory);
-    std::map<ChunkKey, float> previous_maximum_by_key;
+    std::map<ChunkKey, panorama::TerrainManifestEntry> previous_maximum_by_key;
+    id<MTLDevice> manifest_device = nil;
+    id<MTLIOCommandQueue> manifest_queue = nil;
     const std::filesystem::path manifest =
         panorama::terrain_manifest_path(options.output_directory);
     if (options.format == OutputFormat::MetalTile && std::filesystem::exists(manifest)) {
       for (const panorama::TerrainManifestEntry &entry :
            panorama::read_terrain_manifest(manifest)) {
-        if (!previous_maximum_by_key
-                 .emplace(ChunkKey{entry.row, entry.column}, entry.maximum_elevation)
-                 .second) {
+        if (!previous_maximum_by_key.emplace(ChunkKey{entry.row, entry.column}, entry).second) {
           throw std::runtime_error("Terrain manifest contains duplicate tile keys");
         }
       }
@@ -459,10 +459,20 @@ int main(int argc, const char *argv[]) {
         }
         if (options.format == OutputFormat::MetalTile) {
           const auto previous = previous_maximum_by_key.find(key);
-          const float maximum = previous == previous_maximum_by_key.end()
-                                    ? panorama::read_metal_tile_header(output).maximum_elevation
-                                    : previous->second;
-          manifest_entries.push_back({key.row, key.column, maximum});
+          if (previous != previous_maximum_by_key.end() &&
+              previous->second.minimum_elevation.has_value()) {
+            manifest_entries.push_back(previous->second);
+          } else {
+            if (manifest_device == nil) {
+              manifest_device = MTLCreateSystemDefaultDevice();
+              manifest_queue = panorama::make_metal_io_queue(manifest_device);
+            }
+            @autoreleasepool {
+              const auto range =
+                  read_metal_tile_elevation_range(output, manifest_device, manifest_queue);
+              manifest_entries.push_back({key.row, key.column, range.maximum, range.minimum});
+            }
+          }
         }
         skipped++;
         continue;
@@ -495,7 +505,7 @@ int main(int argc, const char *argv[]) {
       if (options.format == OutputFormat::GeoTiff) {
         write_geotiff_chunk(output, chunk, destination, key, catalogue.grid());
       } else {
-        const float maximum = write_metal_tile_chunk(
+        const auto range = write_metal_tile_chunk(
             output,
             chunk,
             destination,
@@ -504,7 +514,7 @@ int main(int argc, const char *argv[]) {
             options.compression,
             options.sample_type
         );
-        manifest_entries.push_back({key.row, key.column, maximum});
+        manifest_entries.push_back({key.row, key.column, range.maximum, range.minimum});
       }
       written++;
     }

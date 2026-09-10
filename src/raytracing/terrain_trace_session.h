@@ -1,6 +1,8 @@
 #pragma once
 
 #include "crs.h"
+#include "gpu_camera.h"
+#include "metal_bvh_trace.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
 #include "raytrace_gpu.h"
@@ -22,10 +24,13 @@ namespace panorama {
 /// cached terrain.
 class TerrainTraceSession {
 public:
+  /// Reuse shared_queue and its device when rebuilding a viewer's catalogue.
+  /// With no supplied queue, the session creates its own default device/queue.
   TerrainTraceSession(
       const RaytraceConfig &config,
-      const RayField &initial_field,
-      GpuTraceOutputRequirements outputs
+      const RayFieldRequest &camera,
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue = nil
   );
 
   TerrainTraceSession(const TerrainTraceSession &) = delete;
@@ -33,7 +38,20 @@ public:
   ~TerrainTraceSession();
 
   /// Trace a new view, resizing only ray-dependent GPU buffers when necessary.
-  void trace(const RayField &field);
+  void trace(const RayFieldRequest &camera);
+  /// Finish the current prepared input, including streaming repairs, without regenerating rays.
+  void trace_prepared();
+
+  /// Append resident primary tracing to an uncommitted producer. Preparation
+  /// may build scene structures synchronously. False encodes nothing.
+  /// Do not mutate session resources until the producer has completed.
+  bool encode_trace(id<MTLCommandBuffer> command, const RayFieldRequest &camera);
+  [[nodiscard]] GpuCameraStatistics camera_statistics() const;
+  /// After producer completion, false requires synchronous trace_prepared() and
+  /// a new presentation pass before publishing the image.
+  bool complete_encoded_trace(id<MTLCommandBuffer> command);
+  bool encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation);
+  bool complete_encoded_shadows(id<MTLCommandBuffer> command);
 
   /// Move the observer without rebuilding terrain resources when the new
   /// position belongs to any source retained by this session's catalogue.
@@ -48,6 +66,12 @@ public:
   /// Select bilinear or triangular collision patches and C1 or patch-local
   /// surface normals for subsequent traces without rebuilding terrain state.
   void set_collision_options(bool bilinear_collisions, bool c1_normals);
+
+  /// Select primary tracing on the render-owning thread. Outputs and the
+  /// software shadow path keep the same device, queue, and buffer ABI.
+  void set_raytracer(Raytracer raytracer);
+  [[nodiscard]] MetalBvhStatistics bvh_statistics() const;
+  [[nodiscard]] TileManagerStatistics tile_statistics() const;
 
   /// Trace one directional sun ray from each eligible primary collision.
   /// Angles are radians; azimuth is clockwise from grid north and elevation
@@ -86,6 +110,10 @@ public:
 
   /// Print cumulative cache, preparation, frontier, and timing statistics.
   void print_statistics() const;
+
+  /// Print the last primary trace's wall time, GPU work, and BVH cache deltas.
+  /// GPU traversal is a sum of command durations, not total GPU frame latency.
+  void print_trace_statistics() const;
 
 private:
   struct State;

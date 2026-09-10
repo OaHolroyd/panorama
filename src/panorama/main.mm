@@ -26,12 +26,15 @@ constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 
 /// Runtime-selectable settings for one panorama invocation.
 struct EntrypointSettings {
-  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-u16-none-lod-point";
+  std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t max_tile_preparation_workers = 8U;
   uint32_t max_tile_count = 0U;
   float max_distance = 600'000.0F;
   float lod_scale = 0.0F;
+  panorama::Raytracer raytracer = panorama::Raytracer::Software;
+  uint32_t bvh_block_cells = 4U;
+  uint64_t bvh_cache_size_bytes = 512ULL * kBytesPerMiB;
   bool discard_quantized = false;
   bool bilinear_collisions = false;
   bool c1_normals = false;
@@ -185,8 +188,11 @@ void print_usage(const char *program) {
       "files are written to the current directory.\n"
       "\n"
       "Terrain options:\n"
+      "  --raytracer MODE     software (default) or metal-bvh\n"
+      "  --bvh-block-cells N  cells per BVH block axis (default: 4)\n"
+      "  --bvh-cache-mib N    BVH cache and build budget (default: 512)\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
-      "                        (default: data/swissalti3d-10-level-0)\n"
+      "                        (default: data/swissalti3d-10-level-0-metal-u16-none-lod-point)\n"
       "  --tile-cache-mib N    resident terrain-cache budget in MiB (default: 128)\n"
       "  --workers N           preparation workers; 0 uses all hardware threads (default: 8)\n"
       "  --max-tiles N         limit available source tiles; 0 is unlimited (default: 0)\n"
@@ -260,7 +266,7 @@ void print_usage(const char *program) {
       settings.c1_normals = true;
       continue;
     }
-    if (option == "--bilinear-patch") {
+    if (option == "--bilinear-patch" || option == "--bilinear-patches") {
       settings.bilinear_collisions = true;
       continue;
     }
@@ -298,6 +304,15 @@ void print_usage(const char *program) {
     const std::string_view value = panorama::arguments::option_value(argc, argv, index, option);
     if (option == "--tile-dir") {
       settings.tile_dir = value;
+    } else if (option == "--raytracer") {
+      settings.raytracer = panorama::arguments::parse_raytracer(value);
+    } else if (option == "--bvh-block-cells") {
+      settings.bvh_block_cells = panorama::arguments::parse_uint32(value, option, false);
+    } else if (option == "--bvh-cache-mib") {
+      const uint64_t size = panorama::arguments::parse_uint64(value, option);
+      if (size == 0U || size > std::numeric_limits<uint64_t>::max() / kBytesPerMiB)
+        throw std::out_of_range("BVH cache is outside the supported byte range");
+      settings.bvh_cache_size_bytes = size * kBytesPerMiB;
     } else if (option == "--tile-cache-mib") {
       const uint64_t mebibytes = panorama::arguments::parse_uint64(value, option);
       if (mebibytes == 0U || mebibytes > std::numeric_limits<uint64_t>::max() / kBytesPerMiB) {
@@ -426,8 +441,11 @@ int main(int argc, const char *argv[]) {
         settings.c1_normals,
         false,
         settings.lod_scale,
+        settings.raytracer,
+        settings.bvh_block_cells,
+        settings.bvh_cache_size_bytes,
     };
-    const panorama::RayField rays = settings.projection.make_ray_field();
+    const panorama::RayFieldRequest rays = settings.projection.make_request();
     const panorama::ScalarColourRange colour_range = scalar_colour_range(settings);
     const panorama::TerrainRenderOutputs outputs = {
         settings.write_diagnostics,
@@ -448,7 +466,11 @@ int main(int argc, const char *argv[]) {
     // Echo every benchmark-relevant setting so redirected timing logs remain
     // self-describing when several command-line configurations are compared.
     std::printf(
-        "Settings: cache %.0f MiB, workers %u, max tiles %u, ",
+        "Settings: raytracer %s, BVH cache %.0f MiB, BVH block %u, terrain cache %.0f MiB, workers "
+        "%u, max tiles %u, ",
+        settings.raytracer == panorama::Raytracer::MetalBvh ? "metal-bvh" : "software",
+        double(settings.bvh_cache_size_bytes) / double(kBytesPerMiB),
+        settings.bvh_block_cells,
         static_cast<double>(settings.tile_cache_size_bytes) / static_cast<double>(kBytesPerMiB),
         settings.max_tile_preparation_workers,
         settings.max_tile_count

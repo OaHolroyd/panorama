@@ -75,7 +75,7 @@ std::filesystem::path metal_tile_chunk_path(
          (terrain_chunk_stem(dataset_name, grid, key) + metal_tile_suffix(compression));
 }
 
-float write_metal_tile_chunk(
+TerrainElevationRange write_metal_tile_chunk(
     const std::filesystem::path &path,
     const TerrainChunk &chunk,
     const DestinationGrid &grid,
@@ -140,6 +140,8 @@ float write_metal_tile_chunk(
   lods.reserve(variants.size());
   std::vector<std::byte> payload(static_cast<size_t>(first_payload - metadata_bytes));
   uint64_t offset = first_payload;
+  TerrainElevationRange range{std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity()};
   for (uint32_t index = 0U; index < variants.size(); index++) {
     const VariantVertices &variant = variants[index];
     const auto [minimum, maximum] =
@@ -152,6 +154,12 @@ float write_metal_tile_chunk(
     const float stored_maximum = sample_type == MetalTileSampleType::Uint16Decimeters
                                      ? static_cast<float>(elevation_decimeters(*maximum)) / 10.0F
                                      : *maximum;
+    const float stored_minimum =
+        sample_type == MetalTileSampleType::Uint16Decimeters ? float(base) * 0.1F : *minimum;
+    const float guard = 4.0F * std::numeric_limits<float>::epsilon() *
+                        std::max({1.0F, std::abs(stored_minimum), std::abs(stored_maximum)});
+    range.minimum = std::min(range.minimum, stored_minimum - guard);
+    range.maximum = std::max(range.maximum, stored_maximum + guard);
     if (sample_type == MetalTileSampleType::Uint16Decimeters &&
         static_cast<int64_t>(elevation_decimeters(*maximum)) - base >
             static_cast<int64_t>(std::numeric_limits<uint16_t>::max())) {
@@ -218,7 +226,46 @@ float write_metal_tile_chunk(
       table_bytes,
   };
   write_metal_tile_lods(path, header, lods, payload);
-  return header.maximum_elevation;
+  return range;
+}
+
+TerrainElevationRange read_metal_tile_elevation_range(
+    const std::filesystem::path &path,
+    id<MTLDevice> device,
+    id<MTLIOCommandQueue> queue
+) {
+  const auto header = read_metal_tile_header(path);
+  const auto lods = read_metal_tile_lods(path, header);
+  TerrainElevationRange range{std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity()};
+  id<MTLIOFileHandle> file = open_metal_tile_file(device, path);
+  for (const auto &lod : lods) {
+    @autoreleasepool {
+      if (lod.vertex_byte_count > device.maxBufferLength)
+        throw std::runtime_error("Tile payload exceeds Metal device limit");
+      id<MTLBuffer> data = [device newBufferWithLength:lod.vertex_byte_count
+                                               options:MTLResourceStorageModeShared];
+      if (data == nil)
+        throw std::runtime_error("Could not allocate manifest scan buffer");
+      const MetalTileBufferLoad load{path, 0U, file, lod.vertex_offset, lod.vertex_byte_count};
+      load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
+      const uint64_t count = (uint64_t(lod.cell_count) + 1U) * (uint64_t(lod.cell_count) + 1U);
+      for (uint64_t i = 0; i < count; ++i) {
+        const float value = header.sample_type == MetalTileSampleType::Float32
+                                ? static_cast<const float *>(data.contents)[i]
+                                : (float(lod.elevation_base_decimeters) +
+                                   float(static_cast<const uint16_t *>(data.contents)[i])) *
+                                      0.1F;
+        if (!std::isfinite(value))
+          throw std::runtime_error("Non-finite terrain sample in manifest scan");
+        range.minimum = std::min(range.minimum, value);
+        range.maximum = std::max(range.maximum, value);
+      }
+    }
+  }
+  const float guard = 4.0F * std::numeric_limits<float>::epsilon() *
+                      std::max({1.0F, std::abs(range.minimum), std::abs(range.maximum)});
+  return {range.minimum - guard, range.maximum + guard};
 }
 
 } // namespace panorama::terrain

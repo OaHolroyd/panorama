@@ -2,6 +2,25 @@
 
 using namespace metal;
 
+struct FullscreenPresentationVertex {
+  float4 position [[position]];
+  float2 uv;
+};
+
+vertex FullscreenPresentationVertex fullscreen_presentation_vertex(uint index [[vertex_id]]) {
+  constexpr float2 positions[3] = {float2(-1.0F, -1.0F), float2(3.0F, -1.0F), float2(-1.0F, 3.0F)};
+  constexpr float2 coordinates[3] = {float2(0.0F, 1.0F), float2(2.0F, 1.0F), float2(0.0F, -1.0F)};
+  return {float4(positions[index], 0.0F, 1.0F), coordinates[index]};
+}
+
+fragment float4 fullscreen_presentation_fragment(
+    FullscreenPresentationVertex input [[stage_in]],
+    texture2d<float> source [[texture(0)]]
+) {
+  constexpr sampler source_sampler(coord::normalized, filter::linear, address::clamp_to_edge);
+  return source.sample(source_sampler, input.uv);
+}
+
 /// Per-pixel terrain ray ABI shared with `RayDirection` in ray_projection.h.
 /// Keeping the complete layout lets the minimap and outline passes consume the
 /// tracer's buffer directly without a repacking pass.
@@ -13,25 +32,6 @@ struct PresentationRayDirection {
   float slope;
 };
 
-/// Affine projected-terrain-to-Metal-clip transform for the minimap. The host
-/// derives the two basis vectors through the terrain CRS and
-/// MapKit, preserving local grid convergence relative to geographic north.
-struct VisibilityMapParameters {
-  float centre_x;
-  float centre_y;
-  float east_x_per_metre;
-  float east_y_per_metre;
-  float north_x_per_metre;
-  float north_y_per_metre;
-  float point_size;
-  uint ray_count;
-};
-
-struct VisibilityPointVertex {
-  float4 position [[position]];
-  float point_size [[point_size]];
-};
-
 /// Snapshot one immutable observer-relative east/north point for each completed
 /// collision. The viewer publishes this buffer with the matching frame so a
 /// subsequent trace can safely reuse its ray and distance storage.
@@ -39,9 +39,11 @@ kernel void visibility_collision_points(
     device const PresentationRayDirection *rays [[buffer(0)]],
     device const float *distances [[buffer(1)]],
     device float2 *points [[buffer(2)]],
-    constant uint &ray_count [[buffer(3)]],
-    uint index [[thread_position_in_grid]]
+    constant uint2 &image [[buffer(3)]],
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * image.x + position.x;
+  const uint ray_count = image.x * image.y;
   if (index >= ray_count) {
     return;
   }
@@ -49,44 +51,6 @@ kernel void visibility_collision_points(
   points[index] = distance > 0.0F && isfinite(distance)
                       ? distance * float2(rays[index].x, rays[index].y)
                       : float2(INFINITY);
-}
-
-/// Project every completed terrain collision directly into the minimap.
-/// Invalid/no-hit rays are moved outside the clip volume and therefore emit no
-/// fragment. Fixed two-pixel coverage keeps cost and opacity predictable.
-vertex VisibilityPointVertex visibility_point_vertex(
-    device const float2 *points [[buffer(0)]],
-    constant VisibilityMapParameters &map [[buffer(1)]],
-    uint index [[vertex_id]]
-) {
-  VisibilityPointVertex output;
-  output.point_size = map.point_size;
-  if (index >= map.ray_count) {
-    output.position = float4(2.0F, 2.0F, 0.0F, 1.0F);
-    return output;
-  }
-
-  const float2 point = points[index];
-  if (!all(isfinite(point))) {
-    output.position = float4(2.0F, 2.0F, 0.0F, 1.0F);
-    return output;
-  }
-
-  output.position = float4(
-      map.centre_x + point.x * map.east_x_per_metre + point.y * map.north_x_per_metre,
-      map.centre_y + point.x * map.east_y_per_metre + point.y * map.north_y_per_metre,
-      0.0F,
-      1.0F
-  );
-  return output;
-}
-
-/// Emit a constant translucent system-blue-like highlight. RGB is
-/// premultiplied because Core Animation composites the transparent Metal layer.
-fragment float4 visibility_point_fragment() {
-  constexpr float alpha = 0.34F;
-  constexpr float3 colour = float3(0.0F, 0.48F, 1.0F);
-  return float4(alpha * colour, alpha);
 }
 
 /// Five-stop approximations of the CLI's built-in colourmaps.

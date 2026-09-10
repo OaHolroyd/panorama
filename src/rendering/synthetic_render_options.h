@@ -62,7 +62,7 @@ struct SyntheticRenderOptions {
   /// Outline sensitivity in [0, 1], from only major divisions to fine detail.
   float feature_outline_detail = 0.7F;
   /// Occlude the directional term using one terrain ray towards the sun.
-  bool raytraced_shadows = false;
+  bool raytraced_shadows = true;
 };
 
 } // namespace panorama

@@ -1,14 +1,20 @@
 #include "minimap.h"
+#include "trace_diagnostics.h"
+#include "visibility_mask.h"
 
 #include "crs.h"
 
 #include <Foundation/Foundation.h>
 #import <MapKit/MapKit.h>
-#import <MetalKit/MetalKit.h>
+
 #import <QuartzCore/QuartzCore.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -18,20 +24,6 @@ constexpr CGFloat kLargeMapPanelWidth = 520.0;
 constexpr CGFloat kLargeMapSectionHeight = 456.0;
 constexpr CGFloat kMinimumPointSectionHeight = 36.0;
 constexpr double kInitialMapDistance = 50'000.0;
-constexpr double kVisibilityBasisDistance = 1'000.0;
-
-/// Scalar-only ABI mirrored by `VisibilityMapParameters` in image_renderer.metal.
-struct VisibilityMapParameters {
-  float centre_x;
-  float centre_y;
-  float east_x_per_metre;
-  float east_y_per_metre;
-  float north_x_per_metre;
-  float north_y_per_metre;
-  float point_size;
-  uint32_t ray_count;
-};
-static_assert(sizeof(VisibilityMapParameters) == 8U * sizeof(uint32_t));
 
 enum class AnnotationKind : NSInteger {
   Observer,
@@ -159,147 +151,83 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 
 @end
 
-/// Transparent, non-interactive Metal layer drawn over MapKit. It consumes the
-/// immutable point buffer published with a completed frame, so hundreds of
-/// thousands of collisions remain one GPU draw rather than becoming MapKit
-/// annotations or host-side paths.
-@interface VisibilityMapView : MTKView <MTKViewDelegate> {
-@private
-  id<MTLCommandQueue> _visibilityCommandQueue;
-  id<MTLRenderPipelineState> _visibilityPipeline;
-  id<MTLBuffer> _points;
-  VisibilityMapParameters _mapParameters;
+/// A stable MapKit overlay; the renderer invalidates only the old/new image
+/// extents. MapKit supplies the normal map composition, with no second drawable.
+@interface VisibilityImageOverlay : NSObject <MKOverlay>
+@end
+@implementation VisibilityImageOverlay
+- (CLLocationCoordinate2D)coordinate {
+  return CLLocationCoordinate2DMake(0, 0);
 }
-- (instancetype)initWithDevice:(id<MTLDevice>)device
-                  commandQueue:(id<MTLCommandQueue>)commandQueue
-                       library:(id<MTLLibrary>)library;
-- (void)setPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image;
-- (void)setMapParameters:(VisibilityMapParameters)parameters;
+- (MKMapRect)boundingMapRect {
+  return MKMapRectWorld;
+}
 @end
 
-@implementation VisibilityMapView
-
-- (instancetype)initWithDevice:(id<MTLDevice>)device
-                  commandQueue:(id<MTLCommandQueue>)commandQueue
-                       library:(id<MTLLibrary>)library {
-  self = [super initWithFrame:NSZeroRect device:device];
-  if (self == nil) {
-    return nil;
-  }
-  if (device == nil || commandQueue == nil || library == nil) {
-    throw std::invalid_argument("Visibility map requires valid Metal resources");
-  }
-
-  id<MTLFunction> vertex = [library newFunctionWithName:@"visibility_point_vertex"];
-  id<MTLFunction> fragment = [library newFunctionWithName:@"visibility_point_fragment"];
-  if (vertex == nil || fragment == nil) {
-    throw std::runtime_error("Visibility point shaders are missing from the Metal library");
-  }
-
-  self.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-  MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
-  descriptor.label = @"Minimap visibility points";
-  descriptor.vertexFunction = vertex;
-  descriptor.fragmentFunction = fragment;
-  descriptor.colorAttachments[0].pixelFormat = self.colorPixelFormat;
-  descriptor.colorAttachments[0].blendingEnabled = YES;
-  // Maximum blending preserves a constant highlight opacity where many camera
-  // rays land on the same minimap pixel.
-  descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationMax;
-  descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationMax;
-  descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
-  descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
-  descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
-  descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
-
-  NSError *error = nil;
-  _visibilityPipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-  if (_visibilityPipeline == nil) {
-    const char *detail = error == nil ? "unknown error" : error.localizedDescription.UTF8String;
-    throw std::runtime_error(
-        "Could not create minimap visibility pipeline: " + std::string(detail)
-    );
-  }
-
-  _visibilityCommandQueue = commandQueue;
-  _mapParameters.point_size = 2.0F;
-  self.delegate = self;
-  self.paused = YES;
-  self.enableSetNeedsDisplay = YES;
-  self.autoResizeDrawable = YES;
-  self.framebufferOnly = YES;
-  self.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
-  self.wantsLayer = YES;
-  self.layer.opaque = NO;
-  self.layer.backgroundColor = NSColor.clearColor.CGColor;
-  return self;
+@interface VisibilityImageRenderer : MKOverlayRenderer {
+  std::mutex _imageMutex;
+  CGImageRef _image;
+  MKMapRect _imageRect;
 }
-
-- (BOOL)isOpaque {
-  return NO;
-}
-
-- (NSView *)hitTest:(NSPoint)point {
-  (void)point;
-  return nil;
-}
-
-- (void)setPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image {
-  const uint64_t count = static_cast<uint64_t>(image.width) * image.height;
-  const uint64_t pointBytes = count * 2U * sizeof(float);
-  if (count == 0U || count > UINT32_MAX || points == nil || points.length < pointBytes) {
-    _points = nil;
-    _mapParameters.ray_count = 0U;
-  } else {
-    _points = points;
-    _mapParameters.ray_count = static_cast<uint32_t>(count);
-  }
-  [self setNeedsDisplay:YES];
-}
-
-- (void)setMapParameters:(VisibilityMapParameters)parameters {
-  const uint32_t rayCount = _mapParameters.ray_count;
-  _mapParameters = parameters;
-  _mapParameters.ray_count = rayCount;
-  [self setNeedsDisplay:YES];
-}
-
-- (void)drawInMTKView:(MTKView *)view {
-  id<CAMetalDrawable> drawable = view.currentDrawable;
-  MTLRenderPassDescriptor *pass = view.currentRenderPassDescriptor;
-  if (drawable == nil || pass == nil) {
-    return;
-  }
-  pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-  pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
-
-  id<MTLCommandBuffer> command = [_visibilityCommandQueue commandBuffer];
-  id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-  if (command == nil || encoder == nil) {
-    return;
-  }
-  command.label = @"Draw minimap visibility";
-  encoder.label = @"visibility points";
-  if (_points != nil && _mapParameters.ray_count > 0U) {
-    [encoder setRenderPipelineState:_visibilityPipeline];
-    [encoder setVertexBuffer:_points offset:0 atIndex:0];
-    [encoder setVertexBytes:&_mapParameters length:sizeof(_mapParameters) atIndex:1];
-    [encoder drawPrimitives:MTLPrimitiveTypePoint
-                vertexStart:0U
-                vertexCount:_mapParameters.ray_count];
-  }
-  [encoder endEncoding];
-  [command presentDrawable:drawable];
-  [command commit];
-}
-
-- (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
-  (void)view;
-  (void)size;
-}
-
+- (void)setImage:(CGImageRef)image mapRect:(MKMapRect)rect;
 @end
+@implementation VisibilityImageRenderer
+- (void)dealloc {
+  CGImageRelease(_image);
+}
+- (void)setImage:(CGImageRef)image mapRect:(MKMapRect)rect {
+  MKMapRect dirty = rect;
+  {
+    std::lock_guard<std::mutex> lock(_imageMutex);
+    if (_image != nullptr)
+      dirty = MKMapRectUnion(dirty, _imageRect);
+    CGImageRelease(_image);
+    _image = CGImageRetain(image);
+    _imageRect = rect;
+  }
+  if (!MKMapRectIsNull(dirty))
+    [self setNeedsDisplayInMapRect:dirty];
+}
+- (void)drawMapRect:(MKMapRect)mapRect
+          zoomScale:(MKZoomScale)zoomScale
+          inContext:(CGContextRef)context {
+  (void)zoomScale;
+  CGImageRef image = nullptr;
+  MKMapRect imageRect;
+  {
+    // MapKit may draw tiles concurrently. Retain an immutable image while
+    // allowing the main thread to publish its replacement without waiting.
+    std::lock_guard<std::mutex> lock(_imageMutex);
+    image = CGImageRetain(_image);
+    imageRect = _imageRect;
+  }
+  if (image == nullptr)
+    return;
+  if (MKMapRectIntersectsRect(mapRect, imageRect)) {
+    const CGRect rect = [self rectForMapRect:imageRect];
+    CGContextSaveGState(context);
+    CGContextClipToRect(context, [self rectForMapRect:mapRect]);
+    CGContextSetInterpolationQuality(context, kCGInterpolationNone);
+    // Image rows and MapKit's map coordinates both start at the north edge;
+    // CGContextDrawImage otherwise treats the first image row as the top of
+    // a Cartesian (bottom-up) rectangle.
+    CGContextTranslateCTM(context, CGRectGetMinX(rect), CGRectGetMaxY(rect));
+    CGContextScaleCTM(context, 1.0, -1.0);
+    CGContextDrawImage(context, CGRectMake(0, 0, rect.size.width, rect.size.height), image);
+    CGContextRestoreGState(context);
+  }
+  CGImageRelease(image);
+}
+@end
+
+struct VisibilityMaskRequest {
+  id<MTLBuffer> points;
+  panorama::app::VisibilityMaskParameters parameters;
+  MKMapRect rect;
+  uint64_t generation;
+  panorama::app::VisibilityMapRegion region;
+  double requested_at;
+};
 
 @interface MiniMapPanelView (MapInteraction)
 - (void)mapPointerDidEnter;
@@ -413,7 +341,22 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   NSView *_mapSection;
   NSView *_pointInfoView;
   InteractiveMiniMapView *_mapView;
-  VisibilityMapView *_visibilityView;
+  VisibilityImageOverlay *_visibilityOverlay;
+  VisibilityImageRenderer *_visibilityRenderer;
+  std::shared_ptr<panorama::app::VisibilityMask> _visibilityMask;
+  dispatch_queue_t _maskQueue;
+  id<MTLBuffer> _visibilityPoints;
+  panorama::ImageSize _visibilityImage;
+  std::optional<VisibilityMaskRequest> _pendingMask;
+  std::optional<VisibilityMaskRequest> _lastMask;
+  bool _maskActive;
+  uint64_t _visibilityGeneration;
+  panorama::CameraOrientation _cameraOrientation;
+  double _cameraFieldOfView;
+  panorama::ImageSize _cameraImage;
+  bool _cameraDirty;
+  bool _observerDirty;
+  bool _centrePending;
   CompactMapScaleView *_scaleView;
   NSPopUpButton *_mapStyleControl;
   NSButton *_coverageControl;
@@ -422,8 +365,6 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   NSButton *_mapSizeControl;
   MiniMapAnnotation *_observerAnnotation;
   MiniMapAnnotation *_inspectionAnnotation;
-  CLLocationCoordinate2D _eastBasisCoordinate;
-  CLLocationCoordinate2D _northBasisCoordinate;
   id<MKOverlay> _fieldOfViewOverlay;
   id<MKOverlay> _headingOverlay;
   MKTileOverlay *_tileOverlay;
@@ -443,6 +384,9 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   bool _largeMap;
 }
 - (void)updateVisibilityTransform;
+- (void)startPendingMask;
+- (void)updateObserverGraphics;
+- (void)updateCameraGraphics;
 - (void)updateCoverageControl;
 - (void)updateMapFocusControl;
 - (void)updateMapSizeControl;
@@ -578,12 +522,12 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   _mapView.translatesAutoresizingMaskIntoConstraints = NO;
   [_mapSection addSubview:_mapView];
 
-  _visibilityView = [[VisibilityMapView alloc] initWithDevice:metalDevice
-                                                 commandQueue:commandQueue
-                                                      library:library];
-  _visibilityView.frame = _mapView.bounds;
-  _visibilityView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-  [_mapView addSubview:_visibilityView];
+  _visibilityMask =
+      std::make_shared<panorama::app::VisibilityMask>(metalDevice, commandQueue, library);
+  _maskQueue = dispatch_queue_create("panorama.minimap-mask", DISPATCH_QUEUE_SERIAL);
+  _visibilityOverlay = [[VisibilityImageOverlay alloc] init];
+  _visibilityRenderer = [[VisibilityImageRenderer alloc] initWithOverlay:_visibilityOverlay];
+  [_mapView addOverlay:_visibilityOverlay level:MKOverlayLevelAboveLabels];
 
   _scaleView = [[CompactMapScaleView alloc] initWithFrame:NSMakeRect(8.0, 8.0, 66.0, 28.0)];
   _scaleView.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
@@ -645,20 +589,6 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
     [coveragePolygons addObject:[MKPolygon polygonWithCoordinates:corners count:4U]];
   }
   _coverageOverlay = [[MKMultiPolygon alloc] initWithPolygons:coveragePolygons];
-  const panorama::LatLon eastBasis = terrainCrs.to_lat_lon(
-      {
-          _observerEasting + kVisibilityBasisDistance,
-          _observerNorthing,
-      }
-  );
-  const panorama::LatLon northBasis = terrainCrs.to_lat_lon(
-      {
-          _observerEasting,
-          _observerNorthing + kVisibilityBasisDistance,
-      }
-  );
-  _eastBasisCoordinate = CLLocationCoordinate2DMake(eastBasis.lat, eastBasis.lon);
-  _northBasisCoordinate = CLLocationCoordinate2DMake(northBasis.lat, northBasis.lon);
   [self mapStyleChanged:_mapStyleControl];
 
   _contentVisible = false;
@@ -668,7 +598,7 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   _largeMap = false;
 
   if (_coverageVisible) {
-    [_mapView addOverlay:_coverageOverlay level:MKOverlayLevelAboveLabels];
+    [_mapView insertOverlay:_coverageOverlay belowOverlay:_visibilityOverlay];
   }
   [self updateCoverageControl];
   [self updateMapFocusControl];
@@ -692,7 +622,7 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   (void)sender;
   _coverageVisible = !_coverageVisible;
   if (_coverageVisible) {
-    [_mapView insertOverlay:_coverageOverlay belowOverlay:_headingOverlay];
+    [_mapView insertOverlay:_coverageOverlay belowOverlay:_visibilityOverlay];
   } else {
     [_mapView removeOverlay:_coverageOverlay];
   }
@@ -705,6 +635,10 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 }
 
 - (void)centerOnObserver {
+  if (!_contentVisible) {
+    _centrePending = true;
+    return;
+  }
   [_mapView setCenterCoordinate:_observerAnnotation.coordinate animated:NO];
 }
 
@@ -718,16 +652,33 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
       self.bounds.size.width,
       std::max(0.0, self.bounds.size.height - pointHeight)
   );
-  [_scaleView updateForMapView:_mapView];
-  [self updateVisibilityTransform];
+  if (_contentVisible) {
+    [_scaleView updateForMapView:_mapView];
+    [self updateVisibilityTransform];
+  }
 }
 
 - (void)setMapAndPointInfoVisible:(bool)visible {
+  if (_contentVisible == visible)
+    return;
   _contentVisible = visible;
+  ++_visibilityGeneration;
+  _pendingMask.reset();
+  _lastMask.reset();
+  _visibilityPoints = nil;
   _mapSection.hidden = !visible;
   _pointInfoView.hidden = !visible;
+  [_visibilityRenderer setImage:nullptr mapRect:MKMapRectNull];
   if (visible) {
-    [_visibilityView setNeedsDisplay:YES];
+    [self updateObserverGraphics];
+    [self updateCameraGraphics];
+    if (_centrePending) {
+      _centrePending = false;
+      [self centerOnObserver];
+    }
+    [self informationFooterContentDidChange];
+  } else if (!_maskActive) {
+    _visibilityMask->clear();
   }
   [self setNeedsLayout:YES];
 }
@@ -739,6 +690,8 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 }
 
 - (void)informationFooterContentDidChange {
+  if (!_contentVisible)
+    return;
   [_pointInfoView layoutSubtreeIfNeeded];
   const CGFloat nextHeight =
       std::max(kMinimumPointSectionHeight, _pointInfoView.fittingSize.height);
@@ -790,7 +743,11 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 
 - (void)mapStyleChanged:(id)sender {
   (void)sender;
-  [_mapView removeOverlay:_tileOverlay];
+  if (_tileOverlay != nil) {
+    [_mapView removeOverlay:_tileOverlay];
+    _tileOverlay = nil;
+  }
+  _mapView.pointOfInterestFilter = nil;
   switch (_mapStyleControl.indexOfSelectedItem) {
   case 0:
     _mapView.preferredConfiguration =
@@ -812,7 +769,7 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
     _mapView.pointOfInterestFilter = [MKPointOfInterestFilter filterExcludingAllCategories];
 
     const size_t index = _mapStyleControl.indexOfSelectedItem - 3;
-    if (index > kTileOverlays.size()) {
+    if (index >= kTileOverlays.size()) {
       throw std::invalid_argument(
           std::format("Map style index '{}' not handled", _mapStyleControl.indexOfSelectedItem)
       );
@@ -826,47 +783,127 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 }
 
 - (void)mapViewDidChangeVisibleRegion:(MKMapView *)mapView {
+  if (!_contentVisible)
+    return;
   [_scaleView updateForMapView:mapView];
   [self updateVisibilityTransform];
 }
 
-/// Approximate the projected terrain CRS over this compact map with the local
-/// east/north Jacobian at the observer. Deriving both basis endpoints through
-/// the full CRS and MapKit conversion keeps grid convergence aligned with the
-/// existing FOV wedge while the map zoom changes.
+/// Capture geometry on AppKit; CRS grid construction happens on the worker.
+/// The image retains its geographical rectangle while a newer job is pending.
 - (void)updateVisibilityTransform {
-  const NSSize size = _visibilityView.bounds.size;
-  if (size.width <= 0.0 || size.height <= 0.0) {
+  if (!_contentVisible || _visibilityPoints == nil)
     return;
-  }
-  const NSPoint centre = [_mapView convertCoordinate:_observerAnnotation.coordinate
-                                       toPointToView:_visibilityView];
-  const NSPoint east = [_mapView convertCoordinate:_eastBasisCoordinate
-                                     toPointToView:_visibilityView];
-  const NSPoint north = [_mapView convertCoordinate:_northBasisCoordinate
-                                      toPointToView:_visibilityView];
-  const auto clip = [size](NSPoint point) {
-    return NSMakePoint(2.0 * point.x / size.width - 1.0, 2.0 * point.y / size.height - 1.0);
+  const NSSize size = [_mapView convertRectToBacking:_mapView.bounds].size;
+  const MKMapRect rect = _mapView.visibleMapRect;
+  if (size.width <= 0 || size.height <= 0 || rect.size.width <= 0 || rect.size.height <= 0)
+    return;
+  const uint32_t width = uint32_t(std::clamp(std::ceil(size.width), 1.0, 4096.0));
+  const uint32_t height = uint32_t(std::clamp(std::ceil(size.height), 1.0, 4096.0));
+  const panorama::app::VisibilityMaskParameters parameters = {
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      width,
+      height,
+      _visibilityImage.width * _visibilityImage.height,
   };
-  const NSPoint centreClip = clip(centre);
-  const NSPoint eastClip = clip(east);
-  const NSPoint northClip = clip(north);
-  const VisibilityMapParameters parameters = {
-      static_cast<float>(centreClip.x),
-      static_cast<float>(centreClip.y),
-      static_cast<float>((eastClip.x - centreClip.x) / kVisibilityBasisDistance),
-      static_cast<float>((eastClip.y - centreClip.y) / kVisibilityBasisDistance),
-      static_cast<float>((northClip.x - centreClip.x) / kVisibilityBasisDistance),
-      static_cast<float>((northClip.y - centreClip.y) / kVisibilityBasisDistance),
-      2.0F,
-      0U,
+  const panorama::app::VisibilityMapRegion region = {
+      rect.origin.x,
+      rect.origin.y,
+      rect.size.width,
+      rect.size.height,
+      _observerEasting,
+      _observerNorthing,
+      _maxDistance,
+      _terrainEpsgCode,
   };
-  [_visibilityView setMapParameters:parameters];
+  if (_lastMask && _lastMask->points == _visibilityPoints &&
+      MKMapRectEqualToRect(_lastMask->rect, rect) &&
+      std::memcmp(&_lastMask->parameters, &parameters, sizeof(parameters)) == 0)
+    return;
+  _pendingMask = VisibilityMaskRequest{_visibilityPoints,
+                                       parameters,
+                                       rect,
+                                       _visibilityGeneration,
+                                       region,
+                                       panorama::app::diagnostics::seconds()};
+  _lastMask = _pendingMask;
+  [self startPendingMask];
+}
+
+- (void)startPendingMask {
+  if (_maskActive || !_contentVisible || !_pendingMask)
+    return;
+  const VisibilityMaskRequest request = *_pendingMask;
+  _pendingMask.reset();
+  _maskActive = true;
+  const auto mask = _visibilityMask;
+  __weak MiniMapPanelView *weakSelf = self;
+  // Only one block is submitted at a time, including its main-queue delivery.
+  // Input while it runs replaces the single pending request, never a FIFO.
+  dispatch_async(_maskQueue, ^{
+    @autoreleasepool {
+      CGImageRef image = nullptr;
+      try {
+        image = mask->render(request.points, request.parameters, &request.region);
+      } catch (const std::exception &error) {
+        std::fprintf(stderr, "Minimap visibility: %s\n", error.what());
+      }
+      dispatch_async(dispatch_get_main_queue(), ^{
+        MiniMapPanelView *panel = weakSelf;
+        if (panel != nil) {
+          panel->_maskActive = false;
+          if (panel->_contentVisible && request.generation == panel->_visibilityGeneration) {
+            if (image != nullptr) {
+              [panel->_visibilityRenderer setImage:image mapRect:request.rect];
+              if (panorama::app::diagnostics::enabled) {
+                ++panorama::app::diagnostics::minimap.presented;
+                std::printf(
+                    "Minimap publish: request-to-image %.3f ms\n",
+                    (panorama::app::diagnostics::seconds() - request.requested_at) * 1000
+                );
+              }
+            } else {
+              panel->_lastMask.reset();
+            }
+          } else if (panorama::app::diagnostics::enabled) {
+            ++panorama::app::diagnostics::minimap.stale;
+          }
+          if (!panel->_contentVisible)
+            mask->clear();
+          [panel startPendingMask];
+        }
+        CGImageRelease(image);
+      });
+    }
+  });
 }
 
 - (void)setCameraOrientation:(panorama::CameraOrientation)orientation
          verticalFieldOfView:(double)verticalFieldOfView
                        image:(panorama::ImageSize)image {
+  if (_cameraOrientation.heading == orientation.heading &&
+      _cameraFieldOfView == verticalFieldOfView && _cameraImage.width == image.width &&
+      _cameraImage.height == image.height)
+    return;
+  _cameraOrientation = orientation;
+  _cameraFieldOfView = verticalFieldOfView;
+  _cameraImage = image;
+  _cameraDirty = true;
+  [self updateCameraGraphics];
+}
+
+- (void)updateCameraGraphics {
+  if (!_contentVisible || !_cameraDirty)
+    return;
+  const auto orientation = _cameraOrientation;
+  const auto image = _cameraImage;
+  const double verticalFieldOfView = _cameraFieldOfView;
+  _cameraDirty = false;
   if (image.width == 0U || image.height == 0U) {
     return;
   }
@@ -902,20 +939,38 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
       mapCoordinate(endpoint(orientation.heading)),
   };
 
-  if (_fieldOfViewOverlay != nil) {
+  // Install replacements before removing the old geometry. MapKit draws
+  // overlays asynchronously, so remove-then-add creates a visible blank frame
+  // while cruise updates the observer and camera continuously.
+  MKPolygon *nextFieldOfView = [MKPolygon polygonWithCoordinates:wedge count:3];
+  MKPolyline *nextHeading = [MKPolyline polylineWithCoordinates:headingLine count:2];
+  [_mapView insertOverlay:nextFieldOfView belowOverlay:_visibilityOverlay];
+  [_mapView addOverlay:nextHeading level:MKOverlayLevelAboveLabels];
+  if (_fieldOfViewOverlay != nil)
     [_mapView removeOverlay:_fieldOfViewOverlay];
-  }
-  if (_headingOverlay != nil) {
+  if (_headingOverlay != nil)
     [_mapView removeOverlay:_headingOverlay];
-  }
-  _fieldOfViewOverlay = [MKPolygon polygonWithCoordinates:wedge count:3];
-  _headingOverlay = [MKPolyline polylineWithCoordinates:headingLine count:2];
-  [_mapView addOverlay:_fieldOfViewOverlay level:MKOverlayLevelAboveLabels];
-  [_mapView addOverlay:_headingOverlay level:MKOverlayLevelAboveLabels];
+  _fieldOfViewOverlay = nextFieldOfView;
+  _headingOverlay = nextHeading;
 }
 
 - (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image {
-  [_visibilityView setPoints:points image:image];
+  if (!_contentVisible)
+    return;
+  const uint64_t count = uint64_t(image.width) * image.height;
+  if (points == nil || count == 0 || count > UINT32_MAX || points.length < count * 8) {
+    if (_visibilityPoints != nil) {
+      ++_visibilityGeneration;
+      _visibilityPoints = nil;
+      _pendingMask.reset();
+      _lastMask.reset();
+      [_visibilityRenderer setImage:nullptr mapRect:MKMapRectNull];
+    }
+    return;
+  }
+  _visibilityPoints = points;
+  _visibilityImage = image;
+  [self updateVisibilityTransform];
 }
 
 - (panorama::Coord)projectedCoordinate:(CLLocationCoordinate2D)coordinate {
@@ -974,23 +1029,40 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 }
 
 - (void)setObserverEasting:(double)easting northing:(double)northing {
+  if (_observerEasting == easting && _observerNorthing == northing)
+    return;
   _observerEasting = easting;
   _observerNorthing = northing;
+  _observerDirty = true;
+  _cameraDirty = true;
+  ++_visibilityGeneration;
+  _visibilityPoints = nil;
+  _pendingMask.reset();
+  _lastMask.reset();
+  // Keep the last complete mask visible while the replacement is rendered on
+  // the serial worker. Its immutable map rectangle remains geographically
+  // valid as the map follows the observer; generation still rejects work that
+  // completed for an older observer.
+  [self updateObserverGraphics];
+  [self updateCameraGraphics];
+}
+
+- (void)updateObserverGraphics {
+  if (!_contentVisible || !_observerDirty)
+    return;
+  _observerDirty = false;
+  const double easting = _observerEasting, northing = _observerNorthing;
   const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
   const panorama::LatLon observer = terrainCrs.to_lat_lon({easting, northing});
   const CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(observer.lat, observer.lon);
   _observerAnnotation.coordinate = coordinate;
 
-  const panorama::LatLon east =
-      terrainCrs.to_lat_lon({easting + kVisibilityBasisDistance, northing});
-  const panorama::LatLon north =
-      terrainCrs.to_lat_lon({easting, northing + kVisibilityBasisDistance});
-  _eastBasisCoordinate = CLLocationCoordinate2DMake(east.lat, east.lon);
-  _northBasisCoordinate = CLLocationCoordinate2DMake(north.lat, north.lon);
   [self updateVisibilityTransform];
 }
 
 - (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked {
+  if (!_contentVisible)
+    return;
   const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
   const panorama::LatLon geographic = terrainCrs.to_lat_lon({easting, northing});
   const CLLocationCoordinate2D coordinate =
@@ -1040,6 +1112,8 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
 
 - (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {
   (void)mapView;
+  if (overlay == _visibilityOverlay)
+    return _visibilityRenderer;
   if (overlay == _coverageOverlay) {
     MKMultiPolygonRenderer *renderer =
         [[MKMultiPolygonRenderer alloc] initWithMultiPolygon:_coverageOverlay];

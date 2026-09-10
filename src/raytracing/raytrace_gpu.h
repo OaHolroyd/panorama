@@ -13,6 +13,8 @@
 
 namespace panorama {
 
+class TerrainTileBvh;
+
 /// Scalar-only tracing ABI shared with the Metal frontier kernels.
 struct RaytraceParameters {
   /// Metres between adjacent vertices in the reference LOD-1 surface.
@@ -27,6 +29,9 @@ struct RaytraceParameters {
   uint32_t num_levels;
   /// Number of output rays and maximum valid `ray_index` plus one.
   uint32_t ray_count;
+  /// Two-dimensional ray-image extent used by spatial GPU dispatches.
+  uint32_t image_width;
+  uint32_t image_height;
   /// Maximum horizontal traversal distance in metres.
   float max_distance;
 };
@@ -85,30 +90,24 @@ struct GpuTraceOutputRequirements {
 /// continuation-culling kernels.
 class GpuRaytraceResources {
 public:
-  /// Create all reusable Metal resources for an initial per-pixel ray field.
-  ///
-  /// Optional outputs specialize the trace pipeline, removing their collision
-  /// arithmetic, buffer writes, and full-size allocations when disabled.
+  /// Allocate ray storage without a CPU field; a GPU producer fills it before tracing.
   GpuRaytraceResources(
-      std::span<const RayDirection> rays,
+      uint32_t ray_count,
       std::span<const TerrainSource> sources,
       bool trace_quantized,
       bool bilinear_collisions,
       bool c1_normals,
-      GpuTraceOutputRequirements outputs
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue = nil
   );
+  void resize_rays(uint32_t ray_count);
+  void encode_clear_outputs(id<MTLCommandBuffer> command);
 
   GpuRaytraceResources(const GpuRaytraceResources &) = delete;
   GpuRaytraceResources &operator=(const GpuRaytraceResources &) = delete;
 
   /// Stop an active capture before releasing the owned command queue.
   ~GpuRaytraceResources();
-
-  /// Replace the fixed-size ray field and clear outputs from the preceding frame.
-  void update_rays(std::span<const RayDirection> rays);
-
-  /// Reallocate ray-dependent buffers for a differently sized output image.
-  void resize_rays(std::span<const RayDirection> rays);
 
   /// Select precompiled collision and normal-interpolation specializations.
   /// The atlas, ray buffers, catalogue, and command queue are unchanged.
@@ -122,6 +121,18 @@ public:
 
   /// Return the queue shared with post-trace GPU presentation work.
   [[nodiscard]] id<MTLCommandQueue> command_queue() const;
+
+  /// Lazily allocate catalogue acceleration shared by both tracing backends.
+  TerrainTileBvh &tile_bvh();
+
+  /// Prepare mipmap catalogue selection; unsupported devices retain grid walking.
+  void prepare_tile_selection(
+      TileManager &tiles,
+      ObserverLocation observer,
+      const RaytraceParameters &parameters,
+      bool enabled,
+      Timer &timer
+  );
 
   /// Return the library containing both tracing and presentation kernels.
   [[nodiscard]] id<MTLLibrary> library() const;

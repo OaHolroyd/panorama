@@ -113,43 +113,6 @@ double tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLo
   return std::hypot(dx, dy);
 }
 
-/// Return the one-based terrain LOD selected for one source tile.
-uint32_t tile_lod(
-    const TileGrid &grid,
-    TileKey key,
-    const ObserverLocation &observer,
-    float base_cell_size,
-    float pixel_angle,
-    float lod_scale,
-    uint32_t available_lod_count
-) {
-  if (!std::isfinite(base_cell_size) || base_cell_size <= 0.0F || !std::isfinite(pixel_angle) ||
-      pixel_angle <= 0.0F || !std::isfinite(lod_scale) || lod_scale < 0.0F ||
-      available_lod_count == 0U) {
-    throw std::invalid_argument("Terrain LOD parameters must be finite and valid");
-  }
-  if (lod_scale == 0.0F) {
-    return 1U;
-  }
-
-  // A level is doubled in cell spacing. With sin(a) ~= a, a pixel subtends
-  // d * pixel_angle metres at the nearest point of this tile. Select the
-  // coarsest representation no wider than lod_scale times that footprint.
-  const double footprint = tile_minimum_distance(grid, key, observer) * pixel_angle;
-  const double ratio = static_cast<double>(lod_scale) * footprint / base_cell_size;
-  if (ratio < 1.0) {
-    return 1U;
-  }
-  if (!std::isfinite(ratio)) {
-    return available_lod_count;
-  }
-  const double logarithm = std::floor(std::log2(ratio));
-  if (logarithm >= static_cast<double>(std::numeric_limits<uint32_t>::max() - 1U)) {
-    return available_lod_count;
-  }
-  return std::min(available_lod_count, 1U + static_cast<uint32_t>(logarithm));
-}
-
 TerrainCatalogue::TerrainCatalogue(
     TileGrid grid,
     std::vector<TerrainSource> sources,
@@ -186,12 +149,12 @@ TerrainCatalogue TerrainCatalogue::discover(
     throw std::invalid_argument("Prepared terrain path is not a directory: " + tile_dir.string());
   }
 
-  std::map<TileKey, float> maximum_elevation_by_key;
+  std::map<TileKey, TerrainManifestEntry> maximum_elevation_by_key;
   const std::filesystem::path manifest = terrain_manifest_path(tile_dir);
   if (std::filesystem::exists(manifest)) {
     for (const TerrainManifestEntry &entry : read_terrain_manifest(manifest)) {
       const TileKey key = {entry.row, entry.column};
-      if (!maximum_elevation_by_key.emplace(key, entry.maximum_elevation).second) {
+      if (!maximum_elevation_by_key.emplace(key, entry).second) {
         throw std::runtime_error("Terrain manifest contains duplicate tile keys");
       }
     }
@@ -215,9 +178,12 @@ TerrainCatalogue TerrainCatalogue::discover(
           {
               key,
               entry.path(),
-              maximum == maximum_elevation_by_key.end() ? std::nullopt
-                                                        : std::optional<float>(maximum->second),
+              maximum == maximum_elevation_by_key.end()
+                  ? std::nullopt
+                  : std::optional<float>(maximum->second.maximum_elevation),
               1U,
+              maximum == maximum_elevation_by_key.end() ? std::nullopt
+                                                        : maximum->second.minimum_elevation,
           }
       );
     } catch (const std::invalid_argument &) {

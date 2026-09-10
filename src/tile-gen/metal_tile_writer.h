@@ -8,6 +8,19 @@
 
 namespace panorama::terrain {
 
+struct TerrainElevationRange {
+  float minimum;
+  float maximum;
+};
+
+/// Scan existing payloads when upgrading an old manifest. The caller reuses
+/// one I/O queue across files; no source rasters need to be regenerated.
+[[nodiscard]] TerrainElevationRange read_metal_tile_elevation_range(
+    const std::filesystem::path &path,
+    id<MTLDevice> device,
+    id<MTLIOCommandQueue> queue
+);
+
 /// Return the stable path for one raw or compressed Metal terrain tile.
 [[nodiscard]] std::filesystem::path metal_tile_chunk_path(
     const std::filesystem::path &output_directory,
@@ -24,8 +37,8 @@ namespace panorama::terrain {
 /// decimetre lattice and stores offsets from a per-tile integer base. The
 /// renderer can expand Uint16 during atlas installation; by default the
 /// renderer instead retains it through tracing.
-/// Returns the exact maximum elevation recorded in the tile header.
-[[nodiscard]] float write_metal_tile_chunk(
+/// Returns conservative elevation bounds enclosing every stored LOD.
+[[nodiscard]] TerrainElevationRange write_metal_tile_chunk(
     const std::filesystem::path &path,
     const TerrainChunk &chunk,
     const DestinationGrid &grid,

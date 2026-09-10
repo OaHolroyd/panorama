@@ -3,7 +3,13 @@
 #include <cstdint>
 #include <string_view>
 
+namespace panorama {
+enum class Raytracer : uint32_t;
+}
+
 namespace panorama::arguments {
+
+[[nodiscard]] Raytracer parse_raytracer(std::string_view text);
 
 /// Return the command-line value following an option and advance its index.
 [[nodiscard]] std::string_view

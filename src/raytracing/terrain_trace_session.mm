@@ -1,6 +1,8 @@
 #include "terrain_trace_session.h"
+#include "trace_activity.h"
 
 #include "host_frontier.h"
+#include "metal_bvh_trace.h"
 #include "terrain_shadow_gpu.h"
 #include "tile_manager.h"
 #include "timer.h"
@@ -21,6 +23,14 @@ namespace panorama {
 namespace {
 
 void validate_configuration(const RaytraceConfig &config) {
+  if (config.bvh_block_cells == 0U) {
+    throw std::invalid_argument("BVH block cell count must be positive");
+  }
+  if (config.bvh_cache_size_bytes == 0U)
+    throw std::invalid_argument("BVH cache size must be positive");
+  if (config.raytracer != Raytracer::Software && config.raytracer != Raytracer::MetalBvh) {
+    throw std::invalid_argument("Unknown terrain raytracer");
+  }
   if (config.tile_cache_size_bytes == 0U || config.tile_dir.empty()) {
     throw std::invalid_argument("Terrain trace session requires a tile directory and cache");
   }
@@ -31,32 +41,11 @@ void validate_configuration(const RaytraceConfig &config) {
   }
 }
 
-[[nodiscard]] uint32_t validate_ray_field(const RayField &field) {
-  const uint64_t ray_count = static_cast<uint64_t>(field.image.width) * field.image.height;
-  if (ray_count == 0U || ray_count > std::numeric_limits<uint32_t>::max() ||
-      field.rays.size() != ray_count) {
-    throw std::invalid_argument("Ray field has invalid dimensions or storage");
-  }
-  if (!std::isfinite(field.minimum_pixel_angle) || field.minimum_pixel_angle <= 0.0F) {
-    throw std::invalid_argument("Ray field has no finite positive pixel angle");
-  }
-  for (const RayDirection &ray : field.rays) {
-    const float horizontal_length = std::hypot(ray.x, ray.y);
-    if (!std::isfinite(ray.x) || !std::isfinite(ray.y) || !std::isfinite(ray.slope) ||
-        !std::isfinite(horizontal_length) || std::abs(horizontal_length - 1.0F) > 1e-4F ||
-        (ray.x != 0.0F && !std::isfinite(ray.inverse_x)) ||
-        (ray.y != 0.0F && !std::isfinite(ray.inverse_y))) {
-      throw std::invalid_argument("Ray field contains an invalid projected direction");
-    }
-  }
-  return static_cast<uint32_t>(ray_count);
-}
-
 [[nodiscard]] RaytraceParameters make_parameters(
     const TileGeometry &tile,
     const RaytraceConfig &config,
     const TerrainCatalogue &catalogue,
-    uint32_t ray_count
+    ImageSize image
 ) {
   const double curvature_lift =
       kCurvatureCoefficient * static_cast<double>(config.max_distance) * config.max_distance;
@@ -74,7 +63,9 @@ void validate_configuration(const RaytraceConfig &config) {
       static_cast<float>(kCurvatureCoefficient),
       catalogue.maximum_elevation().value_or(std::numeric_limits<float>::infinity()),
       tile.mipmap_level_count,
-      ray_count,
+      image.width * image.height,
+      image.width,
+      image.height,
       config.max_distance,
   };
 }
@@ -87,12 +78,18 @@ struct TerrainTraceSession::State {
   ImageSize image;
   uint32_t ray_count;
   Timer timer{"Total elapsed"};
+  MetalBvhStatistics frame_bvh_before;
+  double frame_wall_ms = 0.0;
+  double frame_gpu_ms = 0.0;
+  uint64_t frame_passes = 0U;
 
   // Long-lived owners. TileManager serves both primary and shadow frontiers;
   // ray-sized GPU buffers remain valid for presentation after tracing.
   std::unique_ptr<TileManager> tiles;
   RaytraceParameters parameters = {};
   std::unique_ptr<GpuRaytraceResources> gpu;
+  std::unique_ptr<MetalBvhTrace> bvh;
+  GpuTraceOutputRequirements outputs;
   std::unique_ptr<GpuTerrainShadowResources> shadows;
 
   // Cumulative scheduling diagnostics printed by the command-line frontend.
@@ -106,47 +103,119 @@ struct TerrainTraceSession::State {
   uint64_t shadow_revision = std::numeric_limits<uint64_t>::max();
   double shadow_azimuth = 0.0;
   double shadow_elevation = 0.0;
+  bool bvh_shadow_active = false;
+
+  std::unique_ptr<GpuCamera> camera;
+  bool camera_rays_ready = false;
+
+  void prepare_camera(const RayFieldRequest &request) {
+    const uint32_t count = validate_camera_request(request);
+    camera_rays_ready = false;
+    if (!camera)
+      camera =
+          std::make_unique<GpuCamera>(gpu->device(), gpu->command_queue(), gpu->library(), *tiles);
+    gpu->resize_rays(count);
+    image = request.image;
+    ray_count = parameters.ray_count = count;
+    parameters.image_width = request.image.width;
+    parameters.image_height = request.image.height;
+    bvh_shadow_active = false;
+    shadow_revision = std::numeric_limits<uint64_t>::max();
+    camera->prepare(request, config.observer, config.lod_scale, *tiles);
+  }
+
+  void complete_camera() {
+    if (!camera_rays_ready) {
+      camera->validate_completed_rays();
+      camera_rays_ready = true;
+    }
+  }
 
   State(
       const RaytraceConfig &config_value,
-      const RayField &initial_field,
-      GpuTraceOutputRequirements outputs
+      ImageSize initial_image,
+      uint32_t initial_count,
+      GpuTraceOutputRequirements outputs,
+      id<MTLCommandQueue> shared_queue
   )
-      : config(config_value), image(initial_field.image),
-        ray_count(validate_ray_field(initial_field)) {
+      : config(config_value), image(initial_image), ray_count(initial_count), outputs(outputs) {
     validate_configuration(config);
     timer.start_wall("Initial setup");
 
     // Tile discovery must precede ray-resource construction because the GPU
     // catalogue hash uses stable source indices. Atlas attachment follows so
     // it can reuse the device selected by the primary tracing resources.
-    tiles = std::make_unique<TileManager>(config, initial_field.minimum_pixel_angle);
+    tiles = std::make_unique<TileManager>(config);
     config.observer = tiles->catalogue().observer();
-    parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), ray_count);
+    parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), image);
 
     gpu = std::make_unique<GpuRaytraceResources>(
-        initial_field.rays,
+        ray_count,
         tiles->sources(),
         tiles->traces_quantized(),
         config.bilinear_collisions,
         config.c1_normals,
-        outputs
+        outputs,
+        shared_queue
     );
     tiles->attach_gpu(gpu->device(), timer);
+    if (config.raytracer == Raytracer::MetalBvh) {
+      bvh = std::make_unique<MetalBvhTrace>(
+          *gpu,
+          config.bvh_block_cells,
+          outputs,
+          config.bvh_cache_size_bytes
+      );
+    }
     timer.stop("Initial setup");
   }
 };
 
 TerrainTraceSession::TerrainTraceSession(
     const RaytraceConfig &config,
-    const RayField &initial_field,
-    GpuTraceOutputRequirements outputs
+    const RayFieldRequest &camera,
+    GpuTraceOutputRequirements outputs,
+    id<MTLCommandQueue> shared_queue
 )
-    : state_(std::make_unique<State>(config, initial_field, outputs)) {}
+    : state_(
+          std::make_unique<
+              State>(config, camera.image, validate_camera_request(camera), outputs, shared_queue)
+      ) {
+  state_->prepare_camera(camera);
+}
+
+GpuCameraStatistics TerrainTraceSession::camera_statistics() const {
+  return state_->camera ? state_->camera->statistics() : GpuCameraStatistics{};
+}
 
 TerrainTraceSession::~TerrainTraceSession() = default;
 
+MetalBvhStatistics TerrainTraceSession::bvh_statistics() const {
+  return state_->bvh ? state_->bvh->statistics() : MetalBvhStatistics{};
+}
+
+void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
+  State &state = *state_;
+  if (raytracer != Raytracer::Software && raytracer != Raytracer::MetalBvh) {
+    throw std::invalid_argument("Unknown terrain raytracer");
+  }
+  if (state.config.raytracer == raytracer)
+    return;
+  if (raytracer == Raytracer::MetalBvh && !state.bvh) {
+    state.bvh = std::make_unique<MetalBvhTrace>(
+        *state.gpu,
+        state.config.bvh_block_cells,
+        state.outputs,
+        state.config.bvh_cache_size_bytes
+    );
+  }
+  state.config.raytracer = raytracer;
+  state.bvh_shadow_active = false;
+  state.shadow_revision = std::numeric_limits<uint64_t>::max();
+}
+
 bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
+  trace_activity::Scope activity("observer relocation");
   State &state = *state_;
   if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing) ||
       !std::isfinite(observer.elevation)) {
@@ -156,6 +225,7 @@ bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
     return false;
   }
   state.config.observer = observer;
+  state.bvh_shadow_active = false;
   state.parameters.observer_elevation = static_cast<float>(observer.elevation);
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
   return true;
@@ -170,7 +240,7 @@ void TerrainTraceSession::set_lod_scale(float lod_scale) {
     return;
   }
   state.config.lod_scale = lod_scale;
-  state.tiles->set_lod_scale(lod_scale);
+  state.bvh_shadow_active = false;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
 
@@ -190,33 +260,79 @@ void TerrainTraceSession::set_collision_options(bool bilinear_collisions, bool c
   }
   state.config.bilinear_collisions = bilinear_collisions;
   state.config.c1_normals = c1_normals;
+  state.bvh_shadow_active = false;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
 
-void TerrainTraceSession::trace(const RayField &field) {
-  State &state = *state_;
-  const uint32_t ray_count = validate_ray_field(field);
-  state.tiles->set_pixel_angle(field.minimum_pixel_angle);
-  const bool dimensions_changed = field.image.width != state.image.width ||
-                                  field.image.height != state.image.height ||
-                                  ray_count != state.ray_count;
+void TerrainTraceSession::trace(const RayFieldRequest &camera) {
+  const auto started = std::chrono::steady_clock::now();
+  state_->prepare_camera(camera);
+  trace_prepared();
+  state_->frame_wall_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+}
 
-  // Ray-dependent storage changes with the viewport; catalogue discovery,
-  // terrain preparation, pipelines, and the resident atlas remain intact.
-  const uint32_t observer_slot = state.tiles->ensure_observer_resident(state.timer);
-  if (dimensions_changed) {
-    state.gpu->resize_rays(field.rays);
-    state.image = field.image;
-    state.ray_count = ray_count;
-    state.parameters.ray_count = ray_count;
-  } else {
-    state.gpu->update_rays(field.rays);
+void TerrainTraceSession::trace_prepared() {
+  State &state = *state_;
+  const auto started = std::chrono::steady_clock::now();
+  state.frame_bvh_before = bvh_statistics();
+  state.frame_gpu_ms = 0.0;
+  state.frame_passes = 0U;
+  if (!state.camera_rays_ready) {
+    auto command = [state.gpu->command_queue() commandBuffer];
+    if (command == nil)
+      throw std::runtime_error("Could not create camera ray command");
+    command.label = @"GPU camera rays for synchronous trace";
+    state.camera->encode_rays(command, state.gpu->ray_directions());
+    if (state.config.raytracer == Raytracer::Software)
+      state.gpu->encode_clear_outputs(command);
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+      throw std::runtime_error("GPU camera ray generation failed");
+    state.complete_camera();
   }
+  if (state.config.raytracer == Raytracer::MetalBvh) {
+    state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
+    state.gpu->start_capture_if_requested();
+    state.timer.start_wall("BVH streaming trace");
+    try {
+      state.bvh->trace(state.parameters, state.timer);
+    } catch (...) {
+      state.timer.stop("BVH streaming trace");
+      state.gpu->stop_capture();
+      throw;
+    }
+    state.timer.stop("BVH streaming trace");
+    state.gpu->stop_capture();
+    const auto after = bvh_statistics();
+    state.frame_gpu_ms = after.selection_gpu_ms - state.frame_bvh_before.selection_gpu_ms +
+                         after.trace_gpu_ms - state.frame_bvh_before.trace_gpu_ms;
+    state.frame_passes = after.selection_passes - state.frame_bvh_before.selection_passes +
+                         after.trace_passes - state.frame_bvh_before.trace_passes;
+    state.frame_wall_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
+    state.frames++;
+    state.trace_revision++;
+    return;
+  }
+  state.gpu->prepare_tile_selection(
+      *state.tiles,
+      state.config.observer,
+      state.parameters,
+      state.config.use_tile_bvh,
+      state.timer
+  );
+  const uint32_t observer_slot = state.tiles->ensure_observer_resident(state.timer);
   state.gpu->initialise_frontier(observer_slot);
 
   HostFrontier frontier(
       *state.tiles,
-      field.rays,
+      std::span<const RayDirection>(
+          static_cast<const RayDirection *>(state.gpu->ray_directions().contents),
+          state.ray_count
+      ),
       state.parameters,
       state.tiles->slot_capacity(),
       observer_slot
@@ -246,6 +362,8 @@ void TerrainTraceSession::trace(const RayField &field) {
           state.timer
       );
       state.timer.add_work("GPU raytrace", pass.device_milliseconds);
+      state.frame_gpu_ms += pass.device_milliseconds;
+      ++state.frame_passes;
       state.locally_skipped_tiles += pass.locally_skipped_tiles;
       state.globally_skipped_tiles += pass.globally_skipped_tiles;
       if (pass.deferred_count > state.ray_count) {
@@ -294,14 +412,86 @@ void TerrainTraceSession::trace(const RayField &field) {
   }
   state.gpu->stop_capture();
   state.timer.stop("GPU raytrace");
+  state.frame_wall_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   state.frames++;
   state.trace_revision++;
 }
 
+bool TerrainTraceSession::encode_trace(
+    id<MTLCommandBuffer> command,
+    const RayFieldRequest &camera
+) {
+  State &state = *state_;
+  state.prepare_camera(camera);
+  if (command == nil || state.config.raytracer != Raytracer::MetalBvh)
+    return false;
+  state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
+  if (!state.bvh->prepare_scene(state.timer))
+    return false;
+  state.camera->encode_rays(command, state.gpu->ray_directions());
+  return state.bvh->encode_scene(command, state.timer);
+}
+
+bool TerrainTraceSession::complete_encoded_trace(id<MTLCommandBuffer> command) {
+  if (command.status != MTLCommandBufferStatusCompleted)
+    throw std::logic_error("Primary producer has not completed successfully");
+  state_->complete_camera();
+  if (!state_->bvh->scene_complete())
+    return false;
+  ++state_->frames;
+  ++state_->trace_revision;
+  return true;
+}
+
+bool TerrainTraceSession::encode_shadows(
+    id<MTLCommandBuffer> command,
+    double azimuth,
+    double elevation
+) {
+  State &state = *state_;
+  if (!std::isfinite(azimuth) || !std::isfinite(elevation))
+    throw std::invalid_argument("Sun direction must be finite");
+  if (state.config.raytracer != Raytracer::MetalBvh || !state.outputs.elevations ||
+      !state.outputs.surface_gradients)
+    return false;
+  if (!state.bvh->encode_shadows(command, azimuth, elevation))
+    return false;
+  state.bvh_shadow_active = true;
+  state.shadow_azimuth = azimuth;
+  state.shadow_elevation = elevation;
+  return true;
+}
+
+bool TerrainTraceSession::complete_encoded_shadows(id<MTLCommandBuffer> command) {
+  if (command.status != MTLCommandBufferStatusCompleted)
+    throw std::logic_error("Shadow producer has not completed successfully");
+  if (!state_->bvh->shadows_complete()) {
+    state_->bvh_shadow_active = false;
+    state_->shadow_revision = std::numeric_limits<uint64_t>::max();
+    return false;
+  }
+  state_->shadow_revision = state_->trace_revision;
+  return true;
+}
+
 void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation) {
   State &state = *state_;
+  if (state.bvh_shadow_active) {
+    state.bvh_shadow_active = false;
+    state.shadow_revision = std::numeric_limits<uint64_t>::max();
+  }
   if (!std::isfinite(sun_azimuth) || !std::isfinite(sun_elevation)) {
     throw std::invalid_argument("Sun direction must be finite");
+  }
+  if (state.config.raytracer == Raytracer::MetalBvh && state.outputs.elevations &&
+      state.outputs.surface_gradients &&
+      state.bvh->trace_shadows(sun_azimuth, sun_elevation, state.timer)) {
+    state.bvh_shadow_active = true;
+    state.shadow_revision = state.trace_revision;
+    state.shadow_azimuth = sun_azimuth;
+    state.shadow_elevation = sun_elevation;
+    return;
   }
   if (state.shadows == nullptr) {
     // Construction is deliberately lazy: disabled shadows allocate no
@@ -431,7 +621,12 @@ const TerrainCoverage &TerrainTraceSession::terrain_coverage() const {
 }
 
 std::optional<float> TerrainTraceSession::sample_terrain(double easting, double northing) {
+  trace_activity::Scope activity("full-resolution ground sampling");
   return state_->tiles->sample_terrain(easting, northing);
+}
+
+TileManagerStatistics TerrainTraceSession::tile_statistics() const {
+  return state_->tiles->statistics();
 }
 
 id<MTLDevice> TerrainTraceSession::device() const { return state_->gpu->device(); }
@@ -459,15 +654,76 @@ id<MTLBuffer> TerrainTraceSession::num_evaluations() const {
 }
 
 id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
+  if (state_->bvh_shadow_active)
+    return state_->bvh->shadow_visibility();
   if (state_->shadows == nullptr || state_->shadow_revision != state_->trace_revision) {
     throw std::logic_error("Shadows have not been traced for the current terrain view");
   }
   return state_->shadows->visibility();
 }
 
+void TerrainTraceSession::print_trace_statistics() const {
+  const State &state = *state_;
+  std::printf(
+      "Trace %llu %s %ux%u: wall %.3f ms, GPU traversal sum %.3f ms, %llu passes",
+      static_cast<unsigned long long>(state.frames),
+      state.config.raytracer == Raytracer::MetalBvh                         ? "BVH"
+      : state.config.use_tile_bvh && state.gpu->device().supportsRaytracing ? "Mipmap/tile-BVH"
+                                                                            : "Mipmap/grid",
+      state.image.width,
+      state.image.height,
+      state.frame_wall_ms,
+      state.frame_gpu_ms,
+      static_cast<unsigned long long>(state.frame_passes)
+  );
+  if (state.config.raytracer == Raytracer::MetalBvh) {
+    const auto b = bvh_statistics();
+    const auto &a = state.frame_bvh_before;
+    std::printf(
+        "; tiles built/hit/evicted %llu/%llu/%llu, catalogue/instance builds %llu/%llu, "
+        "BVH submissions %llu, GPU selection/detail/build %.3f/%.3f/%.3f ms, "
+        "CPU grouping %.3f ms, resident %.1f/%.1f MiB, "
+        "scene builds/passes/fallback rays %llu/%llu/%llu (%.3f MiB)",
+        static_cast<unsigned long long>(b.builds - a.builds),
+        static_cast<unsigned long long>(b.cache_hits - a.cache_hits),
+        static_cast<unsigned long long>(b.evictions - a.evictions),
+        static_cast<unsigned long long>(b.catalogue_builds - a.catalogue_builds),
+        static_cast<unsigned long long>(b.instance_builds - a.instance_builds),
+        static_cast<unsigned long long>(b.submissions - a.submissions),
+        b.selection_gpu_ms - a.selection_gpu_ms,
+        b.trace_gpu_ms - a.trace_gpu_ms,
+        b.build_gpu_ms - a.build_gpu_ms,
+        b.grouping_cpu_ms - a.grouping_cpu_ms,
+        double(b.resident_bytes) / 1048576.0,
+        double(b.budget_bytes) / 1048576.0,
+        static_cast<unsigned long long>(b.scene_builds - a.scene_builds),
+        static_cast<unsigned long long>(b.scene_passes - a.scene_passes),
+        static_cast<unsigned long long>(b.scene_fallback_rays - a.scene_fallback_rays),
+        double(b.scene_bytes) / 1048576.0
+    );
+  }
+  std::putchar('\n');
+  std::fflush(stdout);
+}
+
 void TerrainTraceSession::print_statistics() const {
   const State &state = *state_;
   const TileManagerStatistics tiles = state.tiles->statistics();
+  if (state.bvh) {
+    const auto bvh = state.bvh->statistics();
+    std::printf(
+        "Metal BVH cache: %.3f MiB resident, %.3f MiB peak including build workspace / %.3f MiB "
+        "budget; "
+        "%llu builds, %llu cache hits, %llu evictions; catalogue %.3f MiB.\n",
+        double(bvh.resident_bytes) / 1048576.0,
+        double(bvh.peak_bytes) / 1048576.0,
+        double(bvh.budget_bytes) / 1048576.0,
+        static_cast<unsigned long long>(bvh.builds),
+        static_cast<unsigned long long>(bvh.cache_hits),
+        static_cast<unsigned long long>(bvh.evictions),
+        double(bvh.catalogue_bytes) / 1048576.0
+    );
+  }
   std::printf(
       "Terrain sources: %zu (resident slots %u / cache capacity %u, preparation workers %u).\n",
       state.tiles->sources().size(),
@@ -489,7 +745,7 @@ void TerrainTraceSession::print_statistics() const {
   }
   const uint64_t skipped = state.locally_skipped_tiles + state.globally_skipped_tiles;
   std::printf(
-      "  Tile I/O: %llu requests (%llu unique, %llu duplicate); %llu skips "
+      "  Tile I/O: %llu requests (%llu unique, %llu duplicate); %llu grid skips "
       "(%llu local, %llu global; %s).\n",
       static_cast<unsigned long long>(tiles.requests),
       static_cast<unsigned long long>(tiles.unique_requests),

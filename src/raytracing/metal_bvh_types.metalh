@@ -1,0 +1,80 @@
+#pragma once
+
+// Scalar layouts shared by Objective-C++ and Metal. No float3/SIMD padding.
+#ifdef __METAL_VERSION__
+#include "terrain_intersection.metalh"
+using BvhUint = uint;
+using BvhUlong = ulong;
+using BvhLong = long;
+#else
+#include "raytrace_gpu.h"
+#include <cstdint>
+using BvhUint = uint32_t;
+using BvhUlong = uint64_t;
+using BvhLong = int64_t;
+namespace panorama {
+#endif
+
+struct BvhTile {
+  float x_min;
+  float y_min;
+  float cell_size;
+  BvhUint cell_count;
+  BvhUlong vertex_offset;
+  int base_decimeters;
+  BvhUint lod;
+  BvhLong row;
+  BvhLong column;
+};
+
+struct BvhBlock {
+  BvhUint tile;
+  BvhUint x;
+  BvhUint y;
+  BvhUint width;
+  BvhUint height;
+};
+
+struct BvhBounds {
+  float min_x, min_y, min_z;
+  float max_x, max_y, max_z;
+};
+
+struct BvhParameters {
+  RaytraceParameters trace;
+  BvhUint primitive_count;
+  BvhUint quantized;
+  BvhUint observer_source;
+  BvhUint source_count;
+  BvhUint hash_capacity;
+  BvhUint work_count;
+};
+
+/// CPU/GPU continuations. Progress advances to a tile's far XY edge only
+/// after that tile has been traced; cache eviction cannot erase this progress.
+struct BvhRayState {
+  float progress;
+  float exit;
+  BvhUint source;
+  BvhUint done;
+};
+
+/// Indirect tile resources indexed by the instance ID in a batch TLAS.
+struct BvhChunk {
+#ifdef __METAL_VERSION__
+  device const uchar *vertices;
+  device const BvhBlock *blocks;
+  device const BvhBounds *bounds;
+#else
+  BvhUlong vertices;
+  BvhUlong blocks;
+  BvhUlong bounds;
+#endif
+  BvhTile tile;
+  BvhUint source;
+  BvhUint padding;
+};
+
+#ifndef __METAL_VERSION__
+} // namespace panorama
+#endif

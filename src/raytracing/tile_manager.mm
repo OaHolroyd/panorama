@@ -41,30 +41,6 @@ void validate_tile_position(const TileGeometry &tile, TileKey key, const TileGri
 
 } // namespace
 
-void TileManager::State::rebuild_lod_plan(float angle) {
-  if (!std::isfinite(angle) || angle <= 0.0F) {
-    throw std::invalid_argument("Terrain LOD planning requires a positive pixel angle");
-  }
-  const std::vector<TerrainSource> &source_values = catalogue->sources();
-  lod_by_source.resize(source_values.size());
-  // Select each source once for this observer/view combination. HostFrontier,
-  // workers, residency lookup, and Metal metadata then carry the chosen LOD
-  // as part of TileVariant instead of independently recomputing policy.
-  for (uint32_t source_index = 0U; source_index < static_cast<uint32_t>(source_values.size());
-       source_index++) {
-    lod_by_source[source_index] = tile_lod(
-        catalogue->grid(),
-        source_values[source_index].key,
-        config.observer,
-        static_cast<float>(origin->cell_size),
-        angle,
-        config.lod_scale,
-        source_values[source_index].lod_count
-    );
-  }
-  pixel_angle = angle;
-}
-
 void TileManager::State::start_workers(uint32_t configured_workers) {
   if (catalogue->sources().empty() || prepared_capacity == 0U || device == nil ||
       loader_timer == nullptr) {
@@ -234,8 +210,7 @@ void TileManager::State::stop_workers() {
   }
 }
 
-TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle)
-    : state_(std::make_unique<State>()) {
+TileManager::TileManager(const RaytraceConfig &config) : state_(std::make_unique<State>()) {
   State &state = *state_;
   state.config = config;
   // Discovery places the observer source at index zero and fixes source
@@ -259,7 +234,16 @@ TileManager::TileManager(const RaytraceConfig &config, float initial_pixel_angle
     throw std::overflow_error("Terrain tile mipmap exceeds Metal uint indexing");
   }
   state.mipmap_values = static_cast<uint32_t>(mip_count);
-  state.rebuild_lod_plan(initial_pixel_angle);
+  state.lod_by_source.resize(state.catalogue->sources().size(), 1U);
+}
+
+void TileManager::install_lod_plan(std::span<const uint32_t> lods) {
+  if (lods.size() != sources().size())
+    throw std::invalid_argument("GPU LOD plan has the wrong source count");
+  for (size_t i = 0; i < lods.size(); ++i)
+    if (lods[i] == 0 || lods[i] > sources()[i].lod_count)
+      throw std::invalid_argument("GPU LOD plan contains an invalid level");
+  state_->lod_by_source.assign(lods.begin(), lods.end());
 }
 
 TileManager::~TileManager() { stop(); }
@@ -296,16 +280,6 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
   state.start_workers(state.config.max_tile_preparation_workers);
 }
 
-void TileManager::set_pixel_angle(float pixel_angle) { state_->rebuild_lod_plan(pixel_angle); }
-
-void TileManager::set_lod_scale(float lod_scale) {
-  if (!std::isfinite(lod_scale) || lod_scale < 0.0F) {
-    throw std::invalid_argument("Terrain LOD scale must be finite and nonnegative");
-  }
-  state_->config.lod_scale = lod_scale;
-  state_->rebuild_lod_plan(state_->pixel_angle);
-}
-
 bool TileManager::relocate_observer(ObserverLocation observer) {
   State &state = *state_;
   const TileKey key = tile_key_at(state.catalogue->grid(), observer.easting, observer.northing);
@@ -317,7 +291,6 @@ bool TileManager::relocate_observer(ObserverLocation observer) {
   state.observer_source_index = *source;
   // LOD distance and observer-relative Float32 metadata both change, but the
   // catalogue, resident payload bytes, pipelines, and worker pool remain valid.
-  state.rebuild_lod_plan(state.pixel_angle);
   if (state.atlas_attached) {
     state.rebase_observer(observer);
   }
@@ -336,7 +309,6 @@ float TileManager::tile_width() const {
   return static_cast<float>(state_->catalogue->grid().width);
 }
 uint32_t TileManager::observer_source_index() const { return state_->observer_source_index; }
-float TileManager::pixel_angle() const { return state_->pixel_angle; }
 uint32_t TileManager::mipmap_value_count() const { return state_->mipmap_values; }
 bool TileManager::traces_quantized() const { return state_->trace_quantized; }
 uint32_t TileManager::slot_capacity() const { return state_->slot_capacity; }

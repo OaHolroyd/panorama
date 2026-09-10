@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <variant>
-#include <vector>
 
 namespace panorama {
 
@@ -15,6 +14,7 @@ namespace panorama {
 struct ImageSize {
   uint32_t width;
   uint32_t height;
+  bool operator==(const ImageSize &) const = default;
 };
 
 /// Orientation of a camera optical axis in the projected terrain frame.
@@ -122,29 +122,5 @@ struct RayDirection {
   /// Vertical change per metre of horizontal travel.
   float slope;
 };
-
-/// Arbitrary row-major per-pixel rays for a rectangular output image.
-///
-/// After construction the tracing and frontier code use only this type; they
-/// do not depend on the projection model which generated it.
-struct RayField {
-  /// Row/column dimensions used to map pixels to `rays` indices.
-  ImageSize image;
-  /// Row-major projection-independent directions, one per output pixel.
-  std::vector<RayDirection> rays;
-  /// Conservative angular span of one output pixel, in radians. This is kept
-  /// beside the generated rays so terrain LOD planning does not need to know
-  /// which projection produced them.
-  float minimum_pixel_angle;
-};
-
-/// Generate the existing equally spaced angular ray field.
-[[nodiscard]] RayField make_angular_ray_field(ImageSize image, const AngularProjection &projection);
-
-/// Generate perspective camera rays, including inverse lens distortion.
-[[nodiscard]] RayField make_camera_ray_field(ImageSize image, const CameraProjection &projection);
-
-/// Dispatch a runtime-selected projection to its ray-field generator.
-[[nodiscard]] RayField make_ray_field(const RayFieldRequest &request);
 
 } // namespace panorama

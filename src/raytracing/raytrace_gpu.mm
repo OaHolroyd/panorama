@@ -1,4 +1,6 @@
 #include "raytrace_gpu.h"
+#include "terrain_tile_bvh.h"
+#include "threadgroup_sizes.h"
 
 #import <Foundation/Foundation.h>
 
@@ -6,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -22,7 +25,7 @@ namespace {
 constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
 
 static_assert(sizeof(RayDirection) == 5U * sizeof(float));
-static_assert(sizeof(RaytraceParameters) == 7U * sizeof(uint32_t));
+static_assert(sizeof(RaytraceParameters) == 9U * sizeof(uint32_t));
 static_assert(sizeof(RayWorkItem) == 4U * sizeof(uint32_t));
 static_assert(sizeof(DeferredRayWork) == 3U * sizeof(uint32_t));
 
@@ -94,15 +97,6 @@ make_buffer(id<MTLDevice> device, const void *data, NSUInteger length, const cha
   return buffer;
 }
 
-/// Clear a newly allocated shared output/counter buffer before first use.
-void clear_buffer(id<MTLBuffer> buffer, const char *name) {
-  void *contents = buffer.contents;
-  if (contents == nullptr) {
-    throw std::runtime_error(std::string("Could not map ") + name + " Metal buffer");
-  }
-  std::memset(contents, 0, buffer.length);
-}
-
 } // namespace
 
 /// Mutable Objective-C++ state hidden from the scheduling implementation.
@@ -141,6 +135,9 @@ struct GpuRaytraceResources::State {
   bool c1_normals;
   GpuTraceOutputRequirements outputs;
   bool capture_active = false;
+  std::unique_ptr<TerrainTileBvh> tile_bvh;
+  bvh_resources::BvhPipeline bvh_emit;
+  bool use_tile_bvh = false;
 
   [[nodiscard]] id<MTLComputePipelineState>
   make_trace_pipeline(bool bilinear, bool c1Normals) const {
@@ -182,82 +179,71 @@ struct GpuRaytraceResources::State {
   /// Allocate a complete ray-dependent resource set before publishing it.
   /// Keeping the old set intact until every allocation succeeds makes a
   /// failed interactive resize recoverable by the caller.
-  void replace_ray_buffers(std::span<const RayDirection> next_rays) {
-    if (next_rays.empty() || next_rays.size() > std::numeric_limits<uint32_t>::max()) {
+  void replace_ray_buffers(size_t count) {
+    if (count == 0 || count > std::numeric_limits<uint32_t>::max()) {
       throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
     }
-    const uint32_t next_capacity = static_cast<uint32_t>(next_rays.size());
+    const uint32_t next_capacity = static_cast<uint32_t>(count);
     id<MTLBuffer> next_ray_buffer = make_buffer(
         device,
-        next_rays.data(),
-        checked_buffer_length(next_rays.size(), sizeof(RayDirection), "ray directions"),
+        nullptr,
+        checked_buffer_length(count, sizeof(RayDirection), "ray directions"),
         "ray directions"
     );
     id<MTLBuffer> next_distance_output = make_buffer(
         device,
         nullptr,
-        checked_buffer_length(next_rays.size(), sizeof(float), "distance output"),
+        checked_buffer_length(count, sizeof(float), "distance output"),
         "distance output"
     );
     id<MTLBuffer> next_elevation_output = make_buffer(
         device,
         nullptr,
-        outputs.elevations
-            ? checked_buffer_length(next_rays.size(), sizeof(float), "elevation output")
-            : sizeof(float),
+        outputs.elevations ? checked_buffer_length(count, sizeof(float), "elevation output")
+                           : sizeof(float),
         "elevation output"
     );
     id<MTLBuffer> next_surface_gradient_output = make_buffer(
         device,
         nullptr,
         outputs.surface_gradients
-            ? checked_buffer_length(next_rays.size(), sizeof(uint32_t), "surface gradient output")
+            ? checked_buffer_length(count, sizeof(uint32_t), "surface gradient output")
             : sizeof(uint32_t),
         "surface gradient output"
     );
     id<MTLBuffer> next_num_steps_output = make_buffer(
         device,
         nullptr,
-        outputs.debugging_info
-            ? checked_buffer_length(next_rays.size(), sizeof(float), "num steps output")
-            : sizeof(float),
+        outputs.debugging_info ? checked_buffer_length(count, sizeof(float), "num steps output")
+                               : sizeof(float),
         "num steps output"
     );
     id<MTLBuffer> next_num_evaluations_output = make_buffer(
         device,
         nullptr,
         outputs.debugging_info
-            ? checked_buffer_length(next_rays.size(), sizeof(float), "num evaluations output")
+            ? checked_buffer_length(count, sizeof(float), "num evaluations output")
             : sizeof(float),
         "num evaluations output"
     );
     id<MTLBuffer> next_active = make_buffer(
         device,
         nullptr,
-        checked_buffer_length(next_rays.size(), sizeof(RayWorkItem), "active frontier"),
+        checked_buffer_length(count, sizeof(RayWorkItem), "active frontier"),
         "active frontier"
     );
     id<MTLBuffer> next_continuations = make_buffer(
         device,
         nullptr,
-        checked_buffer_length(next_rays.size(), sizeof(float), "ray continuations"),
+        checked_buffer_length(count, sizeof(float), "ray continuations"),
         "ray continuations"
     );
     id<MTLBuffer> next_deferred_items = make_buffer(
         device,
         nullptr,
-        checked_buffer_length(next_rays.size(), sizeof(DeferredRayWork), "deferred frontier"),
+        checked_buffer_length(count, sizeof(DeferredRayWork), "deferred frontier"),
         "deferred frontier"
     );
-    clear_buffer(next_distance_output, "distance output");
-    if (outputs.elevations) {
-      clear_buffer(next_elevation_output, "elevation output");
-    }
-    if (outputs.debugging_info) {
-      clear_buffer(next_num_steps_output, "num steps output");
-      clear_buffer(next_num_evaluations_output, "num evaluations output");
-    }
-
     frontier_capacity = next_capacity;
     rays = next_ray_buffer;
     distance_output = next_distance_output;
@@ -272,15 +258,15 @@ struct GpuRaytraceResources::State {
 };
 
 GpuRaytraceResources::GpuRaytraceResources(
-    std::span<const RayDirection> rays,
+    uint32_t ray_count,
     std::span<const TerrainSource> sources,
     bool trace_quantized,
     bool bilinear_collisions,
     bool c1_normals,
-    GpuTraceOutputRequirements outputs
+    GpuTraceOutputRequirements outputs,
+    id<MTLCommandQueue> shared_queue
 ) {
-  if (rays.empty() || rays.size() > std::numeric_limits<uint32_t>::max() || sources.empty() ||
-      sources.size() > std::numeric_limits<uint32_t>::max()) {
+  if (ray_count == 0 || sources.empty() || sources.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::invalid_argument("GPU raytrace resources require a valid nonempty ray field");
   }
   auto state = std::make_unique<State>();
@@ -289,11 +275,11 @@ GpuRaytraceResources::GpuRaytraceResources(
   state->bilinear_collisions = bilinear_collisions;
   state->c1_normals = c1_normals;
   state->outputs = outputs;
-  state->device = MTLCreateSystemDefaultDevice();
+  state->device = shared_queue == nil ? MTLCreateSystemDefaultDevice() : shared_queue.device;
   if (state->device == nil) {
     throw std::runtime_error("No Metal device is available");
   }
-  state->queue = [state->device newCommandQueue];
+  state->queue = shared_queue == nil ? [state->device newCommandQueue] : shared_queue;
   if (state->queue == nil) {
     throw std::runtime_error("Could not create Metal command queue");
   }
@@ -322,7 +308,7 @@ GpuRaytraceResources::GpuRaytraceResources(
 
   // Function-constant specialization removes disabled output work. One-word
   // placeholders preserve the common kernel ABI without full per-ray buffers.
-  state->replace_ray_buffers(rays);
+  state->replace_ray_buffers(ray_count);
   // Every positive distance is written beside its gradient, and consumers use
   // distance as the validity mask, so clearing this potentially large buffer
   // would add setup bandwidth without defining any observable output.
@@ -367,38 +353,27 @@ GpuRaytraceResources::GpuRaytraceResources(
   state_ = std::move(state);
 }
 
+void GpuRaytraceResources::resize_rays(uint32_t ray_count) {
+  if (ray_count != state_->frontier_capacity)
+    state_->replace_ray_buffers(ray_count);
+}
+
+void GpuRaytraceResources::encode_clear_outputs(id<MTLCommandBuffer> command) {
+  auto encoder = [command blitCommandEncoder];
+  if (encoder == nil)
+    throw std::runtime_error("Could not encode ray output initialization");
+  for (id<MTLBuffer> output in @[
+         state_->distance_output,
+         state_->elevation_output,
+         state_->surface_gradient_output,
+         state_->num_steps_output,
+         state_->num_evaluations_output
+       ])
+    [encoder fillBuffer:output range:NSMakeRange(0, output.length) value:0];
+  [encoder endEncoding];
+}
+
 GpuRaytraceResources::~GpuRaytraceResources() { stop_capture(); }
-
-void GpuRaytraceResources::update_rays(std::span<const RayDirection> rays) {
-  State &state = *state_;
-  if (rays.size() != state.frontier_capacity) {
-    throw std::invalid_argument("Updated ray field has the wrong size");
-  }
-
-  void *ray_contents = state.rays.contents;
-  if (ray_contents == nullptr) {
-    throw std::runtime_error("Could not map reusable raytrace buffers");
-  }
-  std::memcpy(ray_contents, rays.data(), rays.size_bytes());
-
-  clear_buffer(state.distance_output, "distance output");
-  if (state.outputs.debugging_info) {
-    clear_buffer(state.num_steps_output, "num steps output");
-    clear_buffer(state.num_evaluations_output, "num evaluations output");
-  }
-  if (state.outputs.elevations) {
-    clear_buffer(state.elevation_output, "elevation output");
-  }
-}
-
-void GpuRaytraceResources::resize_rays(std::span<const RayDirection> rays) {
-  State &state = *state_;
-  if (rays.size() == state.frontier_capacity) {
-    update_rays(rays);
-    return;
-  }
-  state.replace_ray_buffers(rays);
-}
 
 void GpuRaytraceResources::set_collision_options(bool bilinear_collisions, bool c1_normals) {
   // TerrainTraceSession calls this only on its render-owning thread, after all
@@ -421,6 +396,34 @@ void GpuRaytraceResources::initialise_frontier(uint32_t observer_slot) {
 id<MTLDevice> GpuRaytraceResources::device() const { return state_->device; }
 
 id<MTLCommandQueue> GpuRaytraceResources::command_queue() const { return state_->queue; }
+
+TerrainTileBvh &GpuRaytraceResources::tile_bvh() {
+  if (!state_->tile_bvh)
+    state_->tile_bvh = std::make_unique<TerrainTileBvh>(*this);
+  return *state_->tile_bvh;
+}
+
+void GpuRaytraceResources::prepare_tile_selection(
+    TileManager &tiles,
+    ObserverLocation observer,
+    const RaytraceParameters &parameters,
+    bool enabled,
+    Timer &timer
+) {
+  State &state = *state_;
+  state.use_tile_bvh = enabled && state.device.supportsRaytracing;
+  if (!state.use_tile_bvh)
+    return;
+  const auto started = std::chrono::steady_clock::now();
+  if (state.bvh_emit.state == nil)
+    state.bvh_emit = bvh_resources::make_bvh_pipeline(
+        *this,
+        @"emit_bvh_tile_frontier",
+        @"terrain_tile_intersection"
+    );
+  if (tile_bvh().prepare(tiles, observer, parameters))
+    timer.add_work("Shared tile BVH setup", std::chrono::steady_clock::now() - started);
+}
 
 id<MTLLibrary> GpuRaytraceResources::library() const { return state_->library; }
 
@@ -476,7 +479,7 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setBuffer:state.num_steps_output offset:0 atIndex:12];
   [encoder setBuffer:state.num_evaluations_output offset:0 atIndex:13];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      threadsPerThreadgroup:threadgroups::linear];
   [encoder endEncoding];
 
   encoder = [command computeCommandEncoder];
@@ -486,8 +489,9 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   // Phase two starts at those exits, skips catalogue tiles using manifest
   // maxima, and emits the first source which requires resident traversal.
   // Keeping both phases in one command buffer avoids a host round trip.
-  encoder.label = @"emit_tile_frontier";
-  [encoder setComputePipelineState:state.emit_pipeline];
+  encoder.label = state.use_tile_bvh ? @"emit_bvh_tile_frontier" : @"emit_tile_frontier";
+  const auto emit_pipeline = state.use_tile_bvh ? state.bvh_emit.state : state.emit_pipeline;
+  [encoder setComputePipelineState:emit_pipeline];
   [encoder setBuffer:state.active offset:0 atIndex:0];
   [encoder setBuffer:cache.metadata offset:0 atIndex:1];
   [encoder setBuffer:state.rays offset:0 atIndex:2];
@@ -502,8 +506,25 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
             atIndex:9];
   [encoder setBuffer:state.local_skip_count offset:0 atIndex:10];
   [encoder setBuffer:state.global_skip_count offset:0 atIndex:11];
+  if (state.use_tile_bvh) {
+    auto &catalogue = *state.tile_bvh;
+    const uint32_t count = static_cast<uint32_t>(catalogue.metadata().size());
+    [state.bvh_emit.table setBuffer:catalogue.tiles() offset:0 atIndex:0];
+    // The shared callback binds a resident mask even when filtering is disabled.
+    [state.bvh_emit.table setBuffer:state.local_skip_count offset:0 atIndex:1];
+    [encoder setAccelerationStructure:catalogue.acceleration() atBufferIndex:12];
+    [encoder setIntersectionFunctionTable:state.bvh_emit.table atBufferIndex:13];
+    [encoder setBytes:&count length:sizeof(count) atIndex:14];
+    [encoder setBuffer:catalogue.tiles() offset:0 atIndex:15];
+    [encoder useResource:catalogue.acceleration() usage:MTLResourceUsageRead];
+    [encoder useResource:catalogue.tiles() usage:MTLResourceUsageRead];
+    [encoder useResource:state.local_skip_count usage:MTLResourceUsageRead];
+    [encoder useResource:state.bvh_emit.table usage:MTLResourceUsageRead];
+  }
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+      threadsPerThreadgroup:threadgroups::bounded_linear(
+                                emit_pipeline.maxTotalThreadsPerThreadgroup
+                            )];
   [encoder endEncoding];
   timer.stop("GPU command encoding");
 

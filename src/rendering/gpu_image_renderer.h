@@ -38,14 +38,16 @@ struct GpuPresentationRequirements {
   bool synthetic_scalar_colour;
   /// Allocate the packing pipeline and shared buffer used by CLI image files.
   bool host_readback;
+  /// Extra usage bits required by a downstream GPU consumer such as MetalFX.
+  MTLTextureUsage output_texture_usage = MTLTextureUsageUnknown;
 };
 
 /// Reusable post-trace GPU presentation resources for one output image size.
 ///
 /// Each render method converts scientific trace buffers into the same 8-bit
 /// four-channel Metal texture. The CLI reads that texture back for PNG
-/// encoding, while the interactive viewer blits `texture()` directly and
-/// omits host readback and ImageIO work.
+/// encoding, while the interactive viewer samples `texture()` (optionally
+/// through MetalFX) and omits host readback and ImageIO work.
 class GpuImageRenderer {
 public:
   GpuImageRenderer(
@@ -63,6 +65,13 @@ public:
 
   /// Reallocate only image-sized targets while retaining compiled pipelines.
   void resize(ImageSize image);
+  /// Recreate image targets if a downstream consumer changes their usage contract.
+  void set_output_texture_usage(MTLTextureUsage usage);
+  /// Select a second target so a producer never overwrites the published image.
+  void begin_frame();
+  /// Undo begin_frame after an abandoned or completed-but-failed producer.
+  /// The previous texture remains available; no pending GPU work may use it.
+  void cancel_frame() noexcept;
 
   /// Render a scalar diagnostic using viridis over a fixed value range.
   void render_scalar(id<MTLBuffer> values, ScalarColourRange range, Timer &timer);
@@ -86,7 +95,8 @@ public:
       const SyntheticRenderOptions &options,
       ScalarColourRange range,
       bool use_surface_normals,
-      Timer &timer
+      Timer &timer,
+      id<MTLCommandBuffer> command = nil
   );
 
   /// Return the reusable GPU render target populated by the last render call.

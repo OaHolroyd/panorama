@@ -141,7 +141,7 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
 
 void render_terrain(
     const RaytraceConfig &config,
-    const RayField &field,
+    const RayFieldRequest &field,
     const TerrainRenderOutputs &outputs
 ) {
   validate_output_configuration(outputs);

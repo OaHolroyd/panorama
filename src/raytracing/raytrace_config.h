@@ -5,6 +5,8 @@
 
 namespace panorama {
 
+enum class Raytracer : uint32_t { Software, MetalBvh };
+
 /// Effective-Earth curvature used by tracing: 0.1695 metres per mile squared.
 /// Multiplying this coefficient by horizontal distance squared gives the
 /// ray's elevation gain relative to the curved terrain datum.
@@ -47,6 +49,15 @@ struct RaytraceConfig {
   /// Scale used by the per-source terrain LOD policy. Zero disables LOD
   /// selection and retains the original, LOD-1 terrain everywhere.
   float lod_scale = 0.0F;
+  Raytracer raytracer = Raytracer::Software;
+  /// Maximum terrain cells per axis in a procedural BVH primitive.
+  uint32_t bvh_block_cells = 4U;
+  /// Detailed BVHs, owned samples, metadata, and peak construction workspace.
+  /// Independent of the terrain atlas and ray-sized working buffers.
+  uint64_t bvh_cache_size_bytes = 512ULL * 1024ULL * 1024ULL;
+  /// Use shared catalogue acceleration for mipmap tile selection when supported.
+  /// Disabling this retains grid walking as a reference and compatibility path.
+  bool use_tile_bvh = true;
 };
 
 } // namespace panorama

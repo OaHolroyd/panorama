@@ -10,7 +10,7 @@ namespace panorama {
 /// Command-line configuration for one supported output projection.
 ///
 /// The default preserves the existing 2048-by-1024 angular panorama. Camera
-/// angles are accepted in degrees for usability, while `make_ray_field`
+/// angles are accepted in degrees for usability, while `make_request`
 /// converts them to the projection API's radians. Projection-specific options
 /// are tracked so settings for one mode cannot be silently ignored by another.
 class RayProjectionArguments {
@@ -22,7 +22,7 @@ public:
   void validate() const;
 
   /// Generate the row-major per-pixel ray field described by these arguments.
-  [[nodiscard]] RayField make_ray_field() const;
+  [[nodiscard]] RayFieldRequest make_request() const;
 
   /// Print a concise, reproducible description inside the main settings line.
   void print_settings() const;

@@ -17,7 +17,7 @@ OBJ_ROOT := obj
 
 # Objective-C++ host compiler and the two Metal shader-toolchain stages.
 CXX := clang++
-METAL := xcrun --sdk macosx metal
+METAL := $(shell xcrun --find metal)
 METALLIB := xcrun --sdk macosx metallib
 GDAL_CONFIG := gdal-config
 # GDAL supplies GeoTIFF loading and EPSG/PROJ-backed coordinate transforms.
@@ -42,7 +42,7 @@ COMMON_FLAGS := -std=c++20 -fobjc-arc -MMD -MP
 # ImageIO/CoreGraphics encode diagnostic and rendered images as PNG files.
 FRAMEWORKS := -framework Foundation -framework Metal -framework CoreGraphics -framework ImageIO
 VIEWER_FRAMEWORKS := -framework Foundation -framework Metal -framework AppKit -framework MetalKit \
-	-framework MapKit -framework CoreLocation
+	-framework MapKit -framework CoreLocation -framework MetalFX
 LDLIBS := $(GDAL_LIBS)
 
 # Select with `make DEBUG=1`; release is the default.
@@ -75,7 +75,7 @@ PANORAMA_OBJ := $(PANORAMA_APP_OBJ) $(RAYTRACE_OBJ) $(RENDERING_OBJ)
 PANORAMA_VIEWER_SRC := $(wildcard $(PANORAMA_APP_SRC_DIR)/*.mm)
 PANORAMA_VIEWER_OBJ := \
 	$(patsubst $(PANORAMA_APP_SRC_DIR)/%.mm,$(OBJ_DIR)/app/%.o,$(PANORAMA_VIEWER_SRC))
-PANORAMA_VIEWER_CORE_OBJ := $(RAYTRACE_OBJ) $(OBJ_DIR)/rendering/gpu_image_renderer.o
+PANORAMA_VIEWER_CORE_OBJ := $(RAYTRACE_OBJ) $(OBJ_DIR)/rendering/gpu_image_renderer.o $(OBJ_DIR)/rendering/gpu_terrain_frame.o
 TILE_GEN_SRC := $(wildcard $(TILE_GEN_SRC_DIR)/*.mm)
 TILE_GEN_OBJ := $(patsubst $(TILE_GEN_SRC_DIR)/%.mm,$(OBJ_DIR)/tile-gen/%.o,$(TILE_GEN_SRC))
 SHARED_SRC := $(wildcard $(SHARED_SRC_DIR)/*.mm)
@@ -92,7 +92,8 @@ METAL_LIB := $(OBJ_DIR)/panorama.metallib
 PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 # Compiler-generated header dependencies for the Objective-C++ sources.
 DEPS := $(PANORAMA_OBJ:.o=.d) $(PANORAMA_VIEWER_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) \
-	$(SHARED_OBJ:.o=.d)
+	$(SHARED_OBJ:.o=.d) $(OBJ_DIR)/metal-bvh-test.d $(OBJ_DIR)/terrain-manifest-test.d \
+	$(OBJ_DIR)/minimap-test.d $(OBJ_DIR)/metalfx-test.d
 
 .PHONY: all clean rebuild compile_commands FORCE
 
@@ -148,6 +149,9 @@ $(OBJ_DIR)/raytracing/%.air: $(RAYTRACE_SRC_DIR)/%.metal | $(OBJ_DIR)/raytracing
 	@printf 'Compiling %s\n' '$@'
 	$(METAL) -c -o $@ $<
 
+$(RAYTRACE_METAL_AIR): $(wildcard $(RAYTRACE_SRC_DIR)/*.metalh)
+$(METAL_AIR): $(SHARED_SRC_DIR)/threadgroup_sizes.h
+
 $(OBJ_DIR)/rendering/%.air: $(RENDERING_SRC_DIR)/%.metal | $(OBJ_DIR)/rendering
 	@printf 'Compiling %s\n' '$@'
 	$(METAL) -c -o $@ $<
@@ -176,6 +180,46 @@ clean:
 # A phony prerequisite makes the shared executable relink when switching
 # between debug and release object directories.
 FORCE:
+
+$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB)
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) -framework MetalFX $(LDLIBS)
+
+.PHONY: check-bvh
+check-bvh: $(OBJ_DIR)/metal-bvh-test
+	# Bound concurrently retained Metal I/O driver workers between fixture groups.
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --edge-cases
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-float
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-quantized
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --tile-selection
+
+.PHONY: check-camera
+check-camera: $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --camera
+
+$(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(METAL_LIB)
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
+
+.PHONY: check-minimap
+check-minimap: $(OBJ_DIR)/minimap-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/minimap-test
+
+$(OBJ_DIR)/metalfx-test: tests/metalfx_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(VIEWER_FRAMEWORKS)
+
+.PHONY: check-metalfx
+check-metalfx: $(OBJ_DIR)/metalfx-test $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metalfx-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --metalfx
+
+$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(OBJ_DIR)/tile-gen/geotiff_writer.o $(SHARED_OBJ)
+	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
+
+.PHONY: check-manifest
+check-manifest: $(OBJ_DIR)/terrain-manifest-test $(TILE_GEN_EXE)
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/terrain-manifest-test ./$(TILE_GEN_EXE)
 
 # Missing dependency files are harmless on the first build.
 -include $(DEPS)

@@ -51,7 +51,7 @@ struct TerrainRenderOutputs {
 /// directly so catalogue, atlas, and pipeline state survives between views.
 void render_terrain(
     const RaytraceConfig &config,
-    const RayField &field,
+    const RayFieldRequest &field,
     const TerrainRenderOutputs &outputs
 );
 
