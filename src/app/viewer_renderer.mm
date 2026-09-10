@@ -218,7 +218,7 @@ void print_usage(const char *program) {
       "  --bvh-block-cells N  cells per BVH block axis (default: 4)\n"
       "  --bvh-cache-mib N    BVH cache and build budget (default: 2048)\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
-      "  --peak-gazetteer CSV  peak labels dataset (default: data/gazetteers/Alps589.csv)\n"
+      "  --peak-gazetteer CSV  peak labels dataset (default: data/gazetteers/peaks.csv)\n"
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
       "  --max-distance M      horizontal range in metres (default: 600000)\n"
@@ -999,7 +999,7 @@ private:
       // horizontal sample, especially once LOD coarsening is active. Preserve
       // a modest metre-scale allowance when high output resolution makes the
       // angular pixel footprint very small.
-      const double tolerance = std::max(50.0, 2.0 * horizontal * std::tan(angular_pixel));
+      const double tolerance = std::max(100.0, 2.0 * horizontal * std::tan(angular_pixel));
       float farthest = 0.0F;
       for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {

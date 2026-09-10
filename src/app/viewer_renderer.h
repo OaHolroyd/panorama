@@ -47,7 +47,7 @@ inline constexpr float kDefaultDiffusivity = 1.0F;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
-  std::filesystem::path peak_gazetteer = "data/gazetteers/Alps589.csv";
+  std::filesystem::path peak_gazetteer = "data/gazetteers/peaks.csv";
   uint64_t tile_cache_size_bytes = 2048ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;

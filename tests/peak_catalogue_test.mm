@@ -7,7 +7,7 @@
 int main() {
   try {
     const panorama::app::PeakCatalogue catalogue = panorama::app::PeakCatalogue::load(
-        "data/gazetteers/Alps589.csv",
+        "data/gazetteers/peaks.csv",
         panorama::Crs(panorama::CrsId::SwissLv95)
     );
     if (catalogue.peaks().size() != 633U)
