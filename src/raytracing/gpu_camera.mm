@@ -1,5 +1,6 @@
 #include "gpu_camera.h"
 #include "gpu_camera_types.metalh"
+#include "threadgroup_sizes.h"
 #include "trace_activity.h"
 
 #include <algorithm>
@@ -244,8 +245,10 @@ void GpuCamera::prepare(
       throw std::runtime_error("Could not create camera preparation command");
     command.label = @"GPU camera footprint and LOD";
     if (footprint_changed) {
-      const uint32_t group_columns = (camera.image.width + 31U) / 32U;
-      const uint32_t group_rows = (camera.image.height + 31U) / 32U;
+      const uint32_t group_columns =
+          (camera.image.width + threadgroups::spatial.width - 1U) / threadgroups::spatial.width;
+      const uint32_t group_rows =
+          (camera.image.height + threadgroups::spatial.height - 1U) / threadgroups::spatial.height;
       const uint32_t groups = group_columns * group_rows;
       if (s.partial == nil || s.partial.length < size_t(groups) * sizeof(float))
         s.partial = s.buffer(size_t(groups) * sizeof(float), @"GPU footprint partials");
@@ -253,7 +256,7 @@ void GpuCamera::prepare(
       [encoder setBytes:&s.camera length:sizeof(s.camera) atIndex:0];
       [encoder setBuffer:s.partial offset:0 atIndex:1];
       [encoder dispatchThreadgroups:MTLSizeMake(group_columns, group_rows, 1)
-              threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
+              threadsPerThreadgroup:threadgroups::spatial];
       [encoder endEncoding];
       encoder = s.encoder(command, s.reduce);
       [encoder setBuffer:s.partial offset:0 atIndex:0];
@@ -261,7 +264,7 @@ void GpuCamera::prepare(
       [encoder setBytes:&s.camera length:sizeof(s.camera) atIndex:2];
       [encoder setBuffer:s.angle offset:0 atIndex:3];
       [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+              threadsPerThreadgroup:threadgroups::linear];
       [encoder endEncoding];
     }
     auto encoder = s.encoder(command, s.lod);
@@ -270,7 +273,7 @@ void GpuCamera::prepare(
     [encoder setBuffer:s.angle offset:0 atIndex:2];
     [encoder setBuffer:s.levels offset:0 atIndex:3];
     [encoder dispatchThreads:MTLSizeMake(s.settings.count, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        threadsPerThreadgroup:threadgroups::linear];
     [encoder endEncoding];
     [command commit];
     [command waitUntilCompleted];
@@ -320,7 +323,7 @@ void GpuCamera::encode_rays(id<MTLCommandBuffer> command, id<MTLBuffer> destinat
   [encoder setBuffer:destination offset:0 atIndex:1];
   [encoder setBuffer:s.invalid offset:0 atIndex:2];
   [encoder dispatchThreads:MTLSizeMake(s.camera.width, s.camera.height, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
+      threadsPerThreadgroup:threadgroups::spatial];
   [encoder endEncoding];
 }
 void GpuCamera::validate_completed_rays() const {

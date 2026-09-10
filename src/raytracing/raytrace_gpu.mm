@@ -1,5 +1,6 @@
 #include "raytrace_gpu.h"
 #include "terrain_tile_bvh.h"
+#include "threadgroup_sizes.h"
 
 #import <Foundation/Foundation.h>
 
@@ -478,7 +479,7 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setBuffer:state.num_steps_output offset:0 atIndex:12];
   [encoder setBuffer:state.num_evaluations_output offset:0 atIndex:13];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      threadsPerThreadgroup:threadgroups::linear];
   [encoder endEncoding];
 
   encoder = [command computeCommandEncoder];
@@ -521,8 +522,9 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
     [encoder useResource:state.bvh_emit.table usage:MTLResourceUsageRead];
   }
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
-      threadsPerThreadgroup:
-          MTLSizeMake(std::min<NSUInteger>(32, emit_pipeline.maxTotalThreadsPerThreadgroup), 1, 1)];
+      threadsPerThreadgroup:threadgroups::bounded_linear(
+                                emit_pipeline.maxTotalThreadsPerThreadgroup
+                            )];
   [encoder endEncoding];
   timer.stop("GPU command encoding");
 

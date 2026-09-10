@@ -1,9 +1,11 @@
 #include "terrain_shadow_gpu.h"
+#include "threadgroup_sizes.h"
 
 #import <Foundation/Foundation.h>
 
 #include "timer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <stdexcept>
@@ -192,7 +194,7 @@ std::span<const DeferredRayWork> GpuTerrainShadowResources::initialise(
                                parameters.trace.image_height,
                                1
                            )
-      threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
+      threadsPerThreadgroup:threadgroups::spatial];
   [encoder endEncoding];
   timer.stop("GPU shadow encoding");
   timer.start_wall("GPU shadow wait");
@@ -237,7 +239,7 @@ GpuFrontierPassResult GpuTerrainShadowResources::trace_frontier(
     [encoder setBytes:&cache.quantized_layout length:sizeof(cache.quantized_layout) atIndex:9];
   }
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      threadsPerThreadgroup:threadgroups::linear];
   [encoder endEncoding];
 
   encoder = [command computeCommandEncoder];
@@ -257,7 +259,9 @@ GpuFrontierPassResult GpuTerrainShadowResources::trace_frontier(
   [encoder setBuffer:catalogue_hash offset:0 atIndex:7];
   [encoder setBuffer:state.rays offset:0 atIndex:8];
   [encoder dispatchThreads:MTLSizeMake(active_count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+      threadsPerThreadgroup:threadgroups::bounded_linear(
+                                state.emit_pipeline.maxTotalThreadsPerThreadgroup
+                            )];
   [encoder endEncoding];
   timer.stop("GPU shadow encoding");
   timer.start_wall("GPU shadow wait");

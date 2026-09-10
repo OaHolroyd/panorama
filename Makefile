@@ -150,6 +150,7 @@ $(OBJ_DIR)/raytracing/%.air: $(RAYTRACE_SRC_DIR)/%.metal | $(OBJ_DIR)/raytracing
 	$(METAL) -c -o $@ $<
 
 $(RAYTRACE_METAL_AIR): $(wildcard $(RAYTRACE_SRC_DIR)/*.metalh)
+$(METAL_AIR): $(SHARED_SRC_DIR)/threadgroup_sizes.h
 
 $(OBJ_DIR)/rendering/%.air: $(RENDERING_SRC_DIR)/%.metal | $(OBJ_DIR)/rendering
 	@printf 'Compiling %s\n' '$@'

@@ -1,3 +1,4 @@
+#include "../shared/threadgroup_sizes.h"
 #include "gpu_camera_types.metalh"
 #include <metal_stdlib>
 using namespace metal;
@@ -107,7 +108,8 @@ kernel void camera_pixel_footprint(
     uint lane [[thread_index_in_threadgroup]],
     uint2 group [[threadgroup_position_in_grid]]
 ) {
-  threadgroup float values[1024];
+  threadgroup float
+      values[panorama::threadgroups::spatial_width * panorama::threadgroups::spatial_height];
   float value = INFINITY;
   const uint column = position.x, row = position.y;
   if (column < camera.width && row < camera.height) {
@@ -132,13 +134,19 @@ kernel void camera_pixel_footprint(
   }
   values[lane] = isfinite(value) && value > 0 ? value : INFINITY;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint stride = 512; stride != 0; stride >>= 1) {
+  for (uint stride =
+           panorama::threadgroups::spatial_width * panorama::threadgroups::spatial_height / 2;
+       stride != 0;
+       stride >>= 1) {
     if (lane < stride)
       values[lane] = min(values[lane], values[lane + stride]);
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
   if (lane == 0)
-    partial[group.y * ((camera.width + 31) / 32) + group.x] = values[0];
+    partial
+        [group.y * ((camera.width + panorama::threadgroups::spatial_width - 1) /
+                    panorama::threadgroups::spatial_width) +
+         group.x] = values[0];
 }
 
 kernel void reduce_camera_footprint(
@@ -148,13 +156,13 @@ kernel void reduce_camera_footprint(
     device float *angle [[buffer(3)]],
     uint lane [[thread_index_in_threadgroup]]
 ) {
-  threadgroup float values[256];
+  threadgroup float values[panorama::threadgroups::linear_width];
   float value = INFINITY;
-  for (uint i = lane; i < count; i += 256)
+  for (uint i = lane; i < count; i += panorama::threadgroups::linear_width)
     value = min(value, partial[i]);
   values[lane] = value;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint stride = 128; stride != 0; stride >>= 1) {
+  for (uint stride = panorama::threadgroups::linear_width / 2; stride != 0; stride >>= 1) {
     if (lane < stride)
       values[lane] = min(values[lane], values[lane + stride]);
     threadgroup_barrier(mem_flags::mem_threadgroup);

@@ -56,9 +56,9 @@ constexpr double kMinimumMovementSpeed = 1.0;
 constexpr double kMaximumRoamSpeed = 200.0;
 constexpr double kMaximumCruiseSpeed = 10'000.0;
 constexpr double kDefaultRoamSpeed = 20.0;
-// 50 m/s is 180 km/h: representative of a light training aircraft while
+// 150 m/s is 540 km/h: representative of an early jet fighter while
 // remaining manageable when Cruise first resumes.
-constexpr double kDefaultCruiseSpeed = 50.0;
+constexpr double kDefaultCruiseSpeed = 150.0;
 constexpr double kCruiseSteeringDeadZone = 0.06;
 constexpr double kCruiseSteeringExponent = 1.5;
 constexpr double kCruiseMaximumYawRate = 90.0 * kDegreesToRadians;
@@ -84,7 +84,7 @@ struct ViewerSettings {
   bool discard_quantized = false;
   bool trace_diagnostics = false;
   bool bilinear_collisions = false;
-  bool c1_normals = false;
+  bool c1_normals = true;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
   ImageSize image = {1600U, 900U};
   MetalFxActivation metalfx_activation = MetalFxActivation::Disabled;
@@ -5331,7 +5331,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   roamSpeedRow.alignment = NSLayoutAttributeCenterY;
   roamSpeedRow.spacing = 8.0;
 
-  _roamUpdateRateControl = [NSSlider sliderWithValue:10.0
+  _roamUpdateRateControl = [NSSlider sliderWithValue:30.0
                                             minValue:1.0
                                             maxValue:60.0
                                               target:self
@@ -5339,7 +5339,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   _roamUpdateRateControl.continuous = YES;
   _roamUpdateRateControl.toolTip =
       @"Maximum observer-position requests per second; rendering may complete more slowly";
-  _roamUpdateRateLabel = [NSTextField labelWithString:@"10 Hz"];
+  _roamUpdateRateLabel = [NSTextField labelWithString:@"30 Hz"];
   _roamUpdateRateLabel.alignment = NSTextAlignmentRight;
   [_roamUpdateRateLabel.widthAnchor constraintEqualToConstant:54.0].active = YES;
   NSStackView *roamUpdateRateSetting =

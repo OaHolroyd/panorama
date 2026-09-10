@@ -1,4 +1,5 @@
 #include "gpu_image_renderer.h"
+#include "threadgroup_sizes.h"
 
 #include "raytrace_config.h"
 #include "synthetic_render_options.h"
@@ -14,8 +15,6 @@
 
 namespace panorama {
 namespace {
-
-constexpr NSUInteger kPresentationSide = 16U;
 
 /// Print a Foundation error in the host application's diagnostic style.
 void print_error(NSString *context, NSError *error) {
@@ -70,7 +69,7 @@ void dispatch_image(
 ) {
   [encoder setComputePipelineState:pipeline];
   [encoder dispatchThreads:MTLSizeMake(image.width, image.height, 1U)
-      threadsPerThreadgroup:MTLSizeMake(kPresentationSide, kPresentationSide, 1U)];
+      threadsPerThreadgroup:threadgroups::spatial];
 }
 
 } // namespace

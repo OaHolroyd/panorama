@@ -1,4 +1,5 @@
 #include "visibility_mask.h"
+#include "threadgroup_sizes.h"
 #include "trace_diagnostics.h"
 
 #include <algorithm>
@@ -49,7 +50,7 @@ id<MTLBuffer> GpuVisibilityPointProjector::project(
   [encoder setBuffer:points offset:0 atIndex:2];
   [encoder setBytes:&image length:sizeof(image) atIndex:3];
   [encoder dispatchThreads:MTLSizeMake(image.width, image.height, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
+      threadsPerThreadgroup:threadgroups::spatial];
   [encoder endEncoding];
   if (diagnostics::enabled)
     ++diagnostics::minimap.refreshed;
@@ -133,11 +134,7 @@ CGImageRef VisibilityMask::render(
   [scatter setBytes:&p length:sizeof(p) atIndex:2];
   [scatter setBuffer:grid_ == nil ? occupancy_ : grid_ offset:0 atIndex:3];
   [scatter dispatchThreads:MTLSizeMake(p.count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(
-                                std::min<NSUInteger>(256, scatter_.maxTotalThreadsPerThreadgroup),
-                                1,
-                                1
-                            )];
+      threadsPerThreadgroup:threadgroups::bounded_linear(scatter_.maxTotalThreadsPerThreadgroup)];
   [scatter endEncoding];
   id<MTLComputeCommandEncoder> resolve = [command computeCommandEncoder];
   [resolve setComputePipelineState:resolve_];
@@ -145,7 +142,7 @@ CGImageRef VisibilityMask::render(
   [resolve setBuffer:pixels_ offset:0 atIndex:1];
   [resolve setBytes:&p length:sizeof(p) atIndex:2];
   [resolve dispatchThreads:MTLSizeMake(p.width, p.height, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
+      threadsPerThreadgroup:threadgroups::spatial];
   [resolve endEncoding];
   diagnostics::minimap.mark("mask-gpu");
   diagnostics::track_submission(diagnostics::minimap, command, nil);

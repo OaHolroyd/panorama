@@ -1,6 +1,7 @@
 #include "metal_bvh_trace.h"
 #include "metal_bvh_types.metalh"
 #include "terrain_tile_bvh.h"
+#include "threadgroup_sizes.h"
 #include "timer.h"
 #include "trace_activity.h"
 
@@ -32,11 +33,7 @@ void dispatch_linear(
     uint32_t count
 ) {
   [encoder dispatchThreads:MTLSizeMake(count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(
-                                std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup),
-                                1,
-                                1
-                            )];
+      threadsPerThreadgroup:threadgroups::bounded_linear(pipeline.maxTotalThreadsPerThreadgroup)];
 }
 
 void dispatch_image(
@@ -44,14 +41,11 @@ void dispatch_image(
     id<MTLComputePipelineState> pipeline,
     const RaytraceParameters &parameters
 ) {
-  // Metal ray-intersection pipelines on current Apple GPUs expose a 512-thread
-  // maximum. Keep 32 adjacent columns and use the largest supported spatial
-  // height (16 there); ordinary compute pipelines can use the full 32x32 tile.
-  const NSUInteger rows = std::min<NSUInteger>(32, pipeline.maxTotalThreadsPerThreadgroup / 32);
-  if (rows == 0)
-    throw std::runtime_error("Raytracing pipeline cannot dispatch a 32-pixel row");
+  const MTLSize group = threadgroups::bounded_bvh(pipeline.maxTotalThreadsPerThreadgroup);
+  if (group.height == 0)
+    throw std::runtime_error("Raytracing pipeline cannot dispatch a 32-pixel BVH row");
   [encoder dispatchThreads:MTLSizeMake(parameters.image_width, parameters.image_height, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, rows, 1)];
+      threadsPerThreadgroup:group];
 }
 enum class TraceMode { Batch, Scene, Shadows };
 using Pipeline = BvhPipeline;
