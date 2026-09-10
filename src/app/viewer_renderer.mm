@@ -6,6 +6,7 @@
 #include "inspection_coordinates.h"
 #include "metalfx_upscaler.h"
 #include "minimap.h"
+#include "peak_catalogue.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
 #include "solar_position.h"
@@ -217,6 +218,7 @@ void print_usage(const char *program) {
       "  --bvh-block-cells N  cells per BVH block axis (default: 4)\n"
       "  --bvh-cache-mib N    BVH cache and build budget (default: 2048)\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
+      "  --peak-gazetteer CSV  peak labels dataset (default: data/gazetteers/peaks.csv)\n"
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
       "  --max-distance M      horizontal range in metres (default: 600000)\n"
@@ -266,6 +268,8 @@ void print_usage(const char *program) {
     const std::string_view value = arguments::option_value(argc, argv, index, option);
     if (option == "--tile-dir") {
       settings.tile_dir = value;
+    } else if (option == "--peak-gazetteer") {
+      settings.peak_gazetteer = value;
     } else if (option == "--raytracer") {
       settings.raytracer = arguments::parse_raytracer(value);
     } else if (option == "--bvh-block-cells") {
@@ -497,6 +501,11 @@ public:
         }
     );
     settings_.observer = trace_->observer();
+    try {
+      peak_catalogue_ = PeakCatalogue::load(settings_.peak_gazetteer, trace_->crs());
+    } catch (const std::exception &error) {
+      std::fprintf(stderr, "Peak labels disabled: %s\n", error.what());
+    }
     observer_fallback_used_ = settings_.observer.easting != requestedObserver.easting ||
                               settings_.observer.northing != requestedObserver.northing;
     device_ = trace_->device();
@@ -609,6 +618,20 @@ public:
         trace_pending_ = true;
         presentation_pending_ = true;
       }
+    }
+    changed_.notify_one();
+  }
+
+  void request_peak_labels_enabled(bool enabled) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (peak_labels_enabled_ == enabled)
+        return;
+      peak_labels_enabled_ = enabled && peak_catalogue_.has_value();
+      ++peak_labels_generation_;
+      peak_labels_changed_ = true;
+      if (!peak_labels_enabled_)
+        presented_peak_labels_.reset();
     }
     changed_.notify_one();
   }
@@ -847,6 +870,7 @@ private:
         .map_point_request_token = presented_map_point_token_,
         .target_visibility = presented_target_visibility_,
         .target_visibility_sequence = presented_target_visibility_sequence_,
+        .peak_labels = presented_peak_labels_,
         .roam_result = presented_roam_result_,
         .roam_result_sequence = presented_roam_result_sequence_,
     };
@@ -918,6 +942,7 @@ public:
     return settings_.metalfx_preset;
   }
   [[nodiscard]] bool metalfx_supported() const override { return metalfx_->supported(); }
+  [[nodiscard]] bool peak_labels_available() const override { return peak_catalogue_.has_value(); }
   [[nodiscard]] bool initial_bilinear_collisions() const override {
     return settings_.bilinear_collisions;
   }
@@ -930,6 +955,100 @@ public:
   }
 
 private:
+  [[nodiscard]] PeakLabelFrame visible_peaks() const {
+    PeakLabelFrame result = {.revision = current_revision_,
+                             .output_image = current_output_image_,
+                             .peaks = {}};
+    if (!peak_catalogue_.has_value() || current_field_.image.width == 0U ||
+        current_field_.image.height == 0U)
+      return result;
+    const auto *distances = static_cast<const float *>(trace_->distances().contents);
+    if (distances == nullptr)
+      return result;
+    size_t within_range = 0U;
+    size_t onscreen = 0U;
+    size_t sampled = 0U;
+    double best_margin = -std::numeric_limits<double>::infinity();
+    for (const PeakRecord &peak : peak_catalogue_->peaks()) {
+      const double east = peak.easting - current_observer_.easting;
+      const double north = peak.northing - current_observer_.northing;
+      const double horizontal = std::hypot(east, north);
+      if (horizontal > settings_.max_distance)
+        continue;
+      ++within_range;
+      const LockedPointProjection projection = project_locked_point(
+          {peak.easting, peak.northing, peak.elevation},
+          current_observer_,
+          current_output_image_,
+          current_vertical_field_of_view_,
+          current_orientation_
+      );
+      if (!projection.onscreen)
+        continue;
+      ++onscreen;
+      const auto pixel = inspection_pixel(
+          {projection.pixel_x / current_output_image_.width,
+           projection.pixel_y / current_output_image_.height},
+          current_field_.image
+      );
+      if (!pixel)
+        continue;
+      ++sampled;
+      const double angular_pixel = current_vertical_field_of_view_ / current_field_.image.height;
+      // Gazetteer summits and the rendered DEM need not identify the same
+      // horizontal sample, especially once LOD coarsening is active. Preserve
+      // a modest metre-scale allowance when high output resolution makes the
+      // angular pixel footprint very small.
+      const double tolerance = std::max(100.0, 2.0 * horizontal * std::tan(angular_pixel));
+      float farthest = 0.0F;
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          const int x = static_cast<int>(pixel->x) + dx;
+          const int y = static_cast<int>(pixel->y) + dy;
+          if (x < 0 || y < 0 || x >= static_cast<int>(current_field_.image.width) ||
+              y >= static_cast<int>(current_field_.image.height))
+            continue;
+          const float distance = distances
+              [static_cast<size_t>(y) * current_field_.image.width + static_cast<size_t>(x)];
+          if (std::isfinite(distance))
+            farthest = std::max(farthest, distance);
+        }
+      }
+      best_margin = std::max(best_margin, static_cast<double>(farthest) + tolerance - horizontal);
+      if (farthest + tolerance < horizontal)
+        continue;
+      result.peaks.push_back(
+          {peak.id,
+           projection.pixel_x,
+           projection.pixel_y,
+           horizontal,
+           peak.prominence,
+           peak.elevation,
+           peak.name}
+      );
+    }
+    std::ranges::sort(result.peaks, [](const VisiblePeak &left, const VisiblePeak &right) {
+      if (left.prominence != right.prominence)
+        return left.prominence > right.prominence;
+      if (left.distance != right.distance)
+        return left.distance < right.distance;
+      return left.peak_id < right.peak_id;
+    });
+    if (result.peaks.size() > 100U)
+      result.peaks.resize(100U);
+    if (settings_.trace_diagnostics) {
+      std::printf(
+          "Peak labels: %zu/%zu visible, %zu onscreen, %zu within range, best margin %.1f m\n",
+          result.peaks.size(),
+          sampled,
+          onscreen,
+          within_range,
+          best_margin
+      );
+    }
+    return result;
+  }
+
   [[nodiscard]] bool target_is_occluded(
       TerrainPoint point,
       CameraOrientation orientation,
@@ -1040,6 +1159,9 @@ private:
       uint64_t revision = 0U;
       uint64_t minimap_generation = 0;
       bool minimap_enabled = false;
+      bool peak_labels_enabled = false;
+      bool peak_labels_requested = false;
+      uint64_t peak_labels_generation = 0U;
       bool trace_requested = false;
       bool presentation_requested = false;
       bool inspection_requested = false;
@@ -1070,7 +1192,7 @@ private:
         changed_.wait(lock, [this] {
           return stopping_ || trace_pending_ || presentation_pending_ || inspection_pending_ ||
                  observer_pending_ || map_point_pending_ || target_pending_ || roam_pending_ ||
-                 minimap_changed_;
+                 minimap_changed_ || peak_labels_changed_;
         });
         if (stopping_) {
           return;
@@ -1078,6 +1200,10 @@ private:
         minimap_enabled = minimap_enabled_;
         minimap_generation = minimap_generation_;
         minimap_changed_ = false;
+        peak_labels_enabled = peak_labels_enabled_;
+        peak_labels_generation = peak_labels_generation_;
+        peak_labels_requested = peak_labels_changed_ || (peak_labels_enabled && trace_pending_);
+        peak_labels_changed_ = false;
         if (!minimap_enabled)
           current_visibility_points_ = nil;
         orientation = requested_orientation_;
@@ -1170,6 +1296,7 @@ private:
               target_requested = true;
             }
           }
+          peak_labels_requested = peak_labels_requested || (peak_labels_enabled && trace_requested);
           GpuTerrainFrameTiming producer_timing;
           if (trace_requested) {
             MetalFxResolution metalfx_resolution =
@@ -1414,6 +1541,9 @@ private:
                 ),
             };
           }
+          std::optional<PeakLabelFrame> peak_labels;
+          if (peak_labels_enabled && peak_labels_requested)
+            peak_labels = visible_peaks();
 
           diagnostics::worker.mark("publish");
           std::lock_guard<std::mutex> lock(mutex_);
@@ -1459,6 +1589,8 @@ private:
             presented_target_visibility_ = target_visibility;
             presented_target_visibility_sequence_++;
           }
+          if (peak_labels_requested && peak_labels_generation == peak_labels_generation_)
+            presented_peak_labels_ = peak_labels_enabled_ ? std::move(peak_labels) : std::nullopt;
           if (roam_requested) {
             presented_roam_result_ = roam_result;
             presented_roam_result_sequence_++;
@@ -1529,6 +1661,7 @@ private:
   std::optional<TerrainPoint> presented_map_point_;
   ObserverLocation presented_observer_ = {};
   std::optional<TargetVisibility> presented_target_visibility_;
+  std::optional<PeakLabelFrame> presented_peak_labels_;
   std::optional<RoamResult> presented_roam_result_;
   id<MTLTexture> presented_texture_;
   id<MTLBuffer> current_visibility_points_;
@@ -1556,6 +1689,10 @@ private:
   std::string error_;
   bool minimap_enabled_ = false;
   bool minimap_changed_ = false;
+  bool peak_labels_enabled_ = false;
+  bool peak_labels_changed_ = false;
+  uint64_t peak_labels_generation_ = 0U;
+  std::optional<PeakCatalogue> peak_catalogue_;
   uint64_t minimap_generation_ = 0;
   bool trace_pending_ = false;
   bool presentation_pending_ = false;

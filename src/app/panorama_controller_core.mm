@@ -51,6 +51,7 @@ NSString *format_movement_speed(double metres_per_second) {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     const NSInteger savedActivation = [defaults integerForKey:@"panorama.metalfx.activation"];
     const NSInteger savedPreset = [defaults integerForKey:@"panorama.metalfx.preset"];
+    const NSInteger savedPeakLabels = [defaults integerForKey:@"panorama.peak-labels.mode"];
     _metalfxActivation = [defaults objectForKey:@"panorama.metalfx.activation"] != nil &&
                                  savedActivation >= 0 && savedActivation <= 2
                              ? static_cast<panorama::app::MetalFxActivation>(savedActivation)
@@ -59,6 +60,12 @@ NSString *format_movement_speed(double metres_per_second) {
                              savedPreset >= 0 && savedPreset <= 3
                          ? static_cast<panorama::app::MetalFxPreset>(savedPreset)
                          : renderer->initial_metalfx_preset();
+    _peakLabelMode = [defaults objectForKey:@"panorama.peak-labels.mode"] != nil &&
+                             savedPeakLabels >= 0 && savedPeakLabels <= 2
+                         ? static_cast<panorama::app::PeakLabelMode>(savedPeakLabels)
+                         : panorama::app::PeakLabelMode::Off;
+    if (!renderer->peak_labels_available())
+      _peakLabelMode = panorama::app::PeakLabelMode::Off;
     _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, false);
     _mapPointAction = panorama::app::MapPointAction::None;
     _pointerOwner = panorama::app::PointerOwner::None;
@@ -119,6 +126,8 @@ NSString *format_movement_speed(double metres_per_second) {
   _pointInspectionEnabled = true;
   _renderer->request_minimap_enabled(true);
   [_panoramaView setPointInspectionEnabled:true];
+  [_panoramaView setPeakLabelMode:_peakLabelMode];
+  _renderer->request_peak_labels_enabled(_peakLabelMode != panorama::app::PeakLabelMode::Off);
   [_panoramaView setMouseTurningEnabled:[self isMouseTurningEnabled] && !_viewerPaused];
   [_panoramaView setCruiseSteeringEnabled:[self isCruisingEnabled] && !_viewerPaused];
   [self updateCruiseHUD];

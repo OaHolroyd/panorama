@@ -1,4 +1,5 @@
 #include "panorama_view.h"
+#include "peak_label_overlay.h"
 
 #include <algorithm>
 #include <cmath>
@@ -268,6 +269,7 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   ViewerPauseIndicatorView *_pauseIndicator;
   NSTextField *_pauseIndicatorLabel;
   CruiseHUDView *_cruiseHUD;
+  PeakLabelOverlayView *_peakLabelOverlay;
   double _lockedPointPixelX;
   double _lockedPointPixelY;
   panorama::ImageSize _lockedPointImage;
@@ -276,6 +278,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   bool _pointInspectionEnabled;
   bool _mouseTurningEnabled;
   bool _cruiseSteeringEnabled;
+  bool _peakLabelsNearPointer;
+  std::optional<uint64_t> _peakLabelFrameRevision;
   bool _viewerPaused;
   bool _lockedPointIndicatorActive;
   bool _lockedPointOnscreen;
@@ -285,6 +289,44 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 @end
 
 @implementation PanoramaView
+
+- (void)ensurePeakLabelOverlay {
+  if (_peakLabelOverlay != nil)
+    return;
+  _peakLabelOverlay = [[PeakLabelOverlayView alloc] initWithFrame:NSZeroRect];
+  _peakLabelOverlay.translatesAutoresizingMaskIntoConstraints = NO;
+  [self addSubview:_peakLabelOverlay];
+  [NSLayoutConstraint activateConstraints:@[
+    [_peakLabelOverlay.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+    [_peakLabelOverlay.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+    [_peakLabelOverlay.topAnchor constraintEqualToAnchor:self.topAnchor],
+    [_peakLabelOverlay.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+  ]];
+}
+
+- (void)setPeakLabelMode:(panorama::app::PeakLabelMode)mode {
+  [self ensurePeakLabelOverlay];
+  _peakLabelsNearPointer = mode == panorama::app::PeakLabelMode::NearPointer;
+  if (mode == panorama::app::PeakLabelMode::Off) {
+    _peakLabelFrameRevision.reset();
+    const panorama::app::PeakLabelFrame empty = {};
+    [_peakLabelOverlay setPeakFrame:empty];
+  } else if (_peakLabelsNearPointer) {
+    [_peakLabelOverlay setPointerLocation:std::nullopt];
+  }
+  [_peakLabelOverlay setLabelMode:mode];
+  self.window.acceptsMouseMovedEvents = _peakLabelsNearPointer || _pointInspectionEnabled ||
+                                        _mouseTurningEnabled || _cruiseSteeringEnabled;
+  [self updateTrackingAreas];
+}
+
+- (void)setPeakLabelFrame:(const panorama::app::PeakLabelFrame &)frame {
+  if (_peakLabelFrameRevision == frame.revision)
+    return;
+  [self ensurePeakLabelOverlay];
+  _peakLabelFrameRevision = frame.revision;
+  [_peakLabelOverlay setPeakFrame:frame];
+}
 
 /// Position the marker using the current displayed view bounds. Keeping the
 /// projection in image coordinates lets ordinary AppKit layout handle window
@@ -405,7 +447,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
     [self removeTrackingArea:_inspectionTrackingArea];
     _inspectionTrackingArea = nil;
   }
-  if (!_pointInspectionEnabled && !_mouseTurningEnabled && !_cruiseSteeringEnabled) {
+  if (!_pointInspectionEnabled && !_mouseTurningEnabled && !_cruiseSteeringEnabled &&
+      !_peakLabelsNearPointer) {
     return;
   }
   _inspectionTrackingArea =
@@ -430,7 +473,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 
 - (void)setPointInspectionEnabled:(bool)enabled {
   _pointInspectionEnabled = enabled;
-  self.window.acceptsMouseMovedEvents = enabled || _mouseTurningEnabled || _cruiseSteeringEnabled;
+  self.window.acceptsMouseMovedEvents =
+      enabled || _mouseTurningEnabled || _cruiseSteeringEnabled || _peakLabelsNearPointer;
   [self updateTrackingAreas];
   [self.window invalidateCursorRectsForView:self];
 }
@@ -438,7 +482,7 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 - (void)setMouseTurningEnabled:(bool)enabled {
   _mouseTurningEnabled = enabled;
   self.window.acceptsMouseMovedEvents =
-      enabled || _pointInspectionEnabled || _cruiseSteeringEnabled;
+      enabled || _pointInspectionEnabled || _cruiseSteeringEnabled || _peakLabelsNearPointer;
   [self updateTrackingAreas];
 }
 
@@ -456,7 +500,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
     ]];
   }
   _cruiseHUD.hidden = !enabled;
-  self.window.acceptsMouseMovedEvents = enabled || _pointInspectionEnabled || _mouseTurningEnabled;
+  self.window.acceptsMouseMovedEvents =
+      enabled || _pointInspectionEnabled || _mouseTurningEnabled || _peakLabelsNearPointer;
   [self updateTrackingAreas];
   [self.window invalidateCursorRectsForView:self];
 }
@@ -535,7 +580,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-  if (!_pointInspectionEnabled && !_mouseTurningEnabled && !_cruiseSteeringEnabled) {
+  if (!_pointInspectionEnabled && !_mouseTurningEnabled && !_cruiseSteeringEnabled &&
+      !_peakLabelsNearPointer) {
     [super mouseMoved:event];
     return;
   }
@@ -543,18 +589,22 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   const NSPoint contentPoint = [content convertPoint:event.locationInWindow fromView:nil];
   NSView *hit = [content hitTest:contentPoint];
   if (hit != self && ![hit isDescendantOf:self]) {
+    if (_peakLabelsNearPointer)
+      [_peakLabelOverlay setPointerLocation:std::nullopt];
     [self.panoramaController pointerMovedOverOccludingView:hit];
     return;
   }
+  const NSPoint panoramaPoint = [self convertPoint:event.locationInWindow fromView:nil];
+  if (_peakLabelsNearPointer)
+    [_peakLabelOverlay setPointerLocation:panoramaPoint];
   [self.panoramaController pointerMovedOverPanorama];
   if (_cruiseSteeringEnabled && !_viewerPaused) {
-    const NSPoint location = [self convertPoint:event.locationInWindow fromView:nil];
     const NSRect bounds = self.bounds;
     if (bounds.size.width > 0.0 && bounds.size.height > 0.0) {
       const double x =
-          std::clamp((location.x - NSMidX(bounds)) / (bounds.size.width * 0.5), -1.0, 1.0);
+          std::clamp((panoramaPoint.x - NSMidX(bounds)) / (bounds.size.width * 0.5), -1.0, 1.0);
       const double y =
-          std::clamp((location.y - NSMidY(bounds)) / (bounds.size.height * 0.5), -1.0, 1.0);
+          std::clamp((panoramaPoint.y - NSMidY(bounds)) / (bounds.size.height * 0.5), -1.0, 1.0);
       [self.panoramaController setCruiseSteeringX:x y:y];
     }
   } else if (_mouseTurningEnabled && !_viewerPaused) {
@@ -594,6 +644,8 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   if (_pointInspectionEnabled || _cruiseSteeringEnabled) {
     [self.panoramaController panoramaPointerExited];
   }
+  if (_peakLabelsNearPointer)
+    [_peakLabelOverlay setPointerLocation:std::nullopt];
 }
 
 - (BOOL)acceptsFirstResponder {

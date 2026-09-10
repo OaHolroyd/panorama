@@ -3,6 +3,7 @@
 #include "crs.h"
 #include "inspection_coordinates.h"
 #include "metalfx_upscaler.h"
+#include "peak_catalogue.h"
 #include "ray_projection.h"
 #include "raytrace_config.h"
 #include "solar_position.h"
@@ -46,6 +47,7 @@ inline constexpr float kDefaultDiffusivity = 1.0F;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
+  std::filesystem::path peak_gazetteer = "data/gazetteers/peaks.csv";
   uint64_t tile_cache_size_bytes = 2048ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
@@ -151,6 +153,7 @@ struct PresentedFrame {
   uint64_t map_point_request_token;
   std::optional<TargetVisibility> target_visibility;
   uint64_t target_visibility_sequence;
+  std::optional<PeakLabelFrame> peak_labels;
   std::optional<RoamResult> roam_result;
   uint64_t roam_result_sequence;
 };
@@ -177,6 +180,7 @@ class ViewerRenderer {
 public:
   virtual ~ViewerRenderer() = default;
   virtual void request_minimap_enabled(bool enabled) = 0;
+  virtual void request_peak_labels_enabled(bool enabled) = 0;
   virtual void request_view(CameraOrientation, double, ImageSize) = 0;
   virtual void request_metalfx(MetalFxActivation, MetalFxPreset, bool) = 0;
   virtual void request_raytracer(Raytracer) = 0;
@@ -208,6 +212,7 @@ public:
   [[nodiscard]] virtual MetalFxActivation initial_metalfx_activation() const = 0;
   [[nodiscard]] virtual MetalFxPreset initial_metalfx_preset() const = 0;
   [[nodiscard]] virtual bool metalfx_supported() const = 0;
+  [[nodiscard]] virtual bool peak_labels_available() const = 0;
   [[nodiscard]] virtual bool initial_bilinear_collisions() const = 0;
   [[nodiscard]] virtual bool initial_c1_normals() const = 0;
   [[nodiscard]] virtual CameraOrientation initial_orientation() const = 0;

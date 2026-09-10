@@ -174,6 +174,9 @@
     }
   }
 
+  if (frame.peak_labels.has_value() && frame.peak_labels->revision == frame.revision)
+    [_panoramaView setPeakLabelFrame:*frame.peak_labels];
+
   bool acceptedRoamMove = false;
   if (frame.roam_result_sequence != _displayedRoamResultSequence) {
     _displayedRoamResultSequence = frame.roam_result_sequence;
