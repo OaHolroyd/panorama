@@ -11,11 +11,10 @@ namespace panorama::app {
 
 GpuVisibilityPointProjector::GpuVisibilityPointProjector(
     id<MTLDevice> device,
-    id<MTLCommandQueue> queue,
     id<MTLLibrary> library
 )
     : device_(device) {
-  if (device == nil || queue == nil || library == nil)
+  if (device == nil || library == nil)
     throw std::invalid_argument("Visibility projection requires valid Metal resources");
   id<MTLFunction> function = [library newFunctionWithName:@"visibility_collision_points"];
   NSError *error = nil;
@@ -80,7 +79,10 @@ void VisibilityMask::clear() {
   occupancy_ = nil;
   pixels_ = nil;
   grid_ = nil;
+  grid_region_ = {};
   projection_ = {};
+  grid_width_ = 0;
+  grid_height_ = 0;
 }
 
 CGImageRef VisibilityMask::render(

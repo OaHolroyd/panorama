@@ -743,7 +743,11 @@ struct VisibilityMaskRequest {
 
 - (void)mapStyleChanged:(id)sender {
   (void)sender;
-  [_mapView removeOverlay:_tileOverlay];
+  if (_tileOverlay != nil) {
+    [_mapView removeOverlay:_tileOverlay];
+    _tileOverlay = nil;
+  }
+  _mapView.pointOfInterestFilter = nil;
   switch (_mapStyleControl.indexOfSelectedItem) {
   case 0:
     _mapView.preferredConfiguration =
@@ -765,7 +769,7 @@ struct VisibilityMaskRequest {
     _mapView.pointOfInterestFilter = [MKPointOfInterestFilter filterExcludingAllCategories];
 
     const size_t index = _mapStyleControl.indexOfSelectedItem - 3;
-    if (index > kTileOverlays.size()) {
+    if (index >= kTileOverlays.size()) {
       throw std::invalid_argument(
           std::format("Map style index '{}' not handled", _mapStyleControl.indexOfSelectedItem)
       );

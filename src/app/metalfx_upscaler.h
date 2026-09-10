@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 
 #include <cstdint>
+#include <memory>
 
 namespace panorama::app {
 
@@ -15,11 +16,11 @@ struct MetalFxSelection {
   MetalFxActivation activation = MetalFxActivation::Disabled;
   MetalFxPreset preset = MetalFxPreset::Balanced;
   bool interacting = false;
+  bool operator==(const MetalFxSelection &) const = default;
 };
 
 struct MetalFxResolution {
   ImageSize trace;
-  ImageSize output;
   bool enabled;
 };
 
@@ -45,7 +46,7 @@ public:
 
 private:
   struct State;
-  State *state_ = nullptr;
+  std::unique_ptr<State> state_;
 };
 
 } // namespace panorama::app

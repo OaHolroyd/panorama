@@ -726,7 +726,7 @@ public:
     );
     metalfx_ = std::make_unique<MetalFxUpscaler>(device_, MTLPixelFormatBGRA8Unorm);
     fullscreen_presentation_ = std::make_unique<FullscreenPresentation>(device_, library_);
-    visibility_ = std::make_unique<GpuVisibilityPointProjector>(device_, display_queue_, library_);
+    visibility_ = std::make_unique<GpuVisibilityPointProjector>(device_, library_);
     current_field_ = std::move(initial_field);
     current_output_image_ = settings_.image;
     current_observer_ = settings_.observer;
@@ -797,10 +797,10 @@ public:
   void request_metalfx(MetalFxActivation activation, MetalFxPreset preset, bool interacting) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (requested_metalfx_.activation == activation && requested_metalfx_.preset == preset &&
-          requested_metalfx_.interacting == interacting)
+      const MetalFxSelection requested = {activation, preset, interacting};
+      if (requested_metalfx_ == requested)
         return;
-      requested_metalfx_ = {activation, preset, interacting};
+      requested_metalfx_ = requested;
       requested_revision_++;
       trace_pending_ = true;
       presentation_pending_ = true;
@@ -812,6 +812,8 @@ public:
   void request_raytracer(Raytracer raytracer) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (requested_raytracer_ == raytracer)
+        return;
       requested_raytracer_ = raytracer;
       requested_revision_++;
       trace_pending_ = true;
@@ -844,6 +846,8 @@ public:
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (requested_lod_scale_ == lodScale)
+        return;
       requested_lod_scale_ = lodScale;
       requested_revision_++;
       lod_scale_pending_ = true;
@@ -853,12 +857,13 @@ public:
     changed_.notify_one();
   }
 
-  /// Rebuild the tracing pipelines with the selected collision and normal
-  /// interpolation modes. These are function-constant kernel options, so
-  /// changing them requires a new trace session rather than presentation only.
+  /// Switch among the precompiled collision and normal-interpolation pipelines.
+  /// Terrain residency remains valid, but the current view must be traced again.
   void request_collision_settings(bool bilinear, bool c1Normals) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (requested_bilinear_collisions_ == bilinear && requested_c1_normals_ == c1Normals)
+        return;
       requested_bilinear_collisions_ = bilinear;
       requested_c1_normals_ = c1Normals;
       requested_revision_++;
@@ -1186,7 +1191,6 @@ private:
       double vertical_field_of_view = 0.0;
       ImageSize image = {};
       MetalFxSelection metalfx_selection;
-      MetalFxResolution metalfx_resolution = {};
       TerrainPresentationSettings presentation = {};
       uint64_t revision = 0U;
       uint64_t minimap_generation = 0;
@@ -1322,13 +1326,13 @@ private:
             }
           }
           GpuTerrainFrameTiming producer_timing;
-          metalfx_resolution =
-              panorama::app::metalfx_resolution(image, metalfx_selection, metalfx_->supported());
           if (trace_requested) {
+            MetalFxResolution metalfx_resolution =
+                panorama::app::metalfx_resolution(image, metalfx_selection, metalfx_->supported());
             // Configure before creating the GPU request so failure traces at
             // native resolution rather than stretching a reduced ray image.
             if (metalfx_resolution.enabled && !metalfx_->configure(metalfx_resolution.trace, image))
-              metalfx_resolution = {image, image, false};
+              metalfx_resolution = {image, false};
             RayFieldRequest field = metalfx_ray_request(
                 make_view(image, orientation, vertical_field_of_view),
                 metalfx_resolution.trace
@@ -3663,7 +3667,8 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)requestMetalFxInteraction {
-  if (_metalfxActivation != panorama::app::MetalFxActivation::PanMoveOnly)
+  if (_metalfxActivation != panorama::app::MetalFxActivation::PanMoveOnly ||
+      _metalfxPreset == panorama::app::MetalFxPreset::Off || !_renderer->metalfx_supported())
     return;
   [_metalfxSettleTimer invalidate];
   _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, true);
@@ -6158,7 +6163,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return NO;
   }
   const panorama::ImageSize next_image = {*width, *height};
-  if (next_image.width != _image.width || next_image.height != _image.height) {
+  if (next_image != _image) {
     _image = next_image;
     _inspectionRequestToken = _renderer->request_inspection(std::nullopt);
     _renderer->request_view(_orientation, _verticalFieldOfView, _image);

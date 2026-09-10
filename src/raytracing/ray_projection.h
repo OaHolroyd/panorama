@@ -14,6 +14,7 @@ namespace panorama {
 struct ImageSize {
   uint32_t width;
   uint32_t height;
+  bool operator==(const ImageSize &) const = default;
 };
 
 /// Orientation of a camera optical axis in the projected terrain frame.

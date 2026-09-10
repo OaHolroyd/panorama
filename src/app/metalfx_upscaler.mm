@@ -33,13 +33,13 @@ MetalFxResolution metalfx_resolution(ImageSize output, MetalFxSelection selectio
       (selection.activation == MetalFxActivation::Always ||
        (selection.activation == MetalFxActivation::PanMoveOnly && selection.interacting));
   if (!enabled)
-    return {output, output, false};
+    return {output, false};
   const float scale = preset_scale(selection.preset);
   const auto dimension = [scale](uint32_t value) {
     return std::clamp<uint32_t>(uint32_t(std::lround(double(value) * scale)), 1U, value);
   };
   const ImageSize trace = {dimension(output.width), dimension(output.height)};
-  return {trace, output, trace.width != output.width || trace.height != output.height};
+  return {trace, trace != output};
 }
 
 RayFieldRequest metalfx_ray_request(const RayFieldRequest &output, ImageSize trace) {
@@ -75,37 +75,35 @@ const char *metalfx_preset_name(MetalFxPreset preset) {
 struct MetalFxUpscaler::State {
   id<MTLDevice> device;
   MTLPixelFormat format;
+  bool supported = false;
   id<MTLFXSpatialScaler> scaler;
   id<MTLTexture> output, spare;
-  ImageSize input = {}, dimensions = {};
+  ImageSize input = {}, output_dimensions = {};
   bool selected_spare = false;
   ImageSize failed_input = {}, failed_output = {};
 };
 
-MetalFxUpscaler::MetalFxUpscaler(id<MTLDevice> device, MTLPixelFormat format) {
-  auto state = std::make_unique<State>();
-  state->device = device;
-  state->format = format;
-  state_ = state.release();
-}
-MetalFxUpscaler::~MetalFxUpscaler() { delete state_; }
-
-bool MetalFxUpscaler::supported() const {
+MetalFxUpscaler::MetalFxUpscaler(id<MTLDevice> device, MTLPixelFormat format)
+    : state_(std::make_unique<State>()) {
+  state_->device = device;
+  state_->format = format;
   if (@available(macOS 13.0, *)) {
-    return state_->device != nil && [MTLFXSpatialScalerDescriptor supportsDevice:state_->device];
+    state_->supported = device != nil && [MTLFXSpatialScalerDescriptor supportsDevice:device];
   }
-  return false;
 }
+MetalFxUpscaler::~MetalFxUpscaler() = default;
+
+bool MetalFxUpscaler::supported() const { return state_->supported; }
 
 bool MetalFxUpscaler::configure(ImageSize input, ImageSize output) {
-  if (!supported() || (input.width == output.width && input.height == output.height))
+  if (input.width == 0 || input.height == 0 || output.width == 0 || output.height == 0 ||
+      input.width > output.width || input.height > output.height)
+    throw std::invalid_argument("MetalFX dimensions must describe a positive spatial upscale");
+  if (!supported() || input == output)
     return false;
-  if (state_->scaler != nil && state_->input.width == input.width &&
-      state_->input.height == input.height && state_->dimensions.width == output.width &&
-      state_->dimensions.height == output.height)
+  if (state_->scaler != nil && state_->input == input && state_->output_dimensions == output)
     return true;
-  if (state_->failed_input.width == input.width && state_->failed_input.height == input.height &&
-      state_->failed_output.width == output.width && state_->failed_output.height == output.height)
+  if (state_->failed_input == input && state_->failed_output == output)
     return false;
   // Remember a failed configuration until another configuration succeeds.
   state_->failed_input = input;
@@ -141,7 +139,7 @@ bool MetalFxUpscaler::configure(ImageSize input, ImageSize output) {
     state_->output = first;
     state_->spare = second;
     state_->input = input;
-    state_->dimensions = output;
+    state_->output_dimensions = output;
     state_->selected_spare = false;
     state_->failed_input = {};
     state_->failed_output = {};

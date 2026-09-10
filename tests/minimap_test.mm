@@ -267,7 +267,7 @@ int main() {
                                                         options:MTLResourceStorageModeShared];
       id<MTLBuffer> snapshot = [device newBufferWithLength:5 * sizeof(MaskPoint)
                                                    options:MTLResourceStorageModeShared];
-      panorama::app::GpuVisibilityPointProjector projector(device, queue, library);
+      panorama::app::GpuVisibilityPointProjector projector(device, library);
       id<MTLCommandBuffer> command = [queue commandBuffer];
       const uint32_t count = 5;
       id<MTLBuffer> privateSnapshot = projector.project(rayBuffer, distanceBuffer, {5, 1}, command);

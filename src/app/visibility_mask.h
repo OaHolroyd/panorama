@@ -14,11 +14,7 @@ namespace panorama::app {
 /// Fresh immutable snapshots allow the trace to reuse its own output buffers.
 class GpuVisibilityPointProjector {
 public:
-  GpuVisibilityPointProjector(
-      id<MTLDevice> device,
-      id<MTLCommandQueue> queue,
-      id<MTLLibrary> library
-  );
+  GpuVisibilityPointProjector(id<MTLDevice> device, id<MTLLibrary> library);
   [[nodiscard]] id<MTLBuffer> project(
       id<MTLBuffer> rays,
       id<MTLBuffer> distances,

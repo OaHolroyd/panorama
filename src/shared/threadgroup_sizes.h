@@ -6,7 +6,6 @@
 #include <metal_stdlib>
 #else
 #import <Metal/Metal.h>
-#include <cstdint>
 #endif
 
 namespace panorama::threadgroups {
@@ -22,6 +21,11 @@ enum : unsigned {
   spatial_height = 32U,
   spatial_depth = 1U,
 };
+
+static_assert((linear_width & (linear_width - 1U)) == 0U);
+static_assert((spatial_width * spatial_height & (spatial_width * spatial_height - 1U)) == 0U);
+static_assert(linear_height == 1U && linear_depth == 1U);
+static_assert(bvh_depth == 1U && spatial_depth == 1U);
 
 #ifndef __METAL_VERSION__
 inline constexpr MTLSize linear = {linear_width, linear_height, linear_depth};

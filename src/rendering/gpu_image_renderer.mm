@@ -100,8 +100,7 @@ struct GpuImageRenderer::State {
     if (pixel_count == 0U || pixel_count > std::numeric_limits<uint32_t>::max()) {
       throw std::invalid_argument("GPU image dimensions are invalid");
     }
-    if (output != nil && image.width == next_image.width && image.height == next_image.height &&
-        output.usage == output_texture_usage) {
+    if (output != nil && image == next_image && output.usage == output_texture_usage) {
       return;
     }
 
