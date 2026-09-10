@@ -247,7 +247,7 @@ void TileManager::State::load_custom_vertices(
     const uint32_t tile_count = static_cast<uint32_t>(wave_size);
     [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
     [encoder dispatchThreads:MTLSizeMake(vertex_value_count, tile_count, 1U)
-        threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+        threadsPerThreadgroup:MTLSizeMake(32U, 32U, 1U)];
     [encoder endEncoding];
 
     timer.start_wall("GPU vertex conversion");

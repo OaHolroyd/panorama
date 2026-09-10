@@ -49,8 +49,9 @@ kernel void select_terrain_tiles(
     device BvhRayState *states [[buffer(3)]],
     constant BvhParameters &params [[buffer(4)]],
     device const BvhTile *tiles [[buffer(5)]],
-    uint index [[thread_position_in_grid]]
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * params.trace.image_width + position.x;
   if (index >= params.trace.ray_count || states[index].done || states[index].source != 0xffffffffU)
     return;
   const auto selected = select_next_terrain_tile(

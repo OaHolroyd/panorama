@@ -6,8 +6,10 @@ using namespace metal::raytracing;
 
 kernel void initialize_bvh_continuations(
     device BvhRayState *states [[buffer(0)]],
-    uint index [[thread_position_in_grid]]
+    constant RaytraceParameters &params [[buffer(1)]],
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * params.image_width + position.x;
   states[index] = {0, 0, 0xffffffffU, 0};
 }
 
@@ -404,8 +406,9 @@ kernel void trace_terrain_scene(
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
     intersection_function_table<> missing_functions [[buffer(14)]],
     device atomic_uint *missing_count [[buffer(15)]],
-    uint index [[thread_position_in_grid]]
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * params.trace.image_width + position.x;
   if (index >= params.trace.ray_count)
     return;
   states[index] = {0, 0, 0xffffffffU, 0};
@@ -486,8 +489,9 @@ kernel void trace_scene_shadows(
     constant float4 &sun [[buffer(16)]],
     device uchar *visibility [[buffer(17)]],
     device atomic_uint *requested_sources [[buffer(18)]],
-    uint index [[thread_position_in_grid]]
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * params.trace.image_width + position.x;
   if (index >= params.trace.ray_count)
     return;
   visibility[index] = sun.w < 0 ? 0U : 1U;

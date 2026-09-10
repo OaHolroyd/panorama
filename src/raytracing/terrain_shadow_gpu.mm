@@ -35,7 +35,7 @@ void check_command(id<MTLCommandBuffer> command, const char *name) {
 
 } // namespace
 
-static_assert(sizeof(ShadowTraceParameters) == 16U * sizeof(uint32_t));
+static_assert(sizeof(ShadowTraceParameters) == 18U * sizeof(uint32_t));
 
 struct GpuTerrainShadowResources::State {
   // Pipelines reuse the primary trace's device, command queue, and library.
@@ -187,8 +187,12 @@ std::span<const DeferredRayWork> GpuTerrainShadowResources::initialise(
   [encoder setBuffer:state.deferred offset:0 atIndex:7];
   [encoder setBuffer:state.deferred_count offset:0 atIndex:8];
   [encoder setBuffer:catalogue_hash offset:0 atIndex:9];
-  [encoder dispatchThreads:MTLSizeMake(state.capacity, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  [encoder dispatchThreads:MTLSizeMake(
+                               parameters.trace.image_width,
+                               parameters.trace.image_height,
+                               1
+                           )
+      threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
   [encoder endEncoding];
   timer.stop("GPU shadow encoding");
   timer.start_wall("GPU shadow wait");

@@ -54,8 +54,9 @@ kernel void generate_camera_rays(
     constant Camera &camera [[buffer(0)]],
     device CameraRay *rays [[buffer(1)]],
     device atomic_uint *invalid [[buffer(2)]],
-    uint index [[thread_position_in_grid]]
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * camera.width + position.x;
   if (index >= camera.width * camera.height)
     return;
   const float2 pixel(float(index % camera.width) + 0.5F, float(index / camera.width) + 0.5F);
@@ -102,14 +103,14 @@ static float adjacent_chord(float x, float y, float step) {
 kernel void camera_pixel_footprint(
     constant Camera &camera [[buffer(0)]],
     device float *partial [[buffer(1)]],
-    uint index [[thread_position_in_grid]],
+    uint2 position [[thread_position_in_grid]],
     uint lane [[thread_index_in_threadgroup]],
-    uint group [[threadgroup_position_in_grid]]
+    uint2 group [[threadgroup_position_in_grid]]
 ) {
-  threadgroup float values[256];
+  threadgroup float values[1024];
   float value = INFINITY;
-  const uint column = index % camera.width, row = index / camera.width;
-  if (row < camera.height) {
+  const uint column = position.x, row = position.y;
+  if (column < camera.width && row < camera.height) {
     if (camera.angular) {
       value = min(abs(camera.azimuth_step), abs(camera.elevation_step));
     } else if (distorted(camera)) {
@@ -131,13 +132,13 @@ kernel void camera_pixel_footprint(
   }
   values[lane] = isfinite(value) && value > 0 ? value : INFINITY;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint stride = 128; stride != 0; stride >>= 1) {
+  for (uint stride = 512; stride != 0; stride >>= 1) {
     if (lane < stride)
       values[lane] = min(values[lane], values[lane + stride]);
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
   if (lane == 0)
-    partial[group] = values[0];
+    partial[group.y * ((camera.width + 31) / 32) + group.x] = values[0];
 }
 
 kernel void reduce_camera_footprint(

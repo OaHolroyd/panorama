@@ -62,8 +62,9 @@ kernel void visibility_mask_resolve(
     device atomic_uint *occupancy [[buffer(0)]],
     device uchar4 *pixels [[buffer(1)]],
     constant VisibilityMaskParameters &map [[buffer(2)]],
-    uint index [[thread_position_in_grid]]
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * map.width + position.x;
   if (index >= map.width * map.height)
     return;
   // Premultiplied RGBA: duplicate hits never accumulate opacity.

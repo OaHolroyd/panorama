@@ -524,8 +524,9 @@ kernel void initialise_shadow_rays(
     device DeferredRayWork *deferred_items [[buffer(7)]],
     device atomic_uint *deferred_count [[buffer(8)]],
     device const CatalogueTileHashEntry *catalogue_hash [[buffer(9)]],
-    uint ray_index [[thread_position_in_grid]]
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint ray_index = position.y * params.trace.image_width + position.x;
   if (ray_index >= params.trace.ray_count) {
     return;
   }

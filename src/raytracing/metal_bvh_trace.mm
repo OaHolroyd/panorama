@@ -22,11 +22,11 @@ namespace {
 static_assert(sizeof(BvhTile) == 48U);
 static_assert(sizeof(BvhBlock) == 20U);
 static_assert(sizeof(BvhBounds) == sizeof(MTLAxisAlignedBoundingBox));
-static_assert(sizeof(BvhParameters) == 52U);
+static_assert(sizeof(BvhParameters) == 60U);
 static_assert(sizeof(BvhChunk) == 80U);
 static_assert(sizeof(BvhRayState) == 16U);
 
-void dispatch(
+void dispatch_linear(
     id<MTLComputeCommandEncoder> encoder,
     id<MTLComputePipelineState> pipeline,
     uint32_t count
@@ -37,6 +37,21 @@ void dispatch(
                                 1,
                                 1
                             )];
+}
+
+void dispatch_image(
+    id<MTLComputeCommandEncoder> encoder,
+    id<MTLComputePipelineState> pipeline,
+    const RaytraceParameters &parameters
+) {
+  // Metal ray-intersection pipelines on current Apple GPUs expose a 512-thread
+  // maximum. Keep 32 adjacent columns and use the largest supported spatial
+  // height (16 there); ordinary compute pipelines can use the full 32x32 tile.
+  const NSUInteger rows = std::min<NSUInteger>(32, pipeline.maxTotalThreadsPerThreadgroup / 32);
+  if (rows == 0)
+    throw std::runtime_error("Raytracing pipeline cannot dispatch a 32-pixel row");
+  [encoder dispatchThreads:MTLSizeMake(parameters.image_width, parameters.image_height, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, rows, 1)];
 }
 enum class TraceMode { Batch, Scene, Shadows };
 using Pipeline = BvhPipeline;
@@ -341,7 +356,7 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:entry->blocks offset:0 atIndex:2];
     [encoder setBuffer:entry->bounds offset:0 atIndex:3];
     [encoder setBuffer:parameters offset:0 atIndex:4];
-    dispatch(encoder, bounds_pipeline, count);
+    dispatch_linear(encoder, bounds_pipeline, count);
     [encoder endEncoding];
     stats.build_gpu_ms += complete(command);
     ++stats.submissions;
@@ -472,7 +487,10 @@ struct MetalBvhTrace::State {
       [encoder useResource:entry->bounds usage:MTLResourceUsageRead];
       [encoder useResource:entry->acceleration usage:MTLResourceUsageRead];
     }
-    dispatch(encoder, p.state, current.work_count);
+    if (scene_mode)
+      dispatch_image(encoder, p.state, current.trace);
+    else
+      dispatch_linear(encoder, p.state, current.work_count);
     [encoder endEncoding];
     if (!submit)
       return;
@@ -560,7 +578,7 @@ struct MetalBvhTrace::State {
     [encoder useResource:tiles usage:MTLResourceUsageRead];
     [encoder useResource:catalogue usage:MTLResourceUsageRead];
     [encoder useResource:selector.table usage:MTLResourceUsageRead];
-    dispatch(encoder, selector.state, current.trace.ray_count);
+    dispatch_image(encoder, selector.state, current.trace);
     [encoder endEncoding];
     const double gpu_ms = complete(command);
     stats.selection_gpu_ms += gpu_ms;
@@ -767,7 +785,8 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
         throw std::runtime_error("Could not encode BVH initialization");
       [encoder setComputePipelineState:state.initialize_pipeline];
       [encoder setBuffer:state.rays offset:0 atIndex:0];
-      dispatch(encoder, state.initialize_pipeline, parameters.ray_count);
+      [encoder setBytes:&parameters length:sizeof(parameters) atIndex:1];
+      dispatch_image(encoder, state.initialize_pipeline, parameters);
       [encoder endEncoding];
       state.stats.trace_gpu_ms += complete(command);
       ++state.stats.submissions;

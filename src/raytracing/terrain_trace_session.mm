@@ -45,7 +45,7 @@ void validate_configuration(const RaytraceConfig &config) {
     const TileGeometry &tile,
     const RaytraceConfig &config,
     const TerrainCatalogue &catalogue,
-    uint32_t ray_count
+    ImageSize image
 ) {
   const double curvature_lift =
       kCurvatureCoefficient * static_cast<double>(config.max_distance) * config.max_distance;
@@ -63,7 +63,9 @@ void validate_configuration(const RaytraceConfig &config) {
       static_cast<float>(kCurvatureCoefficient),
       catalogue.maximum_elevation().value_or(std::numeric_limits<float>::infinity()),
       tile.mipmap_level_count,
-      ray_count,
+      image.width * image.height,
+      image.width,
+      image.height,
       config.max_distance,
   };
 }
@@ -115,6 +117,8 @@ struct TerrainTraceSession::State {
     gpu->resize_rays(count);
     image = request.image;
     ray_count = parameters.ray_count = count;
+    parameters.image_width = request.image.width;
+    parameters.image_height = request.image.height;
     bvh_shadow_active = false;
     shadow_revision = std::numeric_limits<uint64_t>::max();
     camera->prepare(request, config.observer, config.lod_scale, *tiles);
@@ -143,7 +147,7 @@ struct TerrainTraceSession::State {
     // it can reuse the device selected by the primary tracing resources.
     tiles = std::make_unique<TileManager>(config);
     config.observer = tiles->catalogue().observer();
-    parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), ray_count);
+    parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), image);
 
     gpu = std::make_unique<GpuRaytraceResources>(
         ray_count,

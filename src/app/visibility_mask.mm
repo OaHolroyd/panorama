@@ -34,7 +34,6 @@ id<MTLBuffer> GpuVisibilityPointProjector::project(
   if (count64 == 0 || count64 > UINT32_MAX || command == nil || rays == nil || distances == nil ||
       rays.length < count64 * sizeof(RayDirection) || distances.length < count64 * sizeof(float))
     throw std::invalid_argument("Visibility projection requires valid trace buffers");
-  const uint32_t count = uint32_t(count64);
   id<MTLBuffer> points = [device_ newBufferWithLength:count64 * 2 * sizeof(float)
                                               options:MTLResourceStorageModePrivate];
   if (points == nil)
@@ -48,13 +47,9 @@ id<MTLBuffer> GpuVisibilityPointProjector::project(
   [encoder setBuffer:rays offset:0 atIndex:0];
   [encoder setBuffer:distances offset:0 atIndex:1];
   [encoder setBuffer:points offset:0 atIndex:2];
-  [encoder setBytes:&count length:sizeof(count) atIndex:3];
-  [encoder dispatchThreads:MTLSizeMake(count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(
-                                std::min<NSUInteger>(256, pipeline_.maxTotalThreadsPerThreadgroup),
-                                1,
-                                1
-                            )];
+  [encoder setBytes:&image length:sizeof(image) atIndex:3];
+  [encoder dispatchThreads:MTLSizeMake(image.width, image.height, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
   [encoder endEncoding];
   if (diagnostics::enabled)
     ++diagnostics::minimap.refreshed;
@@ -149,12 +144,8 @@ CGImageRef VisibilityMask::render(
   [resolve setBuffer:occupancy_ offset:0 atIndex:0];
   [resolve setBuffer:pixels_ offset:0 atIndex:1];
   [resolve setBytes:&p length:sizeof(p) atIndex:2];
-  [resolve dispatchThreads:MTLSizeMake(NSUInteger(p.width) * p.height, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(
-                                std::min<NSUInteger>(256, resolve_.maxTotalThreadsPerThreadgroup),
-                                1,
-                                1
-                            )];
+  [resolve dispatchThreads:MTLSizeMake(p.width, p.height, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
   [resolve endEncoding];
   diagnostics::minimap.mark("mask-gpu");
   diagnostics::track_submission(diagnostics::minimap, command, nil);

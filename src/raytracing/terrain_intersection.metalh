@@ -30,6 +30,9 @@ struct RaytraceParameters {
   uint num_levels;
   /// Number of output rays and collision records.
   uint ray_count;
+  /// Two-dimensional ray-image extent used by spatial GPU dispatches.
+  uint image_width;
+  uint image_height;
   /// Maximum permitted horizontal traversal distance.
   float max_distance;
 };

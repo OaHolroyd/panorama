@@ -39,9 +39,11 @@ kernel void visibility_collision_points(
     device const PresentationRayDirection *rays [[buffer(0)]],
     device const float *distances [[buffer(1)]],
     device float2 *points [[buffer(2)]],
-    constant uint &ray_count [[buffer(3)]],
-    uint index [[thread_position_in_grid]]
+    constant uint2 &image [[buffer(3)]],
+    uint2 position [[thread_position_in_grid]]
 ) {
+  const uint index = position.y * image.x + position.x;
+  const uint ray_count = image.x * image.y;
   if (index >= ray_count) {
     return;
   }
