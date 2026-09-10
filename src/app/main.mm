@@ -74,7 +74,7 @@ constexpr double kFallbackEyeHeight = 2.0;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
-  uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
+  uint64_t tile_cache_size_bytes = 2048ULL * kBytesPerMiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
   float lod_scale = 1.5F;
@@ -385,16 +385,15 @@ void print_usage(const char *program) {
   return settings;
 }
 
-[[nodiscard]] RayField
+[[nodiscard]] RayFieldRequest
 make_view(ImageSize image, CameraOrientation orientation, double vertical_field_of_view) {
-  return make_camera_ray_field(
+  return RayFieldRequest{
       image,
-      {
+      CameraProjection{
           orientation,
           CameraIntrinsics::from_vertical_field_of_view(image, vertical_field_of_view),
           NoDistortion{},
-      }
-  );
+      }};
 }
 
 /// Immutable values sampled from one completed raytrace revision.
@@ -556,6 +555,7 @@ struct PresentedFrame {
   ImageSize image;
   ImageSize output_image;
   bool metalfx_enabled;
+  MetalFxPreset metalfx_preset;
   CameraOrientation orientation;
   double vertical_field_of_view;
   uint64_t revision;
@@ -631,7 +631,7 @@ public:
         requested_image_(settings_.image), requested_presentation_(settings_.presentation),
         presented_vertical_field_of_view_(settings_.vertical_field_of_view),
         presented_image_(settings_.image) {
-    RayField initial_field =
+    RayFieldRequest initial_field =
         make_view(settings_.image, settings_.orientation, settings_.vertical_field_of_view);
     const auto traceConfig =
         [&](ObserverLocation observer, bool allowFallback, bool bilinear, bool c1Normals) {
@@ -728,6 +728,7 @@ public:
     fullscreen_presentation_ = std::make_unique<FullscreenPresentation>(device_, library_);
     visibility_ = std::make_unique<GpuVisibilityPointProjector>(device_, display_queue_, library_);
     current_field_ = std::move(initial_field);
+    current_output_image_ = settings_.image;
     current_observer_ = settings_.observer;
     current_orientation_ = settings_.orientation;
     current_vertical_field_of_view_ = settings_.vertical_field_of_view;
@@ -796,6 +797,9 @@ public:
   void request_metalfx(MetalFxActivation activation, MetalFxPreset preset, bool interacting) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (requested_metalfx_.activation == activation && requested_metalfx_.preset == preset &&
+          requested_metalfx_.interacting == interacting)
+        return;
       requested_metalfx_ = {activation, preset, interacting};
       requested_revision_++;
       trace_pending_ = true;
@@ -982,6 +986,7 @@ private:
         .image = presented_image_,
         .output_image = presented_output_image_,
         .metalfx_enabled = presented_metalfx_enabled_,
+        .metalfx_preset = presented_metalfx_preset_,
         .orientation = presented_orientation_,
         .vertical_field_of_view = presented_vertical_field_of_view_,
         .revision = presented_revision_,
@@ -1083,7 +1088,7 @@ private:
     const LockedPointProjection projection = project_locked_point(
         point,
         current_observer_,
-        current_field_.image,
+        current_output_image_,
         vertical_field_of_view,
         orientation
     );
@@ -1104,16 +1109,14 @@ private:
         current_field_.image.height == 0U) {
       throw std::runtime_error("Could not map target-visibility distance buffer");
     }
-    const uint32_t x = std::min(
-        current_field_.image.width - 1U,
-        static_cast<uint32_t>(std::llround(projection.pixel_x))
+    const auto pixel = inspection_pixel(
+        {projection.pixel_x / current_output_image_.width,
+         projection.pixel_y / current_output_image_.height},
+        current_field_.image
     );
-    const uint32_t y = std::min(
-        current_field_.image.height - 1U,
-        static_cast<uint32_t>(std::llround(projection.pixel_y))
-    );
-    const size_t index =
-        static_cast<size_t>(y) * static_cast<size_t>(current_field_.image.width) + x;
+    if (!pixel)
+      return false;
+    const size_t index = static_cast<size_t>(pixel->y) * current_field_.image.width + pixel->x;
     const float collision_distance = distances[index];
     if (!(collision_distance > 0.0F) || !std::isfinite(collision_distance)) {
       return false;
@@ -1132,7 +1135,7 @@ private:
     const auto *elevations = static_cast<const float *>(trace_->elevations().contents);
     const auto *gradients = static_cast<const uint32_t *>(trace_->surface_gradients().contents);
     if (distances == nullptr || elevations == nullptr || gradients == nullptr ||
-        index >= current_field_.rays.size()) {
+        index >= trace_->ray_directions().length / sizeof(RayDirection)) {
       throw std::runtime_error("Could not map point-inspection buffers");
     }
 
@@ -1153,7 +1156,8 @@ private:
       return result;
     }
 
-    const RayDirection &ray = current_field_.rays[index];
+    const RayDirection &ray =
+        static_cast<const RayDirection *>(trace_->ray_directions().contents)[index];
     const uint32_t packed_gradients = gradients[index];
     const float east_gradient =
         float_from_half_bits(static_cast<uint16_t>(packed_gradients & 0xffffU));
@@ -1272,10 +1276,20 @@ private:
       bool unpublished_frame = false;
       bool upscale_frame_started = false;
       diagnostics::Scope diagnostic_scope(diagnostics::worker);
+      trace_activity::Binding diagnostic_binding(
+          settings_.trace_diagnostics ? &diagnostics::terrain : nullptr
+      );
+      trace_activity::Scope terrain_activity("worker iteration");
       try {
         @autoreleasepool {
           diagnostics::worker.mark("prepare");
           const auto started = std::chrono::steady_clock::now();
+          auto bvh_before =
+              settings_.trace_diagnostics ? trace_->bvh_statistics() : MetalBvhStatistics{};
+          auto tiles_before =
+              settings_.trace_diagnostics ? trace_->tile_statistics() : TileManagerStatistics{};
+          const ObserverLocation previous_observer = current_observer_;
+          bool session_replaced = false;
           std::optional<RoamResult> roam_result;
           double next_ground_clearance = current_ground_clearance;
           if (roam_requested) {
@@ -1311,8 +1325,14 @@ private:
           metalfx_resolution =
               panorama::app::metalfx_resolution(image, metalfx_selection, metalfx_->supported());
           if (trace_requested) {
-            RayField field =
-                make_view(metalfx_resolution.trace, orientation, vertical_field_of_view);
+            // Configure before creating the GPU request so failure traces at
+            // native resolution rather than stretching a reduced ray image.
+            if (metalfx_resolution.enabled && !metalfx_->configure(metalfx_resolution.trace, image))
+              metalfx_resolution = {image, image, false};
+            RayFieldRequest field = metalfx_ray_request(
+                make_view(image, orientation, vertical_field_of_view),
+                metalfx_resolution.trace
+            );
             trace_->set_raytracer(raytracer);
             if (lod_scale_requested) {
               trace_->set_lod_scale(lod_scale);
@@ -1322,6 +1342,7 @@ private:
             }
             if (observer_requested) {
               if (!trace_->relocate_observer(observer)) {
+                trace_activity::Scope activity("terrain session replacement");
                 const RaytraceConfig config = {
                     settings_.tile_dir,
                     observer,
@@ -1349,13 +1370,15 @@ private:
                     display_queue_
                 );
                 trace_ = std::move(replacement);
+                session_replaced = true;
+                bvh_before = {};
+                tiles_before = {};
               }
               current_observer_ = observer;
             }
             current_field_ = std::move(field);
             current_output_image_ = image;
-            current_metalfx_enabled_ =
-                metalfx_resolution.enabled && metalfx_->configure(metalfx_resolution.trace, image);
+            current_metalfx_enabled_ = metalfx_resolution.enabled;
             presentation_->set_output_texture_usage(
                 current_metalfx_enabled_ ? metalfx_->input_texture_usage() : MTLTextureUsageUnknown
             );
@@ -1366,6 +1389,7 @@ private:
 
           if (presentation_requested) {
             diagnostics::worker.mark("render");
+            trace_activity::Scope activity("terrain frame");
             id<MTLBuffer> next_visibility_points = current_visibility_points_;
             // Select one unpublished output for the whole producer, including
             // any streaming repair pass. The callback can run more than once.
@@ -1406,6 +1430,7 @@ private:
           if (settings_.trace_diagnostics && presentation_requested) {
             diagnostics::worker.mark("log");
             const auto bvh = trace_->bvh_statistics();
+            const auto tiles = trace_->tile_statistics();
             std::printf(
                 "Frame %llu: wall %.3f ms, GPU producer %.3f ms, %u producer submission(s), %s; "
                 "t=%.3f, BVH resident/budget %.1f/%.1f MiB, "
@@ -1424,7 +1449,89 @@ private:
                 static_cast<unsigned long long>(bvh.evictions),
                 static_cast<unsigned long long>(bvh.scene_builds)
             );
+            std::printf(
+                "Frame phases %llu: pre-render %.3f ms, prepare %.3f ms, primary repair %.3f ms, "
+                "shadow repair %.3f ms, producer wait %.3f ms; "
+                "observer=%.2f/%.2f/%.2f, moved=%.2f m, roam=%d, replaced=%d, "
+                "output=%ux%u, trace=%ux%u, MetalFX=%s, LOD=%.3f, shadows=%d, minimap=%d\n",
+                static_cast<unsigned long long>(revision),
+                milliseconds - producer_timing.wall_milliseconds,
+                producer_timing.preparation_milliseconds,
+                producer_timing.primary_repair_milliseconds,
+                producer_timing.shadow_repair_milliseconds,
+                producer_timing.producer_wait_milliseconds,
+                current_observer_.easting,
+                current_observer_.northing,
+                current_observer_.elevation,
+                std::hypot(
+                    current_observer_.easting - previous_observer.easting,
+                    current_observer_.northing - previous_observer.northing
+                ),
+                int(roam_requested),
+                int(session_replaced),
+                current_output_image_.width,
+                current_output_image_.height,
+                current_field_.image.width,
+                current_field_.image.height,
+                current_metalfx_enabled_ ? metalfx_preset_name(metalfx_selection.preset) : "Native",
+                double(lod_scale),
+                int(presentation.use_surface_normals && presentation.appearance.raytraced_shadows),
+                int(minimap_enabled)
+            );
+            const auto delta = [](uint64_t after, uint64_t before) {
+              return static_cast<unsigned long long>(after >= before ? after - before : after);
+            };
+            std::printf(
+                "Frame work %llu: BVH built/hit/evicted=%llu/%llu/%llu, "
+                "catalogue/instance/scene builds=%llu/%llu/%llu, "
+                "cached/scene tiles=%llu/%llu, scene %.1f MiB, "
+                "selection/detail passes=%llu/%llu, fallback ray attempts=%llu, "
+                "GPU build/selection/detail=%.3f/%.3f/%.3f ms, CPU grouping=%.3f ms; "
+                "atlas installed/evicted=%llu/%llu, I/O=%.3f MiB, resident=%u/%u\n",
+                static_cast<unsigned long long>(revision),
+                delta(bvh.builds, bvh_before.builds),
+                delta(bvh.cache_hits, bvh_before.cache_hits),
+                delta(bvh.evictions, bvh_before.evictions),
+                delta(bvh.catalogue_builds, bvh_before.catalogue_builds),
+                delta(bvh.instance_builds, bvh_before.instance_builds),
+                delta(bvh.scene_builds, bvh_before.scene_builds),
+                static_cast<unsigned long long>(bvh.cached_tiles),
+                static_cast<unsigned long long>(bvh.scene_tiles),
+                double(bvh.scene_bytes) / 1048576.0,
+                delta(bvh.selection_passes, bvh_before.selection_passes),
+                delta(bvh.trace_passes, bvh_before.trace_passes),
+                delta(bvh.scene_fallback_rays, bvh_before.scene_fallback_rays),
+                bvh.build_gpu_ms - bvh_before.build_gpu_ms,
+                bvh.selection_gpu_ms - bvh_before.selection_gpu_ms,
+                bvh.trace_gpu_ms - bvh_before.trace_gpu_ms,
+                bvh.grouping_cpu_ms - bvh_before.grouping_cpu_ms,
+                delta(tiles.installations, tiles_before.installations),
+                delta(tiles.evictions, tiles_before.evictions),
+                double(tiles.bytes_loaded_with_metal_io - tiles_before.bytes_loaded_with_metal_io) /
+                    1048576.0,
+                tiles.resident_tiles,
+                tiles.slot_capacity
+            );
+            std::printf(
+                "Frame shadows %llu: BVH caster builds=%llu, repair passes=%llu, "
+                "repair GPU=%.3f ms, capacity fallbacks=%llu\n",
+                static_cast<unsigned long long>(revision),
+                delta(bvh.shadow_tiles_built, bvh_before.shadow_tiles_built),
+                delta(bvh.shadow_passes, bvh_before.shadow_passes),
+                bvh.shadow_gpu_ms - bvh_before.shadow_gpu_ms,
+                delta(bvh.shadow_cache_fallbacks, bvh_before.shadow_cache_fallbacks)
+            );
             std::fflush(stdout);
+          }
+          if (settings_.trace_diagnostics && trace_requested) {
+            const auto camera = trace_->camera_statistics();
+            std::printf(
+                "Camera preparation: wall %.3f ms, GPU LOD %.3f ms, plans/footprints=%llu/%llu\n",
+                camera.preparation_wall_ms,
+                camera.preparation_gpu_ms,
+                static_cast<unsigned long long>(camera.plan_updates),
+                static_cast<unsigned long long>(camera.footprint_updates)
+            );
           }
           diagnostics::worker.mark("inspection");
           const bool publish_inspection =
@@ -1472,6 +1579,7 @@ private:
             presented_image_ = current_field_.image;
             presented_output_image_ = current_output_image_;
             presented_metalfx_enabled_ = current_metalfx_enabled_;
+            presented_metalfx_preset_ = metalfx_selection.preset;
             presented_orientation_ = orientation;
             presented_vertical_field_of_view_ = vertical_field_of_view;
             presented_revision_ = revision;
@@ -1540,7 +1648,7 @@ private:
   id<MTLCommandQueue> display_queue_;
   id<MTLLibrary> library_;
   std::unique_ptr<diagnostics::Monitor> diagnostics_;
-  RayField current_field_;
+  RayFieldRequest current_field_;
   ObserverLocation current_observer_ = {};
   CameraOrientation current_orientation_ = {};
   double current_vertical_field_of_view_ = 0.0;
@@ -1567,6 +1675,7 @@ private:
   ImageSize presented_output_image_ = {};
   bool current_metalfx_enabled_ = false;
   bool presented_metalfx_enabled_ = false;
+  MetalFxPreset presented_metalfx_preset_ = MetalFxPreset::Off;
   std::optional<PointInspection> presented_inspection_;
   std::optional<TerrainPoint> presented_map_point_;
   ObserverLocation presented_observer_ = {};
@@ -2439,7 +2548,7 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
     return NO;
   }
 
-  // AppKit view coordinates rise from the bottom-left, whereas RayField rows
+  // AppKit view coordinates rise from the bottom-left, whereas ray-image rows
   // use image coordinates from the top-left.
   const double normalised_x =
       std::clamp((location.x - NSMinX(bounds)) / bounds.size.width, 0.0, 1.0);
@@ -2997,6 +3106,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                              savedPreset >= 0 && savedPreset <= 3
                          ? static_cast<panorama::app::MetalFxPreset>(savedPreset)
                          : renderer->initial_metalfx_preset();
+    _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, false);
     _mapPointAction = panorama::app::MapPointAction::None;
     _pointerOwner = panorama::app::PointerOwner::None;
 
@@ -3037,6 +3147,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
 }
 
 - (void)dealloc {
+  [_metalfxSettleTimer invalidate];
   if (_pauseKeyMonitor != nil) {
     [NSEvent removeMonitor:_pauseKeyMonitor];
   }
@@ -3277,6 +3388,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     _orientation.roll = -_aircraftBank;
     [self updateCruiseHUD];
     if (attitudeChanged) {
+      [self requestMetalFxInteraction];
       _renderer->request_view(_orientation, _verticalFieldOfView, _image);
     }
   } else if (cruising && _cruiseSteeringActive) {
@@ -3336,6 +3448,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   // TODO: validate the complete movement segment rather than only its endpoint.
   // At very high Cruise speeds a single step could otherwise pass through a
   // narrow terrain ridge before the worker samples the destination elevation.
+  [self requestMetalFxInteraction];
   _roamRequestToken = _renderer->request_roam(_roamDesiredPosition, altitudeMode, height);
   if (cruising) {
     [self updateMovementStatus];
@@ -3555,21 +3668,30 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_metalfxSettleTimer invalidate];
   _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, true);
   __weak PanoramaController *weakSelf = self;
-  _metalfxSettleTimer = [NSTimer scheduledTimerWithTimeInterval:0.2
-                                                        repeats:NO
-                                                          block:^(NSTimer *timer) {
-                                                            PanoramaController *controller =
-                                                                weakSelf;
-                                                            if (controller != nil)
-                                                              [controller settleMetalFx:timer];
-                                                          }];
+  _metalfxSettleTimer = [NSTimer timerWithTimeInterval:0.2
+                                               repeats:NO
+                                                 block:^(NSTimer *timer) {
+                                                   PanoramaController *controller = weakSelf;
+                                                   if (controller != nil)
+                                                     [controller settleMetalFx:timer];
+                                                 }];
+  [NSRunLoop.mainRunLoop addTimer:_metalfxSettleTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)settleMetalFx:(NSTimer *)timer {
   if (timer != _metalfxSettleTimer)
     return;
   _metalfxSettleTimer = nil;
+  if (!_viewerPaused && !_cruiseRecovery && _window.isKeyWindow &&
+      ([self isCruisingEnabled] || ([self isRoamingEnabled] && [self hasPressedRoamKey] &&
+                                    _window.firstResponder == _panoramaView))) {
+    [self requestMetalFxInteraction];
+    return;
+  }
   _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, false);
+}
+
+- (void)persistMetalFxSettings {
   [NSUserDefaults.standardUserDefaults setInteger:static_cast<NSInteger>(_metalfxActivation)
                                            forKey:@"panorama.metalfx.activation"];
   [NSUserDefaults.standardUserDefaults setInteger:static_cast<NSInteger>(_metalfxPreset)
@@ -3585,6 +3707,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_metalfxSettleTimer invalidate];
   _metalfxSettleTimer = nil;
   _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, false);
+  [self persistMetalFxSettings];
   _metalfxStatusLabel.stringValue =
       _metalfxPreset == panorama::app::MetalFxPreset::Off ||
               _metalfxActivation == panorama::app::MetalFxActivation::Disabled
@@ -3655,6 +3778,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     return;
   }
   _verticalFieldOfView = next;
+  [self requestMetalFxInteraction];
   [self updateZoomControls];
   _renderer->request_view(_orientation, _verticalFieldOfView, _image);
   [self updateCruiseHUD];
@@ -4312,6 +4436,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   [_miniMapPanel clearInspectedPoint];
   [_panoramaView setTerrainPointIndicator:std::nullopt image:{} locked:true occluded:false];
   [self setPointInfoStatus:@"Moving observer…"];
+  [self requestMetalFxInteraction];
   _renderer->request_observer_at(point, _groundClearance);
 }
 
@@ -6087,7 +6212,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
       _lockedPointOccluded = frame.target_visibility->occluded;
       [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                   verticalFieldOfView:frame.vertical_field_of_view
-                                                image:frame.image];
+                                                image:frame.output_image];
     }
   }
 
@@ -6152,7 +6277,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
           [self updatePointInfo:std::nullopt];
           [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                       verticalFieldOfView:frame.vertical_field_of_view
-                                                    image:frame.image];
+                                                    image:frame.output_image];
         } else {
           NSBeep();
           [self setPointInfoStatus:@"No terrain coverage"];
@@ -6183,7 +6308,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
           [self updatePointInfo:point];
           [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                       verticalFieldOfView:frame.vertical_field_of_view
-                                                    image:frame.image];
+                                                    image:frame.output_image];
         } else if (action == panorama::app::MapPointAction::MoveObserver) {
           if (coordinateMove) {
             [self updateCoordinateInputValidation];
@@ -6221,7 +6346,7 @@ static NSView *makeOverlayPanel(NSView *contentView) {
         [self requestTargetVisibilityForPoint:target];
         [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                     verticalFieldOfView:frame.vertical_field_of_view
-                                                  image:frame.image];
+                                                  image:frame.output_image];
         // The label now owns the immutable sampled values. Stop the renderer
         // resampling this screen pixel as subsequent camera views complete.
         _renderer->request_inspection(std::nullopt);
@@ -6279,10 +6404,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                 revision:frame.revision];
     [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                 verticalFieldOfView:frame.vertical_field_of_view
-                                              image:frame.image];
+                                              image:frame.output_image];
     [_miniMapPanel setCameraOrientation:frame.orientation
                     verticalFieldOfView:frame.vertical_field_of_view
-                                  image:frame.image];
+                                  image:frame.output_image];
     [_miniMapPanel setVisibilityPoints:frame.visibility_points image:frame.image];
     [self updateMiniMapTelemetry];
     if (_metalfxStatusLabel != nil) {
@@ -6293,8 +6418,9 @@ static NSView *makeOverlayPanel(NSView *contentView) {
                                            frame.image.height,
                                            frame.output_image.width,
                                            frame.output_image.height,
-                                           panorama::app::metalfx_preset_name(_metalfxPreset)]
-              : @"Native resolution";
+                                           panorama::app::metalfx_preset_name(frame.metalfx_preset)]
+              : (_renderer->metalfx_supported() ? @"Native resolution"
+                                                : @"MetalFX unavailable on this GPU · Native");
     }
     _window.title = [NSString
         stringWithFormat:@"panorama-app — heading %.1f°, pitch %.1f° — %.1f ms (%.1f fps)",

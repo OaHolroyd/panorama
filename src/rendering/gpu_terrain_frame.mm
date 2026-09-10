@@ -1,18 +1,27 @@
 #include "gpu_terrain_frame.h"
 #include "timer.h"
+#include "trace_activity.h"
 #include <chrono>
 #include <stdexcept>
 
 namespace panorama {
 GpuTerrainFrameTiming render_terrain_frame(
     TerrainTraceSession &trace,
-    const RayField *field,
+    const RayFieldRequest *field,
     GpuImageRenderer &image,
     const TerrainPresentationSettings &settings,
     const std::function<void(id<MTLCommandBuffer>)> &encode_dependent
 ) {
   const auto started = std::chrono::steady_clock::now();
   GpuTerrainFrameTiming timing;
+  const auto repair = [&] {
+    trace_activity::Scope activity("primary repair", &timing.primary_repair_milliseconds);
+    trace.trace_prepared();
+  };
+  const auto repair_shadows = [&] {
+    trace_activity::Scope activity("shadow repair", &timing.shadow_repair_milliseconds);
+    trace.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
+  };
   Timer timer("Terrain producer");
   const bool shadows = settings.use_surface_normals && settings.appearance.raytraced_shadows;
   const auto make_command = [&] {
@@ -23,12 +32,17 @@ GpuTerrainFrameTiming render_terrain_frame(
     return command;
   };
   auto command = make_command();
-  bool encoded_primary = field != nullptr && trace.encode_trace(command, *field);
+  bool encoded_primary;
+  {
+    trace_activity::Scope activity("primary preparation", &timing.preparation_milliseconds);
+    encoded_primary = field != nullptr && trace.encode_trace(command, *field);
+  }
   if (field != nullptr && !encoded_primary) {
-    trace.trace(*field);
+    repair();
     timing.streamed = true;
   }
   const auto finish = [&](id<MTLCommandBuffer> producer) {
+    trace_activity::Scope activity("producer wait", &timing.producer_wait_milliseconds);
     [producer commit];
     [producer waitUntilCompleted];
     if (producer.status != MTLCommandBufferStatusCompleted)
@@ -53,11 +67,11 @@ GpuTerrainFrameTiming render_terrain_frame(
     if (encoded_primary) {
       finish(command);
       if (!trace.complete_encoded_trace(command))
-        trace.trace(*field);
+        repair();
       encoded_primary = false;
       command = make_command();
     }
-    trace.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
+    repair_shadows();
     timing.streamed = true;
   }
   image.resize(trace.image());
@@ -106,9 +120,9 @@ GpuTerrainFrameTiming render_terrain_frame(
     if (!primary_complete || !shadows_complete) {
       timing.streamed = true;
       if (!primary_complete)
-        trace.trace(*field);
+        repair();
       if (shadows)
-        trace.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
+        repair_shadows();
       command = make_command();
       encode_image(command);
       finish(command);

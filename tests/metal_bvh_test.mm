@@ -1,6 +1,7 @@
 #include "arguments.h"
 #include "gpu_terrain_frame.h"
 #include "metal_tile.h"
+#include "metalfx_upscaler.h"
 #include "terrain_manifest.h"
 #include "terrain_trace_session.h"
 #include "timer.h"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <bit>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +22,11 @@
 using namespace panorama;
 
 namespace {
+size_t pixel_count(ImageSize image) { return size_t(image.width) * image.height; }
+RayFieldRequest angular_field(ImageSize image, AngularProjection projection) {
+  return {image, projection};
+}
+RayFieldRequest camera_field(ImageSize image, Projection projection) { return {image, projection}; }
 void require(bool condition, const char *message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -51,7 +58,7 @@ void benchmark(int argc, const char *argv[]) {
   const bool debugging = argc <= 9 || std::stoi(argv[9]) != 0;
   const auto intrinsics =
       CameraIntrinsics::from_vertical_field_of_view(image, 70.0 * std::numbers::pi / 180.0);
-  auto field = make_camera_ray_field(image, {{0, 0, 0}, intrinsics, NoDistortion{}});
+  auto field = camera_field(image, CameraProjection{{0, 0, 0}, intrinsics, NoDistortion{}});
   TerrainTraceSession session(config, field, {true, true, debugging});
   std::printf(
       "Device: %s; range %.0f m, LOD %.2f, debug %d\n",
@@ -63,9 +70,9 @@ void benchmark(int argc, const char *argv[]) {
   for (uint32_t frame = 0; frame < 6; ++frame) {
     @autoreleasepool {
       if (frame == 3)
-        field = make_camera_ray_field(
+        field = camera_field(
             image,
-            {{std::numbers::pi / 180.0, 0, 0}, intrinsics, NoDistortion{}}
+            CameraProjection{{std::numbers::pi / 180.0, 0, 0}, intrinsics, NoDistortion{}}
         );
       if (frame == 5) {
         config.observer.easting += 1.0;
@@ -82,6 +89,112 @@ void benchmark(int argc, const char *argv[]) {
       session.print_trace_statistics();
     }
   }
+}
+
+// Includes GPU projection/LOD preparation and the complete producer.
+void benchmark_camera(int argc, const char *argv[]) {
+  if (argc != 4)
+    throw std::invalid_argument(
+        "usage: metal-bvh-test --benchmark-camera TILE_DIR gpu|gpu-shadows"
+    );
+  const bool shadows = std::string_view(argv[3]) == "gpu-shadows";
+  require(shadows || std::string_view(argv[3]) == "gpu", "Choose gpu or gpu-shadows");
+  RaytraceConfig config{argv[2],
+                        {2623452.4, 1100502.2, 3415},
+                        21000,
+                        0,
+                        128ULL * 1048576,
+                        4,
+                        true,
+                        true,
+                        false};
+  config.lod_scale = 1.5F;
+  config.raytracer = Raytracer::MetalBvh;
+  config.bvh_cache_size_bytes = 2048ULL * 1048576;
+  if (shadows)
+    config.max_distance = 600000;
+  const ImageSize image{1600, 900};
+  RayFieldRequest camera{
+      image,
+      CameraProjection{
+          {0, 0, 0},
+          CameraIntrinsics::from_vertical_field_of_view(image, 70 * std::numbers::pi / 180),
+          NoDistortion{}}};
+  auto session = std::make_unique<TerrainTraceSession>(
+      config,
+      camera,
+      GpuTraceOutputRequirements{true, true, true}
+  );
+  GpuImageRenderer renderer(
+      session->device(),
+      session->command_queue(),
+      session->library(),
+      image,
+      {false, false, false, true, true, true}
+  );
+  TerrainPresentationSettings settings{};
+  settings.appearance.raytraced_shadows = shadows;
+  settings.appearance.sun_azimuth = 2.1;
+  settings.appearance.sun_elevation = 0.35;
+  settings.colour_range = {0, 21000};
+  std::vector<double> warm;
+  for (uint32_t frame = 0; frame < 18; ++frame) {
+    @autoreleasepool {
+      // Warm pans, followed by movement and zoom to exercise plan invalidation.
+      std::get<CameraProjection>(camera.projection).orientation.heading = 0.001 * frame;
+      if (frame == 14) {
+        config.observer.easting += 1;
+        require(session->relocate_observer(config.observer), "Benchmark relocation failed");
+      }
+      if (frame == 16)
+        std::get<CameraProjection>(camera.projection).intrinsics =
+            CameraIntrinsics::from_vertical_field_of_view(image, 1.1);
+      const auto started = std::chrono::steady_clock::now();
+      const auto before = session->bvh_statistics();
+      const auto io_before = session->tile_statistics().bytes_loaded_with_metal_io;
+      const auto timing = render_terrain_frame(*session, &camera, renderer, settings);
+      const double wall =
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+              .count();
+      const auto preparation = session->camera_statistics();
+      if (shadows) {
+        const auto after = session->bvh_statistics();
+        std::printf(
+            "Shadow frame %u: repair %.3f ms, caster builds=%llu, repair passes=%llu, "
+            "capacity fallbacks=%llu, terrain I/O %.3f MiB\n",
+            frame,
+            timing.shadow_repair_milliseconds,
+            static_cast<unsigned long long>(after.shadow_tiles_built - before.shadow_tiles_built),
+            static_cast<unsigned long long>(after.shadow_passes - before.shadow_passes),
+            static_cast<unsigned long long>(
+                after.shadow_cache_fallbacks - before.shadow_cache_fallbacks
+            ),
+            double(session->tile_statistics().bytes_loaded_with_metal_io - io_before) / 1048576.0
+        );
+      }
+      std::printf(
+          "Camera benchmark %s frame=%u: total %.3f ms, "
+          "GPU plan wall/device %.3f/%.3f ms, producer %.3f ms, streamed=%d\n",
+          shadows ? "gpu-shadows" : "gpu",
+          frame,
+          wall,
+          preparation.preparation_wall_ms,
+          preparation.preparation_gpu_ms,
+          timing.gpu_milliseconds,
+          timing.streamed
+      );
+      if (frame >= 2 && frame < 14)
+        warm.push_back(wall);
+    }
+  }
+  std::sort(warm.begin(), warm.end());
+  std::printf(
+      "Camera benchmark %s warm pan median %.3f ms, p95 %.3f ms (%zu samples)\n",
+      shadows ? "gpu-shadows" : "gpu",
+      0.5 * (warm[5] + warm[6]),
+      warm.back(),
+      warm.size()
+  );
 }
 
 void write_fixture(const std::filesystem::path &directory, bool quantized, double spacing) {
@@ -175,12 +288,13 @@ void write_fixture(const std::filesystem::path &directory, bool quantized, doubl
 void compare(
     TerrainTraceSession &software,
     TerrainTraceSession &hardware,
-    const RayField &field,
+    const RayFieldRequest &field,
     float distance_tolerance = 0.01F,
     const MetalTileHeader *real_grid = nullptr
 ) {
   software.trace(field);
   hardware.trace(field);
+  const auto *directions = static_cast<const RayDirection *>(hardware.ray_directions().contents);
   const auto *expected = static_cast<const float *>(software.distances().contents);
   const auto *actual = static_cast<const float *>(hardware.distances().contents);
   const auto *expected_z = static_cast<const float *>(software.elevations().contents);
@@ -189,7 +303,7 @@ void compare(
   const auto *actual_n = static_cast<const uint32_t *>(hardware.surface_gradients().contents);
   size_t mismatches = 0, hits = 0;
   float maximum_error = 0.0F;
-  for (size_t i = 0; i < field.rays.size(); ++i) {
+  for (size_t i = 0; i < pixel_count(field.image); ++i) {
     if (expected[i] > 0)
       ++hits;
     const float delta = std::abs(expected[i] - actual[i]);
@@ -197,7 +311,7 @@ void compare(
     const float elevation_tolerance =
         real_grid == nullptr
             ? 0.02F
-            : 0.002F + distance_tolerance * (std::abs(field.rays[i].slope) +
+            : 0.002F + distance_tolerance * (std::abs(directions[i].slope) +
                                              2.0F * float(kCurvatureCoefficient) * expected[i]);
     const bool mismatch =
         (expected[i] > 0) != (actual[i] > 0) || delta > distance_tolerance ||
@@ -211,9 +325,9 @@ void compare(
             expected[i],
             actual[i],
             expected_z[i] - actual_z[i],
-            field.rays[i].x,
-            field.rays[i].y,
-            field.rays[i].slope
+            directions[i].x,
+            directions[i].y,
+            directions[i].slope
         );
       ++mismatches;
     }
@@ -226,13 +340,13 @@ void compare(
         const ObserverLocation observer = software.observer();
         const double edge_tolerance = std::max(0.05, 128.0 * FLT_EPSILON * expected[i]);
         const double x =
-            observer.easting + expected[i] * double(field.rays[i].x) - real_grid->lower_left_x;
+            observer.easting + expected[i] * double(directions[i].x) - real_grid->lower_left_x;
         const double y =
-            observer.northing + expected[i] * double(field.rays[i].y) - real_grid->lower_left_y;
+            observer.northing + expected[i] * double(directions[i].y) - real_grid->lower_left_y;
         const double actual_x =
-            observer.easting + actual[i] * double(field.rays[i].x) - real_grid->lower_left_x;
+            observer.easting + actual[i] * double(directions[i].x) - real_grid->lower_left_x;
         const double actual_y =
-            observer.northing + actual[i] * double(field.rays[i].y) - real_grid->lower_left_y;
+            observer.northing + actual[i] * double(directions[i].y) - real_grid->lower_left_y;
         on_patch_edge =
             std::abs(std::remainder(x, real_grid->cell_size)) <= edge_tolerance ||
             std::abs(std::remainder(y, real_grid->cell_size)) <= edge_tolerance ||
@@ -258,8 +372,8 @@ void compare(
                 gb,
                 expected[i],
                 actual[i],
-                expected[i] * field.rays[i].x,
-                expected[i] * field.rays[i].y
+                expected[i] * directions[i].x,
+                expected[i] * directions[i].y
             );
           ++mismatches;
         }
@@ -268,7 +382,7 @@ void compare(
   }
   std::printf(
       "Parity: %zu rays, %zu hits, max distance error %.7g m, %zu mismatches.\n",
-      field.rays.size(),
+      pixel_count(field.image),
       hits,
       maximum_error,
       mismatches
@@ -287,12 +401,7 @@ void check_tile_selection(const std::filesystem::path &directory, bool retain, d
                         retain,
                         true,
                         false};
-  auto field = make_angular_ray_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
-  for (uint32_t i = 0; i < 4; ++i) {
-    const float x = i == 0 ? 1.0F : i == 1 ? -1.0F : 0.0F;
-    const float y = i == 2 ? 1.0F : i == 3 ? -1.0F : 0.0F;
-    field.rays[i] = {x, y, x == 0 ? INFINITY : 1 / x, y == 0 ? INFINITY : 1 / y, -0.6F};
-  }
+  auto field = angular_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
   config.use_tile_bvh = false;
   TerrainTraceSession grid(config, field, {true, true, true});
   config.use_tile_bvh = true;
@@ -300,7 +409,7 @@ void check_tile_selection(const std::filesystem::path &directory, bool retain, d
   const float tolerance = spacing > 10 ? 0.25F : 0.01F;
   compare(grid, shared, field, tolerance);
   compare(grid, shared, field, tolerance);
-  field = make_angular_ray_field({97, 33}, {0.35, 6.6, -1.25, 0.05});
+  field = angular_field({97, 33}, {0.35, 6.6, -1.25, 0.05});
   grid.set_collision_options(false, true);
   shared.set_collision_options(false, true);
   compare(grid, shared, field, tolerance);
@@ -323,7 +432,7 @@ void check_tile_selection(const std::filesystem::path &directory, bool retain, d
       std::memcmp(
           grid.shadow_visibility().contents,
           shared.shadow_visibility().contents,
-          field.rays.size()
+          pixel_count(field.image)
       ) == 0,
       "Tile selector changed shadows"
   );
@@ -351,19 +460,7 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
                         retain,
                         true,
                         false};
-  auto field = make_angular_ray_field({129, 65}, {0.0, 2 * std::numbers::pi, -1.3, 0.1});
-  // Include exact cardinal/diagonal directions and steep, unnormalised slopes.
-  for (size_t i = 0; i < 8; ++i) {
-    const float x = i < 4 ? (i == 0   ? 1.0F
-                             : i == 1 ? -1.0F
-                                      : 0.0F)
-                          : (i & 1 ? -1.0F : 1.0F) * std::sqrt(0.5F);
-    const float y = i < 4 ? (i == 2   ? 1.0F
-                             : i == 3 ? -1.0F
-                                      : 0.0F)
-                          : (i & 2 ? -1.0F : 1.0F) * std::sqrt(0.5F);
-    field.rays[i] = {x, y, x == 0 ? INFINITY : 1.0F / x, y == 0 ? INFINITY : 1.0F / y, -2.0F};
-  }
+  auto field = angular_field({129, 65}, {0.0, 2 * std::numbers::pi, -1.3, 0.1});
   const GpuTraceOutputRequirements outputs{true, true, true};
   config.use_tile_bvh = false;
   TerrainTraceSession software(config, field, outputs);
@@ -387,7 +484,7 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
       "Warm scene did not reuse one GPU traversal"
   );
   // Same session, different camera and dimensions: residency must be declared again.
-  auto next = make_angular_ray_field({97, 33}, {0.35, 6.6, -1.25, 0.05});
+  auto next = angular_field({97, 33}, {0.35, 6.6, -1.25, 0.05});
   software.set_collision_options(false, true);
   hardware.set_collision_options(false, true);
   compare(software, hardware, next, spacing > 10 ? 0.25F : 0.01F);
@@ -432,14 +529,14 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
       std::memcmp(
           software.shadow_visibility().contents,
           hardware.shadow_visibility().contents,
-          next.rays.size()
+          pixel_count(next.image)
       ) == 0,
       "Shadow output changed"
   );
 }
 
 void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
-  auto field = make_angular_ray_field({33, 17}, {0.0, 6.3, -1.3, 0.1});
+  auto field = angular_field({33, 17}, {0.0, 6.3, -1.3, 0.1});
   RaytraceConfig
       config{directory, {2600045.0, 1199945.0, 1120.0}, 40.0F, 0U, 16384U, 2U, true, true, false};
   config.raytracer = Raytracer::MetalBvh;
@@ -450,7 +547,7 @@ void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
     trace.trace(field);
     const auto warm = trace.bvh_statistics();
     const auto *values = static_cast<const float *>(trace.distances().contents);
-    for (size_t i = 0; i < field.rays.size(); ++i) {
+    for (size_t i = 0; i < pixel_count(field.image); ++i) {
       require(
           std::isfinite(values[i]) && values[i] >= 0 && values[i] <= config.max_distance,
           "BVH escaped its finite distance interval"
@@ -512,8 +609,8 @@ void check_scene_misses(const std::filesystem::path &directory) {
       config{directory, {2600045.0, 1199945.0, 1120.0}, 480.0F, 0U, 16384U, 2U, true, true, false};
   // A steep ray warms only nearby terrain. A wider view then contains both
   // resolvable resident hits and rays that must load previously unseen tiles.
-  const auto narrow = make_angular_ray_field({1, 1}, {0.0, 0.01, -1.55, -1.54});
-  const auto wide = make_angular_ray_field({129, 65}, {0.0, 6.3, -1.3, 0.1});
+  const auto narrow = angular_field({1, 1}, {0.0, 0.01, -1.55, -1.54});
+  const auto wide = angular_field({129, 65}, {0.0, 6.3, -1.3, 0.1});
   config.use_tile_bvh = false;
   TerrainTraceSession software(config, narrow, {true, true, true});
   config.raytracer = Raytracer::MetalBvh;
@@ -525,7 +622,7 @@ void check_scene_misses(const std::filesystem::path &directory) {
   require(
       after.scene_passes == before.scene_passes + 1U &&
           after.scene_fallback_rays > before.scene_fallback_rays &&
-          after.scene_fallback_rays - before.scene_fallback_rays < wide.rays.size() &&
+          after.scene_fallback_rays - before.scene_fallback_rays < pixel_count(wide.image) &&
           after.builds > before.builds,
       "Partial scene did not stream only unresolved rays"
   );
@@ -542,13 +639,26 @@ void check_scene_misses(const std::filesystem::path &directory) {
   );
 }
 
-void check_session_replacement(const std::filesystem::path &directory, Raytracer backend) {
-  const auto field = make_angular_ray_field({97, 33}, {0, 6.3, -1.3, 0.1});
+void check_session_replacement(
+    const std::filesystem::path &directory,
+    Raytracer backend,
+    bool pinhole = false
+) {
+  const RayFieldRequest camera{
+      {97, 33},
+      CameraProjection{{0, -1.4, 0.13},
+                       CameraIntrinsics::from_vertical_field_of_view({97, 33}, 0.2),
+                       NoDistortion{}}};
+  const auto field = pinhole ? camera_field(camera.image, camera.projection)
+                             : angular_field({97, 33}, {0, 6.3, -1.3, 0.1});
   // One retained tile forces the same replacement path as leaving the viewer's catalogue.
   RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 1, 16384, 2, true, true, false};
   config.raytracer = backend;
   const GpuTraceOutputRequirements outputs{true, true, true};
-  auto session = std::make_unique<TerrainTraceSession>(config, field, outputs);
+  const auto make_session = [&](id<MTLCommandQueue> queue = nil) {
+    return std::make_unique<TerrainTraceSession>(config, field, outputs, queue);
+  };
+  auto session = make_session();
   const auto device = session->device();
   const auto queue = session->command_queue();
   const GpuPresentationRequirements products{false, false, false, true, true, true};
@@ -556,24 +666,25 @@ void check_session_replacement(const std::filesystem::path &directory, Raytracer
   TerrainPresentationSettings settings{};
   settings.colour_range = {0, 480};
   settings.appearance.colour_source = TerrainColourSource::Distance;
+  settings.appearance.ambient_light = 0.3F;
   settings.appearance.raytraced_shadows = true;
   settings.appearance.sun_azimuth = 2.1;
   settings.appearance.sun_elevation = 0.35;
   Timer timer("Session replacement");
-  (void)render_terrain_frame(*session, &field, image, settings);
+  (void)render_terrain_frame(*session, &field, image, settings, {});
 
   for (const ObserverLocation observer :
        {ObserverLocation{2599965, 1199975, 1120}, ObserverLocation{2600045, 1199945, 1120}}) {
     @autoreleasepool {
       require(!session->relocate_observer(observer), "Fixture did not leave the catalogue");
       config.observer = observer;
-      session = std::make_unique<TerrainTraceSession>(config, field, outputs, queue);
+      session = make_session(queue);
       require(
           session->command_queue() == queue && session->device() == device,
           "Session replacement changed the viewer's device or queue"
       );
       // Keep the original presentation renderer and queue alive across replacements.
-      (void)render_terrain_frame(*session, &field, image, settings);
+      (void)render_terrain_frame(*session, &field, image, settings, {});
       const auto rendered = image.readback(timer);
 
       auto reference_config = config;
@@ -595,9 +706,9 @@ void check_session_replacement(const std::filesystem::path &directory, Raytracer
       );
       require(
           std::any_of(
-              baseline.bytes.begin(),
-              baseline.bytes.end(),
-              [](uint8_t value) { return value != 0; }
+              static_cast<const float *>(reference.distances().contents),
+              static_cast<const float *>(reference.distances().contents) + pixel_count(field.image),
+              [](float value) { return value > 0; }
           ),
           "Replacement fixture did not render terrain"
       );
@@ -614,12 +725,233 @@ void check_session_replacement(const std::filesystem::path &directory, Raytracer
   );
 }
 
-void check_producer(const std::filesystem::path &directory, bool bilinear, bool partial = false) {
+RayFieldRequest camera_request(ImageSize image, bool tiny = false) {
+  return {image,
+          CameraProjection{{0.0, tiny ? -1.54 : -0.65, 0.13},
+                           CameraIntrinsics::from_vertical_field_of_view(image, 1.2),
+                           NoDistortion{}}};
+}
+
+void check_gpu_projection(const std::filesystem::path &directory) {
+  RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, true, false};
+  TileManager tiles(config);
+  GpuRaytraceResources resources(1U, tiles.sources(), true, true, false, {false, false, false});
+  GpuCamera camera(resources.device(), resources.command_queue(), resources.library(), tiles);
+  const auto generate = [&](const RayFieldRequest &request) {
+    resources.resize_rays(validate_camera_request(request));
+    camera.prepare(request, config.observer, 1.5F, tiles);
+    auto command = [resources.command_queue() commandBuffer];
+    camera.encode_rays(command, resources.ray_directions());
+    [command commit];
+    [command waitUntilCompleted];
+    require(command.status == MTLCommandBufferStatusCompleted, "GPU projection command failed");
+    camera.validate_completed_rays();
+    const auto *begin = static_cast<const RayDirection *>(resources.ray_directions().contents);
+    return std::vector<RayDirection>(begin, begin + pixel_count(request.image));
+  };
+  for (ImageSize image : {ImageSize{1, 1}, {1, 7}, {9, 1}, {129, 65}, {320, 180}}) {
+    for (double fov : {0.000001, 0.15, 1.2, 2.5}) {
+      CameraProjection p{{0, 0, 0},
+                         CameraIntrinsics::from_vertical_field_of_view(image, fov),
+                         NoDistortion{}};
+      RayFieldRequest request{image, p};
+      const auto rays = generate(request);
+      // Project GPU directions back into the image: this checks the geometric
+      // contract without maintaining a second ray-generation implementation.
+      for (size_t i = 0; i < rays.size(); ++i) {
+        const auto &r = rays[i];
+        require(std::abs(std::hypot(r.x, r.y) - 1) < 1e-5, "GPU horizontal ray is not unit length");
+        require(
+            std::abs(
+                r.x / r.y * p.intrinsics.focal_x + p.intrinsics.principal_x -
+                (double(i % image.width) + .5)
+            ) < .001,
+            "GPU pinhole horizontal reprojection failed"
+        );
+        require(
+            std::abs(
+                -r.slope / r.y * p.intrinsics.focal_y + p.intrinsics.principal_y -
+                (double(i / image.width) + .5)
+            ) < .001,
+            "GPU pinhole vertical reprojection failed"
+        );
+      }
+      const float angle = *static_cast<const float *>(camera.pixel_angle().contents);
+      require(std::isfinite(angle) && angle > 0, "GPU footprint is invalid");
+      if (rays.size() > 1 && fov >= .15) {
+        double minimum = INFINITY;
+        const auto measure = [&](const RayDirection &a, const RayDirection &b) {
+          const double al = std::hypot(1.0, a.slope), bl = std::hypot(1.0, b.slope);
+          minimum = std::min(
+              minimum,
+              std::hypot(
+                  std::hypot(a.x / al - b.x / bl, a.y / al - b.y / bl),
+                  a.slope / al - b.slope / bl
+              )
+          );
+        };
+        for (size_t i = 0; i < rays.size(); ++i) {
+          if (i % image.width + 1 < image.width)
+            measure(rays[i], rays[i + 1]);
+          if (i + image.width < rays.size())
+            measure(rays[i], rays[i + image.width]);
+        }
+        require(std::abs(angle / minimum - 1) < .001, "GPU footprint disagrees with adjacent rays");
+      }
+      for (float scale : {0.0F, 1.5F, 10.0F, 100.0F}) {
+        camera.prepare(request, config.observer, scale, tiles);
+        for (uint32_t i = 0; i < tiles.sources().size(); ++i) {
+          const double ratio = scale *
+                               tile_minimum_distance(
+                                   tiles.catalogue().grid(),
+                                   tiles.sources()[i].key,
+                                   config.observer
+                               ) *
+                               angle / tiles.origin_geometry().cell_size;
+          const uint32_t lod = tiles.lod_for_source(i), maximum = tiles.sources()[i].lod_count;
+          require(lod >= 1 && lod <= maximum, "GPU LOD out of bounds");
+          const double spacing = std::ldexp(1.0, int(lod - 1));
+          require(lod == 1 || spacing <= ratio * 1.000001, "GPU LOD exceeds pixel footprint");
+          require(lod == maximum || 2 * spacing >= ratio / 1.000001, "GPU LOD failed to coarsen");
+        }
+      }
+      camera.prepare(request, config.observer, 1.5F, tiles);
+      const auto before = camera.statistics();
+      std::get<CameraProjection>(request.projection).orientation = {.3, -.2, .1};
+      camera.prepare(request, config.observer, 1.5F, tiles);
+      require(
+          camera.statistics().plan_updates == before.plan_updates &&
+              camera.statistics().footprint_updates == before.footprint_updates,
+          "Rotation must reuse GPU footprint and LOD plan"
+      );
+    }
+  }
+  auto threshold = camera_request({129, 65});
+  camera.prepare(threshold, config.observer, 1, tiles);
+  const float footprint = *static_cast<const float *>(camera.pixel_angle().contents);
+  for (uint32_t i = 0; i < tiles.sources().size(); ++i) {
+    const double distance =
+        tile_minimum_distance(tiles.catalogue().grid(), tiles.sources()[i].key, config.observer);
+    if (distance == 0)
+      continue;
+    for (uint32_t level : {2U, 3U}) {
+      for (double factor : {.99999, 1.0, 1.00001}) {
+        const float scale = float(
+            std::ldexp(1.0, int(level - 1)) * factor * tiles.origin_geometry().cell_size /
+            (distance * footprint)
+        );
+        camera.prepare(threshold, config.observer, scale, tiles);
+        const uint32_t expected =
+            std::min(tiles.sources()[i].lod_count, factor < 1 ? level - 1 : level);
+        const uint32_t actual = tiles.lod_for_source(i);
+        require(
+            actual == expected || (factor == 1 && actual + 1 == expected),
+            "GPU LOD boundary changed"
+        );
+      }
+    }
+  }
+  auto axis = camera_field({1, 1}, CameraProjection{{0, 0, 0}, {1, 1, .5, .5}, NoDistortion{}});
+  auto ray = generate(axis).front();
+  require(
+      ray.x == 0 && ray.y == 1 && ray.slope == 0 && std::isinf(ray.inverse_x),
+      "Axis ray changed"
+  );
+  std::get<CameraProjection>(axis.projection).orientation = {std::numbers::pi / 2,
+                                                             std::numbers::pi / 4,
+                                                             0};
+  ray = generate(axis).front();
+  require(
+      std::abs(ray.x - 1) < 1e-6 && std::abs(ray.y) < 1e-6 && std::abs(ray.slope - 1) < 1e-6,
+      "Camera heading/pitch changed"
+  );
+  const auto angular = angular_field(
+      {4, 2},
+      {-std::numbers::pi / 4, 7 * std::numbers::pi / 4, -std::numbers::pi / 2, std::numbers::pi / 2}
+  );
+  const auto angular_rays = generate(angular);
+  const double x[] = {0, 1, 0, -1}, y[] = {1, 0, -1, 0};
+  for (size_t i = 0; i < angular_rays.size(); ++i) {
+    require(
+        std::abs(angular_rays[i].x - x[i % 4]) < 1e-6 &&
+            std::abs(angular_rays[i].y - y[i % 4]) < 1e-6 &&
+            std::abs(angular_rays[i].slope - (i < 4 ? -1 : 1)) < 1e-6,
+        "Angular pixel centres changed"
+    );
+  }
+  require(
+      std::abs(*static_cast<const float *>(camera.pixel_angle().contents) - std::numbers::pi / 2) <
+          1e-6,
+      "Angular LOD footprint changed"
+  );
+  const ImageSize image{129, 65};
+  const CameraIntrinsics intrinsics{90, 85, 60, 35};
+  const BrownConradyDistortion distortion{.08, -.015, .001, .002, -.003};
+  auto lens = camera_field(image, CameraProjection{{0, 0, 0}, intrinsics, distortion});
+  const auto lens_rays = generate(lens);
+  for (size_t i = 0; i < lens_rays.size(); ++i) {
+    const auto &r = lens_rays[i];
+    const double u = r.x / r.y, v = -r.slope / r.y, r2 = u * u + v * v;
+    // Independent forward calibration validates the GPU's inverse solver.
+    const double radial =
+        1 + r2 * (distortion.radial_1 + r2 * (distortion.radial_2 + r2 * distortion.radial_3));
+    const double px = (u * radial + 2 * distortion.tangential_1 * u * v +
+                       distortion.tangential_2 * (r2 + 2 * u * u)) *
+                          intrinsics.focal_x +
+                      intrinsics.principal_x;
+    const double py = (v * radial + distortion.tangential_1 * (r2 + 2 * v * v) +
+                       2 * distortion.tangential_2 * u * v) *
+                          intrinsics.focal_y +
+                      intrinsics.principal_y;
+    require(
+        std::abs(px - (double(i % image.width) + .5)) < .001 &&
+            std::abs(py - (double(i / image.width) + .5)) < .001,
+        "GPU inverse distortion reprojection failed"
+    );
+  }
+  for (bool invalid_lens : {false, true}) {
+    auto invalid = axis;
+    auto &p = std::get<CameraProjection>(invalid.projection);
+    p.orientation = {0, std::numbers::pi / 2, 0};
+    if (invalid_lens) {
+      invalid = lens;
+      std::get<CameraProjection>(invalid.projection).distortion =
+          BrownConradyDistortion{-20, 0, 0, 0, 0};
+    }
+    bool rejected = false;
+    try {
+      (void)generate(invalid);
+    } catch (const std::runtime_error &) {
+      rejected = true;
+    }
+    require(rejected, "Invalid projection was not rejected");
+  }
+  for (ImageSize invalid : {ImageSize{0, 1}, {1, 0}, {0xffffffffU, 2}}) {
+    axis.image = invalid;
+    bool rejected = false;
+    try {
+      validate_camera_request(axis);
+    } catch (const std::invalid_argument &) {
+      rejected = true;
+    }
+    require(rejected, "Invalid image dimensions were accepted");
+  }
+}
+
+void check_producer(
+    const std::filesystem::path &directory,
+    bool bilinear,
+    bool partial = false,
+    bool pinhole = false
+) {
   RaytraceConfig
       config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
-  auto field = make_angular_ray_field({129, 65}, {0, 6.3, -1.3, 0.1});
+  auto field = angular_field({129, 65}, {0, 6.3, -1.3, 0.1});
   if (partial)
-    field = make_angular_ray_field({1, 1}, {0, 0.01, -1.55, -1.54});
+    field = angular_field({1, 1}, {0, 0.01, -1.55, -1.54});
+  auto camera = camera_request(field.image, partial);
+  if (pinhole)
+    field = camera_field(camera.image, camera.projection);
   TerrainTraceSession reference(config, field, {true, true, true});
   config.raytracer = Raytracer::MetalBvh;
   TerrainTraceSession trace(config, field, {true, true, true});
@@ -641,8 +973,13 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
   Timer timer("Producer test");
   for (uint32_t frame = 0; frame < (partial ? 3U : 14U); ++frame) {
     settings.appearance.raytraced_shadows = frame != 12 && !(partial && frame == 0);
+    // A pinhole view need not load off-screen shadow casters into the primary
+    // BVH cache. Exercise its guaranteed resident path with shadows off first;
+    // later frames verify exact shadow repair as well.
+    if (pinhole && frame < 7 && !partial)
+      settings.appearance.raytraced_shadows = false;
     if (partial && frame == 1)
-      field = make_angular_ray_field({129, 65}, {0, 6.3, -1.3, 0.1});
+      field = angular_field({129, 65}, {0, 6.3, -1.3, 0.1});
     settings.appearance.feature_outlines = frame == 2;
     settings.appearance.colour_source =
         frame == 3 ? TerrainColourSource::White : TerrainColourSource::Distance;
@@ -651,7 +988,7 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
                                                      : 0.35;
     const bool appearance_only = frame == 3 || frame == 12;
     if (frame == 7)
-      field = make_angular_ray_field({161, 97}, {0.2, 6.5, -1.3, 0.1});
+      field = angular_field({161, 97}, {0.2, 6.5, -1.3, 0.1});
     if (frame == 8) {
       const ObserverLocation moved{2599965, 1199975, 1120};
       require(
@@ -667,6 +1004,10 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
       trace.set_raytracer(Raytracer::Software);
     if (frame == 11)
       trace.set_raytracer(Raytracer::MetalBvh);
+    if (pinhole) {
+      camera = camera_request(field.image, partial && frame == 0);
+      field = camera_field(camera.image, camera.projection);
+    }
     if (!appearance_only)
       reference.trace(field);
     if (settings.appearance.raytraced_shadows)
@@ -685,7 +1026,14 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
         timer
     );
     const auto timing =
-        render_terrain_frame(trace, appearance_only ? nullptr : &field, actual, settings);
+        render_terrain_frame(trace, appearance_only ? nullptr : &field, actual, settings, {});
+    if (pinhole && frame > 0 && frame < 7 && !partial) {
+      require(trace.camera_statistics().plan_updates == 1, "Unchanged camera rebuilt GPU LOD plan");
+      require(
+          trace.camera_statistics().footprint_updates == 1,
+          "Unchanged camera rebuilt footprint"
+      );
+    }
     std::printf(
         "Producer bilinear=%d frame=%u: wall %.3f GPU %.3f submits %u streamed %d\n",
         bilinear,
@@ -702,7 +1050,7 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
           timing.streamed && timing.producer_submissions == 2U,
           "Partial resident producer did not repair missing terrain before presentation"
       );
-    else if (frame < 7)
+    else if (frame < 7 && !(pinhole && settings.appearance.raytraced_shadows))
       require(
           !timing.streamed && timing.producer_submissions == 1U,
           "Resident producer required intermediate submissions"
@@ -712,7 +1060,7 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
           std::memcmp(
               reference.shadow_visibility().contents,
               trace.shadow_visibility().contents,
-              field.rays.size()
+              pixel_count(field.image)
           ) == 0,
           "Producer shadow parity failed"
       );
@@ -768,8 +1116,275 @@ void check_producer(const std::filesystem::path &directory, bool bilinear, bool 
   require(rejected, "Primary update exposed stale resident shadows");
 }
 
+// Exercise the viewer's actual GPU ray/LOD -> complete terrain/shadows ->
+// colour -> MetalFX chain, including native/reduced transitions and repair.
+void check_metalfx_producer(const std::filesystem::path &directory) {
+  using namespace panorama::app;
+  RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, true, false};
+  auto output = camera_request({257, 129}, false);
+  TerrainTraceSession reference(config, output, {true, true, true});
+  config.raytracer = Raytracer::MetalBvh;
+  TerrainTraceSession trace(config, output, {true, true, true});
+  MetalFxUpscaler scaler(trace.device(), MTLPixelFormatBGRA8Unorm);
+  MetalFxUpscaler expected_scaler(reference.device(), MTLPixelFormatBGRA8Unorm);
+  if (!scaler.supported()) {
+    std::puts("MetalFX terrain producer skipped: unsupported device");
+    return;
+  }
+  const GpuPresentationRequirements products{false, false, false, true, true, false};
+  GpuImageRenderer actual(
+      trace.device(),
+      trace.command_queue(),
+      trace.library(),
+      output.image,
+      products,
+      MTLPixelFormatBGRA8Unorm
+  );
+  GpuImageRenderer expected(
+      reference.device(),
+      reference.command_queue(),
+      reference.library(),
+      output.image,
+      products,
+      MTLPixelFormatBGRA8Unorm
+  );
+  const auto read = [&](id<MTLTexture> texture) {
+    const NSUInteger row = (texture.width * 4 + 255) & ~NSUInteger(255);
+    id<MTLBuffer> buffer = [trace.device() newBufferWithLength:row * texture.height
+                                                       options:MTLResourceStorageModeShared];
+    auto command = [trace.command_queue() commandBuffer];
+    auto blit = [command blitCommandEncoder];
+    [blit copyFromTexture:texture
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(texture.width, texture.height, 1)
+                        toBuffer:buffer
+               destinationOffset:0
+          destinationBytesPerRow:row
+        destinationBytesPerImage:row * texture.height];
+    [blit endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    require(command.status == MTLCommandBufferStatusCompleted, "MetalFX producer readback failed");
+    std::vector<uint8_t> bytes(texture.width * texture.height * 4);
+    for (NSUInteger y = 0; y < texture.height; ++y)
+      std::memcpy(
+          bytes.data() + y * texture.width * 4,
+          static_cast<const uint8_t *>(buffer.contents) + y * row,
+          texture.width * 4
+      );
+    return bytes;
+  };
+  TerrainPresentationSettings settings{};
+  settings.colour_range = {0, 480};
+  settings.appearance.colour_source = TerrainColourSource::Distance;
+  settings.appearance.ambient_light = 0.3F;
+  settings.appearance.sun_azimuth = 2.1;
+  settings.appearance.sun_elevation = 0.35;
+  id<MTLTexture> published = nil;
+  std::vector<uint8_t> published_bytes;
+  const MetalFxPreset presets[] = {MetalFxPreset::Off,
+                                   MetalFxPreset::Quality,
+                                   MetalFxPreset::Balanced,
+                                   MetalFxPreset::Performance,
+                                   MetalFxPreset::Off,
+                                   MetalFxPreset::Performance,
+                                   MetalFxPreset::Performance,
+                                   MetalFxPreset::Performance};
+  for (size_t frame = 0; frame < std::size(presets); ++frame) {
+    settings.appearance.raytraced_shadows = frame != 0;
+    settings.appearance.feature_outlines = frame == 3;
+    const auto resolution =
+        metalfx_resolution(output.image, {MetalFxActivation::Always, presets[frame], false}, true);
+    const auto field = metalfx_ray_request(output, resolution.trace);
+    if (frame == 3) {
+      require(
+          trace.relocate_observer({2599965, 1199975, 1120}) &&
+              reference.relocate_observer({2599965, 1199975, 1120}),
+          "MetalFX observer relocation failed"
+      );
+    }
+    if (resolution.enabled) {
+      require(
+          scaler.configure(field.image, output.image) &&
+              expected_scaler.configure(field.image, output.image),
+          "MetalFX configure failed"
+      );
+      actual.set_output_texture_usage(scaler.input_texture_usage());
+      expected.set_output_texture_usage(expected_scaler.input_texture_usage());
+      scaler.begin_frame();
+      expected_scaler.begin_frame();
+    }
+    const bool appearance_only = frame == 7;
+    uint32_t callbacks = 0;
+    id<MTLTexture> pending = resolution.enabled ? scaler.texture() : nil;
+    const auto timing = render_terrain_frame(
+        trace,
+        appearance_only ? nullptr : &field,
+        actual,
+        settings,
+        [&](id<MTLCommandBuffer> command) {
+          ++callbacks;
+          if (resolution.enabled) {
+            scaler.encode(command, actual.texture());
+            require(scaler.texture() == pending, "Terrain repair rotated MetalFX output");
+          }
+        }
+    );
+    require(callbacks == timing.producer_submissions, "Missing MetalFX repair encode");
+    (void)render_terrain_frame(
+        reference,
+        appearance_only ? nullptr : &field,
+        expected,
+        settings,
+        [&](id<MTLCommandBuffer> command) {
+          if (resolution.enabled)
+            expected_scaler.encode(command, expected.texture());
+        }
+    );
+    if (published != nil)
+      require(read(published) == published_bytes, "Producer overwrote the displayed frame");
+    published = resolution.enabled ? scaler.texture() : actual.texture();
+    require(
+        published.width == output.image.width && published.height == output.image.height,
+        "MetalFX producer published incorrect output dimensions"
+    );
+    published_bytes = read(published);
+    const auto expected_bytes =
+        read(resolution.enabled ? expected_scaler.texture() : expected.texture());
+    require(published_bytes.size() == expected_bytes.size(), "MetalFX output size mismatch");
+    for (size_t i = 0; i < published_bytes.size(); ++i)
+      require(
+          std::abs(int(published_bytes[i]) - int(expected_bytes[i])) <= 3,
+          "MetalFX terrain/shadow output differs from complete software reference"
+      );
+    if (frame >= 6)
+      require(!timing.streamed, "Warmed MetalFX view unexpectedly repaired terrain");
+    std::printf(
+        "MetalFX producer frame %zu: %ux%u -> %ux%u, submits=%u, streamed=%d\n",
+        frame,
+        field.image.width,
+        field.image.height,
+        output.image.width,
+        output.image.height,
+        timing.producer_submissions,
+        timing.streamed
+    );
+  }
+}
+
+void check_shadow_reuse(const std::filesystem::path &directory, bool bilinear, bool bounded) {
+  RaytraceConfig
+      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
+  auto camera = camera_request({129, 65});
+  auto field = camera_field(camera.image, camera.projection);
+  TerrainTraceSession reference(config, field, {true, true, true});
+  config.raytracer = Raytracer::MetalBvh;
+  if (bounded) {
+    auto *geometry = [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+    geometry.boundingBoxCount = 16;
+    geometry.boundingBoxStride = 24;
+    geometry.opaque = NO;
+    geometry.allowDuplicateIntersectionFunctionInvocation = NO;
+    auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    descriptor.geometryDescriptors = @[ geometry ];
+    const auto sizes = [reference.device() accelerationStructureSizesWithDescriptor:descriptor];
+    const bool quantized =
+        read_metal_tile_header(
+            TerrainCatalogue::discover(directory, config.observer, config.max_distance, 0)
+                .origin()
+                .path
+        )
+            .sample_type == MetalTileSampleType::Uint16Decimeters;
+    config.bvh_cache_size_bytes = 17U * 17U * (quantized ? 2U : 4U) + 16U * (20U + 24U) + 48U + 8U +
+                                  2U * sizes.accelerationStructureSize +
+                                  sizes.buildScratchBufferSize;
+  }
+  TerrainTraceSession trace(config, camera, {true, true, true});
+  GpuImageRenderer image(
+      trace.device(),
+      trace.command_queue(),
+      trace.library(),
+      camera.image,
+      {false, false, false, true, true, true}
+  );
+  TerrainPresentationSettings settings{};
+  settings.appearance.raytraced_shadows = false;
+  settings.appearance.sun_azimuth = 2.1;
+  settings.colour_range = {0, 480};
+  settings.appearance.sun_elevation = 0.35;
+  (void)render_terrain_frame(trace, &camera, image, settings, {});
+  require(trace.bvh_statistics().shadow_tiles_built == 0, "Disabled shadows loaded BVH casters");
+  settings.appearance.raytraced_shadows = true;
+  for (uint32_t frame = 0; frame < 8; ++frame) {
+    // Odd frames repeat a view exactly; even frames exercise invalidation.
+    if (frame == 2) {
+      config.observer.easting -= 1;
+      require(
+          reference.relocate_observer(config.observer) && trace.relocate_observer(config.observer),
+          "Shadow reuse relocation failed"
+      );
+      std::get<CameraProjection>(camera.projection).orientation.heading += 0.02;
+    }
+    if (frame == 4) {
+      settings.appearance.sun_azimuth = -1.2;
+      settings.appearance.sun_elevation = 0.15;
+    }
+    if (frame == 6) {
+      reference.set_lod_scale(3);
+      trace.set_lod_scale(3);
+    }
+    field = camera_field(camera.image, camera.projection);
+    reference.trace(field);
+    reference.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
+    const auto before = trace.bvh_statistics();
+    const auto io_before = trace.tile_statistics().bytes_loaded_with_metal_io;
+    const auto timing = render_terrain_frame(trace, &camera, image, settings, {});
+    const auto after = trace.bvh_statistics();
+    require(
+        std::memcmp(
+            reference.shadow_visibility().contents,
+            trace.shadow_visibility().contents,
+            pixel_count(field.image)
+        ) == 0,
+        "Cached shadow repair changed visibility"
+    );
+    require(
+        after.peak_bytes <= config.bvh_cache_size_bytes &&
+            after.resident_bytes <= config.bvh_cache_size_bytes,
+        "Shadow reuse exceeded BVH cache budget"
+    );
+    if (!bounded && frame % 2 == 1) {
+      require(
+          !timing.streamed && timing.producer_submissions == 1,
+          "Repeated shadows required repair after warming"
+      );
+      require(
+          after.builds == before.builds &&
+              trace.tile_statistics().bytes_loaded_with_metal_io == io_before,
+          "Repeated shadows rebuilt or reloaded terrain"
+      );
+    }
+  }
+  const auto stats = trace.bvh_statistics();
+  std::printf(
+      "Shadow reuse bilinear=%d bounded=%d: caster builds=%llu, capacity fallbacks=%llu\n",
+      bilinear,
+      bounded,
+      static_cast<unsigned long long>(stats.shadow_tiles_built),
+      static_cast<unsigned long long>(stats.shadow_cache_fallbacks)
+  );
+  if (bounded)
+    require(stats.shadow_cache_fallbacks > 0, "Small cache did not exercise exact shadow fallback");
+  else {
+    require(stats.shadow_tiles_built > 0, "Fixture did not request off-screen shadow terrain");
+    require(stats.shadow_cache_fallbacks == 0, "Roomy shadow cache unexpectedly fell back");
+  }
+}
+
 void check_streaming(const std::filesystem::path &directory) {
-  const auto field = make_angular_ray_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
+  const auto field = angular_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
   RaytraceConfig
       config{directory, {2600045, 1199945, 1120}, 600000, 0, 16384, 2, true, true, false};
   config.use_tile_bvh = false;
@@ -814,15 +1429,25 @@ int main(int argc, const char *argv[]) {
   try {
     @autoreleasepool {
       require(arguments::parse_raytracer("metal-bvh") == Raytracer::MetalBvh, "Backend parser");
+      if (argc >= 2 && std::string_view(argv[1]) == "--benchmark-camera") {
+        benchmark_camera(argc, argv);
+        return EXIT_SUCCESS;
+      }
       if (argc >= 2 && std::string_view(argv[1]) == "--benchmark") {
         benchmark(argc, argv);
         return EXIT_SUCCESS;
       }
       const bool tile_selection = argc == 2 && std::string_view(argv[1]) == "--tile-selection";
+      const bool camera = argc == 2 && std::string_view(argv[1]) == "--camera";
+      const bool metalfx = argc == 2 && std::string_view(argv[1]) == "--metalfx";
       const bool producer = argc == 2 && std::string_view(argv[1]) == "--producer";
+      const bool shadow_float = argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-float";
+      const bool shadow_quantized =
+          argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-quantized";
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
-      if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection) {
+      if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
+          !shadow_float && !shadow_quantized && !metalfx) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -836,8 +1461,7 @@ int main(int argc, const char *argv[]) {
           config.max_distance = std::stof(argv[2]);
         if (argc >= 4)
           config.bvh_cache_size_bytes = std::stoull(argv[3]) * 1048576U;
-        const auto field =
-            make_angular_ray_field({512, 128}, {0, 2 * std::numbers::pi, -0.6, 0.15});
+        const auto field = angular_field({512, 128}, {0, 2 * std::numbers::pi, -0.6, 0.15});
         config.use_tile_bvh = false;
         TerrainTraceSession software(config, field, {true, true, true});
         config.raytracer = Raytracer::MetalBvh;
@@ -861,13 +1485,13 @@ int main(int argc, const char *argv[]) {
         const auto *candidates = static_cast<const float *>(hardware.num_steps().contents);
         double total_candidates = 0.0;
         float maximum_candidates = 0.0F;
-        for (size_t i = 0; i < field.rays.size(); ++i) {
+        for (size_t i = 0; i < pixel_count(field.image); ++i) {
           total_candidates += candidates[i];
           maximum_candidates = std::max(maximum_candidates, candidates[i]);
         }
         std::printf(
             "BVH candidates: mean %.3f, maximum %.0f per ray.\n",
-            total_candidates / double(field.rays.size()),
+            total_candidates / double(pixel_count(field.image)),
             maximum_candidates
         );
         software.print_statistics();
@@ -881,7 +1505,38 @@ int main(int argc, const char *argv[]) {
         write_fixture(root / "float", false, 10.0);
         write_fixture(root / "quantized", true, 10.0);
         write_fixture(root / "distant", true, 1000.0);
-        if (tile_selection) {
+        if (shadow_float || shadow_quantized) {
+          for (bool bilinear : {false, true}) {
+            for (bool bounded : {false, true}) {
+              @autoreleasepool {
+                check_shadow_reuse(
+                    root / (shadow_float ? "float" : "quantized"),
+                    bilinear,
+                    bounded
+                );
+              }
+            }
+          }
+        } else if (metalfx) {
+          check_metalfx_producer(root / "quantized");
+        } else if (camera) {
+          @autoreleasepool {
+            check_gpu_projection(root / "quantized");
+          }
+          for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
+            @autoreleasepool {
+              check_session_replacement(root / "quantized", backend, true);
+            }
+          }
+          for (bool bilinear : {false, true}) {
+            @autoreleasepool {
+              check_producer(root / "quantized", bilinear, false, true);
+            }
+          }
+          @autoreleasepool {
+            check_producer(root / "quantized", true, true, true);
+          }
+        } else if (tile_selection) {
           @autoreleasepool {
             check_tile_selection(root / "float", false, 10.0);
           }

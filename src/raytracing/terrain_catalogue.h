@@ -110,17 +110,4 @@ private:
 [[nodiscard]] double
 tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLocation &observer);
 
-/// Return the one-based terrain LOD selected for this tile. `pixel_angle` is
-/// the conservative angular span of one output pixel in radians; `lod_scale`
-/// of zero disables selection and returns LOD 1.
-[[nodiscard]] uint32_t tile_lod(
-    const TileGrid &grid,
-    TileKey key,
-    const ObserverLocation &observer,
-    float base_cell_size,
-    float pixel_angle,
-    float lod_scale,
-    uint32_t available_lod_count
-);
-
 } // namespace panorama

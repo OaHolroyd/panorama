@@ -64,9 +64,91 @@ static void check_inspection_coordinates() {
   std::puts("MetalFX inspection coordinate regression tests passed.");
 }
 
+static void check_projection_scaling() {
+  // Odd dimensions deliberately round differently on X and Y. Check the
+  // angular extent at image edges, not just the implementation's coefficients.
+  const panorama::RayFieldRequest output = {
+      {1601, 901},
+      panorama::CameraProjection{
+          {0.2, -0.4, 0.1},
+          {1031.0, 917.0, 780.0, 463.0},
+          panorama::BrownConradyDistortion{0.08, -0.015, 0.001, 0.002, -0.003}}};
+  const auto original = std::get<panorama::CameraProjection>(output.projection);
+  for (auto preset : {MetalFxPreset::Off,
+                      MetalFxPreset::Quality,
+                      MetalFxPreset::Balanced,
+                      MetalFxPreset::Performance}) {
+    const auto resolution =
+        metalfx_resolution(output.image, {MetalFxActivation::Always, preset, false}, true);
+    const auto request = metalfx_ray_request(output, resolution.trace);
+    const auto camera = std::get<panorama::CameraProjection>(request.projection);
+    for (double edge : {0.0, 0.5, 1.0}) {
+      require(
+          std::abs(
+              (edge * request.image.width - camera.intrinsics.principal_x) /
+                  camera.intrinsics.focal_x -
+              (edge * output.image.width - original.intrinsics.principal_x) /
+                  original.intrinsics.focal_x
+          ) < 1e-12,
+          "MetalFX rounding changed horizontal viewing angle"
+      );
+      require(
+          std::abs(
+              (edge * request.image.height - camera.intrinsics.principal_y) /
+                  camera.intrinsics.focal_y -
+              (edge * output.image.height - original.intrinsics.principal_y) /
+                  original.intrinsics.focal_y
+          ) < 1e-12,
+          "MetalFX rounding changed vertical viewing angle"
+      );
+    }
+    require(
+        camera.orientation.heading == original.orientation.heading &&
+            camera.orientation.pitch == original.orientation.pitch &&
+            camera.orientation.roll == original.orientation.roll &&
+            std::get<panorama::BrownConradyDistortion>(camera.distortion).radial_1 == 0.08,
+        "MetalFX changed camera orientation or lens calibration"
+    );
+  }
+  for (auto activation :
+       {MetalFxActivation::Disabled, MetalFxActivation::PanMoveOnly, MetalFxActivation::Always})
+    for (auto preset : {MetalFxPreset::Off,
+                        MetalFxPreset::Quality,
+                        MetalFxPreset::Balanced,
+                        MetalFxPreset::Performance})
+      for (bool supported : {false, true})
+        for (bool interacting : {false, true}) {
+          const auto resolution =
+              metalfx_resolution(output.image, {activation, preset, interacting}, supported);
+          const bool enabled = supported && preset != MetalFxPreset::Off &&
+                               (activation == MetalFxActivation::Always ||
+                                (activation == MetalFxActivation::PanMoveOnly && interacting));
+          require(resolution.enabled == enabled, "MetalFX activation/preset policy mismatch");
+          if (!enabled)
+            require(
+                resolution.trace.width == output.image.width &&
+                    resolution.trace.height == output.image.height,
+                "Disabled or unsupported MetalFX must trace natively"
+            );
+        }
+  bool rejected = false;
+  try {
+    (void)metalfx_resolution(
+        {0, 900},
+        {MetalFxActivation::Always, MetalFxPreset::Balanced, false},
+        true
+    );
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  require(rejected, "Zero dimensions should be rejected before scaling");
+  std::puts("MetalFX projection and activation matrix tests passed.");
+}
+
 int main() {
   try {
     check_inspection_coordinates();
+    check_projection_scaling();
     const ImageSize output = {1600, 900};
     const MetalFxSelection disabled = {MetalFxActivation::Disabled, MetalFxPreset::Balanced, true};
     require(!metalfx_resolution(output, disabled, true).enabled, "Disabled must remain native");

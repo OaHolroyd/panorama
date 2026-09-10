@@ -1,4 +1,5 @@
 #include "terrain_tile_bvh.h"
+#include "trace_activity.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,7 @@ struct TerrainTileBvh::State {
   explicit State(GpuRaytraceResources &resources) : gpu(resources) {}
 
   void rebuild(TileManager &manager, const RaytraceParameters &parameters) {
+    trace_activity::Scope activity("BVH catalogue rebuild");
     const auto &grid = manager.catalogue().grid();
     const auto &sources = manager.sources();
     const auto &geometry = manager.origin_geometry();

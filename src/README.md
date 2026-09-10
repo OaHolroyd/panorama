@@ -32,16 +32,17 @@ The batch and interactive entry points converge on `TerrainTraceSession`:
 
 ```mermaid
 flowchart TD
-    CLI[panorama/main.mm] --> RP[Build RayField]
+    CLI[panorama/main.mm] --> RP[Describe projection]
     RP --> RT[render_terrain]
     RT --> SESSION[TerrainTraceSession]
 
     APP[app/main.mm] --> VR[ViewerRenderer worker]
-    VR --> ARP[Build or update RayField]
+    VR --> ARP[Describe projection]
     ARP --> SESSION
 
     SESSION --> TM[TileManager]
-    SESSION --> GPU[GpuRaytraceResources]
+    SESSION --> CAM[GpuCamera: rays, footprint and LOD]
+    CAM --> GPU[GpuRaytraceResources]
     SESSION --> HF[HostFrontier per trace]
     GPU --> MK[raytrace.metal kernels]
     TM --> MK
@@ -52,8 +53,10 @@ flowchart TD
     BVH --> HW[metal_bvh_trace.metal]
 ```
 
-`RayField` is the projection-independent input to tracing: one normalized
-horizontal direction and vertical slope per output pixel. The CLI creates a
+`RayFieldRequest` describes an angular or calibrated camera projection. Both
+entry points use GPU kernels to generate horizontal directions, slopes, pixel
+footprints and source LOD decisions; no CPU ray vectors or LOD implementation
+are retained. Brown–Conrady lens inversion also runs on the GPU. The CLI creates a
 short-lived session. The viewer retains its session so the catalogue, tile
 atlas, worker threads, and Metal pipelines survive changes in heading, pitch,
 field of view, and observer location.
@@ -64,14 +67,16 @@ field of view, and observer location.
 ownership:
 
 1. `TileManager` discovers `.ptile` files, creates the immutable
-   `TerrainCatalogue`, reads the reference tile geometry, and selects one LOD
-   for every source.
+   `TerrainCatalogue`, reads the reference tile geometry, and starts with LOD 1
+   until GPU decisions are installed.
 2. `GpuRaytraceResources` selects the Metal device, compiles the Float32 or
    retained-uint16 pipelines, allocates per-ray buffers, and uploads a compact
    tile-key-to-source hash table.
 3. `TileManager::attach_gpu` allocates its atlas on that device, synchronously
    installs the observer tile in slot zero, builds its maximum-elevation
    mipmap, and starts loading workers.
+4. `GpuCamera` prepares the projection and installs GPU-selected source LODs.
+   Ray generation runs before primary tracing on the same command queue.
 
 The catalogue is immutable for the session. A viewer relocation inside that
 catalogue only rebases resident tile coordinates and recalculates LOD choices.

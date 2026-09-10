@@ -1,5 +1,7 @@
 #pragma once
 
+#include "trace_activity.h"
+
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <mach/mach.h>
@@ -35,6 +37,7 @@ struct Activity {
   }
 };
 inline Activity worker, display, minimap;
+inline trace_activity::Activity terrain;
 
 // Scope cleanup also records early returns, exceptions, and pool-drain time.
 struct Scope {
@@ -97,6 +100,13 @@ public:
           report("worker", worker, now);
           report("display", display, now);
           report("minimap", minimap, now);
+          std::fprintf(
+              stdout,
+              "Health t=%.3f: terrain stage=%s age=%.1f ms\n",
+              now,
+              terrain.stage.load(),
+              1000.0 * (trace_activity::seconds() - terrain.since.load())
+          );
           std::fflush(stdout);
         }
       }

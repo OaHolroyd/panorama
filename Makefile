@@ -180,8 +180,8 @@ clean:
 # between debug and release object directories.
 FORCE:
 
-$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB)
-	$(CXX) $(RAYTRACE_INCLUDES) $(RENDERING_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) $(LDLIBS)
+$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB)
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) -framework MetalFX $(LDLIBS)
 
 .PHONY: check-bvh
 check-bvh: $(OBJ_DIR)/metal-bvh-test
@@ -190,7 +190,13 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --edge-cases
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-float
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-quantized
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --tile-selection
+
+.PHONY: check-camera
+check-camera: $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --camera
 
 $(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(METAL_LIB)
 	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
@@ -203,8 +209,9 @@ $(OBJ_DIR)/metalfx-test: tests/metalfx_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o
 	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(VIEWER_FRAMEWORKS)
 
 .PHONY: check-metalfx
-check-metalfx: $(OBJ_DIR)/metalfx-test
+check-metalfx: $(OBJ_DIR)/metalfx-test $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metalfx-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --metalfx
 
 $(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(OBJ_DIR)/tile-gen/geotiff_writer.o $(SHARED_OBJ)
 	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)

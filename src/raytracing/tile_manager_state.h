@@ -71,7 +71,6 @@ struct TileManager::State {
   /// Currently selected one-based LOD for every catalogue source.
   std::vector<uint32_t> lod_by_source;
   /// Conservative angular span of a current output pixel, in radians.
-  float pixel_angle = 0.0F;
   /// Source containing `config.observer` after the latest relocation.
   uint32_t observer_source_index = 0U;
   /// Number of maximum-hierarchy samples reserved per atlas slot.
@@ -190,7 +189,6 @@ struct TileManager::State {
 
   // Loader lifecycle operations implemented in tile_manager.mm.
   /// Select exactly one LOD for every source using the current view policy.
-  void rebuild_lod_plan(float angle);
   /// Create the bounded worker pool after GPU/file resources are available.
   void start_workers(uint32_t configured_workers);
   /// Deduplicate or improve the priority of one exact variant request.

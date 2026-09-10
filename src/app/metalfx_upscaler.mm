@@ -26,6 +26,8 @@ float preset_scale(MetalFxPreset preset) {
 } // namespace
 
 MetalFxResolution metalfx_resolution(ImageSize output, MetalFxSelection selection, bool supported) {
+  if (output.width == 0 || output.height == 0)
+    throw std::invalid_argument("MetalFX output dimensions must be positive");
   const bool enabled =
       supported && selection.preset != MetalFxPreset::Off &&
       (selection.activation == MetalFxActivation::Always ||
@@ -38,6 +40,22 @@ MetalFxResolution metalfx_resolution(ImageSize output, MetalFxSelection selectio
   };
   const ImageSize trace = {dimension(output.width), dimension(output.height)};
   return {trace, output, trace.width != output.width || trace.height != output.height};
+}
+
+RayFieldRequest metalfx_ray_request(const RayFieldRequest &output, ImageSize trace) {
+  if (output.image.width == 0 || output.image.height == 0 || trace.width == 0 || trace.height == 0)
+    throw std::invalid_argument("MetalFX ray dimensions must be positive");
+  RayFieldRequest request = output;
+  request.image = trace;
+  if (auto *camera = std::get_if<CameraProjection>(&request.projection)) {
+    const double x = double(trace.width) / output.image.width;
+    const double y = double(trace.height) / output.image.height;
+    camera->intrinsics.focal_x *= x;
+    camera->intrinsics.principal_x *= x;
+    camera->intrinsics.focal_y *= y;
+    camera->intrinsics.principal_y *= y;
+  }
+  return request;
 }
 
 const char *metalfx_preset_name(MetalFxPreset preset) {
@@ -61,6 +79,7 @@ struct MetalFxUpscaler::State {
   id<MTLTexture> output, spare;
   ImageSize input = {}, dimensions = {};
   bool selected_spare = false;
+  ImageSize failed_input = {}, failed_output = {};
 };
 
 MetalFxUpscaler::MetalFxUpscaler(id<MTLDevice> device, MTLPixelFormat format) {
@@ -85,6 +104,12 @@ bool MetalFxUpscaler::configure(ImageSize input, ImageSize output) {
       state_->input.height == input.height && state_->dimensions.width == output.width &&
       state_->dimensions.height == output.height)
     return true;
+  if (state_->failed_input.width == input.width && state_->failed_input.height == input.height &&
+      state_->failed_output.width == output.width && state_->failed_output.height == output.height)
+    return false;
+  // Remember a failed configuration until another configuration succeeds.
+  state_->failed_input = input;
+  state_->failed_output = output;
   @autoreleasepool {
     MTLFXSpatialScalerDescriptor *descriptor = [[MTLFXSpatialScalerDescriptor alloc] init];
     descriptor.colorTextureFormat = state_->format;
@@ -118,6 +143,8 @@ bool MetalFxUpscaler::configure(ImageSize input, ImageSize output) {
     state_->input = input;
     state_->dimensions = output;
     state_->selected_spare = false;
+    state_->failed_input = {};
+    state_->failed_output = {};
     return true;
   }
 }

@@ -46,8 +46,8 @@ struct GpuPresentationRequirements {
 ///
 /// Each render method converts scientific trace buffers into the same 8-bit
 /// four-channel Metal texture. The CLI reads that texture back for PNG
-/// encoding, while the interactive viewer blits `texture()` directly and
-/// omits host readback and ImageIO work.
+/// encoding, while the interactive viewer samples `texture()` (optionally
+/// through MetalFX) and omits host readback and ImageIO work.
 class GpuImageRenderer {
 public:
   GpuImageRenderer(

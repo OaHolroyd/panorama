@@ -1,4 +1,5 @@
 #include "terrain_trace_session.h"
+#include "trace_activity.h"
 
 #include "host_frontier.h"
 #include "metal_bvh_trace.h"
@@ -38,27 +39,6 @@ void validate_configuration(const RaytraceConfig &config) {
       config.max_distance <= 0.0F || !std::isfinite(config.lod_scale) || config.lod_scale < 0.0F) {
     throw std::invalid_argument("Raytrace configuration must be finite");
   }
-}
-
-[[nodiscard]] uint32_t validate_ray_field(const RayField &field) {
-  const uint64_t ray_count = static_cast<uint64_t>(field.image.width) * field.image.height;
-  if (ray_count == 0U || ray_count > std::numeric_limits<uint32_t>::max() ||
-      field.rays.size() != ray_count) {
-    throw std::invalid_argument("Ray field has invalid dimensions or storage");
-  }
-  if (!std::isfinite(field.minimum_pixel_angle) || field.minimum_pixel_angle <= 0.0F) {
-    throw std::invalid_argument("Ray field has no finite positive pixel angle");
-  }
-  for (const RayDirection &ray : field.rays) {
-    const float horizontal_length = std::hypot(ray.x, ray.y);
-    if (!std::isfinite(ray.x) || !std::isfinite(ray.y) || !std::isfinite(ray.slope) ||
-        !std::isfinite(horizontal_length) || std::abs(horizontal_length - 1.0F) > 1e-4F ||
-        (ray.x != 0.0F && !std::isfinite(ray.inverse_x)) ||
-        (ray.y != 0.0F && !std::isfinite(ray.inverse_y))) {
-      throw std::invalid_argument("Ray field contains an invalid projected direction");
-    }
-  }
-  return static_cast<uint32_t>(ray_count);
 }
 
 [[nodiscard]] RaytraceParameters make_parameters(
@@ -123,47 +103,50 @@ struct TerrainTraceSession::State {
   double shadow_elevation = 0.0;
   bool bvh_shadow_active = false;
 
-  void update_field(const RayField &field) {
-    const uint32_t next_ray_count = validate_ray_field(field);
+  std::unique_ptr<GpuCamera> camera;
+  bool camera_rays_ready = false;
+
+  void prepare_camera(const RayFieldRequest &request) {
+    const uint32_t count = validate_camera_request(request);
+    camera_rays_ready = false;
+    if (!camera)
+      camera =
+          std::make_unique<GpuCamera>(gpu->device(), gpu->command_queue(), gpu->library(), *tiles);
+    gpu->resize_rays(count);
+    image = request.image;
+    ray_count = parameters.ray_count = count;
     bvh_shadow_active = false;
     shadow_revision = std::numeric_limits<uint64_t>::max();
-    tiles->set_pixel_angle(field.minimum_pixel_angle);
-    const bool dimensions_changed = field.image.width != image.width ||
-                                    field.image.height != image.height ||
-                                    next_ray_count != ray_count;
+    camera->prepare(request, config.observer, config.lod_scale, *tiles);
+  }
 
-    // Ray-dependent storage changes with the viewport; catalogue discovery,
-    // terrain preparation, pipelines, and the resident atlas remain intact.
-    if (dimensions_changed) {
-      gpu->resize_rays(field.rays);
-      image = field.image;
-      ray_count = next_ray_count;
-      parameters.ray_count = next_ray_count;
-    } else {
-      gpu->update_rays(field.rays);
+  void complete_camera() {
+    if (!camera_rays_ready) {
+      camera->validate_completed_rays();
+      camera_rays_ready = true;
     }
   }
 
   State(
       const RaytraceConfig &config_value,
-      const RayField &initial_field,
+      ImageSize initial_image,
+      uint32_t initial_count,
       GpuTraceOutputRequirements outputs,
       id<MTLCommandQueue> shared_queue
   )
-      : config(config_value), image(initial_field.image),
-        ray_count(validate_ray_field(initial_field)), outputs(outputs) {
+      : config(config_value), image(initial_image), ray_count(initial_count), outputs(outputs) {
     validate_configuration(config);
     timer.start_wall("Initial setup");
 
     // Tile discovery must precede ray-resource construction because the GPU
     // catalogue hash uses stable source indices. Atlas attachment follows so
     // it can reuse the device selected by the primary tracing resources.
-    tiles = std::make_unique<TileManager>(config, initial_field.minimum_pixel_angle);
+    tiles = std::make_unique<TileManager>(config);
     config.observer = tiles->catalogue().observer();
     parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), ray_count);
 
     gpu = std::make_unique<GpuRaytraceResources>(
-        initial_field.rays,
+        ray_count,
         tiles->sources(),
         tiles->traces_quantized(),
         config.bilinear_collisions,
@@ -186,11 +169,20 @@ struct TerrainTraceSession::State {
 
 TerrainTraceSession::TerrainTraceSession(
     const RaytraceConfig &config,
-    const RayField &initial_field,
+    const RayFieldRequest &camera,
     GpuTraceOutputRequirements outputs,
     id<MTLCommandQueue> shared_queue
 )
-    : state_(std::make_unique<State>(config, initial_field, outputs, shared_queue)) {}
+    : state_(
+          std::make_unique<
+              State>(config, camera.image, validate_camera_request(camera), outputs, shared_queue)
+      ) {
+  state_->prepare_camera(camera);
+}
+
+GpuCameraStatistics TerrainTraceSession::camera_statistics() const {
+  return state_->camera ? state_->camera->statistics() : GpuCameraStatistics{};
+}
 
 TerrainTraceSession::~TerrainTraceSession() = default;
 
@@ -219,6 +211,7 @@ void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
 }
 
 bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
+  trace_activity::Scope activity("observer relocation");
   State &state = *state_;
   if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing) ||
       !std::isfinite(observer.elevation)) {
@@ -244,7 +237,6 @@ void TerrainTraceSession::set_lod_scale(float lod_scale) {
   }
   state.config.lod_scale = lod_scale;
   state.bvh_shadow_active = false;
-  state.tiles->set_lod_scale(lod_scale);
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
 
@@ -268,13 +260,34 @@ void TerrainTraceSession::set_collision_options(bool bilinear_collisions, bool c
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
 
-void TerrainTraceSession::trace(const RayField &field) {
+void TerrainTraceSession::trace(const RayFieldRequest &camera) {
+  const auto started = std::chrono::steady_clock::now();
+  state_->prepare_camera(camera);
+  trace_prepared();
+  state_->frame_wall_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+}
+
+void TerrainTraceSession::trace_prepared() {
   State &state = *state_;
   const auto started = std::chrono::steady_clock::now();
   state.frame_bvh_before = bvh_statistics();
   state.frame_gpu_ms = 0.0;
   state.frame_passes = 0U;
-  state.update_field(field);
+  if (!state.camera_rays_ready) {
+    auto command = [state.gpu->command_queue() commandBuffer];
+    if (command == nil)
+      throw std::runtime_error("Could not create camera ray command");
+    command.label = @"GPU camera rays for synchronous trace";
+    state.camera->encode_rays(command, state.gpu->ray_directions());
+    if (state.config.raytracer == Raytracer::Software)
+      state.gpu->encode_clear_outputs(command);
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+      throw std::runtime_error("GPU camera ray generation failed");
+    state.complete_camera();
+  }
   if (state.config.raytracer == Raytracer::MetalBvh) {
     state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
     state.gpu->start_capture_if_requested();
@@ -312,7 +325,10 @@ void TerrainTraceSession::trace(const RayField &field) {
 
   HostFrontier frontier(
       *state.tiles,
-      field.rays,
+      std::span<const RayDirection>(
+          static_cast<const RayDirection *>(state.gpu->ray_directions().contents),
+          state.ray_count
+      ),
       state.parameters,
       state.tiles->slot_capacity(),
       observer_slot
@@ -398,18 +414,25 @@ void TerrainTraceSession::trace(const RayField &field) {
   state.trace_revision++;
 }
 
-bool TerrainTraceSession::encode_trace(id<MTLCommandBuffer> command, const RayField &field) {
+bool TerrainTraceSession::encode_trace(
+    id<MTLCommandBuffer> command,
+    const RayFieldRequest &camera
+) {
   State &state = *state_;
+  state.prepare_camera(camera);
   if (command == nil || state.config.raytracer != Raytracer::MetalBvh)
     return false;
-  state.update_field(field);
   state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
+  if (!state.bvh->prepare_scene(state.timer))
+    return false;
+  state.camera->encode_rays(command, state.gpu->ray_directions());
   return state.bvh->encode_scene(command, state.timer);
 }
 
 bool TerrainTraceSession::complete_encoded_trace(id<MTLCommandBuffer> command) {
   if (command.status != MTLCommandBufferStatusCompleted)
     throw std::logic_error("Primary producer has not completed successfully");
+  state_->complete_camera();
   if (!state_->bvh->scene_complete())
     return false;
   ++state_->frames;
@@ -456,6 +479,15 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
   }
   if (!std::isfinite(sun_azimuth) || !std::isfinite(sun_elevation)) {
     throw std::invalid_argument("Sun direction must be finite");
+  }
+  if (state.config.raytracer == Raytracer::MetalBvh && state.outputs.elevations &&
+      state.outputs.surface_gradients &&
+      state.bvh->trace_shadows(sun_azimuth, sun_elevation, state.timer)) {
+    state.bvh_shadow_active = true;
+    state.shadow_revision = state.trace_revision;
+    state.shadow_azimuth = sun_azimuth;
+    state.shadow_elevation = sun_elevation;
+    return;
   }
   if (state.shadows == nullptr) {
     // Construction is deliberately lazy: disabled shadows allocate no
@@ -585,7 +617,12 @@ const TerrainCoverage &TerrainTraceSession::terrain_coverage() const {
 }
 
 std::optional<float> TerrainTraceSession::sample_terrain(double easting, double northing) {
+  trace_activity::Scope activity("full-resolution ground sampling");
   return state_->tiles->sample_terrain(easting, northing);
+}
+
+TileManagerStatistics TerrainTraceSession::tile_statistics() const {
+  return state_->tiles->statistics();
 }
 
 id<MTLDevice> TerrainTraceSession::device() const { return state_->gpu->device(); }

@@ -445,7 +445,7 @@ int main(int argc, const char *argv[]) {
         settings.bvh_block_cells,
         settings.bvh_cache_size_bytes,
     };
-    const panorama::RayField rays = settings.projection.make_ray_field();
+    const panorama::RayFieldRequest rays = settings.projection.make_request();
     const panorama::ScalarColourRange colour_range = scalar_colour_range(settings);
     const panorama::TerrainRenderOutputs outputs = {
         settings.write_diagnostics,

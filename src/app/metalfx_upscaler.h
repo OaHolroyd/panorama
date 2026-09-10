@@ -25,7 +25,10 @@ struct MetalFxResolution {
 
 [[nodiscard]] MetalFxResolution
 metalfx_resolution(ImageSize output, MetalFxSelection selection, bool supported);
-[[nodiscard]] const char *metalfx_preset_name(MetalFxPreset preset);
+[[nodiscard]] /// Scale output calibration independently on each axis after dimension rounding.
+/// The GPU still owns per-pixel ray generation and the resulting LOD footprint.
+RayFieldRequest metalfx_ray_request(const RayFieldRequest &output, ImageSize trace);
+const char *metalfx_preset_name(MetalFxPreset preset);
 
 /// Worker-owned spatial scaler and its two publish-safe private outputs.
 class MetalFxUpscaler {
