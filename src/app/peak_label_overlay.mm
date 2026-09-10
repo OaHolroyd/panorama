@@ -65,11 +65,17 @@
     NSSize size = [label sizeWithAttributes:attributes];
     size.width += 12.0;
     size.height += 6.0;
-    const std::array<NSPoint, 4> origins = {
-        NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 9.0),
-        NSMakePoint(anchor.x - size.width * 0.5, anchor.y - size.height - 9.0),
-        NSMakePoint(anchor.x + 9.0, anchor.y - size.height * 0.5),
-        NSMakePoint(anchor.x - size.width - 9.0, anchor.y - size.height * 0.5),
+    // Prefer successively higher placements so labels can rise clear of a
+    // crowded mountain skyline. Side and lower placements remain fallbacks
+    // for peaks close to the top of the view.
+    const std::array<NSPoint, 7> origins = {
+        NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 12.0),
+        NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 40.0),
+        NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 72.0),
+        NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 108.0),
+        NSMakePoint(anchor.x + 12.0, anchor.y - size.height * 0.5),
+        NSMakePoint(anchor.x - size.width - 12.0, anchor.y - size.height * 0.5),
+        NSMakePoint(anchor.x - size.width * 0.5, anchor.y - size.height - 12.0),
     };
     std::optional<NSRect> placement;
     for (const NSPoint origin : origins) {
