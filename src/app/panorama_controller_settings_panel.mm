@@ -145,6 +145,14 @@
   _invertMousePanningControl.target = self;
   _invertMousePanningControl.action = @selector(invertMousePanningChanged:);
 
+  _peakLabelControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+  [_peakLabelControl addItemsWithTitles:@[ @"Off", @"On", @"Near pointer" ]];
+  [_peakLabelControl selectItemAtIndex:static_cast<NSInteger>(_peakLabelMode)];
+  _peakLabelControl.target = self;
+  _peakLabelControl.action = @selector(peakLabelsChanged:);
+  _peakLabelControl.toolTip = @"Show names and elevations for visible Alpine peaks";
+  _peakLabelControl.enabled = _renderer->peak_labels_available();
+
   _raytracerControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   for (const auto backend : {panorama::Raytracer::Software, panorama::Raytracer::MetalBvh}) {
     [_raytracerControl
@@ -586,6 +594,7 @@
       [[InspectorSectionView alloc] initWithTitle:@"Terrain"
                                          controls:@[
                                            make_row(@"Raytracer", _raytracerControl),
+                                           make_row(@"Peak labels", _peakLabelControl),
                                            make_row(@"Colour by", _colourSourceControl),
                                            colourmapRow,
                                            colourScaleRow,

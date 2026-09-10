@@ -1,5 +1,6 @@
 #pragma once
 
+#include "peak_catalogue.h"
 #include "viewer_renderer.h"
 
 #import <MetalKit/MetalKit.h>
@@ -36,6 +37,8 @@
         verticalFieldOfView:(double)verticalFieldOfView
                aircraftMode:(bool)aircraftMode;
 - (void)setViewerPaused:(bool)paused recoveryMessage:(NSString *)recoveryMessage;
+- (void)setPeakLabelMode:(panorama::app::PeakLabelMode)mode;
+- (void)setPeakLabelFrame:(const panorama::app::PeakLabelFrame &)frame;
 - (void)setTerrainPointIndicator:(std::optional<panorama::app::LockedPointProjection>)projection
                            image:(panorama::ImageSize)image
                           locked:(bool)locked

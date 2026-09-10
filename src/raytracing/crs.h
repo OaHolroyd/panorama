@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace panorama {
 
@@ -43,6 +45,9 @@ public:
 
   /// Transform WGS 84 latitude/longitude degrees into projected metres.
   [[nodiscard]] Coord from_lat_lon(LatLon coordinate) const;
+
+  /// Transform a batch while sharing one GDAL/PROJ transformation.
+  [[nodiscard]] std::vector<Coord> from_lat_lon(std::span<const LatLon> coordinates) const;
 
   /// Transform projected metres in this CRS into WGS 84 latitude/longitude
   /// degrees.

@@ -35,6 +35,7 @@
   NSPopUpButton *_metalfxActivationControl;
   NSPopUpButton *_metalfxPresetControl;
   NSTextField *_metalfxStatusLabel;
+  NSPopUpButton *_peakLabelControl;
   NSTextField *_minimumControl;
   NSTextField *_maximumControl;
   NSSlider *_zoomControl;
@@ -168,6 +169,7 @@
   bool _updatingResolutionControls;
   panorama::app::MetalFxActivation _metalfxActivation;
   panorama::app::MetalFxPreset _metalfxPreset;
+  panorama::app::PeakLabelMode _peakLabelMode;
   NSTimer *_metalfxSettleTimer;
 }
 @end
@@ -246,6 +248,7 @@
 - (BOOL)publishTerrainControls;
 - (BOOL)commitResolutionControls;
 - (void)metalfxChanged:(id)sender;
+- (void)peakLabelsChanged:(id)sender;
 - (void)requestMetalFxInteraction;
 - (void)settleMetalFx:(NSTimer *)timer;
 - (NSViewController *)makeSettingsViewController;

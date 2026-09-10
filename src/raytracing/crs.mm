@@ -95,6 +95,29 @@ Coord Crs::from_lat_lon(LatLon coordinate) const {
   return {longitude, latitude};
 }
 
+std::vector<Coord> Crs::from_lat_lon(std::span<const LatLon> coordinates) const {
+  if (coordinates.empty())
+    return {};
+  auto transformation = make_transformation(kWgs84Epsg, epsg_code());
+  std::vector<double> longitudes;
+  std::vector<double> latitudes;
+  longitudes.reserve(coordinates.size());
+  latitudes.reserve(coordinates.size());
+  for (const LatLon coordinate : coordinates) {
+    longitudes.push_back(coordinate.lon);
+    latitudes.push_back(coordinate.lat);
+  }
+  if (!transformation
+           ->Transform(coordinates.size(), longitudes.data(), latitudes.data(), nullptr, nullptr)) {
+    throw std::runtime_error("Could not transform WGS 84 coordinates to " + std::string(name()));
+  }
+  std::vector<Coord> result;
+  result.reserve(coordinates.size());
+  for (size_t index = 0; index < coordinates.size(); ++index)
+    result.push_back({longitudes[index], latitudes[index]});
+  return result;
+}
+
 LatLon Crs::to_lat_lon(Coord coordinate) const {
   // Transform mutates its coordinate arguments in place. Begin with projected
   // easting/northing, then reinterpret the resulting x/y as longitude/latitude.

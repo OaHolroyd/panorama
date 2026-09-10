@@ -20,6 +20,15 @@
 
 @implementation PanoramaController (TextEditing)
 
+- (void)peakLabelsChanged:(id)sender {
+  (void)sender;
+  _peakLabelMode = static_cast<panorama::app::PeakLabelMode>(_peakLabelControl.indexOfSelectedItem);
+  [NSUserDefaults.standardUserDefaults setInteger:static_cast<NSInteger>(_peakLabelMode)
+                                           forKey:@"panorama.peak-labels.mode"];
+  [_panoramaView setPeakLabelMode:_peakLabelMode];
+  _renderer->request_peak_labels_enabled(_peakLabelMode != panorama::app::PeakLabelMode::Off);
+}
+
 - (void)updateAspectLockAppearance {
   const BOOL locked = _aspectLockControl.state == NSControlStateValueOn;
   _aspectLockControl.image = [NSImage
