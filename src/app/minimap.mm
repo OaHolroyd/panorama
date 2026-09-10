@@ -935,16 +935,19 @@ struct VisibilityMaskRequest {
       mapCoordinate(endpoint(orientation.heading)),
   };
 
-  if (_fieldOfViewOverlay != nil) {
+  // Install replacements before removing the old geometry. MapKit draws
+  // overlays asynchronously, so remove-then-add creates a visible blank frame
+  // while cruise updates the observer and camera continuously.
+  MKPolygon *nextFieldOfView = [MKPolygon polygonWithCoordinates:wedge count:3];
+  MKPolyline *nextHeading = [MKPolyline polylineWithCoordinates:headingLine count:2];
+  [_mapView insertOverlay:nextFieldOfView belowOverlay:_visibilityOverlay];
+  [_mapView addOverlay:nextHeading level:MKOverlayLevelAboveLabels];
+  if (_fieldOfViewOverlay != nil)
     [_mapView removeOverlay:_fieldOfViewOverlay];
-  }
-  if (_headingOverlay != nil) {
+  if (_headingOverlay != nil)
     [_mapView removeOverlay:_headingOverlay];
-  }
-  _fieldOfViewOverlay = [MKPolygon polygonWithCoordinates:wedge count:3];
-  _headingOverlay = [MKPolyline polylineWithCoordinates:headingLine count:2];
-  [_mapView insertOverlay:_fieldOfViewOverlay belowOverlay:_visibilityOverlay];
-  [_mapView addOverlay:_headingOverlay level:MKOverlayLevelAboveLabels];
+  _fieldOfViewOverlay = nextFieldOfView;
+  _headingOverlay = nextHeading;
 }
 
 - (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image {
@@ -1032,8 +1035,10 @@ struct VisibilityMaskRequest {
   _visibilityPoints = nil;
   _pendingMask.reset();
   _lastMask.reset();
-  if (_contentVisible)
-    [_visibilityRenderer setImage:nullptr mapRect:MKMapRectNull];
+  // Keep the last complete mask visible while the replacement is rendered on
+  // the serial worker. Its immutable map rectangle remains geographically
+  // valid as the map follows the observer; generation still rejects work that
+  // completed for an older observer.
   [self updateObserverGraphics];
   [self updateCameraGraphics];
 }
