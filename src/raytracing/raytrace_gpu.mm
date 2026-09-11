@@ -332,9 +332,7 @@ GpuRaytraceResources::GpuRaytraceResources(
     catalogue_entries[index] = {
         source.key.row,
         source.key.column,
-        source.valid_cells && !source.valid_cells->full()
-            ? std::numeric_limits<float>::infinity()
-            : source.maximum_elevation.value_or(std::numeric_limits<float>::infinity()),
+        source.maximum_elevation.value_or(std::numeric_limits<float>::infinity()),
         source_index,
     };
   }
@@ -413,13 +411,7 @@ void GpuRaytraceResources::prepare_tile_selection(
     Timer &timer
 ) {
   State &state = *state_;
-  // The software selector walks rectangular source tiles. Masked catalogues
-  // use exact native-cell walking so its height rejection cannot jump a gap.
-  state.use_tile_bvh =
-      enabled && state.device.supportsRaytracing &&
-      std::none_of(tiles.sources().begin(), tiles.sources().end(), [](const TerrainSource &source) {
-        return source.valid_cells && !source.valid_cells->full();
-      });
+  state.use_tile_bvh = enabled && state.device.supportsRaytracing;
   if (!state.use_tile_bvh)
     return;
   const auto started = std::chrono::steady_clock::now();
@@ -516,13 +508,11 @@ GpuFrontierPassResult GpuRaytraceResources::trace_frontier(
   [encoder setBuffer:state.global_skip_count offset:0 atIndex:11];
   if (state.use_tile_bvh) {
     auto &catalogue = *state.tile_bvh;
-    const uint32_t count = static_cast<uint32_t>(catalogue.metadata().size());
     [state.bvh_emit.table setBuffer:catalogue.tiles() offset:0 atIndex:0];
     // The shared callback binds a resident mask even when filtering is disabled.
     [state.bvh_emit.table setBuffer:state.local_skip_count offset:0 atIndex:1];
     [encoder setAccelerationStructure:catalogue.acceleration() atBufferIndex:12];
     [encoder setIntersectionFunctionTable:state.bvh_emit.table atBufferIndex:13];
-    [encoder setBytes:&count length:sizeof(count) atIndex:14];
     [encoder setBuffer:catalogue.tiles() offset:0 atIndex:15];
     [encoder useResource:catalogue.acceleration() usage:MTLResourceUsageRead];
     [encoder useResource:catalogue.tiles() usage:MTLResourceUsageRead];

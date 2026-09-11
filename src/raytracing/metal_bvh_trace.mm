@@ -655,8 +655,6 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:outputs.debugging_info ? gpu.num_steps() : dummy offset:0 atIndex:6];
     [encoder setBuffer:outputs.debugging_info ? gpu.num_evaluations() : dummy offset:0 atIndex:7];
     [encoder setBuffer:parameters offset:0 atIndex:8];
-    [encoder setBuffer:tiles offset:0 atIndex:9];
-    [encoder setBuffer:gpu.catalogue_hash() offset:0 atIndex:10];
     [encoder setBuffer:rays offset:0 atIndex:11];
     [encoder setBuffer:work offset:0 atIndex:12];
     if (scene_mode) {
@@ -675,22 +673,22 @@ struct MetalBvhTrace::State {
         [encoder setBuffer:candidate_patches offset:0 atIndex:16];
         [encoder setBuffer:scene_requested_sources offset:0 atIndex:17];
       }
-      [p.coverage_table setBuffer:current.transformed_catalogue ? coverage_polygons : tiles
-                           offset:0
-                          atIndex:0];
-      [p.coverage_table setBuffer:current.transformed_catalogue ? coverage_vertices : dummy
-                           offset:0
-                          atIndex:1];
-      [p.coverage_table setBuffer:dummy offset:0 atIndex:2];
-      [encoder setAccelerationStructure:catalogue atBufferIndex:20];
-      [encoder setIntersectionFunctionTable:p.coverage_table atBufferIndex:21];
-      [encoder setBuffer:coverage_polygons offset:0 atIndex:22];
-      [encoder setBuffer:coverage_vertices offset:0 atIndex:23];
-      [encoder useResource:catalogue usage:MTLResourceUsageRead];
-      [encoder useResource:p.coverage_table usage:MTLResourceUsageRead];
-      [encoder useResource:coverage_polygons usage:MTLResourceUsageRead];
-      [encoder useResource:coverage_vertices usage:MTLResourceUsageRead];
     }
+    [p.coverage_table setBuffer:current.transformed_catalogue ? coverage_polygons : tiles
+                         offset:0
+                        atIndex:0];
+    [p.coverage_table setBuffer:current.transformed_catalogue ? coverage_vertices : dummy
+                         offset:0
+                        atIndex:1];
+    [p.coverage_table setBuffer:dummy offset:0 atIndex:2];
+    [encoder setAccelerationStructure:catalogue atBufferIndex:20];
+    [encoder setIntersectionFunctionTable:p.coverage_table atBufferIndex:21];
+    [encoder setBuffer:coverage_polygons offset:0 atIndex:22];
+    [encoder setBuffer:coverage_vertices offset:0 atIndex:23];
+    [encoder useResource:catalogue usage:MTLResourceUsageRead];
+    [encoder useResource:p.coverage_table usage:MTLResourceUsageRead];
+    [encoder useResource:coverage_polygons usage:MTLResourceUsageRead];
+    [encoder useResource:coverage_vertices usage:MTLResourceUsageRead];
     if (shadows) {
       [encoder setBytes:sun length:sizeof(sun) atIndex:16];
       [encoder setBuffer:scene_shadows offset:0 atIndex:17];

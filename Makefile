@@ -193,6 +193,8 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --mixed-coverage
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --coverage-junctions
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-quantized
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-expanded
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --valid-quantized
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --valid-expanded
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer

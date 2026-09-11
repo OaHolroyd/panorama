@@ -198,7 +198,7 @@ candidate tiles; Mipmap then traverses each selected tile's maximum hierarchy,
 while BVH uses its detailed surface acceleration. The shared catalogue survives
 camera turns, image resizing, and backend switches, and rebuilds after XY or LOD
 changes. Mipmap retains grid selection on devices without Metal ray-tracing
-support. Coverage gaps still terminate rays. Sharing the catalogue alone did not
+support. Rays cross coverage gaps as empty space. Sharing the catalogue alone did not
 improve Mipmap timings in the tested M2 view; performance depends on the camera
 and device.
 
@@ -291,7 +291,9 @@ without loading heights, allowing later `--terrain` sources to fill missing
 coverage in earlier sources. Cells crossing a priority boundary remain
 candidates; priority is checked at the actual collision position. Partial tiles
 stay at native resolution, and missing neighbours are excluded from normal
-reconstruction. Real gaps in the combined coverage still end a ray's traversal.
+reconstruction. Primary and shadow rays cross gaps in the combined coverage as
+empty space, continuing to known terrain beyond them up to the configured range.
+Known terrain that is not resident still loads before its visibility is resolved.
 
 Manifest elevation bounds enclose all stored LODs and ignore missing samples.
 Re-running generation without `--overwrite` repairs absent or older manifests

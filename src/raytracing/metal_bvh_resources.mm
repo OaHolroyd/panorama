@@ -86,14 +86,23 @@ BvhPipeline make_bvh_pipeline(
                                                      : missing_intersection_name];
     if (missing == nil)
       throw std::runtime_error("Could not load scene missing-tile intersection function");
-    coverage = coverage_intersection_name == nil
-                   ? missing
-                   : [gpu.library() newFunctionWithName:coverage_intersection_name];
-    if (coverage == nil)
-      throw std::runtime_error("Could not load scene coverage intersection function");
-    descriptor.linkedFunctions.functions =
-        coverage == missing ? @[ intersection, missing ] : @[ intersection, missing, coverage ];
   }
+  coverage = scene_mode && coverage_intersection_name == nil
+                 ? missing
+                 : [gpu.library() newFunctionWithName:coverage_intersection_name == nil
+                                                          ? @"terrain_tile_intersection"
+                                                          : coverage_intersection_name];
+  if (coverage == nil)
+    throw std::runtime_error("Could not load terrain coverage intersection function");
+  if ([coverage.name isEqualToString:intersection.name])
+    coverage = intersection;
+  auto *linked = [NSMutableArray arrayWithObject:intersection];
+  if (missing != nil && missing != intersection)
+    [linked addObject:missing];
+  if (coverage != intersection && coverage != missing)
+    [linked addObject:coverage];
+  descriptor.linkedFunctions.functions = linked;
+
   BvhPipeline result;
   result.state = [gpu.device() newComputePipelineStateWithDescriptor:descriptor
                                                              options:MTLPipelineOptionNone
@@ -108,17 +117,19 @@ BvhPipeline make_bvh_pipeline(
   if (result.table == nil || handle == nil)
     throw std::runtime_error("Could not create BVH intersection table");
   [result.table setFunction:handle atIndex:0];
+  result.coverage_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
+  auto coverage_handle = [result.state functionHandleWithFunction:coverage];
+  if (result.coverage_table == nil || coverage_handle == nil)
+    throw std::runtime_error("Could not create terrain coverage intersection table");
+  [result.coverage_table setFunction:coverage_handle atIndex:0];
   if (scene_mode) {
     result.missing_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
-    result.coverage_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
     auto missing_handle = [result.state functionHandleWithFunction:missing];
-    auto coverage_handle = [result.state functionHandleWithFunction:coverage];
-    if (result.missing_table == nil || result.coverage_table == nil || missing_handle == nil ||
-        coverage_handle == nil)
+    if (result.missing_table == nil || missing_handle == nil)
       throw std::runtime_error("Could not create scene missing-tile intersection table");
     [result.missing_table setFunction:missing_handle atIndex:0];
-    [result.coverage_table setFunction:coverage_handle atIndex:0];
   }
+
   return result;
 }
 

@@ -121,6 +121,8 @@ struct BvhPayload {
   uint source;
   float3 world_direction;
   float3 world_origin;
+  bool allow_covered_steps;
+  bool covered_step;
 };
 
 template <typename Sample>
@@ -239,7 +241,8 @@ inline BvhIntersection intersect_terrain_block(
                                                   params.trace.curvature_coefficient,
                                                   collision_start,
                                                   end,
-                                                  horizontal_origin
+                                                  horizontal_origin,
+                                                  payload.allow_covered_steps
                                               )
                                             : triangle_collision(
                                                   vertices,
@@ -255,7 +258,8 @@ inline BvhIntersection intersect_terrain_block(
                                                   direction.z,
                                                   params.trace.curvature_coefficient,
                                                   collision_start,
-                                                  horizontal_origin
+                                                  horizontal_origin,
+                                                  payload.allow_covered_steps
                                               );
         if (!collision.hit || !params.transformed_catalogue ||
             bvh_owned_hit(
@@ -303,6 +307,7 @@ inline BvhIntersection intersect_terrain_block(
            ))) {
         if (collision.distance < payload.closest) {
           payload.closest = collision.distance;
+          payload.covered_step = collision.covered_step;
           if (compute_surface_gradients) {
             if (use_c1_normals && x >= 1 && y >= 1 && x < int(tile.cell_count) - 1 &&
                 y < int(tile.cell_count) - 1 &&
@@ -470,7 +475,42 @@ BvhIntersection terrain_bvh_intersection(
   return result;
 }
 
-/// Match the software frontier's termination at the first missing source.
+// A discontinuity between known terrain sources may need the established
+// underground recovery. It must never turn the far side of an empty gap into
+// a wall. Verify coverage only for this exceptional result; exact surface hits
+// beyond gaps need no continuity proof.
+inline bool recovered_step_crosses_gap(
+    primitive_acceleration_structure coverage,
+    intersection_function_table<> functions,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
+    thread const BvhPayload &payload,
+    constant BvhParameters &params,
+    float distance
+) {
+  if (!payload.covered_step)
+    return false;
+  const float3 d = payload.world_direction;
+  const RayDirection ray_direction = {d.x,
+                                      d.y,
+                                      d.x == 0 ? INFINITY : 1 / d.x,
+                                      d.y == 0 ? INFINITY : 1 / d.y,
+                                      d.z};
+  const float limit = transformed_coverage_limit(
+      coverage,
+      functions,
+      polygons,
+      vertices,
+      ray_direction,
+      payload.world_origin.z,
+      distance,
+      params.coverage_step_limit,
+      payload.world_origin.xy
+  );
+  return distance > limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
+}
+
+/// Trace the next resident terrain interval, allowing empty regions between tiles.
 kernel void trace_terrain_bvh(
     instance_acceleration_structure terrain [[buffer(0)]],
     intersection_function_table<instancing> functions [[buffer(1)]],
@@ -481,10 +521,12 @@ kernel void trace_terrain_bvh(
     device float *steps [[buffer(6)]],
     device float *evaluations [[buffer(7)]],
     constant BvhParameters &params [[buffer(8)]],
-    device const BvhTile *tiles [[buffer(9)]],
-    device const CatalogueTileHashEntry *catalogue [[buffer(10)]],
     device BvhRayState *states [[buffer(11)]],
     device const uint *work [[buffer(12)]],
+    primitive_acceleration_structure coverage [[buffer(20)]],
+    intersection_function_table<> coverage_functions [[buffer(21)]],
+    device const BvhCoveragePolygon *coverage_polygons [[buffer(22)]],
+    device const BvhCoverageVertex *coverage_vertices [[buffer(23)]],
     uint work_index [[thread_position_in_grid]]
 ) {
   if (work_index >= params.work_count)
@@ -498,18 +540,34 @@ kernel void trace_terrain_bvh(
   r.max_distance = min(states[index].exit, params.trace.max_distance);
   intersector<instancing> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
-  BvhPayload payload = {INFINITY, 0U, 0U, 0U, states[index].source, r.direction, r.origin};
-  const auto result = tracer.intersect(r, terrain, functions, payload);
+  BvhPayload payload = {INFINITY,
+                        0U,
+                        0U,
+                        0U,
+                        states[index].source,
+                        r.direction,
+                        r.origin,
+                        bool(params.transformed_catalogue),
+                        false};
+  auto result = tracer.intersect(r, terrain, functions, payload);
+  if (result.type != intersection_type::none && recovered_step_crosses_gap(
+                                                    coverage,
+                                                    coverage_functions,
+                                                    coverage_polygons,
+                                                    coverage_vertices,
+                                                    payload,
+                                                    params,
+                                                    result.distance
+                                                )) {
+    payload.closest = INFINITY;
+    payload.allow_covered_steps = false;
+    payload.covered_step = false;
+    result = tracer.intersect(r, terrain, functions, payload);
+  }
   states[index].source = 0xffffffffU;
   bool hit = result.type != intersection_type::none;
   states[index].progress = states[index].exit;
   states[index].done = hit || states[index].progress >= params.trace.max_distance;
-  // Only successful rays need coverage verification, and only up to the hit.
-  // Walking the entire catalogue first wastes work on sky and nearby terrain.
-  if (hit && !params.transformed_catalogue) {
-    const float limit = bvh_coverage_limit(direction, params, tiles, catalogue, result.distance);
-    hit = result.distance <= limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
-  }
   distances[index] = hit ? result.distance : 0.0F;
   if (store_collision_elevations)
     elevations[index] = hit ? curved_ray_elevation(
@@ -528,7 +586,7 @@ kernel void trace_terrain_bvh(
 }
 
 // Traverse all cached tiles in one GPU dispatch. A second, conservative
-// catalogue query proves no missing tile can occlude the tentative hit. Rays
+// catalogue query proves no unloaded tile can occlude the tentative hit. Rays
 // without that proof remain at progress zero for the bounded streaming path.
 kernel void trace_terrain_scene(
     instance_acceleration_structure terrain [[buffer(0)]],
@@ -540,8 +598,6 @@ kernel void trace_terrain_scene(
     device float *steps [[buffer(6)]],
     device float *evaluations [[buffer(7)]],
     constant BvhParameters &params [[buffer(8)]],
-    device const BvhTile *tiles [[buffer(9)]],
-    device const CatalogueTileHashEntry *catalogue [[buffer(10)]],
     device BvhRayState *states [[buffer(11)]],
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
     intersection_function_table<> missing_functions [[buffer(14)]],
@@ -575,8 +631,30 @@ kernel void trace_terrain_scene(
   r.max_distance = params.trace.max_distance;
   intersector<instancing> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
-  BvhPayload payload = {INFINITY, 0U, 0U, 0U, 0xffffffffU, r.direction, r.origin};
-  const auto result = tracer.intersect(r, terrain, functions, payload);
+  BvhPayload payload = {INFINITY,
+                        0U,
+                        0U,
+                        0U,
+                        0xffffffffU,
+                        r.direction,
+                        r.origin,
+                        bool(params.transformed_catalogue),
+                        false};
+  auto result = tracer.intersect(r, terrain, functions, payload);
+  if (result.type != intersection_type::none && recovered_step_crosses_gap(
+                                                    coverage,
+                                                    coverage_functions,
+                                                    coverage_polygons,
+                                                    coverage_vertices,
+                                                    payload,
+                                                    params,
+                                                    result.distance
+                                                )) {
+    payload.closest = INFINITY;
+    payload.allow_covered_steps = false;
+    payload.covered_step = false;
+    result = tracer.intersect(r, terrain, functions, payload);
+  }
   bool hit = result.type != intersection_type::none;
   if (hit) {
     r.max_distance =
@@ -596,22 +674,6 @@ kernel void trace_terrain_scene(
     atomic_store_explicit(requested_sources + source, 1U, memory_order_relaxed);
     atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
     return;
-  }
-  if (hit) {
-    const float limit =
-        params.transformed_catalogue
-            ? transformed_coverage_limit(
-                  coverage,
-                  coverage_functions,
-                  coverage_polygons,
-                  coverage_vertices,
-                  direction,
-                  params.trace.observer_elevation,
-                  result.distance,
-                  params.coverage_step_limit
-              )
-            : bvh_coverage_limit(direction, params, tiles, catalogue, result.distance);
-    hit = result.distance <= limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
   }
   states[index].done = 1U;
   distances[index] = hit ? result.distance : 0.0F;
@@ -642,8 +704,6 @@ kernel void trace_scene_shadows(
     device const float *elevations [[buffer(4)]],
     device const uint *gradients [[buffer(5)]],
     constant BvhParameters &params [[buffer(8)]],
-    device const BvhTile *tiles [[buffer(9)]],
-    device const CatalogueTileHashEntry *catalogue [[buffer(10)]],
     device const BvhRayState *states [[buffer(11)]],
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
     intersection_function_table<> missing_functions [[buffer(14)]],
@@ -675,62 +735,42 @@ kernel void trace_scene_shadows(
       distances[index] * float2(camera.x, camera.y) + horizontal_bias * sun.xy,
       elevations[index] + horizontal_bias * sun.z + vertical_bias
   );
-  const RayDirection direction = {sun.x,
-                                  sun.y,
-                                  sun.x == 0 ? INFINITY : 1 / sun.x,
-                                  sun.y == 0 ? INFINITY : 1 / sun.y,
-                                  sun.z};
-  float limit = params.trace.max_distance;
-  if (!params.transformed_catalogue) {
-    const BvhTile observer_tile = tiles[params.observer_source];
-    const float width = observer_tile.cell_size * float(observer_tile.cell_count);
-    const long column =
-        observer_tile.column + long(floor((origin.x - observer_tile.x_min) / width));
-    const long row = observer_tile.row - long(floor((origin.y - observer_tile.y_min) / width));
-    device const CatalogueTileHashEntry *source =
-        lookup_catalogue_tile(catalogue, params.hash_capacity, row, column);
-    if (source == nullptr)
-      return;
-    limit = bvh_coverage_limit(
-        direction,
-        params,
-        tiles,
-        catalogue,
-        params.trace.max_distance,
-        origin.xy,
-        source->source_index
-    );
-  }
-  if (!(limit > 0))
-    return;
   const float k = params.trace.curvature_coefficient;
   ray r;
   r.origin = float3(origin.xy, origin.z - k * dot(origin.xy, origin.xy));
   r.direction = float3(sun.xy, sun.z - 2 * k * dot(origin.xy, sun.xy));
   r.min_distance = 0;
-  r.max_distance = limit;
+  r.max_distance = params.trace.max_distance;
   intersector<instancing> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
   tracer.accept_any_intersection(true);
-  BvhPayload payload = {INFINITY, 0U, 0U, 0U, 0xffffffffU, sun.xyz, origin};
-  const auto hit = tracer.intersect(r, terrain, functions, payload);
+  BvhPayload payload = {INFINITY,
+                        0U,
+                        0U,
+                        0U,
+                        0xffffffffU,
+                        sun.xyz,
+                        origin,
+                        bool(params.transformed_catalogue),
+                        false};
+  auto hit = tracer.intersect(r, terrain, functions, payload);
+  if (hit.type != intersection_type::none && recovered_step_crosses_gap(
+                                                 coverage,
+                                                 coverage_functions,
+                                                 coverage_polygons,
+                                                 coverage_vertices,
+                                                 payload,
+                                                 params,
+                                                 hit.distance
+                                             )) {
+    payload.closest = INFINITY;
+    payload.allow_covered_steps = false;
+    payload.covered_step = false;
+    hit = tracer.intersect(r, terrain, functions, payload);
+  }
   if (hit.type != intersection_type::none) {
-    const float coverage_limit = params.transformed_catalogue ? transformed_coverage_limit(
-                                                                    coverage,
-                                                                    coverage_functions,
-                                                                    coverage_polygons,
-                                                                    coverage_vertices,
-                                                                    direction,
-                                                                    origin.z,
-                                                                    hit.distance,
-                                                                    params.coverage_step_limit,
-                                                                    origin.xy
-                                                                )
-                                                              : limit;
-    if (hit.distance <= coverage_limit + 8.0F * FLT_EPSILON * max(1.0F, coverage_limit)) {
-      visibility[index] = 0U;
-      return; // A reachable known occluder proves shadow even if later tiles are absent.
-    }
+    visibility[index] = 0U;
+    return; // A known occluder proves shadow even if other tiles still need loading.
   }
   intersector<> missing_tracer;
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);

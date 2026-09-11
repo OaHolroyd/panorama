@@ -75,7 +75,7 @@ void print_error(NSString *context, NSError *error) {
   }
   return {static_cast<float>(x),
           static_cast<float>(y),
-          (no_data & 2U) ? std::numeric_limits<float>::infinity() : maximum_elevation,
+          maximum_elevation,
           lod,
           key.row,
           key.column,
@@ -256,6 +256,8 @@ void TileManager::State::load_custom_vertices(
     [encoder setBytes:&quantized_record.no_data_offset
                length:sizeof(quantized_record.no_data_offset)
               atIndex:8];
+    // Coarser variants use fewer samples but keep the full-resolution slot stride.
+    [encoder setBytes:&vertex_count length:sizeof(vertex_count) atIndex:9];
     [encoder dispatchThreads:MTLSizeMake(vertex_value_count, tile_count, 1U)
         threadsPerThreadgroup:threadgroups::spatial];
     [encoder endEncoding];
@@ -617,9 +619,7 @@ void TileManager::State::attach_atlas(
       state->header_template.vertex_byte_count,
   };
   const uint32_t slot = 0U;
-  state->metadata[0].no_data = uint32_t(
-      (sources.front().valid_cells ? (sources.front().valid_cells->full() ? 1U : 3U) : 0U)
-  );
+  state->metadata[0].no_data = uint32_t(bool(sources.front().valid_cells));
   const int32_t elevation_base = state->header_template.elevation_base_decimeters;
   state->load_custom_vertices(
       std::span<const MetalTileBufferLoad>(&load, 1U),
@@ -643,7 +643,7 @@ void TileManager::State::attach_atlas(
       origin_key,
       1U,
       config,
-      (sources.front().valid_cells ? (sources.front().valid_cells->full() ? 1U : 3U) : 0U)
+      bool(sources.front().valid_cells)
   );
   state->slot_by_variant[{0U, 1U}] = 0U;
   state->variant_by_slot.assign(capacity, std::nullopt);
@@ -752,7 +752,7 @@ TileManager::State::install_prepared(std::span<const uint8_t> pinned_slots, Time
         source.key,
         installation.prepared.variant.lod,
         state.config,
-        (source.valid_cells ? (source.valid_cells->full() ? 1U : 3U) : 0U)
+        bool(source.valid_cells)
     );
   }
 

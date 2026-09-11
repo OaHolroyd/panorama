@@ -137,24 +137,6 @@ kernel void select_terrain_coverage_polygons(
       float2(0.0F),
       true
   );
-  // Ownership can leave a sliver between source grids. Skip it only when
-  // physical dataset footprints still cover the complete interval.
-  if (selected.source != 0xffffffffU && selected.entry > states[index].progress) {
-    const float limit = transformed_coverage_limit(
-        catalogue,
-        functions,
-        polygons,
-        vertices,
-        rays[index],
-        params.trace.observer_elevation,
-        selected.entry,
-        params.coverage_step_limit,
-        float2(0.0F),
-        states[index].progress
-    );
-    if (limit + 8.0F * FLT_EPSILON * max(1.0F, limit) < selected.entry)
-      selected.source = 0xffffffffU;
-  }
   states[index].source = selected.source;
   states[index].primitive = selected.primitive;
   states[index].exit = selected.exit;
@@ -207,7 +189,6 @@ kernel void emit_bvh_tile_frontier(
     constant uint &hash_capacity [[buffer(9)]],
     primitive_acceleration_structure catalogue [[buffer(12)]],
     intersection_function_table<> functions [[buffer(13)]],
-    constant uint &source_count [[buffer(14)]],
     device const BvhTile *tiles [[buffer(15)]],
     uint work_index [[thread_position_in_grid]]
 ) {
@@ -230,31 +211,6 @@ kernel void emit_bvh_tile_frontier(
       current_source->source_index
   );
   if (selected.source == 0xffffffffU)
-    return;
-  BvhTile tile = {current.tile_x_min,
-                  current.tile_y_min,
-                  params.cell_size,
-                  mipmap_finest_side(params.num_levels),
-                  0,
-                  0,
-                  1,
-                  current.row,
-                  current.column};
-  // Never jump a coverage gap to terrain beyond it. Check only the skipped
-  // interval from the current resident tile, without revisiting earlier tiles.
-  const float limit = tile_coverage_limit(
-      direction,
-      tile,
-      catalogue_hash,
-      hash_capacity,
-      source_count,
-      params.cell_size,
-      active.entry_distance,
-      min(selected.exit,
-          selected.entry +
-              max(0.001F * params.cell_size, 16.0F * FLT_EPSILON * max(1.0F, selected.entry)))
-  );
-  if (limit <= selected.entry)
     return;
   const uint index = atomic_fetch_add_explicit(deferred_count, 1U, memory_order_relaxed);
   if (index < frontier_capacity)

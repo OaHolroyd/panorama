@@ -36,79 +36,6 @@ struct TileSelection {
   bool ownership_only;
 };
 
-inline float tile_coverage_limit(
-    RayDirection ray,
-    BvhTile tile,
-    device const CatalogueTileHashEntry *catalogue,
-    uint hash_capacity,
-    uint source_count,
-    float cell_size,
-    float entry,
-    float limit
-) {
-  const float width = tile.cell_size * float(tile.cell_count);
-  for (uint crossed = 0; crossed <= source_count; ++crossed) {
-    float boundary = tile_exit_distance(
-        tile.x_min,
-        tile.y_min,
-        width,
-        1U,
-        float4(ray.x, ray.y, ray.inverse_x, ray.inverse_y),
-        entry
-    );
-    // At an observer edge/corner the first crossing can be exactly t=0.
-    // tile_exit_distance intentionally returns only strictly later boundaries.
-    if (crossed == 0U) {
-      const float nudge = max(1e-3F * cell_size, 8.0F * FLT_EPSILON * max(1.0F, entry));
-      const float x = entry * ray.x + (ray.x == 0 ? 0 : copysign(nudge, ray.x));
-      const float y = entry * ray.y + (ray.y == 0 ? 0 : copysign(nudge, ray.y));
-      if (x < tile.x_min || x >= tile.x_min + width || y < tile.y_min || y >= tile.y_min + width)
-        boundary = entry;
-    }
-    if (boundary >= limit)
-      return limit;
-    const float nudge = max(1e-3F * cell_size, 8.0F * FLT_EPSILON * max(1.0F, boundary));
-    const float x = boundary * ray.x + (ray.x == 0.0F ? 0.0F : copysign(nudge, ray.x));
-    const float y = boundary * ray.y + (ray.y == 0.0F ? 0.0F : copysign(nudge, ray.y));
-    const long dx = x < tile.x_min ? -1L : x >= tile.x_min + width ? 1L : 0L;
-    const long dy = y < tile.y_min ? 1L : y >= tile.y_min + width ? -1L : 0L;
-    if (dx == 0L && dy == 0L)
-      return boundary;
-    tile.row += dy;
-    tile.column += dx;
-    tile.x_min += float(dx) * width;
-    tile.y_min -= float(dy) * width;
-    if (lookup_catalogue_tile(catalogue, hash_capacity, tile.row, tile.column) == nullptr)
-      return boundary;
-    entry = boundary;
-  }
-  return entry;
-}
-
-inline float bvh_coverage_limit(
-    RayDirection ray,
-    constant BvhParameters &params,
-    device const BvhTile *tiles,
-    device const CatalogueTileHashEntry *catalogue,
-    float limit,
-    float2 origin = float2(0.0F),
-    uint source = 0xffffffffU
-) {
-  BvhTile tile = tiles[source == 0xffffffffU ? params.observer_source : source];
-  tile.x_min -= origin.x;
-  tile.y_min -= origin.y;
-  return tile_coverage_limit(
-      ray,
-      tile,
-      catalogue,
-      params.hash_capacity,
-      params.source_count,
-      params.trace.cell_size,
-      0.0F,
-      limit
-  );
-}
-
 struct SelectedTerrainTile {
   uint source;
   uint primitive;
@@ -233,7 +160,7 @@ inline bool bvh_source_interval(
         continue;
       // Merge connected intervals so a tessellated tile does not require a
       // fresh hardware query at every internal region edge. Disjoint intervals
-      // remain separate: a real no-data hole must still end continuous coverage.
+      // remain separate so an empty region never acquires a surface.
       if (found && start <= farthest && end >= nearest) {
         nearest = min(nearest, start);
         farthest = max(farthest, end);
@@ -317,7 +244,6 @@ inline SelectedTerrainTile select_next_coverage_polygon(
   ray r;
   r.origin = float3(ray_origin, elevation);
   r.direction = float3(direction.x, direction.y, direction.slope);
-  const float tolerance = max(1e-3F, 8.0F * FLT_EPSILON * max(1.0F, progress));
   r.min_distance = progress;
   r.max_distance = limit;
   intersector<> tracer;
@@ -338,8 +264,7 @@ inline SelectedTerrainTile select_next_coverage_polygon(
           float2(direction.x, direction.y),
           entry,
           exit
-      ) ||
-      (!ownership_only && entry > progress + tolerance))
+      ))
     return {0xffffffffU, 0xffffffffU, progress, progress};
   return {polygon.source, hit.primitive_id, max(progress, entry), exit};
 }
@@ -374,7 +299,8 @@ inline float transformed_coverage_limit(
         previous,
         origin
     );
-    if (selected.source == 0xffffffffU)
+    const float tolerance = max(1e-3F, 8.0F * FLT_EPSILON * max(1.0F, progress));
+    if (selected.source == 0xffffffffU || selected.entry > progress + tolerance)
       return progress;
     if (selected.exit >= limit)
       return limit;

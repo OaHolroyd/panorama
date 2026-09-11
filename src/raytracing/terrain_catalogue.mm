@@ -609,7 +609,7 @@ TerrainCatalogue TerrainCatalogue::discover(
       // Geometry uses sufficiently small affine regions that independently
       // transformed neighbouring tiles differ by less than half a metre at a
       // shared edge. Coverage uses a coarser shared-vertex tessellation: it
-      // proves source continuity but never supplies a rendered surface.
+      // schedules owned intervals but never supplies a rendered surface.
       constexpr double geometry_residual_metres = 0.25;
       const std::vector<TerrainTransformPatch> geometry_patches =
           make_terrain_transform_patches(header, frame, geometry_residual_metres);
@@ -635,7 +635,7 @@ TerrainCatalogue TerrainCatalogue::discover(
         continue;
       // Physical coverage includes all usable cells, independent of ownership.
       // Adjacent fallback cells can overlap at a priority edge without opening
-      // an artificial gap in this continuity hierarchy.
+      // an artificial gap in this coverage hierarchy.
       const auto boundary_junctions = coverage_boundary_junctions(dataset, available.key);
       source.coverage_polygons =
           make_terrain_coverage_polygons(header, frame, coverage_patches, 256U, boundary_junctions);
