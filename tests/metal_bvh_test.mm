@@ -406,13 +406,17 @@ void check_dataset_foundation(const std::filesystem::path &root) {
   );
   for (const TerrainSource &source : combined.sources()) {
     require(!source.transform_patches.empty(), "Combined source has no render transform");
+    require(!source.coverage_patches.empty(), "Combined source has no coverage transform");
     require(
         std::all_of(
             source.transform_patches.begin(),
             source.transform_patches.end(),
-            [](const auto &patch) { return std::isfinite(patch.transform.maximum_residual_metres); }
+            [](const auto &patch) {
+              return std::isfinite(patch.transform.maximum_residual_metres) &&
+                     patch.transform.maximum_residual_metres <= 0.25;
+            }
         ),
-        "Combined source transform has no finite seam bound"
+        "Combined source geometry transform exceeded its seam bound"
     );
   }
 

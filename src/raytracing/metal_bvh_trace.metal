@@ -483,10 +483,11 @@ kernel void trace_terrain_scene(
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
     intersection_function_table<> missing_functions [[buffer(14)]],
     device atomic_uint *missing_count [[buffer(15)]],
-    device const BvhAffinePatch *patches [[buffer(16)]],
+    device const BvhAffinePatch *candidate_patches [[buffer(16)]],
     device atomic_uint *requested_sources [[buffer(17)]],
     primitive_acceleration_structure coverage [[buffer(20)]],
     intersection_function_table<> coverage_functions [[buffer(21)]],
+    device const BvhAffinePatch *coverage_patches [[buffer(22)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.trace.image_width + position.x;
@@ -525,8 +526,9 @@ kernel void trace_terrain_scene(
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {
-    const uint source =
-        params.transformed_catalogue ? patches[missing.primitive_id].source : missing.primitive_id;
+    const uint source = params.transformed_catalogue
+                            ? candidate_patches[missing.primitive_id].source
+                            : missing.primitive_id;
     atomic_store_explicit(requested_sources + source, 1U, memory_order_relaxed);
     atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
     return;
@@ -537,7 +539,7 @@ kernel void trace_terrain_scene(
             ? transformed_coverage_limit(
                   coverage,
                   coverage_functions,
-                  patches,
+                  coverage_patches,
                   direction,
                   params.trace.observer_elevation,
                   result.distance,
@@ -584,9 +586,10 @@ kernel void trace_scene_shadows(
     constant float4 &sun [[buffer(16)]],
     device uchar *visibility [[buffer(17)]],
     device atomic_uint *requested_sources [[buffer(18)]],
-    device const BvhAffinePatch *patches [[buffer(19)]],
+    device const BvhAffinePatch *candidate_patches [[buffer(19)]],
     primitive_acceleration_structure coverage [[buffer(20)]],
     intersection_function_table<> coverage_functions [[buffer(21)]],
+    device const BvhAffinePatch *coverage_patches [[buffer(22)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.trace.image_width + position.x;
@@ -649,7 +652,7 @@ kernel void trace_scene_shadows(
     const float coverage_limit = params.transformed_catalogue ? transformed_coverage_limit(
                                                                     coverage,
                                                                     coverage_functions,
-                                                                    patches,
+                                                                    coverage_patches,
                                                                     direction,
                                                                     origin.z,
                                                                     hit.distance,
@@ -669,8 +672,9 @@ kernel void trace_scene_shadows(
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {
-    const uint source =
-        params.transformed_catalogue ? patches[missing.primitive_id].source : missing.primitive_id;
+    const uint source = params.transformed_catalogue
+                            ? candidate_patches[missing.primitive_id].source
+                            : missing.primitive_id;
     atomic_store_explicit(requested_sources + source, 1U, memory_order_relaxed);
     atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
   }

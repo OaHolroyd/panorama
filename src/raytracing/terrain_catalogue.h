@@ -51,6 +51,10 @@ struct TerrainSource {
   uint32_t dataset_index = 0U;
   /// Tile-local logical-cell transforms into the selected render frame.
   std::vector<TerrainTransformPatch> transform_patches;
+  /// Coarse ownership transforms used only to prove uninterrupted dataset
+  /// coverage. Keeping these separate prevents geometry refinement from
+  /// multiplying the cost of every coverage walk.
+  std::vector<TerrainTransformPatch> coverage_patches;
   /// Largest transformed LOD-1 cell axis, used by per-source LOD policy.
   double effective_cell_size_metres = 0.0;
   double vertical_offset_metres = 0.0;

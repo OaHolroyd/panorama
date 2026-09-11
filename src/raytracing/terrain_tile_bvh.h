@@ -16,7 +16,10 @@ public:
   /// Height-bounded candidates used to find unloaded possible occluders.
   id<MTLAccelerationStructure> candidate_acceleration() const;
   id<MTLBuffer> tiles() const;
+  /// Coarse transformed patches used by catalogue coverage traversal.
   id<MTLBuffer> patches() const;
+  /// Fine transformed patches used by height-bounded candidate traversal.
+  id<MTLBuffer> candidate_patches() const;
   std::span<const BvhTile> metadata() const;
   uint64_t bytes() const;
   uint64_t generation() const;

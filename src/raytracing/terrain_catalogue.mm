@@ -115,6 +115,7 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
                                                   : elevation->second.minimum_elevation,
               dataset_index,
               {},
+              {},
               0.0,
               config.vertical_offset_metres,
           }
@@ -541,20 +542,27 @@ TerrainCatalogue TerrainCatalogue::discover(
         *source.maximum_elevation += static_cast<float>(source.vertical_offset_metres);
       if (source.minimum_elevation.has_value())
         *source.minimum_elevation += static_cast<float>(source.vertical_offset_metres);
-      // Each source uses one local affine CRS approximation. This keeps the
-      // catalogue proportional to the number of terrain tiles and matches the
-      // prepared tile as the unit of loading, LOD selection, and BVH reuse.
-      // The measured residual is retained so traversal can bridge only the
-      // small seam introduced by adjacent local approximations.
-      const std::array<TerrainTransformPatch, 1> transform_patches = {
+      // Geometry uses sufficiently small affine regions that independently
+      // transformed neighbouring tiles differ by less than half a metre at a
+      // shared edge. Coverage retains one region per tile: it proves source
+      // continuity but never supplies a rendered surface.
+      constexpr double geometry_residual_metres = 0.25;
+      const std::vector<TerrainTransformPatch> geometry_patches =
+          make_terrain_transform_patches(header, frame, geometry_residual_metres);
+      const std::array<TerrainTransformPatch, 1> coverage_patches = {
           TerrainTransformPatch{0U, 0U, header.cell_count, header.cell_count, whole},
       };
       source.transform_patches = owned_transform_patches(
           header,
-          transform_patches,
+          geometry_patches,
           std::span<const TerrainDataset>(datasets).first(dataset.index)
       );
-      if (source.transform_patches.empty())
+      source.coverage_patches = owned_transform_patches(
+          header,
+          coverage_patches,
+          std::span<const TerrainDataset>(datasets).first(dataset.index)
+      );
+      if (source.transform_patches.empty() || source.coverage_patches.empty())
         continue;
       uint64_t owned_cells = 0U;
       for (const TerrainTransformPatch &patch : source.transform_patches)

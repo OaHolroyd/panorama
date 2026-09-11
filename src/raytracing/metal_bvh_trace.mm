@@ -94,7 +94,7 @@ struct MetalBvhTrace::State {
   std::array<Pipeline, 4> scene_pipelines = {};
   std::array<Pipeline, 4> shadow_pipelines = {};
   Pipeline tile_selector, patch_selector;
-  id<MTLBuffer> parameters, dummy, tiles, patches, rays, work;
+  id<MTLBuffer> parameters, dummy, tiles, patches, candidate_patches, rays, work;
   id<MTLAccelerationStructure> catalogue, candidate_catalogue;
   std::span<const BvhTile> tile_metadata;
   uint64_t catalogue_generation = 0;
@@ -274,6 +274,7 @@ struct MetalBvhTrace::State {
     auto &shared = gpu.tile_bvh();
     tiles = shared.tiles();
     patches = shared.patches();
+    candidate_patches = shared.candidate_patches();
     catalogue = shared.acceleration();
     candidate_catalogue = shared.candidate_acceleration();
     tile_metadata = shared.metadata();
@@ -646,7 +647,7 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:rays offset:0 atIndex:11];
     [encoder setBuffer:work offset:0 atIndex:12];
     if (scene_mode) {
-      [p.missing_table setBuffer:current.transformed_catalogue ? patches : tiles
+      [p.missing_table setBuffer:current.transformed_catalogue ? candidate_patches : tiles
                           offset:0
                          atIndex:0];
       [p.missing_table setBuffer:scene_resident offset:0 atIndex:1];
@@ -657,7 +658,7 @@ struct MetalBvhTrace::State {
       [encoder useResource:scene_resident usage:MTLResourceUsageRead];
       [encoder useResource:p.missing_table usage:MTLResourceUsageRead];
       if (!shadows) {
-        [encoder setBuffer:patches offset:0 atIndex:16];
+        [encoder setBuffer:candidate_patches offset:0 atIndex:16];
         [encoder setBuffer:scene_requested_sources offset:0 atIndex:17];
       }
       [p.coverage_table setBuffer:current.transformed_catalogue ? patches : tiles
@@ -666,14 +667,16 @@ struct MetalBvhTrace::State {
       [p.coverage_table setBuffer:dummy offset:0 atIndex:1];
       [encoder setAccelerationStructure:catalogue atBufferIndex:20];
       [encoder setIntersectionFunctionTable:p.coverage_table atBufferIndex:21];
+      [encoder setBuffer:patches offset:0 atIndex:22];
       [encoder useResource:catalogue usage:MTLResourceUsageRead];
       [encoder useResource:p.coverage_table usage:MTLResourceUsageRead];
+      [encoder useResource:patches usage:MTLResourceUsageRead];
     }
     if (shadows) {
       [encoder setBytes:sun length:sizeof(sun) atIndex:16];
       [encoder setBuffer:scene_shadows offset:0 atIndex:17];
       [encoder setBuffer:shadow_requested_sources offset:0 atIndex:18];
-      [encoder setBuffer:patches offset:0 atIndex:19];
+      [encoder setBuffer:candidate_patches offset:0 atIndex:19];
     }
     [encoder useResource:hierarchy.chunks usage:MTLResourceUsageRead];
     [encoder useResource:parameters usage:MTLResourceUsageRead];
@@ -1066,8 +1069,9 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
       }
     }
     if (!has_scene) {
-      // Resident tracing initializes every ray itself. Only a cold streaming
-      // pass needs separate initialization, and it need not touch CPU ray data.
+      // A cold streaming pass needs fresh continuations. A partially resolved
+      // scene already marks its complete rays and leaves only seam/missing
+      // rays active for the streaming fallback below.
       auto command = [state.gpu.command_queue() commandBuffer];
       if (command == nil)
         throw std::runtime_error("Could not create BVH initialization command");
