@@ -762,6 +762,115 @@ void write_masked_fixture(
   write_terrain_manifest(terrain_manifest_path(directory), entries);
 }
 
+// A void at the west side changes coverage rectangles across the entire tile.
+// Rays at the east side must cross their projected T-junction without a gap.
+void write_geographic_junction_fixture(
+    const std::filesystem::path &directory,
+    bool hole,
+    bool across_tiles
+) {
+  constexpr double spacing = 64.0 / 3600.0;
+  write_flat_coverage_fixture(directory, 7.4, spacing, 1000.0F);
+  const auto path = directory / "flat_r0_c0.ptile";
+  const auto original = read_metal_tile_header(path);
+  const auto original_lod = read_metal_tile_lods(path, original).front();
+  std::vector<TerrainManifestEntry> entries;
+  for (int64_t row = 0; row <= int64_t(across_tiles); ++row) {
+    auto header = original;
+    auto lod = original_lod;
+    std::vector<uint16_t> vertices(17U * 17U, 1000U);
+    if (hole && row == int64_t(across_tiles))
+      vertices[(across_tiles ? 16U : 11U) * 17U + 2U] = 0;
+    std::vector<uint8_t> usable(16U * 16U);
+    for (uint32_t y = 0; y < 16; ++y)
+      for (uint32_t x = 0; x < 16; ++x)
+        usable[y * 16 + x] = vertices[y * 17 + x] && vertices[y * 17 + x + 1] &&
+                             vertices[(y + 1) * 17 + x] && vertices[(y + 1) * 17 + x + 1];
+    const auto coverage = make_cell_coverage(16, usable);
+    const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
+    const size_t bytes = size_t(count) * sizeof(TerrainCoverageRect);
+    header.magic = kMetalTileLodMagic;
+    header.version = kMetalTileLodVersion;
+    header.epsg_code = 4326;
+    header.row = row;
+    header.lower_left_y = 45.7 - double(row) * 16 * spacing;
+    header.reserved = count;
+    header.vertex_offset = lod.vertex_offset += bytes;
+    std::vector<std::byte> payload(bytes + vertices.size() * sizeof(uint16_t));
+    if (bytes)
+      std::memcpy(payload.data(), coverage.rectangles.data(), bytes);
+    std::memcpy(payload.data() + bytes, vertices.data(), vertices.size() * sizeof(uint16_t));
+    write_metal_tile_lods(
+        directory / ("flat_r" + std::to_string(row) + "_c0.ptile"),
+        header,
+        std::span(&lod, 1),
+        payload
+    );
+    entries.push_back({row, 0, 1000, 1000, coverage});
+  }
+  write_terrain_manifest(terrain_manifest_path(directory), entries);
+}
+
+void check_coverage_junctions(const std::filesystem::path &root) {
+  const auto projected = root / "junction-navigation";
+  write_flat_coverage_fixture(projected, 2600000, 10, 1000);
+  for (bool across_tiles : {false, true}) {
+    @autoreleasepool {
+      const auto reference =
+          root / (across_tiles ? "junction-reference-two" : "junction-reference-one");
+      const auto masked = root / (across_tiles ? "junction-masked-two" : "junction-masked-one");
+      write_geographic_junction_fixture(reference, false, across_tiles);
+      write_geographic_junction_fixture(masked, true, across_tiles);
+      const auto navigation = Crs::from_epsg(2056).from_lat_lon(
+          {45.7 + 15.5 * 64.0 / 3600.0, 7.4 + 14.5 * 64.0 / 3600.0}
+      );
+      RaytraceConfig config{projected,
+                            {navigation.x, navigation.y, 2000},
+                            80000,
+                            0,
+                            16384,
+                            2,
+                            true,
+                            true,
+                            false};
+      config.raytracer = Raytracer::MetalBvh;
+      config.terrain_datasets = {{projected, 0}, {reference, 0}};
+      const auto field = angular_field(
+          {65, 9},
+          {3.12,
+           3.16,
+           std::atan(across_tiles ? -0.030 : -0.12),
+           std::atan(across_tiles ? -0.026 : -0.08)}
+      );
+      TerrainTraceSession expected(config, field, {true, true, true});
+      expected.trace(field);
+      const auto *distances = static_cast<const float *>(expected.distances().contents);
+      require(
+          std::all_of(
+              distances,
+              distances + pixel_count(field.image),
+              [](float t) { return t > 0; }
+          ),
+          "Coverage junction reference did not hit flat terrain"
+      );
+      config.terrain_datasets.back().directory = masked;
+      TerrainTraceSession actual(config, field, {true, true, true});
+      compare(expected, actual, field, 0.02F);
+      auto relocated = config.observer;
+      relocated.easting -= 50;
+      require(
+          expected.relocate_observer(relocated) && actual.relocate_observer(relocated),
+          "Coverage junction rebase failed"
+      );
+      compare(expected, actual, field, 0.02F);
+    }
+  }
+  std::puts(
+      "Coverage junctions: internal and adjacent-tile seams retain all terrain hits after "
+      "projection and rebasing."
+  );
+}
+
 void check_valid_coverage(const std::filesystem::path &root, bool retained) {
   const auto primary = root / "masked-primary";
   const auto fallback = root / "masked-fallback";
@@ -2143,10 +2252,12 @@ int main(int argc, const char *argv[]) {
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
       const bool valid_quantized = argc == 2 && std::string_view(argv[1]) == "--valid-quantized";
       const bool valid_expanded = argc == 2 && std::string_view(argv[1]) == "--valid-expanded";
+      const bool coverage_junctions =
+          argc == 2 && std::string_view(argv[1]) == "--coverage-junctions";
       const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
           !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage &&
-          !valid_quantized && !valid_expanded) {
+          !valid_quantized && !valid_expanded && !coverage_junctions) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -2265,6 +2376,8 @@ int main(int argc, const char *argv[]) {
           }
         } else if (valid_quantized || valid_expanded) {
           check_valid_coverage(root, valid_quantized);
+        } else if (coverage_junctions) {
+          check_coverage_junctions(root);
         } else if (mixed_coverage) {
           check_misaligned_coverage(root);
         } else if (streaming) {

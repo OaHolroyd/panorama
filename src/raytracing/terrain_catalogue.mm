@@ -267,6 +267,36 @@ enum class CoverageRelation { Uncovered, Covered, Partial };
   return found != dataset.sources.end() && found->key == key ? &*found : nullptr;
 }
 
+/// Match subdivisions on each shared tile boundary as well as inside a tile.
+/// The adjacent source's valid-cell endpoints can meet the middle of our edge.
+[[nodiscard]] std::vector<std::array<uint32_t, 2>>
+coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
+  const uint32_t side = dataset.cell_count;
+  std::vector<std::array<uint32_t, 2>> points;
+  for (uint32_t edge = 0; edge < 4U; ++edge) {
+    const TileKey neighbour = {key.row + (edge == 2U   ? 1
+                                          : edge == 3U ? -1
+                                                       : 0),
+                               key.column + (edge == 0U   ? -1
+                                             : edge == 1U ? 1
+                                                          : 0)};
+    const auto *source = dataset_source(dataset, neighbour);
+    if (!source || !source->valid_cells || source->valid_cells->full())
+      continue;
+    for (const auto &rect : source->valid_cells->rectangles) {
+      if ((edge == 0U && rect.column + rect.width == side) || (edge == 1U && rect.column == 0U)) {
+        points.push_back({edge == 0U ? 0U : side, rect.row});
+        points.push_back({edge == 0U ? 0U : side, rect.row + rect.height});
+      }
+      if ((edge == 2U && rect.row + rect.height == side) || (edge == 3U && rect.row == 0U)) {
+        points.push_back({rect.column, edge == 2U ? 0U : side});
+        points.push_back({rect.column + rect.width, edge == 2U ? 0U : side});
+      }
+    }
+  }
+  return points;
+}
+
 /// Use a logical rectangle's corners, edge midpoints, and centre to bound its
 /// footprint in a higher-priority grid. A completely populated key rectangle
 /// proves coverage; an empty one proves no overlap. Mixed rectangles are
@@ -606,7 +636,9 @@ TerrainCatalogue TerrainCatalogue::discover(
       // Physical coverage includes all usable cells, independent of ownership.
       // Adjacent fallback cells can overlap at a priority edge without opening
       // an artificial gap in this continuity hierarchy.
-      source.coverage_polygons = make_terrain_coverage_polygons(header, frame, coverage_patches);
+      const auto boundary_junctions = coverage_boundary_junctions(dataset, available.key);
+      source.coverage_polygons =
+          make_terrain_coverage_polygons(header, frame, coverage_patches, 256U, boundary_junctions);
       uint64_t owned_cells = 0U;
       for (const TerrainTransformPatch &patch : source.transform_patches)
         owned_cells += uint64_t(patch.cell_width) * patch.cell_height;
@@ -615,8 +647,13 @@ TerrainCatalogue TerrainCatalogue::discover(
       // into a region removed above.
       if (owned_cells != uint64_t(header.cell_count) * header.cell_count) {
         source.lod_count = 1U;
-        source.ownership_polygons =
-            make_terrain_coverage_polygons(header, frame, coverage_ownership);
+        source.ownership_polygons = make_terrain_coverage_polygons(
+            header,
+            frame,
+            coverage_ownership,
+            256U,
+            boundary_junctions
+        );
       }
       source.effective_cell_size_metres = whole.maximum_cell_size_metres();
       const bool contains_observer =

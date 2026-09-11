@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -189,7 +190,8 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
     const MetalTileHeader &header,
     const TerrainRenderFrame &frame,
     std::span<const TerrainTransformPatch> ownership,
-    uint32_t maximum_cells_per_side
+    uint32_t maximum_cells_per_side,
+    std::span<const std::array<uint32_t, 2>> boundary_junctions
 ) {
   if (maximum_cells_per_side == 0U)
     throw std::invalid_argument("Coverage triangle side must be positive");
@@ -200,31 +202,63 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
   const CoordinateTransform projector = frame.projector(header.epsg_code);
   std::vector<TerrainCoveragePolygon> result;
 
+  // A geographic grid line becomes curved after projection. If one side of
+  // a shared edge includes a T-junction but the other uses a longer chord,
+  // the two polygons leave a false gap. Split both at the same grid points.
+  std::map<uint32_t, std::vector<uint32_t>> horizontal, vertical;
+  const auto add_junction = [&](uint32_t column, uint32_t row) {
+    horizontal[row].push_back(column);
+    vertical[column].push_back(row);
+  };
+  for (const auto &region : ownership) {
+    for (uint32_t column : {region.minimum_column, region.minimum_column + region.cell_width})
+      for (uint32_t row : {region.minimum_row, region.minimum_row + region.cell_height})
+        add_junction(column, row);
+  }
+  for (const auto &point : boundary_junctions)
+    add_junction(point[0], point[1]);
+  for (auto *edges : {&horizontal, &vertical})
+    for (auto &[line, cuts] : *edges) {
+      (void)line;
+      std::sort(cuts.begin(), cuts.end());
+      cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+    }
   for (const TerrainTransformPatch &region : ownership) {
-    const uint32_t maximum_column = region.minimum_column + region.cell_width;
-    const uint32_t maximum_row = region.minimum_row + region.cell_height;
-    const auto grid_coordinates = [maximum_cells_per_side](uint32_t minimum, uint32_t maximum) {
-      std::vector<uint32_t> coordinates = {minimum};
-      while (coordinates.back() < maximum) {
-        const uint32_t coordinate = coordinates.back();
-        coordinates.push_back(
-            std::min(maximum, ((coordinate / maximum_cells_per_side) + 1U) * maximum_cells_per_side)
-        );
-      }
-      return coordinates;
-    };
-    const auto columns = grid_coordinates(region.minimum_column, maximum_column);
-    const auto rows = grid_coordinates(region.minimum_row, maximum_row);
+    const uint32_t x0 = region.minimum_column, x1 = x0 + region.cell_width;
+    const uint32_t y0 = region.minimum_row, y1 = y0 + region.cell_height;
     std::vector<Coord> native;
-    native.reserve(2U * (columns.size() + rows.size()) - 4U);
-    for (uint32_t column : columns)
-      native.push_back(native_coordinate(header, column, rows.front()));
-    for (size_t row = 1U; row < rows.size(); ++row)
-      native.push_back(native_coordinate(header, columns.back(), rows[row]));
-    for (size_t column = columns.size() - 1U; column-- > 0U;)
-      native.push_back(native_coordinate(header, columns[column], rows.back()));
-    for (size_t row = rows.size() - 1U; row-- > 1U;)
-      native.push_back(native_coordinate(header, columns.front(), rows[row]));
+    const auto append_edge = [&](bool is_horizontal,
+                                 uint32_t fixed,
+                                 uint32_t minimum,
+                                 uint32_t maximum,
+                                 bool reverse) {
+      std::vector<uint32_t> coordinates = {minimum};
+      for (uint32_t value = minimum; value < maximum;) {
+        value = std::min(maximum, ((value / maximum_cells_per_side) + 1U) * maximum_cells_per_side);
+        coordinates.push_back(value);
+      }
+      const auto &cuts = (is_horizontal ? horizontal : vertical).at(fixed);
+      coordinates.insert(
+          coordinates.end(),
+          std::lower_bound(cuts.begin(), cuts.end(), minimum),
+          std::upper_bound(cuts.begin(), cuts.end(), maximum)
+      );
+      std::sort(coordinates.begin(), coordinates.end());
+      coordinates.erase(std::unique(coordinates.begin(), coordinates.end()), coordinates.end());
+      if (reverse)
+        std::reverse(coordinates.begin(), coordinates.end());
+      for (uint32_t value : coordinates) {
+        const Coord point =
+            native_coordinate(header, is_horizontal ? value : fixed, is_horizontal ? fixed : value);
+        if (native.empty() || native.back().x != point.x || native.back().y != point.y)
+          native.push_back(point);
+      }
+    };
+    append_edge(true, y0, x0, x1, false);
+    append_edge(false, x1, y0, y1, false);
+    append_edge(true, y1, x0, x1, true);
+    append_edge(false, x0, y0, y1, true);
+    native.pop_back(); // The last edge closes at the first vertex.
     std::vector<Coord> projected = projector.apply(native);
     double signed_area = 0.0;
     for (size_t index = 0; index < projected.size(); ++index) {

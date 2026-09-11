@@ -78,14 +78,15 @@ struct TerrainCoveragePolygon {
     double maximum_residual_metres = 1.0
 );
 
-/// Triangulate ownership regions with a regular shared-vertex grid.  The
-/// triangles are used only to establish source continuity; fine affine
-/// patches continue to provide the rendered terrain geometry.
+/// Project coverage perimeters with matching vertices wherever regions meet.
+/// Extra grid points connect region edges to neighbouring tiles at T-junctions;
+/// fine affine patches continue to provide the rendered terrain geometry.
 [[nodiscard]] std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
     const MetalTileHeader &header,
     const TerrainRenderFrame &frame,
     std::span<const TerrainTransformPatch> ownership,
-    uint32_t maximum_cells_per_side = 256U
+    uint32_t maximum_cells_per_side = 256U,
+    std::span<const std::array<uint32_t, 2>> boundary_junctions = {}
 );
 
 } // namespace panorama

@@ -229,12 +229,19 @@ inline bool bvh_source_interval(
     float nearest = limit, farthest = cursor;
     for (uint index = 0U; index < count; ++index) {
       float start = cursor, end = limit;
-      if (bvh_polygon_interval(polygons[offset + index], vertices, origin, direction, start, end) &&
-          (!found || start < nearest || (start == nearest && end > farthest))) {
+      if (!bvh_polygon_interval(polygons[offset + index], vertices, origin, direction, start, end))
+        continue;
+      // Merge connected intervals so a tessellated tile does not require a
+      // fresh hardware query at every internal region edge. Disjoint intervals
+      // remain separate: a real no-data hole must still end continuous coverage.
+      if (found && start <= farthest && end >= nearest) {
+        nearest = min(nearest, start);
+        farthest = max(farthest, end);
+      } else if (!found || start < nearest) {
         nearest = start;
         farthest = end;
-        found = true;
       }
+      found = true;
     }
     if (!found)
       return false;
