@@ -520,12 +520,12 @@ TerrainCatalogue::TerrainCatalogue(
     TileGrid grid,
     std::vector<TerrainSource> sources,
     ObserverLocation observer,
-    std::vector<TileKey> coverage_tiles,
+    TerrainCoverage coverage,
     std::vector<TerrainDataset> datasets,
     std::optional<TerrainRenderFrame> render_frame
 )
     : grid_(grid), sources_(std::move(sources)), observer_(observer),
-      coverage_{grid, std::move(coverage_tiles)}, datasets_(std::move(datasets)),
+      coverage_(std::move(coverage)), datasets_(std::move(datasets)),
       render_frame_(std::move(render_frame)) {
   if (!datasets_.empty()) {
     navigation_to_dataset_.reserve(datasets_.size());
@@ -724,15 +724,19 @@ TerrainCatalogue TerrainCatalogue::discover(
   sources.reserve(candidates.size());
   for (Candidate &candidate : candidates)
     sources.push_back(std::move(candidate.source));
-  std::vector<TileKey> primary_coverage;
-  primary_coverage.reserve(datasets.front().sources.size());
-  for (const TerrainSource &source : datasets.front().sources)
-    primary_coverage.push_back(source.key);
+  TerrainCoverage coverage;
+  for (const TerrainDataset &dataset : datasets) {
+    TerrainDatasetCoverage footprint{dataset.grid, dataset.epsg_code, {}};
+    footprint.tiles.reserve(dataset.sources.size());
+    for (const TerrainSource &source : dataset.sources)
+      footprint.tiles.push_back(source.key);
+    coverage.datasets.push_back(std::move(footprint));
+  }
   return TerrainCatalogue(
       datasets.front().grid,
       std::move(sources),
       observer,
-      std::move(primary_coverage),
+      std::move(coverage),
       std::move(datasets),
       frame
   );
@@ -846,7 +850,12 @@ TerrainCatalogue TerrainCatalogue::discover(
   if (sources.empty() || !(sources.front().key == origin_key)) {
     throw std::logic_error("Terrain catalogue lost its resolved observer tile");
   }
-  return TerrainCatalogue(grid, std::move(sources), resolved_observer, std::move(coverage_tiles));
+  return TerrainCatalogue(
+      grid,
+      std::move(sources),
+      resolved_observer,
+      TerrainCoverage{{{grid, datasets.front().epsg_code, std::move(coverage_tiles)}}}
+  );
 }
 
 const TileGrid &TerrainCatalogue::grid() const { return grid_; }

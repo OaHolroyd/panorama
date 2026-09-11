@@ -33,10 +33,16 @@ struct TileGrid {
   double width;
 };
 
-/// Complete prepared-data footprint, independent of one observer's trace radius.
-struct TerrainCoverage {
+/// Prepared tile footprints in one dataset's native coordinate system.
+struct TerrainDatasetCoverage {
   TileGrid grid;
+  uint32_t epsg_code;
   std::vector<TileKey> tiles;
+};
+
+/// Complete prepared-data footprints, independent of trace radius or ownership.
+struct TerrainCoverage {
+  std::vector<TerrainDatasetCoverage> datasets;
 };
 
 /// One available prepared-terrain file, grid location, and optional culling bound.
@@ -162,7 +168,7 @@ private:
       TileGrid grid,
       std::vector<TerrainSource> sources,
       ObserverLocation observer,
-      std::vector<TileKey> coverage_tiles,
+      TerrainCoverage coverage,
       std::vector<TerrainDataset> datasets = {},
       std::optional<TerrainRenderFrame> render_frame = std::nullopt
   );

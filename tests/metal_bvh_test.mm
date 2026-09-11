@@ -477,6 +477,32 @@ void check_dataset_foundation(const std::filesystem::path &root) {
   const TerrainCatalogue combined =
       TerrainCatalogue::discover(configs, {2600000.0, 1200000.0, 1000.0}, 200000.0F, 0U);
   require(combined.datasets().size() == 2U, "Combined catalogue lost dataset metadata");
+  const auto &footprints = combined.coverage().datasets;
+  require(footprints.size() == 2U, "Minimap coverage lost a configured dataset");
+  require(
+      footprints[0].epsg_code == 2056U && footprints[1].epsg_code == 4326U &&
+          std::abs(footprints[0].grid.width - 160.0) < 1e-8 &&
+          std::abs(footprints[1].grid.width - 16.0 / 3600.0) < 1e-8,
+      "Minimap coverage combined incompatible native grids or coordinate systems"
+  );
+  const TerrainCatalogue limited =
+      TerrainCatalogue::discover(configs, {2600045.0, 1199945.0, 1120.0}, 1.0F, 1U);
+  require(limited.sources().size() == 1U, "Coverage fixture did not limit the trace catalogue");
+  for (size_t index = 0; index < footprints.size(); ++index) {
+    require(
+        footprints[index].tiles.size() == 9U &&
+            limited.coverage().datasets[index].tiles == footprints[index].tiles,
+        "Minimap coverage omitted available tiles outside the trace radius"
+    );
+  }
+  const TerrainCatalogue single =
+      TerrainCatalogue::discover(root / "quantized", {2600045.0, 1199945.0, 1120.0}, 1.0F, 1U);
+  require(
+      single.coverage().datasets.size() == 1U &&
+          single.coverage().datasets.front().epsg_code == 2056U &&
+          single.coverage().datasets.front().tiles == footprints.front().tiles,
+      "Single-dataset minimap coverage changed"
+  );
   require(
       combined.render_frame().kind == TerrainRenderFrame::Kind::LocalAzimuthalEquidistant,
       "Combined mixed catalogue did not retain its local render frame"
@@ -517,6 +543,10 @@ void check_dataset_foundation(const std::filesystem::path &root) {
           [](const TerrainSource &source) { return source.dataset_index == 1U; }
       ),
       "Fully covered lower-priority sources retained GPU ownership"
+  );
+  require(
+      owned.coverage().datasets.size() == 2U && owned.coverage().datasets[1].tiles.size() == 9U,
+      "Minimap coverage hid an available dataset because another source owns its terrain"
   );
 }
 
