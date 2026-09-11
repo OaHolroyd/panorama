@@ -654,6 +654,7 @@ kernel void trace_terrain_scene(
                        ? min(params.trace.max_distance,
                              previous_hit + 8.0F * FLT_EPSILON * max(1.0F, previous_hit))
                        : params.trace.max_distance;
+  const float scene_limit = r.max_distance;
   intersector<instancing> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
   BvhPayload payload = {INFINITY,
@@ -666,37 +667,49 @@ kernel void trace_terrain_scene(
                         bool(params.transformed_catalogue),
                         false};
   auto result = tracer.intersect(r, terrain, functions, payload);
-  if (result.type != intersection_type::none && recovered_step_crosses_gap(
-                                                    coverage,
-                                                    coverage_functions,
-                                                    coverage_polygons,
-                                                    coverage_vertices,
-                                                    payload,
-                                                    params,
-                                                    result.distance
-                                                )) {
+  bool hit = result.type != intersection_type::none;
+  if (hit)
+    r.max_distance =
+        min(params.trace.max_distance,
+            result.distance + 8.0F * FLT_EPSILON * max(1.0F, result.distance));
+  intersector<> missing_tracer;
+  missing_tracer.assume_geometry_type(geometry_type::bounding_box);
+  missing_tracer.accept_any_intersection(true);
+  TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU, 0xffffffffU, false};
+  auto missing = missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
+  // A distant provisional step can require a long continuity walk, only to
+  // lose to nearer terrain on the next repair pass. Load missing candidates
+  // first. A step becomes an output (or a reusable hit bound) only after its
+  // coverage proof succeeds; an unverified step cannot truncate future rays.
+  if (missing.type == intersection_type::none && hit &&
+      recovered_step_crosses_gap(
+          coverage,
+          coverage_functions,
+          coverage_polygons,
+          coverage_vertices,
+          payload,
+          params,
+          result.distance
+      )) {
     payload.closest = INFINITY;
     payload.allow_covered_steps = false;
     payload.covered_step = false;
+    r.max_distance = scene_limit;
     result = tracer.intersect(r, terrain, functions, payload);
+    hit = result.type != intersection_type::none;
+    if (hit)
+      r.max_distance =
+          min(params.trace.max_distance,
+              result.distance + 8.0F * FLT_EPSILON * max(1.0F, result.distance));
+    // The invalid step may have hidden both resident and unloaded terrain.
+    missing = missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   }
-  bool hit = result.type != intersection_type::none;
-  if (hit) {
+  if (hit && (missing.type == intersection_type::none || !payload.covered_step))
     atomic_store_explicit(
         used_sources + chunks[result.instance_id].source,
         1U,
         memory_order_relaxed
     );
-    r.max_distance =
-        min(params.trace.max_distance,
-            result.distance + 8.0F * FLT_EPSILON * max(1.0F, result.distance));
-  }
-  intersector<> missing_tracer;
-  missing_tracer.assume_geometry_type(geometry_type::bounding_box);
-  missing_tracer.accept_any_intersection(true);
-  TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU, 0xffffffffU, false};
-  const auto missing =
-      missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {
     const uint source = params.transformed_catalogue
                             ? candidate_patches[missing.primitive_id].source
@@ -706,7 +719,7 @@ kernel void trace_terrain_scene(
     pending_rays[pending] = index;
     // Retain a conservative closest-hit bound while missing sources load.
     // Admission pins the source recorded above, which supplied this candidate.
-    states[index].exit = hit ? result.distance : previous_hit;
+    states[index].exit = hit && !payload.covered_step ? result.distance : previous_hit;
     return;
   }
   states[index].done = 1U;

@@ -20,3 +20,31 @@ kernel void check_ownership_progress(
       any(origin + nextafter(distance, INFINITY) * direction != point)
   );
 }
+
+// Compare the indexed polygon lists with the same leaves scanned exhaustively.
+// Both paths evaluate the actual GPU boundary tolerances and interval merging.
+kernel void check_coverage_index(
+    device const BvhCoveragePolygon *plain [[buffer(0)]],
+    device const BvhCoveragePolygon *indexed [[buffer(1)]],
+    device const BvhCoverageVertex *vertices [[buffer(2)]],
+    device const float4 *queries [[buffer(3)]],
+    device uint4 *results [[buffer(4)]],
+    uint index [[thread_position_in_grid]]
+) {
+  const float4 ray = queries[2U * index];
+  const float4 query = queries[2U * index + 1U];
+  const uint source = uint(query.z);
+  float a = query.x, b = query.y, c = a, d = b;
+  const bool expected =
+      bvh_source_interval(plain[source], plain, vertices, bool(query.w), ray.xy, ray.zw, a, b);
+  const bool actual =
+      bvh_source_interval(indexed[source], indexed, vertices, bool(query.w), ray.xy, ray.zw, c, d);
+  const float2 point = ray.xy + query.x * ray.zw;
+  const bool owned = bvh_owned_hit(source, plain, vertices, point);
+  results[index] = uint4(
+      expected == actual && (!expected || (a == c && b == d)),
+      owned == bvh_owned_hit(source, indexed, vertices, point),
+      expected,
+      owned
+  );
+}

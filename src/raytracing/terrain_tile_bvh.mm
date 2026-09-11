@@ -254,6 +254,7 @@ struct TerrainTileBvh::State {
       coverage_metadata[i].blocker_offset = offset;
       coverage_metadata[i].blocker_count = checked_count(coverage_metadata.size()) - offset;
     }
+    index_coverage_polygons(coverage_metadata, checked_count(sources.size()));
     tiles = buffer(gpu.device(), sources.size(), sizeof(BvhTile), @"catalogue tiles");
     coverage_polygons = buffer(
         gpu.device(),

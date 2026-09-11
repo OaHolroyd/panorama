@@ -109,6 +109,17 @@ inline bool bvh_point_in_polygon(
   return inside;
 }
 
+inline bool bvh_polygon_bounds(
+    BvhCoveragePolygon polygon,
+    float2 origin,
+    float2 direction,
+    float entry,
+    float exit
+) {
+  return bvh_slab(origin.x, direction.x, polygon.minimum_x, polygon.maximum_x, entry, exit) &&
+         bvh_slab(origin.y, direction.y, polygon.minimum_y, polygon.maximum_y, entry, exit);
+}
+
 /// Find the first horizontal-ray interval inside a coverage polygon. The
 /// perimeter can be slightly non-convex after projection, so this evaluates
 /// its even-odd interior instead of relying on convex half-plane clipping.
@@ -124,15 +135,12 @@ inline bool bvh_polygon_interval(
 ) {
   if (polygon.vertex_count < 3U)
     return false;
-  float box_entry = entry, box_exit = exit;
-  if (!bvh_slab(origin.x, direction.x, polygon.minimum_x, polygon.maximum_x, box_entry, box_exit) ||
-      !bvh_slab(origin.y, direction.y, polygon.minimum_y, polygon.maximum_y, box_entry, box_exit))
+  if (!bvh_polygon_bounds(polygon, origin, direction, entry, exit))
     return false;
-  float coordinate_scale = max(1.0F, max(abs(origin.x), abs(origin.y)));
-  for (uint index = 0U; index < polygon.vertex_count; ++index) {
-    const BvhCoverageVertex a = vertices[polygon.vertex_offset + index];
-    coordinate_scale = max(coordinate_scale, max(abs(a.x), abs(a.y)));
-  }
+  const float coordinate_scale =
+      max(max(1.0F, max(abs(origin.x), abs(origin.y))),
+          max(max(abs(polygon.minimum_x), abs(polygon.maximum_x)),
+              max(abs(polygon.minimum_y), abs(polygon.maximum_y))));
   const float coordinate_error = 8.0F * FLT_EPSILON * coordinate_scale + 1e-4F;
   // Coalesce crossings at the current position, independently of the query's
   // far limit. A distant maximum must not erase a short valid near interval.
@@ -191,8 +199,14 @@ inline bool bvh_source_interval(
     bool found = false;
     float nearest = limit, farthest = cursor;
     for (uint index = 0U; index < count; ++index) {
+      const auto polygon = polygons[offset + index];
+      if (polygon.skip_count != 0U) {
+        if (!bvh_polygon_bounds(polygon, origin, direction, cursor, limit))
+          index += polygon.skip_count;
+        continue;
+      }
       float start = cursor, end = limit;
-      if (!bvh_polygon_interval(polygons[offset + index], vertices, origin, direction, start, end))
+      if (!bvh_polygon_interval(polygon, vertices, origin, direction, start, end))
         continue;
       // Merge connected intervals so a tessellated tile does not require a
       // fresh hardware query at every internal region edge. Disjoint intervals
@@ -217,15 +231,14 @@ inline bool bvh_source_interval(
     // Otherwise that segment could jump over an untraced primary island.
     float blocked_until = nearest, first_blocker = farthest;
     for (uint index = 0; index < footprint.blocker_count; ++index) {
+      const auto polygon = polygons[footprint.blocker_offset + index];
+      if (polygon.skip_count != 0U) {
+        if (!bvh_polygon_bounds(polygon, origin, direction, nearest, farthest))
+          index += polygon.skip_count;
+        continue;
+      }
       float start = nearest, end = farthest;
-      if (!bvh_polygon_interval(
-              polygons[footprint.blocker_offset + index],
-              vertices,
-              origin,
-              direction,
-              start,
-              end
-          ))
+      if (!bvh_polygon_interval(polygon, vertices, origin, direction, start, end))
         continue;
       if (start <= nearest)
         blocked_until = max(blocked_until, end);
@@ -255,7 +268,11 @@ inline bool bvh_owned_hit(
   for (uint index = 0; index < footprint.blocker_count; ++index) {
     const auto blocker = polygons[footprint.blocker_offset + index];
     if (point.x < blocker.minimum_x || point.x > blocker.maximum_x || point.y < blocker.minimum_y ||
-        point.y > blocker.maximum_y)
+        point.y > blocker.maximum_y) {
+      index += blocker.skip_count;
+      continue;
+    }
+    if (blocker.skip_count != 0U)
       continue;
     if (bvh_point_in_polygon(blocker, vertices, point, 0.0F))
       return false;

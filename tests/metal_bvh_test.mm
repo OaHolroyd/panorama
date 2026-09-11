@@ -1,5 +1,6 @@
 #include "arguments.h"
 #include "gpu_terrain_frame.h"
+#include "metal_bvh_resources.h"
 #include "metal_bvh_types.metalh"
 #include "metal_tile.h"
 #include "metalfx_upscaler.h"
@@ -87,6 +88,108 @@ void check_ownership_progress() {
       require(result[i][3] == 0, "Fixture did not reproduce unchanged shadow coordinates");
   }
   std::puts("Ownership continuation advances to the first distinct world point.");
+}
+
+void check_coverage_index() {
+  std::vector<BvhCoveragePolygon> polygons(3);
+  std::vector<BvhCoverageVertex> vertices;
+  const auto rectangle = [&](float x, float y, float width, bool concave) {
+    BvhCoveragePolygon polygon = {};
+    polygon.vertex_offset = uint32_t(vertices.size());
+    vertices.insert(vertices.end(), {{x, y}, {x + width, y}, {x + width, y + 10}});
+    if (concave)
+      vertices.push_back({x + 0.5F * width, y + 5});
+    vertices.push_back({x, y + 10});
+    polygon.vertex_count = uint32_t(vertices.size()) - polygon.vertex_offset;
+    polygon.minimum_x = x;
+    polygon.minimum_y = y;
+    polygon.maximum_x = x + width;
+    polygon.maximum_y = y + 10;
+    polygons.push_back(polygon);
+  };
+  polygons[0].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t row = 0; row < 32U; ++row)
+    for (uint32_t column = 0; column < 32U; ++column)
+      if ((row + column) % 11U != 0U)
+        rectangle(40000 + float(column * 10U), -30000 + float(row * 10U), 10, column % 9U == 0U);
+  polygons[0].coverage_count = uint32_t(polygons.size()) - polygons[0].coverage_offset;
+  polygons[0].ownership_offset = polygons[0].coverage_offset;
+  polygons[0].ownership_count = polygons[0].coverage_count;
+  polygons[1] = polygons[0];
+  // A different ownership range exercises remapping without sharing coverage.
+  polygons[1].ownership_offset += 7U;
+  polygons[1].ownership_count -= 15U;
+  polygons[0].blocker_offset = uint32_t(polygons.size());
+  for (uint32_t row = 0; row < 32U; ++row)
+    for (uint32_t column = 0; column < 32U; column += 5U)
+      rectangle(40002 + float(column * 10U), -30000 + float(row * 10U), 3, false);
+  polygons[0].blocker_count = uint32_t(polygons.size()) - polygons[0].blocker_offset;
+  auto indexed = polygons;
+  bvh_resources::index_coverage_polygons(indexed, 3);
+  require(indexed.size() > polygons.size(), "Coverage fixture did not build an index");
+  require(
+      indexed[0].coverage_offset == indexed[0].ownership_offset,
+      "Coverage index duplicated shared ownership"
+  );
+
+  std::vector<std::array<float, 4>> queries;
+  for (uint32_t i = 0; i < 4096U; ++i) {
+    const float y = -30000 + float(i % 128U) * 2.5F;
+    // Include shared edges, concave perimeters, holes, parallel/tangent rays,
+    // distant primary origins, and very short shadow distances at large XY.
+    const std::array<std::array<float, 4>, 4> rays = {{
+        {39990, y, 1, (float(i / 128U) - 16) * 0.01F},
+        {40002 + float(i % 32U) * 10, y, 1, 0},
+        {40160, -30010, i % 2U == 0U ? 0.0F : 1e-6F, 1},
+        {0, 0, 0.8F, -0.6F + float(i % 32U) * 1e-5F},
+    }};
+    for (const auto &ray : rays) {
+      const float start = i % 3U == 0U ? 0.1F : 0.0F;
+      const float lengths[] = {0.125F, 10.0F, 100.0F, 600000.0F};
+      queries.push_back(ray);
+      queries.push_back({start, start + lengths[(i / 128U) % 4U], float(i % 3U), float(i % 2U)});
+    }
+  }
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  NSError *error = nil;
+  auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:@PANORAMA_TEST_HELPERS_PATH]
+                                     error:&error];
+  auto pipeline = [device
+      newComputePipelineStateWithFunction:[library newFunctionWithName:@"check_coverage_index"]
+                                    error:&error];
+  require(pipeline != nil, "Could not compile coverage index test");
+  const auto upload = [&](const auto &values) {
+    return [device newBufferWithBytes:values.data()
+                               length:values.size() * sizeof(values.front())
+                              options:MTLResourceStorageModeShared];
+  };
+  auto plain_buffer = upload(polygons), indexed_buffer = upload(indexed);
+  auto vertex_buffer = upload(vertices), query_buffer = upload(queries);
+  const size_t count = queries.size() / 2U;
+  auto output = [device newBufferWithLength:count * sizeof(std::array<uint32_t, 4>)
+                                    options:MTLResourceStorageModeShared];
+  auto command = [[device newCommandQueue] commandBuffer];
+  auto encoder = [command computeCommandEncoder];
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:plain_buffer offset:0 atIndex:0];
+  [encoder setBuffer:indexed_buffer offset:0 atIndex:1];
+  [encoder setBuffer:vertex_buffer offset:0 atIndex:2];
+  [encoder setBuffer:query_buffer offset:0 atIndex:3];
+  [encoder setBuffer:output offset:0 atIndex:4];
+  [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  [encoder endEncoding];
+  [command commit];
+  [command waitUntilCompleted];
+  require(command.status == MTLCommandBufferStatusCompleted, "Coverage index GPU test failed");
+  const auto *result = static_cast<const std::array<uint32_t, 4> *>(output.contents);
+  size_t hits = 0U, blocked = 0U;
+  for (size_t i = 0; i < count; ++i) {
+    require(result[i][0] && result[i][1], "Coverage index changed an interval or ownership");
+    hits += result[i][2];
+    blocked += !result[i][3];
+  }
+  require(hits > 0U && hits < count && blocked > 0U, "Coverage index fixture missed edge cases");
+  std::printf("Coverage index matches exhaustive intervals and ownership for %zu rays.\n", count);
 }
 
 // Match the viewer's default camera and output requirements, excluding image
@@ -2670,6 +2773,7 @@ int main(int argc, const char *argv[]) {
           check_coverage_junctions(root);
         } else if (mixed_coverage) {
           check_ownership_progress();
+          check_coverage_index();
           check_misaligned_coverage(root);
         } else if (streaming) {
           check_streaming(root / "quantized");

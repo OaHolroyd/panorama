@@ -12,6 +12,58 @@ uint32_t checked_count(uint64_t count) {
     throw std::overflow_error("Metal BVH count exceeds uint32");
   return static_cast<uint32_t>(count);
 }
+
+void index_coverage_polygons(std::vector<BvhCoveragePolygon> &polygons, uint32_t source_count) {
+  std::vector<BvhCoveragePolygon> indexed(polygons.begin(), polygons.begin() + source_count);
+  indexed.reserve(polygons.size() + polygons.size() / 4U);
+  const auto append = [&](auto &&self, uint32_t offset, uint32_t count) -> void {
+    if (count <= 8U) {
+      indexed.insert(indexed.end(), polygons.begin() + offset, polygons.begin() + offset + count);
+      return;
+    }
+    const size_t parent = indexed.size();
+    indexed.push_back({});
+    const uint32_t half = count / 2U;
+    self(self, offset, half);
+    self(self, offset + half, count - half);
+    BvhCoveragePolygon bounds = {};
+    bounds.skip_count = checked_count(indexed.size() - parent - 1U);
+    bounds.minimum_x = bounds.minimum_y = std::numeric_limits<float>::infinity();
+    bounds.maximum_x = bounds.maximum_y = -std::numeric_limits<float>::infinity();
+    // Visit immediate children only: each child's box already includes its descendants.
+    for (size_t child = parent + 1U; child < indexed.size();) {
+      const auto &box = indexed[child];
+      bounds.minimum_x = std::min(bounds.minimum_x, box.minimum_x);
+      bounds.minimum_y = std::min(bounds.minimum_y, box.minimum_y);
+      bounds.maximum_x = std::max(bounds.maximum_x, box.maximum_x);
+      bounds.maximum_y = std::max(bounds.maximum_y, box.maximum_y);
+      child += 1U + box.skip_count;
+    }
+    indexed[parent] = bounds;
+  };
+  const auto append_range = [&](uint32_t &offset, uint32_t &count) {
+    const uint32_t start = checked_count(indexed.size());
+    append(append, offset, count);
+    offset = start;
+    count = checked_count(indexed.size()) - start;
+  };
+  for (uint32_t source = 0U; source < source_count; ++source) {
+    auto footprint = polygons[source];
+    const bool shared = footprint.ownership_offset == footprint.coverage_offset &&
+                        footprint.ownership_count == footprint.coverage_count;
+    append_range(footprint.coverage_offset, footprint.coverage_count);
+    if (shared) {
+      footprint.ownership_offset = footprint.coverage_offset;
+      footprint.ownership_count = footprint.coverage_count;
+    } else {
+      append_range(footprint.ownership_offset, footprint.ownership_count);
+    }
+    append_range(footprint.blocker_offset, footprint.blocker_count);
+    indexed[source] = footprint;
+  }
+  polygons = std::move(indexed);
+}
+
 id<MTLBuffer> buffer(
     id<MTLDevice> device,
     uint64_t count,

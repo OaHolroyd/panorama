@@ -216,6 +216,13 @@ rebuilding the same tile for successive groups of rays within a frame. Streaming
 selection and CPU grouping use only unfinished rays, preserving completed pixels
 when a sparse remainder needs more terrain.
 
+Primary repair requests missing terrain before proving coverage continuity to a
+provisional height-discontinuity hit. Unverified steps cannot shorten later rays;
+completed hits retain the same gap checks. Coverage, ownership and blocker lists
+use nested XY bounds to skip unreachable polygons while preserving their order
+and exact boundary tests. Tile bounds generation and BVH construction share one
+GPU submission; compaction still waits for the resulting size.
+
 `--bvh-cache-mib` bounds the requested Metal storage for detailed BVHs, owned
 vertices, block metadata, bounds, and peak build/compaction workspace. It is
 **additional to** `--tile-cache-mib`; ray/output buffers, the small catalogue

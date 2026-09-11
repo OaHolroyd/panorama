@@ -47,7 +47,9 @@ struct BvhCoveragePolygon {
   BvhUint vertex_offset;
   BvhUint vertex_count;
   BvhUint source;
-  BvhUint padding;
+  /// A bounds-only record skips this many following records on a miss.
+  /// Leaf polygons have zero descendants; list order is preserved.
+  BvhUint skip_count;
   /// Full footprints reference their owned regions in the same polygon buffer.
   BvhUint ownership_offset;
   BvhUint ownership_count;

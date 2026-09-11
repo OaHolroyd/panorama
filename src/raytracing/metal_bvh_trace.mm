@@ -229,7 +229,11 @@ struct MetalBvhTrace::State {
     return result;
   }
 
-  id<MTLAccelerationStructure> build(MTLAccelerationStructureDescriptor *descriptor, bool compact) {
+  id<MTLAccelerationStructure> build(
+      MTLAccelerationStructureDescriptor *descriptor,
+      bool compact,
+      id<MTLCommandBuffer> command = nil
+  ) {
     trace_activity::Scope activity("BVH build/compaction");
     const auto sizes = [gpu.device() accelerationStructureSizesWithDescriptor:descriptor];
     id<MTLAccelerationStructure> original =
@@ -244,7 +248,8 @@ struct MetalBvhTrace::State {
         MTLResourceStorageModePrivate
     );
     auto size_buffer = compact ? buffer(gpu.device(), 1, sizeof(uint64_t), @"compacted size") : nil;
-    auto command = [gpu.command_queue() commandBuffer];
+    if (command == nil)
+      command = [gpu.command_queue() commandBuffer];
     auto encoder = [command accelerationStructureCommandEncoder];
     if (encoder == nil)
       throw std::runtime_error("Could not encode BVH build");
@@ -550,9 +555,9 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:entry->transforms offset:0 atIndex:5];
     dispatch_linear(encoder, bounds_pipeline, count);
     [encoder endEncoding];
-    stats.build_gpu_ms += complete(command);
-    ++stats.submissions;
-    entry->acceleration = build(primitive_descriptor(count, entry->bounds), true);
+    // Tracked resources and encoder ordering make the generated bounds
+    // available to the build without a separate submission and CPU wait.
+    entry->acceleration = build(primitive_descriptor(count, entry->bounds), true, command);
     entry->bytes = base_bytes + entry->acceleration.size;
     stats.resident_bytes += entry->bytes;
     ++stats.builds;
