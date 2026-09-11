@@ -12,8 +12,7 @@ Building the project produces three executables:
 
 - `panorama-tile-gen` prepares aligned DTM GeoTIFF, raw SRTM HGT, and Arc/Info
   ASC inputs for tracing. ASC files may be loose or retained in ZIP archives.
-  It can write conventional rechunked GeoTIFFs or compact, optionally compressed
-  Metal tiles intended for fast GPU loading.
+  It writes compact uint16 Metal tiles with optional compression for GPU loading.
 - `panorama` is the batch renderer. It traces an angular panorama or a pinhole
   camera view and writes diagnostic PNGs and, optionally, a shaded synthetic
   terrain image.
@@ -53,9 +52,8 @@ For SRTM, place the raw `.hgt` files below one input directory; nested
 directories are supported. The filename supplies each tile's one-degree WGS 84
 bounds, while its 3601- or 1201-sample side selects one- or three-arcsecond
 spacing. HGT elevations are decoded as signed, big-endian 16-bit metres and the
-standard `-32768` void value is treated as no-data. The current renderer still
-requires one of its supported projected CRSs; accepting native geographic
-tiles there is part of the planned multi-source ray-tracing work.
+standard `-32768` void value is treated as no-data. Native geographic SRTM tiles
+can be combined with projected terrain through the Metal BVH raytracer.
 
 ### Prepare tracing tiles
 
@@ -281,13 +279,26 @@ solver's cell-edge tolerance; away from those edges, the comparison allows only
 half-precision rounding. BVH step diagnostics count procedural candidates;
 evaluation diagnostics count precise cell tests.
 
-`panorama-tile-gen` now writes version-2 `panorama-terrain-manifest.bin` entries
-with minimum and maximum elevations enclosing **all stored LODs**, including
-quantization and finite no-data fill values. Re-running the original generation
-command without `--overwrite` upgrades an old manifest by scanning existing tile
-payloads; it does not regenerate those tiles. Existing version-2 entries are
-reused for skipped files. Version-1 or absent manifests remain readable with
-conservative culling where bounds are unavailable.
+`panorama-tile-gen` writes version-5 uint16 tiles. Encoded zero denotes a missing
+sample; codes 1–65535 represent valid heights, including actual zero and negative
+elevations. The decimetre lattice is unchanged, with a maximum per-LOD height
+span of 6553.4 m. A terrain cell is usable only when all four corner samples are
+valid, for both triangle and bilinear interpolation.
+
+Usable-cell rectangles are stored after each tile's LOD table and in its
+version-3 `panorama-terrain-manifest.bin`. The catalogue reads this metadata
+without loading heights, allowing later `--terrain` sources to fill missing
+coverage in earlier sources. Cells crossing a priority boundary remain
+candidates; priority is checked at the actual collision position. Partial tiles
+stay at native resolution, and missing neighbours are excluded from normal
+reconstruction. Real gaps in the combined coverage still end a ray's traversal.
+
+Manifest elevation bounds enclose all stored LODs and ignore missing samples.
+Re-running generation without `--overwrite` repairs absent or older manifests
+from existing tiles. Legacy version-4 uint16 files remain readable with their
+original all-codes-valid interpretation. Recovering coverage from their padded
+zeros requires regenerating them from the original rasters with `--overwrite`
+or into a new directory; a manifest upgrade alone cannot recover that mask.
 
 Build the project, then launch the interactive viewer with:
 

@@ -22,6 +22,14 @@ inline float bvh_height(device const uchar *vertices, BvhTile tile, uint index, 
                    : reinterpret_cast<device const float *>(data)[index];
 }
 
+inline bool
+bvh_valid_vertex(device const uchar *vertices, BvhTile tile, uint index, bool quantized) {
+  device const uchar *data = vertices + tile.vertex_offset;
+  return quantized
+             ? valid_sample(reinterpret_cast<device const ushort *>(data)[index], tile.no_data)
+             : valid_sample(reinterpret_cast<device const float *>(data)[index], tile.no_data);
+}
+
 /// Immutable bounds use a tile-centred anchor: h(u,v) - k*(u*u+v*v).
 /// Instance shear/translation applies observer curvature without rebuilding.
 kernel void build_terrain_bvh_bounds(
@@ -40,11 +48,15 @@ kernel void build_terrain_bvh_bounds(
   float low = INFINITY, high = -INFINITY;
   for (uint y = block.y; y <= block.y + block.height; ++y) {
     for (uint x = block.x; x <= block.x + block.width; ++x) {
+      if (!bvh_valid_vertex(vertices, tile, y * (tile.cell_count + 1U) + x, params.quantized))
+        continue;
       const float z = bvh_height(vertices, tile, y * (tile.cell_count + 1U) + x, params.quantized);
       low = min(low, z);
       high = max(high, z);
     }
   }
+  if (low > high)
+    low = high = 0.0F;
   float x0 = tile.x_min + float(block.x) * tile.cell_size;
   float y0 = tile.y_min + float(block.y) * tile.cell_size;
   float x1 = tile.x_min + float(block.x + block.width) * tile.cell_size;
@@ -122,7 +134,10 @@ inline BvhIntersection intersect_terrain_block(
     float min_distance,
     float max_distance,
     constant BvhParameters &params,
-    ray_data BvhPayload &payload
+    ray_data BvhPayload &payload,
+    uint source,
+    device const BvhCoveragePolygon *coverage_polygons,
+    device const BvhCoverageVertex *coverage_vertices
 ) {
   const float delta = tile.cell_size;
   const float inverse_delta = 1.0F / delta;
@@ -195,7 +210,8 @@ inline BvhIntersection intersect_terrain_block(
             max(sample_elevation(vertices[sample_index + side], tile.base_decimeters),
                 sample_elevation(vertices[sample_index + side + 1U], tile.base_decimeters)));
     const float stationary = -direction.z / (2.0F * params.trace.curvature_coefficient);
-    if (minimum_curved_ray_elevation(
+    if (valid_cell(vertices, side, uint(x), uint(y), tile.no_data) &&
+        minimum_curved_ray_elevation(
             observer_elevation,
             direction.z,
             params.trace.curvature_coefficient,
@@ -203,41 +219,72 @@ inline BvhIntersection intersect_terrain_block(
             start,
             end
         ) <= maximum) {
-      if (store_debugging_info)
-        payload.evaluations++;
-      Collision collision = use_bilinear_collisions ? bilinear_collision(
-                                                          vertices,
-                                                          side,
-                                                          tile.base_decimeters,
-                                                          cell_x,
-                                                          cell_y,
-                                                          inverse_delta,
-                                                          uint(y),
-                                                          uint(x),
-                                                          observer_elevation,
-                                                          direction.xy,
-                                                          direction.z,
-                                                          params.trace.curvature_coefficient,
-                                                          start,
-                                                          end,
-                                                          horizontal_origin
-                                                      )
-                                                    : triangle_collision(
-                                                          vertices,
-                                                          side,
-                                                          tile.base_decimeters,
-                                                          cell_x,
-                                                          cell_y,
-                                                          delta,
-                                                          uint(y),
-                                                          uint(x),
-                                                          observer_elevation,
-                                                          direction.xy,
-                                                          direction.z,
-                                                          params.trace.curvature_coefficient,
-                                                          start,
-                                                          horizontal_origin
-                                                      );
+      Collision collision = {false, 0.0F};
+      float collision_start = start;
+      while (collision_start < end) {
+        if (store_debugging_info)
+          payload.evaluations++;
+        collision = use_bilinear_collisions ? bilinear_collision(
+                                                  vertices,
+                                                  side,
+                                                  tile.base_decimeters,
+                                                  cell_x,
+                                                  cell_y,
+                                                  inverse_delta,
+                                                  uint(y),
+                                                  uint(x),
+                                                  observer_elevation,
+                                                  direction.xy,
+                                                  direction.z,
+                                                  params.trace.curvature_coefficient,
+                                                  collision_start,
+                                                  end,
+                                                  horizontal_origin
+                                              )
+                                            : triangle_collision(
+                                                  vertices,
+                                                  side,
+                                                  tile.base_decimeters,
+                                                  cell_x,
+                                                  cell_y,
+                                                  delta,
+                                                  uint(y),
+                                                  uint(x),
+                                                  observer_elevation,
+                                                  direction.xy,
+                                                  direction.z,
+                                                  params.trace.curvature_coefficient,
+                                                  collision_start,
+                                                  horizontal_origin
+                                              );
+        if (!collision.hit || !params.transformed_catalogue ||
+            bvh_owned_hit(
+                source,
+                coverage_polygons,
+                coverage_vertices,
+                payload.world_origin.xy + collision.distance * payload.world_direction.xy
+            ))
+          break;
+        // A hidden root does not discard the rest of this cell: its second
+        // root, or a step into higher fallback terrain, may be outside primary
+        // coverage. Resume at the next interval this source actually owns.
+        float next =
+            max(nextafter(collision.distance, INFINITY), nextafter(collision_start, INFINITY));
+        float next_end = end;
+        collision.hit = false;
+        if (!bvh_source_interval(
+                coverage_polygons[source],
+                coverage_polygons,
+                coverage_vertices,
+                true,
+                payload.world_origin.xy,
+                payload.world_direction.xy,
+                next,
+                next_end
+            ))
+          break;
+        collision_start = next;
+      }
       // The catalogue DDA and cell DDA can round a shared far edge differently.
       // Clamp only a few ULPs so an edge hit remains in Metal's legal ray range.
       const float range_guard = 8.0F * FLT_EPSILON * max(1.0F, max_distance);
@@ -246,12 +293,20 @@ inline BvhIntersection intersect_terrain_block(
         collision.distance = clamp(collision.distance, min_distance, max_distance);
       }
       if (collision.hit && collision.distance >= min_distance &&
-          collision.distance <= max_distance && collision.distance <= params.trace.max_distance) {
+          collision.distance <= max_distance && collision.distance <= params.trace.max_distance &&
+          (!params.transformed_catalogue ||
+           bvh_owned_hit(
+               source,
+               coverage_polygons,
+               coverage_vertices,
+               payload.world_origin.xy + collision.distance * payload.world_direction.xy
+           ))) {
         if (collision.distance < payload.closest) {
           payload.closest = collision.distance;
           if (compute_surface_gradients) {
             if (use_c1_normals && x >= 1 && y >= 1 && x < int(tile.cell_count) - 1 &&
-                y < int(tile.cell_count) - 1) {
+                y < int(tile.cell_count) - 1 &&
+                valid_normal_stencil(vertices, side, uint(x), uint(y), tile.no_data)) {
               payload.gradients = interpolated_packed_surface_gradients(
                   vertices,
                   side,
@@ -322,7 +377,9 @@ BvhIntersection terrain_bvh_intersection(
     uint instance [[instance_id]],
     ray_data BvhPayload &payload [[payload]],
     device const BvhChunk *chunks [[buffer(0)]],
-    constant BvhParameters &params [[buffer(1)]]
+    constant BvhParameters &params [[buffer(1)]],
+    device const BvhCoveragePolygon *coverage_polygons [[buffer(2)]],
+    device const BvhCoverageVertex *coverage_vertices [[buffer(3)]]
 ) {
   if (store_debugging_info)
     payload.steps++;
@@ -377,7 +434,10 @@ BvhIntersection terrain_bvh_intersection(
                                            min_distance,
                                            max_distance,
                                            params,
-                                           payload
+                                           payload,
+                                           chunk.source,
+                                           coverage_polygons,
+                                           coverage_vertices
                                        )
                                      : intersect_terrain_block(
                                            reinterpret_cast<device const float *>(data),
@@ -389,7 +449,10 @@ BvhIntersection terrain_bvh_intersection(
                                            min_distance,
                                            max_distance,
                                            params,
-                                           payload
+                                           payload,
+                                           chunk.source,
+                                           coverage_polygons,
+                                           coverage_vertices
                                        );
   if (result.accept && chunk.transformed && compute_surface_gradients) {
     const float2 logical = float2(as_type<half2>(payload.gradients));

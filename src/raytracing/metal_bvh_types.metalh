@@ -25,6 +25,7 @@ struct BvhTile {
   BvhUint lod;
   BvhLong row;
   BvhLong column;
+  BvhUint no_data;
 };
 
 /// Logical-cell affine patch used by transformed catalogue and detail BVHs.
@@ -50,6 +51,9 @@ struct BvhCoveragePolygon {
   /// Full footprints reference their owned regions in the same polygon buffer.
   BvhUint ownership_offset;
   BvhUint ownership_count;
+  BvhUint coverage_offset, coverage_count;
+  BvhUint blocker_offset, blocker_count;
+  float minimum_x, minimum_y, maximum_x, maximum_y;
 };
 
 struct BvhCoverageVertex {

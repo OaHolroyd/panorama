@@ -117,6 +117,10 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
     }
   }
   require(timestamps.size() == original.size(), "Generator omitted a tile's bounds");
+  auto old_entries = original;
+  for (auto &entry : old_entries)
+    entry.coverage.reset();
+  write_terrain_manifest(path, old_entries);
   std::ifstream stream(path, std::ios::binary);
   std::vector<char> bytes((std::istreambuf_iterator<char>(stream)), {});
   const uint32_t one = 1, zero = 0;
@@ -134,7 +138,8 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
           upgraded[i].row == original[i].row && upgraded[i].column == original[i].column &&
               upgraded[i].minimum_elevation.has_value() &&
               std::abs(*upgraded[i].minimum_elevation - *original[i].minimum_elevation) < 0.001F &&
-              std::abs(upgraded[i].maximum_elevation - original[i].maximum_elevation) < 0.001F,
+              std::abs(upgraded[i].maximum_elevation - original[i].maximum_elevation) < 0.001F &&
+              upgraded[i].coverage == original[i].coverage,
           "Generator upgrade changed tile elevation bounds"
       );
     for (const auto &[tile, timestamp] : timestamps)
@@ -170,10 +175,9 @@ void check_uint16_range(
     id<MTLDevice> device,
     id<MTLIOCommandQueue> queue
 ) {
-  // Version 4 uses all 65,536 codes for valid elevations, including zero.
-  // Restricting the supported file types must preserve that encoding.
+  // Version 5 reserves code zero while retaining real zero/negative heights.
   const TerrainChunk chunk{3,
-                           {-400, 0, 6153.5F, 0, 10, 20, 30, 40, 50},
+                           {-400, 0, 6153.4F, 0, 10, 20, 30, 40, 50},
                            std::vector<uint8_t>(9, 1),
                            {}};
   const DestinationGrid grid{2600000, 1200000, 1, 2, RasterLayout::Level0, 0};
@@ -184,7 +188,7 @@ void check_uint16_range(
     (void)write_metal_tile_chunk(path, chunk, grid, {0, 0}, source, compression);
     const auto header = read_metal_tile_header(path);
     require(
-        header.elevation_base_decimeters == -4000 && header.vertex_byte_count == 18,
+        header.elevation_base_decimeters == -4001 && header.vertex_byte_count == 18,
         "Uint16 file encoding changed"
     );
     id<MTLBuffer> data = [device newBufferWithLength:header.vertex_byte_count
@@ -201,8 +205,50 @@ void check_uint16_range(
         );
       }
     require(
-        encoded[6] == 0U && encoded[8] == 65535U,
+        encoded[6] == 1U && encoded[8] == 65535U,
         "Uint16 range endpoints are no longer valid elevations"
+    );
+  }
+
+  TerrainChunk partial = chunk;
+  partial.covered[0] = 0;
+  partial.elevations[0] = -99999; // Must not pollute bounds or the quantization range.
+  for (const auto compression : {MetalTileCompression::None, MetalTileCompression::Lz4}) {
+    const auto path = root / (std::string("partial") + metal_tile_suffix(compression));
+    const auto bounds = write_metal_tile_chunk(path, partial, grid, {0, 0}, source, compression);
+    const auto header = read_metal_tile_header(path);
+    const auto coverage = read_metal_tile_coverage(path, header);
+    require(
+        coverage && !coverage->full() && coverage->covered_area(0, 0, 2, 2) == 3,
+        "Coverage did not exclude every cell touching the missing corner"
+    );
+    require(
+        !coverage->contains(0.5, 1.5) && coverage->contains(1.5, 1.5),
+        "Coverage row order changed"
+    );
+    require(
+        std::abs(bounds.minimum) < 0.01F && std::abs(bounds.maximum - 6153.4F) < 0.01F,
+        "Missing height polluted bounds"
+    );
+    const auto scanned = read_metal_tile_elevation_range(path, device, queue);
+    require(
+        std::abs(scanned.minimum - bounds.minimum) < 0.001F &&
+            std::abs(scanned.maximum - bounds.maximum) < 0.001F && scanned.coverage == coverage,
+        "Compressed coverage or bounds did not round-trip"
+    );
+    const std::array<TerrainManifestEntry, 1> entries = {
+        {{0, 0, bounds.maximum, bounds.minimum, coverage}}};
+    const auto manifest = root / "partial-manifest.bin";
+    write_terrain_manifest(manifest, entries);
+    require(read_terrain_manifest(manifest).front().coverage == coverage, "Manifest lost coverage");
+    id<MTLBuffer> data = [device newBufferWithLength:header.vertex_byte_count
+                                             options:MTLResourceStorageModeShared];
+    const MetalTileBufferLoad load{path, 0, nil, header.vertex_offset, header.vertex_byte_count};
+    load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
+    const auto *encoded = static_cast<const uint16_t *>(data.contents);
+    require(
+        encoded[6] == 0 && encoded[7] != 0 && encoded[5] != 0,
+        "Missing sample confused with valid zero"
     );
   }
 

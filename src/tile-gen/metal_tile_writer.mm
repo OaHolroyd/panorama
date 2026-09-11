@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -76,6 +77,24 @@ std::filesystem::path metal_tile_chunk_path(
           metal_tile_suffix(compression));
 }
 
+TerrainCellCoverage terrain_chunk_coverage(const TerrainChunk &chunk) {
+  const uint32_t side = chunk.sample_side;
+  if (side < 2 || chunk.covered.size() != uint64_t(side) * side ||
+      chunk.elevations.size() != chunk.covered.size())
+    throw std::invalid_argument("Terrain chunk validity mask has the wrong size");
+  const uint32_t cells = side - 1U;
+  if (std::all_of(chunk.covered.begin(), chunk.covered.end(), [](uint8_t v) { return v != 0; }))
+    return {cells, {{0, 0, cells, cells}}};
+  std::vector<uint8_t> usable(size_t(cells) * cells);
+  for (uint32_t y = 0; y < cells; ++y)
+    for (uint32_t x = 0; x < cells; ++x) {
+      const size_t i = size_t(cells - y - 1U) * side + x;
+      usable[size_t(y) * cells + x] = chunk.covered[i] && chunk.covered[i + 1] &&
+                                      chunk.covered[i + side] && chunk.covered[i + side + 1];
+    }
+  return make_cell_coverage(cells, usable);
+}
+
 TerrainElevationRange write_metal_tile_chunk(
     const std::filesystem::path &path,
     const TerrainChunk &chunk,
@@ -89,74 +108,76 @@ TerrainElevationRange write_metal_tile_chunk(
     throw std::invalid_argument("Metal tiles require a power-of-two level-0 destination grid");
   }
 
-  // Reverse whole rows into the raytracer's south-to-north convention so both
-  // stored sample representations already match atlas order.
-  std::vector<float> vertices(chunk.elevations.size());
-  for (uint32_t source_row = 0U; source_row < chunk.sample_side; source_row++) {
-    const uint32_t destination_row = chunk.sample_side - 1U - source_row;
-    std::copy_n(
-        chunk.elevations.begin() + static_cast<size_t>(source_row) * chunk.sample_side,
-        chunk.sample_side,
-        vertices.begin() + static_cast<size_t>(destination_row) * chunk.sample_side
-    );
-  }
-  if (!std::all_of(vertices.begin(), vertices.end(), [](float value) {
-        return std::isfinite(value);
-      })) {
-    throw std::runtime_error("Metal tiles cannot contain non-finite elevations");
-  }
-
+  const TerrainCellCoverage coverage = terrain_chunk_coverage(chunk);
+  if (coverage.rectangles.empty())
+    throw std::invalid_argument("Cannot write terrain without a usable cell");
   struct VariantVertices {
     uint32_t cell_count;
     std::vector<float> values;
+    std::vector<uint8_t> covered;
   };
   std::vector<VariantVertices> variants;
-  variants.push_back({grid.tile_cell_count, std::move(vertices)});
-  for (const TerrainChunk::LodVariant &variant : chunk.lod_variants) {
-    std::vector<float> values(variant.elevations.size());
-    for (uint32_t source_row = 0U; source_row < variant.sample_side; source_row++) {
-      const uint32_t destination_row = variant.sample_side - 1U - source_row;
-      std::copy_n(
-          variant.elevations.begin() + static_cast<size_t>(source_row) * variant.sample_side,
-          variant.sample_side,
-          values.begin() + static_cast<size_t>(destination_row) * variant.sample_side
-      );
-    }
-    if (!std::all_of(values.begin(), values.end(), [](float value) {
-          return std::isfinite(value);
-        })) {
-      throw std::runtime_error("Metal tile LOD cannot contain non-finite elevations");
-    }
-    variants.push_back({variant.sample_side - 1U, std::move(values)});
-  }
+  const auto append_variant = [&](uint32_t side, const auto &heights, const auto &covered) {
+    if (heights.size() != uint64_t(side) * side || covered.size() != heights.size())
+      throw std::invalid_argument("Terrain LOD validity mask has the wrong size");
+    VariantVertices variant{side - 1U,
+                            std::vector<float>(heights.size()),
+                            std::vector<uint8_t>(covered.size())};
+    for (uint32_t y = 0; y < side; ++y)
+      for (uint32_t x = 0; x < side; ++x) {
+        const size_t from = size_t(y) * side + x, to = size_t(side - 1U - y) * side + x;
+        if (covered[from] && !std::isfinite(heights[from]))
+          throw std::invalid_argument("Covered terrain elevation must be finite");
+        variant.values[to] = heights[from];
+        variant.covered[to] = covered[from];
+      }
+    variants.push_back(std::move(variant));
+  };
+  append_variant(chunk.sample_side, chunk.elevations, chunk.covered);
+  for (const auto &variant : chunk.lod_variants)
+    append_variant(variant.sample_side, variant.elevations, variant.covered);
+  const uint32_t coverage_count =
+      coverage.full() ? 0U : static_cast<uint32_t>(coverage.rectangles.size());
+  const uint64_t coverage_bytes = uint64_t(coverage_count) * sizeof(TerrainCoverageRect);
   const uint64_t table_bytes = static_cast<uint64_t>(variants.size()) * sizeof(MetalTileLod);
   const uint64_t metadata_bytes = kMetalTileLodHeaderSize + table_bytes;
   const uint64_t first_payload = align_up(
-      metadata_bytes,
+      metadata_bytes + coverage_bytes,
       compression == MetalTileCompression::None ? 1U : metal_tile_compression_chunk_size()
   );
   const double tile_width = static_cast<double>(grid.tile_cell_count) * grid.resolution;
   std::vector<MetalTileLod> lods;
   lods.reserve(variants.size());
   std::vector<std::byte> payload(static_cast<size_t>(first_payload - metadata_bytes));
+  if (coverage_bytes)
+    std::memcpy(payload.data(), coverage.rectangles.data(), coverage_bytes);
   uint64_t offset = first_payload;
   TerrainElevationRange range{std::numeric_limits<float>::infinity(),
                               -std::numeric_limits<float>::infinity()};
   for (uint32_t index = 0U; index < variants.size(); index++) {
     const VariantVertices &variant = variants[index];
-    const auto [minimum, maximum] =
-        std::minmax_element(variant.values.begin(), variant.values.end());
+    int32_t minimum = std::numeric_limits<int32_t>::max(),
+            maximum = std::numeric_limits<int32_t>::min();
+    bool any = false;
+    for (size_t i = 0; i < variant.values.size(); ++i)
+      if (variant.covered[i]) {
+        const int32_t height = elevation_decimeters(variant.values[i]);
+        minimum = std::min(minimum, height);
+        maximum = std::max(maximum, height);
+        any = true;
+      }
+    if (any &&
+        (minimum == std::numeric_limits<int32_t>::min() || int64_t(maximum) - minimum > 65534))
+      throw std::runtime_error("Terrain LOD elevation range exceeds 6553.4 metres");
     const uint64_t byte_count = static_cast<uint64_t>(variant.values.size()) * sizeof(uint16_t);
-    const int32_t base = elevation_decimeters(*minimum);
-    const float stored_maximum = static_cast<float>(elevation_decimeters(*maximum)) / 10.0F;
-    const float stored_minimum = float(base) * 0.1F;
-    const float guard = 4.0F * std::numeric_limits<float>::epsilon() *
-                        std::max({1.0F, std::abs(stored_minimum), std::abs(stored_maximum)});
-    range.minimum = std::min(range.minimum, stored_minimum - guard);
-    range.maximum = std::max(range.maximum, stored_maximum + guard);
-    if (static_cast<int64_t>(elevation_decimeters(*maximum)) - base >
-        static_cast<int64_t>(std::numeric_limits<uint16_t>::max())) {
-      throw std::runtime_error("Terrain LOD elevation range exceeds 6553.5 metres");
+    const int32_t base = any ? minimum - 1 : 0;
+    const float stored_maximum = any ? float(maximum) / 10.0F : 0.0F;
+    if (any) {
+      const float stored_minimum = float(minimum) / 10.0F;
+      const float guard = 4.0F * std::numeric_limits<float>::epsilon() *
+                          std::max({1.0F, std::abs(stored_minimum), std::abs(stored_maximum)});
+      range.minimum = std::min(range.minimum, stored_minimum - guard);
+      range.maximum = std::max(range.maximum, stored_maximum + guard);
     }
     lods.push_back(
         {index + 1U,
@@ -172,9 +193,12 @@ TerrainElevationRange write_metal_tile_chunk(
     payload.resize(old_size + static_cast<size_t>(byte_count));
     auto *destination = reinterpret_cast<uint16_t *>(payload.data() + old_size);
     for (size_t sample = 0U; sample < variant.values.size(); sample++) {
-      destination[sample] = static_cast<uint16_t>(
-          static_cast<int64_t>(elevation_decimeters(variant.values[sample])) - base
-      );
+      destination[sample] =
+          variant.covered[sample]
+              ? static_cast<uint16_t>(
+                    static_cast<int64_t>(elevation_decimeters(variant.values[sample])) - base
+                )
+              : 0U;
     }
     offset += byte_count;
     if (index + 1U < variants.size()) {
@@ -197,7 +221,7 @@ TerrainElevationRange write_metal_tile_chunk(
       base.maximum_elevation,
       MetalTileSampleType::Uint16Decimeters,
       base.elevation_base_decimeters,
-      0U,
+      coverage_count,
       key.row,
       key.column,
       grid.origin_x + static_cast<double>(key.column) * tile_width,
@@ -211,6 +235,7 @@ TerrainElevationRange write_metal_tile_chunk(
       table_bytes,
   };
   write_metal_tile_lods(path, header, lods, payload);
+  range.coverage = coverage;
   return range;
 }
 
@@ -236,6 +261,8 @@ TerrainElevationRange read_metal_tile_elevation_range(
       load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
       const uint64_t count = (uint64_t(lod.cell_count) + 1U) * (uint64_t(lod.cell_count) + 1U);
       for (uint64_t i = 0; i < count; ++i) {
+        if (header.version >= 5U && static_cast<const uint16_t *>(data.contents)[i] == 0U)
+          continue;
         const float value = (float(lod.elevation_base_decimeters) +
                              float(static_cast<const uint16_t *>(data.contents)[i])) *
                             0.1F;
@@ -248,7 +275,7 @@ TerrainElevationRange read_metal_tile_elevation_range(
   }
   const float guard = 4.0F * std::numeric_limits<float>::epsilon() *
                       std::max({1.0F, std::abs(range.minimum), std::abs(range.maximum)});
-  return {range.minimum - guard, range.maximum + guard};
+  return {range.minimum - guard, range.maximum + guard, read_metal_tile_coverage(path, header)};
 }
 
 } // namespace panorama::terrain

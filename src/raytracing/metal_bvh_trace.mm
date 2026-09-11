@@ -20,14 +20,14 @@
 namespace panorama {
 using namespace bvh_resources;
 namespace {
-static_assert(sizeof(BvhTile) == 48U);
+static_assert(sizeof(BvhTile) == 56U);
 static_assert(sizeof(BvhAffinePatch) == 64U);
-static_assert(sizeof(BvhCoveragePolygon) == 24U);
+static_assert(sizeof(BvhCoveragePolygon) == 56U);
 static_assert(sizeof(BvhCoverageVertex) == 8U);
 static_assert(sizeof(BvhBlock) == 24U);
 static_assert(sizeof(BvhBounds) == sizeof(MTLAxisAlignedBoundingBox));
 static_assert(sizeof(BvhParameters) == 68U);
-static_assert(sizeof(BvhChunk) == 96U);
+static_assert(sizeof(BvhChunk) == 104U);
 static_assert(sizeof(BvhRayState) == 20U);
 
 void dispatch_linear(
@@ -122,6 +122,7 @@ struct MetalBvhTrace::State {
   id<MTLBuffer> scene_resident, scene_missing_count;
   id<MTLBuffer> scene_requested_sources;
   id<MTLBuffer> scene_shadows, shadow_missing_count;
+  id<MTLBuffer> shadow_tested;
   id<MTLBuffer> shadow_requested_sources;
   bool scene_requests_ready = false;
   bool shadow_requests_ready = false;
@@ -477,7 +478,8 @@ struct MetalBvhTrace::State {
                     base,
                     key.lod,
                     tile_key.row,
-                    tile_key.column};
+                    tile_key.column,
+                    uint32_t(bool(source_metadata.valid_cells))};
     auto *tile_transforms = static_cast<BvhAffinePatch *>(entry->transforms.contents);
     if (transformed) {
       for (size_t patch = 0; patch < source_metadata.transform_patches.size(); ++patch)
@@ -633,6 +635,8 @@ struct MetalBvhTrace::State {
     );
     [p.table setBuffer:hierarchy.chunks offset:0 atIndex:0];
     [p.table setBuffer:parameters offset:0 atIndex:1];
+    [p.table setBuffer:coverage_polygons offset:0 atIndex:2];
+    [p.table setBuffer:coverage_vertices offset:0 atIndex:3];
     const bool submit = command == nil;
     if (submit)
       command = [gpu.command_queue() commandBuffer];
@@ -659,12 +663,13 @@ struct MetalBvhTrace::State {
       [p.missing_table setBuffer:current.transformed_catalogue ? candidate_patches : tiles
                           offset:0
                          atIndex:0];
-      [p.missing_table setBuffer:scene_resident offset:0 atIndex:1];
+      const id<MTLBuffer> excluded = shadows && shadow_tested ? shadow_tested : scene_resident;
+      [p.missing_table setBuffer:excluded offset:0 atIndex:1];
       [encoder setAccelerationStructure:candidate_catalogue atBufferIndex:13];
       [encoder setIntersectionFunctionTable:p.missing_table atBufferIndex:14];
       [encoder setBuffer:shadows ? shadow_missing_count : scene_missing_count offset:0 atIndex:15];
       [encoder useResource:candidate_catalogue usage:MTLResourceUsageRead];
-      [encoder useResource:scene_resident usage:MTLResourceUsageRead];
+      [encoder useResource:excluded usage:MTLResourceUsageRead];
       [encoder useResource:p.missing_table usage:MTLResourceUsageRead];
       if (!shadows) {
         [encoder setBuffer:candidate_patches offset:0 atIndex:16];
@@ -692,6 +697,8 @@ struct MetalBvhTrace::State {
       [encoder setBuffer:shadow_requested_sources offset:0 atIndex:18];
       [encoder setBuffer:candidate_patches offset:0 atIndex:19];
     }
+    [encoder useResource:coverage_polygons usage:MTLResourceUsageRead];
+    [encoder useResource:coverage_vertices usage:MTLResourceUsageRead];
     [encoder useResource:hierarchy.chunks usage:MTLResourceUsageRead];
     [encoder useResource:parameters usage:MTLResourceUsageRead];
     [encoder useResource:hierarchy.acceleration usage:MTLResourceUsageRead];
@@ -955,7 +962,8 @@ bool MetalBvhTrace::trace_shadows(double azimuth, double elevation, Timer &timer
         State::Entry *entry = state.acquire(source, pinned, timer, true);
         if (entry == nullptr) {
           ++state.stats.shadow_cache_fallbacks;
-          return false;
+          return state.current.transformed_catalogue ? stream_shadows(azimuth, elevation, timer)
+                                                     : false;
         }
         pinned.push_back(entry);
         ++state.stats.shadow_tiles_built;
@@ -966,7 +974,69 @@ bool MetalBvhTrace::trace_shadows(double azimuth, double elevation, Timer &timer
       break;
   }
   ++state.stats.shadow_cache_fallbacks;
-  return false;
+  return state.current.transformed_catalogue ? stream_shadows(azimuth, elevation, timer) : false;
+}
+
+bool MetalBvhTrace::stream_shadows(double azimuth, double elevation, Timer &timer) {
+  State &state = *state_;
+  // Each pass tests a cache-sized set of sources. Keep proven occlusion and
+  // remember tested sources even after eviction; primary hit outputs stay valid.
+  state.shadow_tested = buffer(
+      state.gpu.device(),
+      state.current.source_count,
+      sizeof(uint32_t),
+      @"tested shadow sources"
+  );
+  struct ClearTested {
+    State &state;
+    ~ClearTested() { state.shadow_tested = nil; }
+  } clear{state};
+  auto *tested = static_cast<uint32_t *>(state.shadow_tested.contents);
+  std::memset(tested, 0, state.shadow_tested.length);
+  std::vector<uint8_t> visibility(state.current.trace.ray_count, 1U);
+  for (uint32_t round = 0; round <= state.current.source_count; ++round) {
+    @autoreleasepool {
+      if (!state.prepare_scene(timer))
+        throw std::runtime_error("No resident BVH is available for shadow streaming");
+      for (const auto *entry : state.scene_entries)
+        tested[entry->key.source_index] = 1U;
+      auto command = [state.gpu.command_queue() commandBuffer];
+      if (!encode_shadows(command, azimuth, elevation))
+        throw std::runtime_error("Could not encode streamed BVH shadows");
+      const double gpu_ms = complete(command);
+      state.stats.shadow_gpu_ms += gpu_ms;
+      ++state.stats.shadow_passes;
+      ++state.stats.submissions;
+      timer.add_work("GPU BVH shadow streaming", gpu_ms);
+      const auto *current_visibility = static_cast<const uint8_t *>(state.scene_shadows.contents);
+      for (size_t index = 0; index < visibility.size(); ++index)
+        visibility[index] &= current_visibility[index];
+      if (shadows_complete()) {
+        std::memcpy(state.scene_shadows.contents, visibility.data(), visibility.size());
+        return true;
+      }
+      const auto *requested =
+          static_cast<const uint32_t *>(state.shadow_requested_sources.contents);
+      std::vector<State::Entry *> batch;
+      for (uint32_t source = 0; source < state.current.source_count; ++source) {
+        if (!requested[source] || tested[source])
+          continue;
+        auto *entry = state.acquire(source, batch, timer, true);
+        if (!entry) {
+          if (batch.empty())
+            throw std::runtime_error(
+                "BVH cache cannot hold one shadow terrain tile; increase --bvh-cache-mib"
+            );
+          break;
+        }
+        batch.push_back(entry);
+        ++state.stats.shadow_tiles_built;
+      }
+      if (batch.empty())
+        throw std::runtime_error("BVH shadow streaming did not advance to an untested source");
+    }
+  }
+  throw std::runtime_error("BVH shadow streaming exceeded the source count");
 }
 
 void MetalBvhTrace::prepare(

@@ -69,7 +69,8 @@ struct TerrainTileBvh::State {
                           0,
                           1,
                           source.key.row,
-                          source.key.column};
+                          source.key.column,
+                          uint32_t(bool(source.valid_cells))};
       const auto append_candidate_patch = [&](const TerrainTileTransform &transform,
                                               uint32_t minimum_column,
                                               uint32_t minimum_row,
@@ -143,20 +144,42 @@ struct TerrainTileBvh::State {
                                               checked_count(i),
                                               0U,
                                               0U,
-                                              0U},
+                                              0U,
+                                              0U,
+                                              0U,
+                                              0U,
+                                              0U,
+                                              minimum_x,
+                                              minimum_y,
+                                              maximum_x,
+                                              maximum_y},
                            BvhBounds{minimum_x, minimum_y, -1e30F, maximum_x, maximum_y, 1e30F}};
         };
-        if (source.coverage_polygons.size() != 1U)
-          throw std::runtime_error("Transformed source must have one physical coverage footprint");
-        auto [footprint, footprint_bounds] = append_vertices(source.coverage_polygons.front());
-        footprint.ownership_offset = checked_count(i);
-        footprint.ownership_count = 1U;
+        BvhCoveragePolygon footprint = {};
+        footprint.source = checked_count(i);
+        footprint.coverage_offset = checked_count(coverage_metadata.size());
+        footprint.coverage_count = checked_count(source.coverage_polygons.size());
+        BvhBounds footprint_bounds = {INFINITY, INFINITY, -1e30F, -INFINITY, -INFINITY, 1e30F};
+        for (const auto &polygon : source.coverage_polygons) {
+          const auto [record, box] = append_vertices(polygon);
+          coverage_metadata.push_back(record);
+          footprint_bounds.min_x = std::min(footprint_bounds.min_x, box.min_x);
+          footprint_bounds.min_y = std::min(footprint_bounds.min_y, box.min_y);
+          footprint_bounds.max_x = std::max(footprint_bounds.max_x, box.max_x);
+          footprint_bounds.max_y = std::max(footprint_bounds.max_y, box.max_y);
+        }
+        footprint.ownership_offset = footprint.coverage_offset;
+        footprint.ownership_count = footprint.coverage_count;
         if (!source.ownership_polygons.empty()) {
           footprint.ownership_offset = checked_count(coverage_metadata.size());
           footprint.ownership_count = checked_count(source.ownership_polygons.size());
           for (const TerrainCoveragePolygon &polygon : source.ownership_polygons)
             coverage_metadata.push_back(append_vertices(polygon).first);
         }
+        footprint.minimum_x = footprint_bounds.min_x;
+        footprint.minimum_y = footprint_bounds.min_y;
+        footprint.maximum_x = footprint_bounds.max_x;
+        footprint.maximum_y = footprint_bounds.max_y;
         coverage_metadata[i] = footprint;
         boxes.push_back(footprint_bounds);
         for (const TerrainTransformPatch &patch : source.transform_patches) {
@@ -182,6 +205,32 @@ struct TerrainTileBvh::State {
         append_candidate_patch(transform, 0U, 0U, geometry.cell_count, geometry.cell_count);
         boxes.push_back(candidate_boxes.back());
       }
+    }
+    // Precompute only overlapping higher-priority regions. Their vertex
+    // ranges are shared, and a cheap XY check rejects most at each exact hit.
+    const auto overlaps = [](const BvhCoveragePolygon &a, const BvhCoveragePolygon &b) {
+      return a.minimum_x < b.maximum_x && a.maximum_x > b.minimum_x && a.minimum_y < b.maximum_y &&
+             a.maximum_y > b.minimum_y;
+    };
+    for (size_t i = 0; i < sources.size(); ++i) {
+      if (sources[i].transform_patches.empty())
+        continue;
+      const auto footprint = coverage_metadata[i];
+      const uint32_t offset = checked_count(coverage_metadata.size());
+      for (size_t j = 0; j < sources.size(); ++j) {
+        if (sources[j].dataset_index >= sources[i].dataset_index)
+          continue;
+        const auto higher = coverage_metadata[j];
+        if (!overlaps(footprint, higher))
+          continue;
+        for (uint32_t r = 0; r < higher.coverage_count; ++r) {
+          const auto region = coverage_metadata[higher.coverage_offset + r];
+          if (overlaps(footprint, region))
+            coverage_metadata.push_back(region);
+        }
+      }
+      coverage_metadata[i].blocker_offset = offset;
+      coverage_metadata[i].blocker_count = checked_count(coverage_metadata.size()) - offset;
     }
     tiles = buffer(gpu.device(), sources.size(), sizeof(BvhTile), @"catalogue tiles");
     coverage_polygons = buffer(

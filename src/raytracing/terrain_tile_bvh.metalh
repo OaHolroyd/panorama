@@ -161,6 +161,10 @@ inline bool bvh_polygon_interval(
 ) {
   if (polygon.vertex_count < 3U)
     return false;
+  float box_entry = entry, box_exit = exit;
+  if (!bvh_slab(origin.x, direction.x, polygon.minimum_x, polygon.maximum_x, box_entry, box_exit) ||
+      !bvh_slab(origin.y, direction.y, polygon.minimum_y, polygon.maximum_y, box_entry, box_exit))
+    return false;
   float coordinate_scale = max(1.0F, max(abs(origin.x), abs(origin.y)));
   for (uint index = 0U; index < polygon.vertex_count; ++index) {
     const BvhCoverageVertex a = vertices[polygon.vertex_offset + index];
@@ -216,29 +220,77 @@ inline bool bvh_source_interval(
     thread float &entry,
     thread float &exit
 ) {
-  if (!ownership_only)
-    return bvh_polygon_interval(footprint, vertices, origin, direction, entry, exit);
-  bool found = false;
-  float nearest = exit, farthest = entry;
-  for (uint index = 0U; index < footprint.ownership_count; ++index) {
-    float start = entry, end = exit;
-    if (bvh_polygon_interval(
-            polygons[footprint.ownership_offset + index],
-            vertices,
-            origin,
-            direction,
-            start,
-            end
-        ) &&
-        (!found || start < nearest || (start == nearest && end > farthest))) {
-      nearest = start;
-      farthest = end;
-      found = true;
+  const uint offset = ownership_only ? footprint.ownership_offset : footprint.coverage_offset;
+  const uint count = ownership_only ? footprint.ownership_count : footprint.coverage_count;
+  const float limit = exit;
+  float cursor = entry;
+  while (cursor < limit) {
+    bool found = false;
+    float nearest = limit, farthest = cursor;
+    for (uint index = 0U; index < count; ++index) {
+      float start = cursor, end = limit;
+      if (bvh_polygon_interval(polygons[offset + index], vertices, origin, direction, start, end) &&
+          (!found || start < nearest || (start == nearest && end > farthest))) {
+        nearest = start;
+        farthest = end;
+        found = true;
+      }
     }
+    if (!found)
+      return false;
+    if (!ownership_only || footprint.blocker_count == 0U) {
+      entry = nearest;
+      exit = farthest;
+      return true;
+    }
+    // Subtract higher-priority coverage before scheduling a fallback segment.
+    // Otherwise that segment could jump over an untraced primary island.
+    float blocked_until = nearest, first_blocker = farthest;
+    for (uint index = 0; index < footprint.blocker_count; ++index) {
+      float start = nearest, end = farthest;
+      if (!bvh_polygon_interval(
+              polygons[footprint.blocker_offset + index],
+              vertices,
+              origin,
+              direction,
+              start,
+              end
+          ))
+        continue;
+      if (start <= nearest)
+        blocked_until = max(blocked_until, end);
+      else
+        first_blocker = min(first_blocker, start);
+    }
+    if (blocked_until > nearest) {
+      if (!(blocked_until > cursor))
+        return false;
+      cursor = blocked_until;
+      continue;
+    }
+    entry = nearest;
+    exit = first_blocker;
+    return exit > entry;
   }
-  entry = nearest;
-  exit = farthest;
-  return found;
+  return false;
+}
+
+inline bool bvh_owned_hit(
+    uint source,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
+    float2 point
+) {
+  const BvhCoveragePolygon footprint = polygons[source];
+  for (uint index = 0; index < footprint.blocker_count; ++index) {
+    const auto blocker = polygons[footprint.blocker_offset + index];
+    if (point.x < blocker.minimum_x || point.x > blocker.maximum_x || point.y < blocker.minimum_y ||
+        point.y > blocker.maximum_y)
+      continue;
+    if (bvh_point_in_polygon(blocker, vertices, point, 0.0F))
+      return false;
+  }
+  return true;
 }
 
 inline SelectedTerrainTile select_next_coverage_polygon(

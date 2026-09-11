@@ -119,6 +119,7 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
               {},
               0.0,
               config.vertical_offset_metres,
+              {},
           }
       );
     } catch (const std::invalid_argument &) {
@@ -136,8 +137,19 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
 
   const MetalTileHeader header = read_metal_tile_header(sources.front().path);
   const TileGrid grid = infer_tile_grid(sources.front());
-  for (TerrainSource &source : sources)
+  for (TerrainSource &source : sources) {
     source.lod_count = header.lod_count;
+    const auto entry = elevation_by_key.find(source.key);
+    auto coverage = entry == elevation_by_key.end() ? std::optional<TerrainCellCoverage>{}
+                                                    : entry->second.coverage;
+    if (!coverage)
+      coverage = read_metal_tile_coverage(source.path, read_metal_tile_header(source.path));
+    if (coverage) {
+      if (coverage->cell_count != header.cell_count)
+        throw std::runtime_error("Terrain coverage disagrees with its grid");
+      source.valid_cells = std::make_shared<TerrainCellCoverage>(std::move(*coverage));
+    }
+  }
   return {
       config,
       dataset_index,
@@ -245,14 +257,14 @@ namespace {
 
 enum class CoverageRelation { Uncovered, Covered, Partial };
 
-[[nodiscard]] bool dataset_has_tile(const TerrainDataset &dataset, TileKey key) {
+[[nodiscard]] const TerrainSource *dataset_source(const TerrainDataset &dataset, TileKey key) {
   const auto found = std::lower_bound(
       dataset.sources.begin(),
       dataset.sources.end(),
       key,
       [](const TerrainSource &source, TileKey wanted) { return source.key < wanted; }
   );
-  return found != dataset.sources.end() && found->key == key;
+  return found != dataset.sources.end() && found->key == key ? &*found : nullptr;
 }
 
 /// Use a logical rectangle's corners, edge midpoints, and centre to bound its
@@ -287,12 +299,45 @@ enum class CoverageRelation { Uncovered, Covered, Partial };
     minimum_column = std::min(minimum_column, key.column);
     maximum_column = std::max(maximum_column, key.column);
   }
+  double x0 = transformed.front().x, x1 = x0;
+  double y0 = transformed.front().y, y1 = y0;
+  for (Coord point : transformed) {
+    x0 = std::min(x0, point.x);
+    x1 = std::max(x1, point.x);
+    y0 = std::min(y0, point.y);
+    y1 = std::max(y1, point.y);
+  }
   bool any = false, all = true;
   for (int64_t row = minimum_row; row <= maximum_row; ++row) {
     for (int64_t column = minimum_column; column <= maximum_column; ++column) {
-      const bool present = dataset_has_tile(higher, {row, column});
-      any = any || present;
-      all = all && present;
+      const double left = higher.grid.origin_x + double(column) * higher.grid.width;
+      const double bottom = higher.grid.origin_y - double(row + 1) * higher.grid.width;
+      const double ax = std::max(x0, left), bx = std::min(x1, left + higher.grid.width);
+      const double ay = std::max(y0, bottom), by = std::min(y1, bottom + higher.grid.width);
+      if (ax >= bx || ay >= by)
+        continue;
+      const TerrainSource *source = dataset_source(higher, {row, column});
+      if (!source) {
+        all = false;
+        continue;
+      }
+      if (!source->valid_cells || source->valid_cells->full()) {
+        any = true;
+        continue;
+      }
+      const auto &coverage = *source->valid_cells;
+      const double scale = coverage.cell_count / higher.grid.width;
+      const auto low = [&](double v) {
+        return uint32_t(std::clamp(std::floor(v * scale), 0.0, double(coverage.cell_count)));
+      };
+      const auto high = [&](double v) {
+        return uint32_t(std::clamp(std::ceil(v * scale), 0.0, double(coverage.cell_count)));
+      };
+      const uint32_t cx0 = low(ax - left), cx1 = high(bx - left);
+      const uint32_t cy0 = low(ay - bottom), cy1 = high(by - bottom);
+      const uint64_t area = coverage.covered_area(cx0, cy0, cx1, cy1);
+      any = any || area != 0U;
+      all = all && area == uint64_t(cx1 - cx0) * (cy1 - cy0);
     }
   }
   return all   ? CoverageRelation::Covered
@@ -331,8 +376,8 @@ enum class CoverageRelation { Uncovered, Covered, Partial };
 }
 
 /// Return affine rectangles owned by this source after higher-priority tile
-/// coverage is removed. Cell centres define the lower-resolution ownership
-/// decision at a boundary; complete interior/exterior tiles avoid this pass.
+/// coverage is removed. Boundary cells remain candidates; GPU hit-position
+/// checks remove their overlap with higher-priority coverage.
 [[nodiscard]] std::vector<TerrainTransformPatch> owned_transform_patches(
     const MetalTileHeader &header,
     std::span<const TerrainTransformPatch> transforms,
@@ -384,21 +429,9 @@ enum class CoverageRelation { Uncovered, Covered, Partial };
       continue;
     }
     if (region.width == 1U && region.height == 1U) {
-      const std::array<Coord, 1> centre = {{{
-          header.lower_left_x + (double(region.column) + 0.5) * header.cell_size,
-          header.lower_left_y + (double(region.row) + 0.5) * header.cell_size,
-      }}};
-      bool centre_covered = false;
-      for (size_t higher_index = 0; higher_index < higher_datasets.size(); ++higher_index) {
-        const Coord point = to_higher[higher_index]->apply(centre).front();
-        centre_covered =
-            centre_covered || dataset_has_tile(
-                                  higher_datasets[higher_index],
-                                  tile_key_at(higher_datasets[higher_index].grid, point.x, point.y)
-                              );
-      }
-      if (!centre_covered)
-        owned.push_back({region.column, region.row, 1U, 1U, {}});
+      // Keep cells crossed by a priority edge. The exact hit position decides
+      // ownership on GPU, so rounding never opens a crack between grids.
+      owned.push_back({region.column, region.row, 1U, 1U, {}});
       continue;
     }
     const uint32_t left = region.width > 1U ? region.width / 2U : region.width;
@@ -550,12 +583,17 @@ TerrainCatalogue TerrainCatalogue::discover(
       constexpr double geometry_residual_metres = 0.25;
       const std::vector<TerrainTransformPatch> geometry_patches =
           make_terrain_transform_patches(header, frame, geometry_residual_metres);
-      const std::array<TerrainTransformPatch, 1> coverage_patches = {
-          TerrainTransformPatch{0U, 0U, header.cell_count, header.cell_count, whole},
-      };
+      std::vector<TerrainTransformPatch> coverage_patches;
+      if (source.valid_cells) {
+        for (const auto &rect : source.valid_cells->rectangles)
+          coverage_patches.push_back({rect.column, rect.row, rect.width, rect.height, whole});
+      } else {
+        coverage_patches.push_back({0U, 0U, header.cell_count, header.cell_count, whole});
+      }
+      const auto valid_geometry = intersect_owned_rectangles(geometry_patches, coverage_patches);
       source.transform_patches = owned_transform_patches(
           header,
-          geometry_patches,
+          valid_geometry,
           std::span<const TerrainDataset>(datasets).first(dataset.index)
       );
       const std::vector<TerrainTransformPatch> coverage_ownership = owned_transform_patches(
@@ -565,9 +603,9 @@ TerrainCatalogue TerrainCatalogue::discover(
       );
       if (source.transform_patches.empty() || coverage_ownership.empty())
         continue;
-      // Physical data coverage is the full source footprint. Cell-centre
-      // ownership rounding can leave narrow gaps where different grids meet;
-      // those gaps must not terminate otherwise continuous catalogue coverage.
+      // Physical coverage includes all usable cells, independent of ownership.
+      // Adjacent fallback cells can overlap at a priority edge without opening
+      // an artificial gap in this continuity hierarchy.
       source.coverage_polygons = make_terrain_coverage_polygons(header, frame, coverage_patches);
       uint64_t owned_cells = 0U;
       for (const TerrainTransformPatch &patch : source.transform_patches)
@@ -581,7 +619,13 @@ TerrainCatalogue TerrainCatalogue::discover(
             make_terrain_coverage_polygons(header, frame, coverage_ownership);
       }
       source.effective_cell_size_metres = whole.maximum_cell_size_metres();
-      candidates.push_back({std::move(source), distance, available.key == observer_key});
+      const bool contains_observer =
+          available.key == observer_key &&
+          (!source.valid_cells || source.valid_cells->contains(
+                                      (native_observer.x - header.lower_left_x) / header.cell_size,
+                                      (native_observer.y - header.lower_left_y) / header.cell_size
+                                  ));
+      candidates.push_back({std::move(source), distance, contains_observer});
     }
   }
   if (candidates.empty())
@@ -591,6 +635,28 @@ TerrainCatalogue TerrainCatalogue::discover(
   });
   if (origin == candidates.end() && !allow_observer_fallback)
     throw std::runtime_error("No prepared terrain tile contains the observer");
+  if (origin == candidates.end()) {
+    const auto &candidate = candidates.front().source;
+    const auto &dataset = datasets[candidate.dataset_index];
+    double column = 0.5, row = 0.5;
+    if (candidate.valid_cells) {
+      const auto &rect = candidate.valid_cells->rectangles.front();
+      column = (rect.column + 0.5 * rect.width) / candidate.valid_cells->cell_count;
+      row = (rect.row + 0.5 * rect.height) / candidate.valid_cells->cell_count;
+    }
+    const std::array<Coord, 1> point = {
+        {{dataset.grid.origin_x + (double(candidate.key.column) + column) * dataset.grid.width,
+          dataset.grid.origin_y - (double(candidate.key.row + 1) - row) * dataset.grid.width}}};
+    const Coord navigation =
+        transform_coordinates(dataset.epsg_code, datasets.front().epsg_code, point).front();
+    return discover(
+        configs,
+        {navigation.x, navigation.y, observer.elevation},
+        max_distance,
+        max_tile_count,
+        false
+    );
+  }
   std::sort(
       candidates.begin(),
       candidates.end(),
@@ -633,6 +699,18 @@ TerrainCatalogue TerrainCatalogue::discover(
 ) {
   std::vector<TerrainDataset> datasets =
       discover_terrain_datasets(std::array<TerrainDatasetConfig, 1>{{{tile_dir, 0.0}}});
+  if (std::any_of(
+          datasets.front().sources.begin(),
+          datasets.front().sources.end(),
+          [](const TerrainSource &source) { return bool(source.valid_cells); }
+      ))
+    return discover(
+        std::array<TerrainDatasetConfig, 1>{{{tile_dir, 0.0}}},
+        observer,
+        max_distance,
+        max_tile_count,
+        allow_observer_fallback
+    );
   const TileGrid grid = datasets.front().grid;
   std::vector<TerrainSource> available_sources = std::move(datasets.front().sources);
   std::vector<TileKey> coverage_tiles;
@@ -753,8 +831,18 @@ std::optional<TerrainLocation> TerrainCatalogue::locate_source(Coord navigation_
   for (size_t dataset_index = 0; dataset_index < datasets_.size(); ++dataset_index) {
     const Coord native = navigation_to_dataset_[dataset_index]->apply(input).front();
     const TileKey key = tile_key_at(datasets_[dataset_index].grid, native.x, native.y);
-    if (const auto source = find_source(static_cast<uint32_t>(dataset_index), key))
+    if (const auto source = find_source(static_cast<uint32_t>(dataset_index), key)) {
+      const auto &coverage = sources_[*source].valid_cells;
+      const auto &grid = datasets_[dataset_index].grid;
+      if (coverage && !coverage->contains(
+                          (native.x - grid.origin_x - double(key.column) * grid.width) *
+                              coverage->cell_count / grid.width,
+                          (native.y - grid.origin_y + double(key.row + 1) * grid.width) *
+                              coverage->cell_count / grid.width
+                      ))
+        continue;
       return TerrainLocation{*source, native};
+    }
   }
   return std::nullopt;
 }

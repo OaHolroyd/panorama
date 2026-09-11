@@ -192,6 +192,8 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --edge-cases
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --mixed-coverage
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --valid-quantized
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --valid-expanded
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-expanded
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-quantized

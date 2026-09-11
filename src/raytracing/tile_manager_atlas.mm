@@ -25,8 +25,8 @@ namespace {
 
 constexpr const char *kMetallibPath = PANORAMA_METALLIB_PATH;
 
-static_assert(sizeof(ResidentTile) == 4U * sizeof(uint64_t));
-static_assert(sizeof(QuantizedTerrainLayout) == 3U * sizeof(uint32_t));
+static_assert(sizeof(ResidentTile) == 5U * sizeof(uint64_t));
+static_assert(sizeof(QuantizedTerrainLayout) == 4U * sizeof(uint32_t));
 
 /// Check that a byte count fits Metal's NSUInteger buffer-length argument.
 [[nodiscard]] NSUInteger checked_buffer_length(size_t count, size_t size, const char *name) {
@@ -62,7 +62,8 @@ void print_error(NSString *context, NSError *error) {
     float maximum_elevation,
     TileKey key,
     uint32_t lod,
-    const RaytraceConfig &config
+    const RaytraceConfig &config,
+    uint32_t no_data
 ) {
   const double x = lower_left_x - config.observer.easting;
   const double y = lower_left_y - config.observer.northing;
@@ -74,10 +75,11 @@ void print_error(NSString *context, NSError *error) {
   }
   return {static_cast<float>(x),
           static_cast<float>(y),
-          maximum_elevation,
+          (no_data & 2U) ? std::numeric_limits<float>::infinity() : maximum_elevation,
           lod,
           key.row,
-          key.column};
+          key.column,
+          uint32_t(no_data)};
 }
 
 /// One prepared source paired with its selected destination atlas slot.
@@ -148,6 +150,11 @@ void TileManager::State::load_custom_vertices(
           &elevation_bases[index],
           sizeof(int32_t)
       );
+      std::memcpy(
+          record + quantized_record.no_data_offset,
+          &metadata[slots[index]].no_data,
+          sizeof(uint32_t)
+      );
     }
     if (!direct_loads.empty()) {
       timer.start_wall("Metal tile I/O");
@@ -201,6 +208,11 @@ void TileManager::State::load_custom_vertices(
           &elevation_bases[wave_start + index],
           sizeof(int32_t)
       );
+      std::memcpy(
+          record + quantized_record.no_data_offset,
+          &metadata[slots[wave_start + index]].no_data,
+          sizeof(uint32_t)
+      );
     }
 
     if (!staged_loads.empty()) {
@@ -241,6 +253,9 @@ void TileManager::State::load_custom_vertices(
     [encoder setBytes:&vertex_value_count length:sizeof(vertex_value_count) atIndex:6];
     const uint32_t tile_count = static_cast<uint32_t>(wave_size);
     [encoder setBytes:&tile_count length:sizeof(tile_count) atIndex:7];
+    [encoder setBytes:&quantized_record.no_data_offset
+               length:sizeof(quantized_record.no_data_offset)
+              atIndex:8];
     [encoder dispatchThreads:MTLSizeMake(vertex_value_count, tile_count, 1U)
         threadsPerThreadgroup:threadgroups::spatial];
     [encoder endEncoding];
@@ -602,6 +617,9 @@ void TileManager::State::attach_atlas(
       state->header_template.vertex_byte_count,
   };
   const uint32_t slot = 0U;
+  state->metadata[0].no_data = uint32_t(
+      (sources.front().valid_cells ? (sources.front().valid_cells->full() ? 1U : 3U) : 0U)
+  );
   const int32_t elevation_base = state->header_template.elevation_base_decimeters;
   state->load_custom_vertices(
       std::span<const MetalTileBufferLoad>(&load, 1U),
@@ -624,7 +642,8 @@ void TileManager::State::attach_atlas(
       origin_tile.maximum_elevation,
       origin_key,
       1U,
-      config
+      config,
+      (sources.front().valid_cells ? (sources.front().valid_cells->full() ? 1U : 3U) : 0U)
   );
   state->slot_by_variant[{0U, 1U}] = 0U;
   state->variant_by_slot.assign(capacity, std::nullopt);
@@ -732,7 +751,8 @@ TileManager::State::install_prepared(std::span<const uint8_t> pinned_slots, Time
         lod.maximum_elevation,
         source.key,
         installation.prepared.variant.lod,
-        state.config
+        state.config,
+        (source.valid_cells ? (source.valid_cells->full() ? 1U : 3U) : 0U)
     );
   }
 
@@ -949,12 +969,16 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
     if (expanded_vertices) {
       return static_cast<double>(static_cast<const float *>(values)[index]);
     }
+    if (source.valid_cells && static_cast<const uint16_t *>(values)[index] == 0U)
+      return std::numeric_limits<double>::quiet_NaN();
     return static_cast<double>(elevation_base) / 10.0 +
            static_cast<double>(static_cast<const uint16_t *>(values)[index]) / 10.0;
   };
   const double south = std::lerp(vertex(x0, y0), vertex(x0 + 1U, y0), tx);
   const double north = std::lerp(vertex(x0, y0 + 1U), vertex(x0 + 1U, y0 + 1U), tx);
-  return static_cast<float>(std::lerp(south, north, ty) + source.vertical_offset_metres);
+  const double elevation = std::lerp(south, north, ty) + source.vertical_offset_metres;
+  return std::isfinite(elevation) ? std::optional<float>(static_cast<float>(elevation))
+                                  : std::nullopt;
 }
 
 TileManagerBindings TileManager::State::bindings() const {
@@ -968,6 +992,7 @@ TileManagerBindings TileManager::State::bindings() const {
                 state.quantized_record.stride,
                 state.quantized_record.vertex_offset,
                 state.quantized_record.elevation_base_offset,
+                state.quantized_record.no_data_offset,
             }
           : QuantizedTerrainLayout{},
   };

@@ -332,7 +332,9 @@ GpuRaytraceResources::GpuRaytraceResources(
     catalogue_entries[index] = {
         source.key.row,
         source.key.column,
-        source.maximum_elevation.value_or(std::numeric_limits<float>::infinity()),
+        source.valid_cells && !source.valid_cells->full()
+            ? std::numeric_limits<float>::infinity()
+            : source.maximum_elevation.value_or(std::numeric_limits<float>::infinity()),
         source_index,
     };
   }
@@ -411,7 +413,13 @@ void GpuRaytraceResources::prepare_tile_selection(
     Timer &timer
 ) {
   State &state = *state_;
-  state.use_tile_bvh = enabled && state.device.supportsRaytracing;
+  // The software selector walks rectangular source tiles. Masked catalogues
+  // use exact native-cell walking so its height rejection cannot jump a gap.
+  state.use_tile_bvh =
+      enabled && state.device.supportsRaytracing &&
+      std::none_of(tiles.sources().begin(), tiles.sources().end(), [](const TerrainSource &source) {
+        return source.valid_cells && !source.valid_cells->full();
+      });
   if (!state.use_tile_bvh)
     return;
   const auto started = std::chrono::steady_clock::now();

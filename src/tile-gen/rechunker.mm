@@ -98,6 +98,7 @@ downsample_lod(const TerrainChunk::LodVariant &fine, LodSampling sampling, float
       }
 
       float maximum = -std::numeric_limits<float>::infinity();
+      bool complete = true;
       double weighted_sum = 0.0;
       uint32_t weight_sum = 0U;
       for (int32_t offset_y = -1; offset_y <= 1; offset_y++) {
@@ -106,6 +107,7 @@ downsample_lod(const TerrainChunk::LodVariant &fine, LodSampling sampling, float
           const uint32_t sample_y = static_cast<uint32_t>(static_cast<int32_t>(fine_y) + offset_y);
           const size_t sample = static_cast<size_t>(sample_y) * fine.sample_side + sample_x;
           if (fine.covered[sample] == 0U) {
+            complete = false;
             continue;
           }
           const uint32_t weight = offset_x == 0 && offset_y == 0     ? 4U
@@ -116,7 +118,7 @@ downsample_lod(const TerrainChunk::LodVariant &fine, LodSampling sampling, float
           weight_sum += weight;
         }
       }
-      if (weight_sum != 0U) {
+      if (weight_sum != 0U && complete) {
         coarse.elevations[output] = sampling == LodSampling::Maximum
                                         ? maximum
                                         : static_cast<float>(weighted_sum / weight_sum);

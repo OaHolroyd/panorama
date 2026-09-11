@@ -11,7 +11,10 @@ namespace panorama::terrain {
 struct TerrainElevationRange {
   float minimum;
   float maximum;
+  std::optional<TerrainCellCoverage> coverage = std::nullopt;
 };
+
+[[nodiscard]] TerrainCellCoverage terrain_chunk_coverage(const TerrainChunk &chunk);
 
 /// Scan existing payloads when upgrading an old manifest. The caller reuses
 /// one I/O queue across files; no source rasters need to be regenerated.

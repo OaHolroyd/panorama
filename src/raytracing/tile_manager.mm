@@ -13,9 +13,10 @@ namespace panorama {
 namespace {
 
 /// Reduce the prepared-file header to geometry needed throughout a session.
-[[nodiscard]] TileGeometry read_tile_geometry(const std::filesystem::path &path) {
+[[nodiscard]] TileGeometry
+read_tile_geometry(const std::filesystem::path &path, uint32_t navigation_epsg) {
   const MetalTileHeader header = read_metal_tile_header(path);
-  return {Crs::from_epsg(header.epsg_code),
+  return {Crs::from_epsg(navigation_epsg ? navigation_epsg : header.epsg_code),
           header.maximum_elevation,
           header.cell_count,
           header.lower_left_x,
@@ -233,7 +234,13 @@ TileManager::TileManager(const RaytraceConfig &config) : state_(std::make_unique
                                         )
   );
   state.config.observer = state.catalogue->observer();
-  state.origin = std::make_unique<TileGeometry>(read_tile_geometry(state.catalogue->origin().path));
+  // Navigation remains in the first dataset's CRS even when its missing
+  // samples put the observer on a geographic fallback source.
+  const auto &catalogue_datasets = state.catalogue->datasets();
+  state.origin = std::make_unique<TileGeometry>(read_tile_geometry(
+      state.catalogue->origin().path,
+      catalogue_datasets.empty() ? 0U : catalogue_datasets.front().epsg_code
+  ));
   state.trace_quantized = state.config.retain_quantized;
   if (config.terrain_datasets.empty())
     validate_tile_position(*state.origin, state.catalogue->origin().key, state.catalogue->grid());

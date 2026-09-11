@@ -2,17 +2,21 @@
 
 #import <Metal/Metal.h>
 
+#include "terrain_cell_coverage.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <vector>
 
 namespace panorama {
 
-inline constexpr std::array<char, 8> kMetalTileLodMagic = {'P', 'N', 'T', 'I', 'L', 'E', '0', '4'};
-inline constexpr uint32_t kMetalTileLodVersion = 4U;
+inline constexpr std::array<char, 8> kMetalTileLodMagic = {'P', 'N', 'T', 'I', 'L', 'E', '0', '5'};
+inline constexpr uint32_t kMetalTileLodVersion = 5U;
+inline constexpr std::array<char, 8> kLegacyMetalTileLodMagic =
+    {'P', 'N', 'T', 'I', 'L', 'E', '0', '4'};
 inline constexpr uint32_t kMetalTileLodHeaderSize = 128U;
 
 /// Compression applied to the complete logical Metal tile stream.
@@ -33,8 +37,9 @@ enum class MetalTileSampleType : uint32_t {
 /// Fixed little-endian header at decompressed stream offset zero.
 ///
 /// All offsets address the logical decompressed stream understood by Metal I/O.
-/// Every tile uses this version-4 layout, with one or more independently
-/// addressable terrain LOD payloads.
+/// Versions 4 and 5 share this header and independently addressable LODs.
+/// Version 5 reserves uint16 code zero for no-data; valid elevations decode as
+/// (base + code) / 10 metres. Coverage rectangles follow the LOD table.
 struct MetalTileHeader {
   std::array<char, 8> magic;
   uint32_t version;
@@ -46,7 +51,8 @@ struct MetalTileHeader {
   float maximum_elevation;
   MetalTileSampleType sample_type;
   int32_t elevation_base_decimeters;
-  uint32_t reserved; // Written as zero; ignored when reading early version-3 files.
+  /// Version 5: coverage rectangle count after the LOD table; zero means full.
+  uint32_t reserved;
   int64_t row;
   int64_t column;
   double lower_left_x;
@@ -60,7 +66,7 @@ struct MetalTileHeader {
   uint64_t lod_table_byte_count;
 };
 
-/// One independently addressable vertex payload within a version-4 tile.
+/// One independently addressable vertex payload within a Metal tile.
 struct MetalTileLod {
   uint32_t lod;
   uint32_t cell_count;
@@ -72,12 +78,13 @@ struct MetalTileLod {
   uint64_t vertex_byte_count;
 };
 
-/// Aligned GPU layout for one complete uint16 logical tile record.
+/// Compact GPU record containing only the selected vertices, base and validity flag.
 struct QuantizedMetalTileRecordLayout {
   uint32_t logical_size;
   uint32_t stride;
   uint32_t vertex_offset;
   uint32_t elevation_base_offset;
+  uint32_t no_data_offset;
 };
 
 /// One source file, logical byte range, and destination for a Metal I/O load.
@@ -111,11 +118,15 @@ void validate_metal_tile_header(
     MetalTileCompression expected_compression
 );
 
-/// Read and validate the complete LOD table of a version-4 Metal tile.
+/// Read and validate the complete LOD table of a Metal tile.
 [[nodiscard]] std::vector<MetalTileLod>
 read_metal_tile_lods(const std::filesystem::path &path, const MetalTileHeader &header);
 
-/// Write a version-4 logical stream containing a table and all LOD payloads.
+/// Version 4 has no recoverable mask. Version 5 metadata needs no height reads.
+[[nodiscard]] std::optional<TerrainCellCoverage>
+read_metal_tile_coverage(const std::filesystem::path &path, const MetalTileHeader &header);
+
+/// Write a versioned logical stream containing a table and all LOD payloads.
 void write_metal_tile_lods(
     const std::filesystem::path &path,
     const MetalTileHeader &header,

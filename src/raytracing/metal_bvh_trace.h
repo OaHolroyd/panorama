@@ -86,12 +86,14 @@ public:
   bool encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation);
   bool shadows_complete();
   /// Load GPU-requested shadow casters into the ordinary BVH cache and retry.
-  /// False means the working set cannot fit; use exact software streaming.
+  /// Transformed/masked sources stream through the BVH if the full set cannot fit.
+  /// False requests the legacy single-grid software fallback.
   /// Primary outputs must be complete and no command may be in flight.
   bool trace_shadows(double azimuth, double elevation, Timer &timer);
   id<MTLBuffer> shadow_visibility() const;
 
 private:
+  bool stream_shadows(double azimuth, double elevation, Timer &timer);
   struct State;
   std::unique_ptr<State> state_;
 };

@@ -61,6 +61,8 @@ struct TerrainSource {
   /// Largest transformed LOD-1 cell axis, used by per-source LOD policy.
   double effective_cell_size_metres = 0.0;
   double vertical_offset_metres = 0.0;
+  /// Null for legacy tiles; otherwise also identifies the reserved-zero encoding.
+  std::shared_ptr<const TerrainCellCoverage> valid_cells;
 };
 
 /// One independently gridded prepared dataset before observer filtering and

@@ -265,8 +265,8 @@ void write_fixture(
         offset += bytes;
       }
       const auto &base = lods.front();
-      MetalTileHeader header = {kMetalTileLodMagic,
-                                kMetalTileLodVersion,
+      MetalTileHeader header = {kLegacyMetalTileLodMagic,
+                                4U,
                                 kMetalTileLodHeaderSize,
                                 MetalTileCompression::None,
                                 epsg,
@@ -684,8 +684,8 @@ void write_flat_coverage_fixture(
                             0U,
                             kMetalTileLodHeaderSize + sizeof(MetalTileLod),
                             heights.size() * sizeof(uint16_t)};
-  const MetalTileHeader header = {kMetalTileLodMagic,
-                                  kMetalTileLodVersion,
+  const MetalTileHeader header = {kLegacyMetalTileLodMagic,
+                                  4U,
                                   kMetalTileLodHeaderSize,
                                   MetalTileCompression::None,
                                   2056U,
@@ -713,6 +713,277 @@ void write_flat_coverage_fixture(
       TerrainManifestEntry{0, 0, elevation, elevation}};
   write_metal_tile_lods(directory / "flat_r0_c0.ptile", header, lods, payload);
   write_terrain_manifest(terrain_manifest_path(directory), manifest);
+}
+
+void write_masked_fixture(
+    const std::filesystem::path &directory,
+    bool hole,
+    float height,
+    double x_min,
+    double spacing,
+    MetalTileCompression compression
+) {
+  write_flat_coverage_fixture(directory, x_min, spacing, 1000.0F);
+  const auto old_path = directory / "flat_r0_c0.ptile";
+  auto header = read_metal_tile_header(old_path);
+  auto lod = read_metal_tile_lods(old_path, header).front();
+  std::vector<uint16_t> samples(17U * 17U, 1U);
+  if (hole)
+    for (uint32_t y = 0; y < 17; ++y)
+      samples[y * 17 + 7] = samples[y * 17 + 8] = 0;
+  std::vector<uint8_t> usable(16U * 16U);
+  for (uint32_t y = 0; y < 16; ++y)
+    for (uint32_t x = 0; x < 16; ++x)
+      usable[y * 16 + x] = samples[y * 17 + x] && samples[y * 17 + x + 1] &&
+                           samples[(y + 1) * 17 + x] && samples[(y + 1) * 17 + x + 1];
+  const auto coverage = make_cell_coverage(16, usable);
+  const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
+  const uint64_t bytes = count * sizeof(TerrainCoverageRect);
+  header.magic = kMetalTileLodMagic;
+  header.version = kMetalTileLodVersion;
+  header.compression = compression;
+  header.reserved = count;
+  header.elevation_base_decimeters = lod.elevation_base_decimeters =
+      int(std::lround(height * 10)) - 1;
+  header.maximum_elevation = lod.maximum_elevation = height;
+  header.vertex_offset = lod.vertex_offset += bytes;
+  std::vector<std::byte> payload(bytes + samples.size() * sizeof(uint16_t));
+  if (bytes)
+    std::memcpy(payload.data(), coverage.rectangles.data(), bytes);
+  std::memcpy(payload.data() + bytes, samples.data(), samples.size() * sizeof(uint16_t));
+  std::filesystem::remove(old_path);
+  write_metal_tile_lods(
+      directory / (std::string("flat_r0_c0") + metal_tile_suffix(compression)),
+      header,
+      std::span(&lod, 1),
+      payload
+  );
+  const std::array<TerrainManifestEntry, 1> entries = {{{0, 0, height, height, coverage}}};
+  write_terrain_manifest(terrain_manifest_path(directory), entries);
+}
+
+void check_valid_coverage(const std::filesystem::path &root, bool retained) {
+  const auto primary = root / "masked-primary";
+  const auto fallback = root / "masked-fallback";
+  const auto compression = retained ? MetalTileCompression::Lz4 : MetalTileCompression::None;
+  write_masked_fixture(primary, true, 0.0F, 2600000.0, 10.0, compression);
+  write_masked_fixture(fallback, false, 10.0F, 2600003.0, 20.0, compression);
+  RaytraceConfig config{primary, {2600045, 1199945, 20}, 500, 0, 16384, 2, retained, true, false};
+  config.raytracer = Raytracer::MetalBvh;
+  config.terrain_datasets = {{primary, 0}, {fallback, 0}};
+  const auto catalogue =
+      TerrainCatalogue::discover(config.terrain_datasets, config.observer, 500, 0);
+  const auto hole = catalogue.locate_source({2600075, 1199945});
+  const auto filled = catalogue.locate_source({2600095, 1199945});
+  require(
+      hole && filled && catalogue.sources()[hole->source_index].dataset_index == 1 &&
+          catalogue.sources()[filled->source_index].dataset_index == 0,
+      "Masked catalogue priority is wrong"
+  );
+  require(
+      catalogue.sources()[*catalogue.find_source(0, {0, 0})].lod_count == 1,
+      "Partial source allowed coarse LODs across a hole"
+  );
+  const auto gap_field = angular_field({9, 3}, {1.56, 1.58, std::atan(-0.34), std::atan(-0.32)});
+  const auto filled_field = angular_field({9, 3}, {1.56, 1.58, std::atan(-0.21), std::atan(-0.19)});
+  const auto edge_field = angular_field({9, 3}, {1.56, 1.58, std::atan(-2.05), std::atan(-2.0)});
+  for (bool bounded : {false, true}) {
+    @autoreleasepool {
+      config.bvh_cache_size_bytes = bounded ? (retained ? 14200U : 14800U) : 1048576U;
+      TerrainTraceSession session(config, gap_field, {true, true, true});
+      require(
+          std::abs(*session.sample_terrain(2600075, 1199945) - 10.0F) < 0.001F &&
+              std::abs(*session.sample_terrain(2600095, 1199945)) < 0.001F,
+          "CPU sampling did not fall back through missing samples"
+      );
+      for (bool bilinear : {false, true}) {
+        session.set_collision_options(bilinear, true);
+        for (const auto &[field, height] : std::array<std::pair<RayFieldRequest, float>, 3>{
+                 {{gap_field, 10.0F}, {filled_field, 0.0F}, {edge_field, 0.0F}}}) {
+          session.trace(field);
+          const auto *distances = static_cast<const float *>(session.distances().contents);
+          const auto *elevations = static_cast<const float *>(session.elevations().contents);
+          const auto *gradients =
+              static_cast<const uint32_t *>(session.surface_gradients().contents);
+          for (uint32_t i = 0; i < pixel_count(field.image); ++i) {
+            if (!(distances[i] > 0 && std::abs(elevations[i] - height) < 0.01F))
+              std::fprintf(
+                  stderr,
+                  "Masked hit retained=%d bounded=%d bilinear=%d pixel=%u t=%g z=%g expected=%g\n",
+                  retained,
+                  bounded,
+                  bilinear,
+                  i,
+                  distances[i],
+                  elevations[i],
+                  height
+              );
+            require(
+                distances[i] > 0 && std::abs(elevations[i] - height) < 0.01F,
+                "GPU hit did not respect valid coverage priority"
+            );
+            require(gradients[i] == 0U, "Missing sample contaminated flat terrain normals");
+          }
+          session.trace_shadows(1.57, 0.6);
+          const auto *visibility =
+              static_cast<const uint8_t *>(session.shadow_visibility().contents);
+          for (uint32_t i = 0; i < pixel_count(field.image); ++i) {
+            if (height == 10.0F)
+              require(visibility[i] != 0, "Flat fallback incorrectly shadowed itself");
+            if (distances[i] < 11.0F) {
+              if (visibility[i] != 0)
+                std::fprintf(
+                    stderr,
+                    "Shadow failed retained=%d bounded=%d bilinear=%d pixel=%u t=%g z=%g "
+                    "fallbacks=%llu\n",
+                    retained,
+                    bounded,
+                    bilinear,
+                    i,
+                    distances[i],
+                    elevations[i],
+                    (unsigned long long)session.bvh_statistics().shadow_cache_fallbacks
+                );
+              require(visibility[i] == 0, "Fallback in the hole did not cast a shadow");
+            }
+          }
+        }
+      }
+      const auto cliff_field =
+          angular_field({9, 3}, {1.5707, 1.5709, std::atan(-0.101), std::atan(-0.099)});
+      for (bool bilinear : {false, true}) {
+        session.set_collision_options(bilinear, true);
+        session.trace(cliff_field);
+        const auto *distances = static_cast<const float *>(session.distances().contents);
+        for (uint32_t i = 0; i < pixel_count(cliff_field.image); ++i) {
+          if (std::abs(distances[i] - 115.0F) >= 0.1F)
+            std::fprintf(
+                stderr,
+                "Priority step bounded=%d bilinear=%d distance=%g\n",
+                bounded,
+                bilinear,
+                distances[i]
+            );
+          require(
+              std::abs(distances[i] - 115.0F) < 0.1F,
+              "Priority clipping lost the remaining part of a fallback cell"
+          );
+        }
+      }
+      if (bounded)
+        require(session.bvh_statistics().evictions > 0, "Masked test did not exercise streaming");
+      require(
+          session.relocate_observer({2600046, 1199946, 20}),
+          "Masked observer relocation failed"
+      );
+      session.trace(gap_field);
+    }
+  }
+  // Without fallback, the same internal hole is a real coverage gap. Neither
+  // backend may see the valid terrain island beyond it.
+  config.terrain_datasets.clear();
+  for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
+    @autoreleasepool {
+      config.raytracer = backend;
+      TerrainTraceSession session(config, filled_field, {true, true, true});
+      session.trace(filled_field);
+      const auto *distances = static_cast<const float *>(session.distances().contents);
+      require(
+          std::none_of(
+              distances,
+              distances + pixel_count(filled_field.image),
+              [](float t) { return t > 0; }
+          ),
+          "Single-source trace crossed a real internal coverage gap"
+      );
+    }
+  }
+  // Legacy code zero remains real terrain in either GPU representation.
+  const auto legacy = root / "legacy-zero";
+  write_flat_coverage_fixture(legacy, 2600000.0, 10.0, 900.0F);
+  config.tile_dir = legacy;
+  config.observer.elevation = 920;
+  config.raytracer = Raytracer::MetalBvh;
+  {
+    TerrainTraceSession session(config, edge_field, {true, true, true});
+    session.trace(edge_field);
+    const auto *distances = static_cast<const float *>(session.distances().contents);
+    require(
+        std::all_of(
+            distances,
+            distances + pixel_count(edge_field.image),
+            [](float t) { return t > 0; }
+        ),
+        "Legacy code zero was mistaken for no-data"
+    );
+  }
+
+  // Reach the masked tile through a full legacy predecessor. Source-level
+  // height rejection must not skip the hole and hit the island beyond it.
+  auto predecessor = read_metal_tile_header(legacy / "flat_r0_c0.ptile");
+  auto predecessor_lod = read_metal_tile_lods(legacy / "flat_r0_c0.ptile", predecessor).front();
+  predecessor.lower_left_x -= 160;
+  predecessor.column = -1;
+  predecessor.compression = compression;
+  predecessor.maximum_elevation = predecessor_lod.maximum_elevation = 0;
+  predecessor.elevation_base_decimeters = predecessor_lod.elevation_base_decimeters = 0;
+  std::vector<std::byte> zero_samples(predecessor.vertex_byte_count, std::byte{0});
+  write_metal_tile_lods(
+      primary / (std::string("flat_r0_c-1") + metal_tile_suffix(compression)),
+      predecessor,
+      std::span(&predecessor_lod, 1),
+      zero_samples
+  );
+  config.tile_dir = primary;
+  config.observer = {2599885, 1199945, 20};
+  const auto beyond_gap = angular_field({9, 3}, {1.56, 1.58, std::atan(-0.084), std::atan(-0.083)});
+  for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
+    @autoreleasepool {
+      config.raytracer = backend;
+      TerrainTraceSession session(config, beyond_gap, {true, true, true});
+      session.trace(beyond_gap);
+      const auto *distances = static_cast<const float *>(session.distances().contents);
+      require(
+          std::none_of(
+              distances,
+              distances + pixel_count(beyond_gap.image),
+              [](float t) { return t > 0; }
+          ),
+          "Tile-level culling jumped over an internal coverage gap"
+      );
+    }
+  }
+  // Starting on geographic fallback must retain the projected navigation CRS.
+  config.tile_dir = root / "quantized";
+  config.terrain_datasets = {{config.tile_dir, 0}, {root / "geographic", 0}};
+  const std::array<Coord, 1> geographic_observer = {{{7.0 + 4.5 / 3600, 46.0 - 5.5 / 3600}}};
+  const Coord navigation = transform_coordinates(4326, 2056, geographic_observer).front();
+  config.observer = {navigation.x, navigation.y, 1120};
+  config.max_distance = 1000;
+  config.bvh_cache_size_bytes = 1048576;
+  config.raytracer = Raytracer::MetalBvh;
+  {
+    TerrainTraceSession session(config, edge_field, {true, true, true});
+    require(session.crs().epsg_code() == 2056, "Geographic fallback changed the navigation CRS");
+    require(
+        session.sample_terrain(navigation.x, navigation.y).has_value(),
+        "Fallback observer lost its terrain"
+    );
+    session.trace(edge_field);
+    const auto *distances = static_cast<const float *>(session.distances().contents);
+    require(
+        std::all_of(
+            distances,
+            distances + pixel_count(edge_field.image),
+            [](float t) { return t > 0; }
+        ),
+        "Geographic fallback observer did not render terrain"
+    );
+  }
+  std::puts(
+      "Valid coverage: no-data, zero elevations, exact priority, normals, streaming and real gaps "
+      "passed."
+  );
 }
 
 void check_misaligned_coverage(const std::filesystem::path &root) {
@@ -760,7 +1031,7 @@ void check_misaligned_coverage(const std::filesystem::path &root) {
   for (bool bounded : {false, true}) {
     for (bool bilinear : {false, true}) {
       @autoreleasepool {
-        config.bvh_cache_size_bytes = bounded ? one_tile_budget : 1048576U;
+        config.bvh_cache_size_bytes = bounded ? one_tile_budget + 256U : 1048576U;
         config.bilinear_collisions = bilinear;
         config.terrain_datasets = {{primary, 0.0}, {fallback, 0.0}};
         TerrainTraceSession mixed(config, far_field, {true, true, true});
@@ -1870,9 +2141,12 @@ int main(int argc, const char *argv[]) {
           argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-quantized";
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
+      const bool valid_quantized = argc == 2 && std::string_view(argv[1]) == "--valid-quantized";
+      const bool valid_expanded = argc == 2 && std::string_view(argv[1]) == "--valid-expanded";
       const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
-          !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage) {
+          !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage &&
+          !valid_quantized && !valid_expanded) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -1989,6 +2263,8 @@ int main(int argc, const char *argv[]) {
           @autoreleasepool {
             check_producer(root / "quantized", true, true);
           }
+        } else if (valid_quantized || valid_expanded) {
+          check_valid_coverage(root, valid_quantized);
         } else if (mixed_coverage) {
           check_misaligned_coverage(root);
         } else if (streaming) {

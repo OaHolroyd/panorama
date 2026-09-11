@@ -13,6 +13,7 @@ kernel void convert_quantized_vertices(
     constant uint &elevation_base_offset [[buffer(5)]],
     constant uint &vertex_count [[buffer(6)]],
     constant uint &tile_count [[buffer(7)]],
+    constant uint &no_data_offset [[buffer(8)]],
     uint2 output_index [[thread_position_in_grid]]
 ) {
   if (output_index.x >= vertex_count || output_index.y >= tile_count) {
@@ -24,7 +25,10 @@ kernel void convert_quantized_vertices(
   device const ushort *vertices = reinterpret_cast<device const ushort *>(record + vertex_offset);
   const uint slot = destination_slots[output_index.y];
   destination[slot * vertex_count + output_index.x] =
-      (float(*base) + float(vertices[output_index.x])) * 0.1F;
+      (*reinterpret_cast<device const uint *>(record + no_data_offset) &&
+       vertices[output_index.x] == 0U)
+          ? NAN
+          : (float(*base) + float(vertices[output_index.x])) * 0.1F;
 }
 
 /// Shared traversal specialized at compile time for Float32 or uint16 terrain.
@@ -89,7 +93,8 @@ inline float trace_tile_frontier_impl(
 
   // The observer tile begins at level 1; incoming tiles begin at their
   // coarsest maximum so clear terrain can be rejected immediately.
-  uint level = clamp(input.start_level, 1U, num_levels);
+  const bool partial_coverage = (resident_tile.no_data & 2U) != 0U;
+  uint level = partial_coverage ? 1U : clamp(input.start_level, 1U, num_levels);
   uint scale = 1 << (level - 1);
   // Host-created items start at either the full level-1 field or the final
   // one-value level, whose flattened offsets are known without rebuilding the
@@ -210,9 +215,14 @@ inline float trace_tile_frontier_impl(
     const uint cell_index =
         offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
 
+    // A true gap ends coverage even when the ray passes above the terrain.
+    if (partial_coverage && !valid_cell(vertices, vertex_count, uint(j), uint(i), true))
+      return INFINITY;
     // Collision check
     if (z <= sample_elevation(mipmap[cell_index], base_decimeters)) {
       if (level == 1) {
+        if (!valid_cell(vertices, vertex_count, uint(j), uint(i), resident_tile.no_data))
+          return INFINITY;
         // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
         Collision collision;
@@ -269,7 +279,14 @@ inline float trace_tile_frontier_impl(
                 curved_ray_elevation(observer_elevation, dz, curvature, collision.distance);
           }
           if (!shadow_trace && compute_surface_gradients) {
-            if (use_c1_normals && (i >= 1 && j >= 1 && i < n - 1 && j < n - 1)) {
+            if (use_c1_normals && (i >= 1 && j >= 1 && i < n - 1 && j < n - 1) &&
+                valid_normal_stencil(
+                    vertices,
+                    vertex_count,
+                    uint(j),
+                    uint(i),
+                    resident_tile.no_data
+                )) {
               surface_gradients[output_index] = interpolated_packed_surface_gradients(
                   vertices,
                   vertex_count,
@@ -382,7 +399,7 @@ inline float trace_tile_frontier_impl(
     }
 
     // Go up to a coarser level whenever possible
-    if (level < params.num_levels) {
+    if (!partial_coverage && level < num_levels) {
       if (ty < tx) {
         if (at_level_boundary(i, stepy, scale)) {
           // Crossing a Y boundary joins two vertically adjacent blocks. The

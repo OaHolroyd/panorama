@@ -395,7 +395,8 @@ int main(int argc, const char *argv[]) {
         }
         const auto previous = previous_maximum_by_key.find(key);
         if (previous != previous_maximum_by_key.end() &&
-            previous->second.minimum_elevation.has_value()) {
+            previous->second.minimum_elevation.has_value() &&
+            previous->second.coverage.has_value()) {
           manifest_entries.push_back(previous->second);
         } else {
           if (manifest_device == nil) {
@@ -405,7 +406,9 @@ int main(int argc, const char *argv[]) {
           @autoreleasepool {
             const auto range =
                 read_metal_tile_elevation_range(output, manifest_device, manifest_queue);
-            manifest_entries.push_back({key.row, key.column, range.maximum, range.minimum});
+            manifest_entries.push_back(
+                {key.row, key.column, range.maximum, range.minimum, range.coverage}
+            );
           }
         }
         skipped++;
@@ -414,11 +417,10 @@ int main(int argc, const char *argv[]) {
 
       const TerrainChunk chunk =
           build_chunk(catalogue, plan, key, contributors, options.lod_sampling);
-      const bool has_coverage =
-          std::any_of(chunk.covered.begin(), chunk.covered.end(), [](uint8_t value) {
-            return value != 0U;
-          });
+      const bool has_coverage = !terrain_chunk_coverage(chunk).rectangles.empty();
       if (!has_coverage) {
+        if (options.overwrite)
+          std::filesystem::remove(output);
         empty++;
         continue;
       }
@@ -442,7 +444,9 @@ int main(int argc, const char *argv[]) {
           catalogue.grid(),
           options.compression
       );
-      manifest_entries.push_back({key.row, key.column, range.maximum, range.minimum});
+      manifest_entries.push_back(
+          {key.row, key.column, range.maximum, range.minimum, range.coverage}
+      );
       written++;
     }
 

@@ -21,6 +21,8 @@ struct ResidentTile {
   int64_t row;
   /// Global west-to-east catalogue column used to find successor tiles.
   int64_t column;
+  /// Bit 0: encoded zero is missing. Bit 1: native cell coverage is partial.
+  uint32_t no_data;
 };
 
 /// Fixed byte offsets for the retained uint16 tracing specialization.  This
@@ -32,6 +34,7 @@ struct QuantizedTerrainLayout {
   uint32_t vertex_offset;
   /// Byte offset from a record to its signed decimetre elevation base.
   uint32_t elevation_base_offset;
+  uint32_t no_data_offset;
 };
 
 } // namespace panorama
