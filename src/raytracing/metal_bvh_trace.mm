@@ -22,9 +22,11 @@ using namespace bvh_resources;
 namespace {
 static_assert(sizeof(BvhTile) == 48U);
 static_assert(sizeof(BvhAffinePatch) == 64U);
+static_assert(sizeof(BvhCoveragePolygon) == 24U);
+static_assert(sizeof(BvhCoverageVertex) == 8U);
 static_assert(sizeof(BvhBlock) == 24U);
 static_assert(sizeof(BvhBounds) == sizeof(MTLAxisAlignedBoundingBox));
-static_assert(sizeof(BvhParameters) == 64U);
+static_assert(sizeof(BvhParameters) == 68U);
 static_assert(sizeof(BvhChunk) == 96U);
 static_assert(sizeof(BvhRayState) == 20U);
 
@@ -94,7 +96,8 @@ struct MetalBvhTrace::State {
   std::array<Pipeline, 4> scene_pipelines = {};
   std::array<Pipeline, 4> shadow_pipelines = {};
   Pipeline tile_selector, patch_selector;
-  id<MTLBuffer> parameters, dummy, tiles, patches, candidate_patches, rays, work;
+  id<MTLBuffer> parameters, dummy, tiles, coverage_polygons, coverage_vertices, candidate_patches,
+      rays, work;
   id<MTLAccelerationStructure> catalogue, candidate_catalogue;
   std::span<const BvhTile> tile_metadata;
   uint64_t catalogue_generation = 0;
@@ -184,8 +187,11 @@ struct MetalBvhTrace::State {
     scene_missing_count = buffer(gpu.device(), 1, sizeof(uint32_t), @"scene missing ray count");
     shadow_missing_count = buffer(gpu.device(), 1, sizeof(uint32_t), @"shadow missing ray count");
     tile_selector = make_bvh_pipeline(gpu, @"select_terrain_tiles", @"terrain_tile_intersection");
-    patch_selector =
-        make_bvh_pipeline(gpu, @"select_terrain_patches", @"terrain_patch_intersection");
+    patch_selector = make_bvh_pipeline(
+        gpu,
+        @"select_terrain_coverage_polygons",
+        @"terrain_coverage_polygon_intersection"
+    );
   }
 
   Pipeline &pipeline(TraceMode mode = TraceMode::Batch) {
@@ -213,7 +219,8 @@ struct MetalBvhTrace::State {
           @"terrain_bvh_intersection",
           constants,
           scene_mode,
-          current.transformed_catalogue ? @"terrain_patch_intersection" : nil
+          current.transformed_catalogue ? @"terrain_patch_intersection" : nil,
+          current.transformed_catalogue ? @"terrain_coverage_polygon_intersection" : nil
       );
     }
     return result;
@@ -273,12 +280,14 @@ struct MetalBvhTrace::State {
     invalidate_scene(SceneInvalidation::Catalogue);
     auto &shared = gpu.tile_bvh();
     tiles = shared.tiles();
-    patches = shared.patches();
+    coverage_polygons = shared.coverage_polygons();
+    coverage_vertices = shared.coverage_vertices();
     candidate_patches = shared.candidate_patches();
     catalogue = shared.acceleration();
     candidate_catalogue = shared.candidate_acceleration();
     tile_metadata = shared.metadata();
     catalogue_generation = shared.generation();
+    current.coverage_step_limit = shared.coverage_step_limit();
     const auto &sources = manager->sources();
     tile_shells.resize(sources.size());
     if (current.transformed_catalogue) {
@@ -661,16 +670,21 @@ struct MetalBvhTrace::State {
         [encoder setBuffer:candidate_patches offset:0 atIndex:16];
         [encoder setBuffer:scene_requested_sources offset:0 atIndex:17];
       }
-      [p.coverage_table setBuffer:current.transformed_catalogue ? patches : tiles
+      [p.coverage_table setBuffer:current.transformed_catalogue ? coverage_polygons : tiles
                            offset:0
                           atIndex:0];
-      [p.coverage_table setBuffer:dummy offset:0 atIndex:1];
+      [p.coverage_table setBuffer:current.transformed_catalogue ? coverage_vertices : dummy
+                           offset:0
+                          atIndex:1];
+      [p.coverage_table setBuffer:dummy offset:0 atIndex:2];
       [encoder setAccelerationStructure:catalogue atBufferIndex:20];
       [encoder setIntersectionFunctionTable:p.coverage_table atBufferIndex:21];
-      [encoder setBuffer:patches offset:0 atIndex:22];
+      [encoder setBuffer:coverage_polygons offset:0 atIndex:22];
+      [encoder setBuffer:coverage_vertices offset:0 atIndex:23];
       [encoder useResource:catalogue usage:MTLResourceUsageRead];
       [encoder useResource:p.coverage_table usage:MTLResourceUsageRead];
-      [encoder useResource:patches usage:MTLResourceUsageRead];
+      [encoder useResource:coverage_polygons usage:MTLResourceUsageRead];
+      [encoder useResource:coverage_vertices usage:MTLResourceUsageRead];
     }
     if (shadows) {
       [encoder setBytes:sun length:sizeof(sun) atIndex:16];
@@ -770,9 +784,12 @@ struct MetalBvhTrace::State {
     trace_activity::Scope activity("BVH streaming tile selection");
     std::memcpy(parameters.contents, &current, sizeof(current));
     Pipeline &selector = current.transformed_catalogue ? patch_selector : tile_selector;
-    id<MTLBuffer> selection_metadata = current.transformed_catalogue ? patches : tiles;
+    id<MTLBuffer> selection_metadata = current.transformed_catalogue ? coverage_polygons : tiles;
     [selector.table setBuffer:selection_metadata offset:0 atIndex:0];
-    [selector.table setBuffer:dummy offset:0 atIndex:1];
+    [selector.table setBuffer:current.transformed_catalogue ? coverage_vertices : dummy
+                       offset:0
+                      atIndex:1];
+    [selector.table setBuffer:dummy offset:0 atIndex:2];
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command computeCommandEncoder];
     if (encoder == nil)
@@ -784,7 +801,11 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:rays offset:0 atIndex:3];
     [encoder setBuffer:parameters offset:0 atIndex:4];
     [encoder setBuffer:selection_metadata offset:0 atIndex:5];
+    if (current.transformed_catalogue)
+      [encoder setBuffer:coverage_vertices offset:0 atIndex:6];
     [encoder useResource:selection_metadata usage:MTLResourceUsageRead];
+    if (current.transformed_catalogue)
+      [encoder useResource:coverage_vertices usage:MTLResourceUsageRead];
     [encoder useResource:catalogue usage:MTLResourceUsageRead];
     [encoder useResource:selector.table usage:MTLResourceUsageRead];
     dispatch_image(encoder, selector.state, current.trace);
@@ -1088,7 +1109,10 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
       ++state.stats.submissions;
     }
   }
-  for (uint32_t round = 0; round <= state.current.source_count; ++round) {
+  const uint32_t traversal_limit = state.current.transformed_catalogue
+                                       ? state.current.coverage_step_limit
+                                       : state.current.source_count;
+  for (uint32_t round = 0; round <= traversal_limit; ++round) {
     @autoreleasepool {
       state.select(timer);
     }

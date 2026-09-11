@@ -487,7 +487,8 @@ kernel void trace_terrain_scene(
     device atomic_uint *requested_sources [[buffer(17)]],
     primitive_acceleration_structure coverage [[buffer(20)]],
     intersection_function_table<> coverage_functions [[buffer(21)]],
-    device const BvhAffinePatch *coverage_patches [[buffer(22)]],
+    device const BvhCoveragePolygon *coverage_polygons [[buffer(22)]],
+    device const BvhCoverageVertex *coverage_vertices [[buffer(23)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.trace.image_width + position.x;
@@ -522,7 +523,7 @@ kernel void trace_terrain_scene(
   intersector<> missing_tracer;
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
-  TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU, 0xffffffffU};
+  TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU, 0xffffffffU, false};
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {
@@ -539,11 +540,12 @@ kernel void trace_terrain_scene(
             ? transformed_coverage_limit(
                   coverage,
                   coverage_functions,
-                  coverage_patches,
+                  coverage_polygons,
+                  coverage_vertices,
                   direction,
                   params.trace.observer_elevation,
                   result.distance,
-                  params.source_count
+                  params.coverage_step_limit
               )
             : bvh_coverage_limit(direction, params, tiles, catalogue, result.distance);
     hit = result.distance <= limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
@@ -589,7 +591,8 @@ kernel void trace_scene_shadows(
     device const BvhAffinePatch *candidate_patches [[buffer(19)]],
     primitive_acceleration_structure coverage [[buffer(20)]],
     intersection_function_table<> coverage_functions [[buffer(21)]],
-    device const BvhAffinePatch *coverage_patches [[buffer(22)]],
+    device const BvhCoveragePolygon *coverage_polygons [[buffer(22)]],
+    device const BvhCoverageVertex *coverage_vertices [[buffer(23)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.trace.image_width + position.x;
@@ -652,11 +655,12 @@ kernel void trace_scene_shadows(
     const float coverage_limit = params.transformed_catalogue ? transformed_coverage_limit(
                                                                     coverage,
                                                                     coverage_functions,
-                                                                    coverage_patches,
+                                                                    coverage_polygons,
+                                                                    coverage_vertices,
                                                                     direction,
                                                                     origin.z,
                                                                     hit.distance,
-                                                                    params.source_count,
+                                                                    params.coverage_step_limit,
                                                                     origin.xy
                                                                 )
                                                               : limit;
@@ -668,7 +672,7 @@ kernel void trace_scene_shadows(
   intersector<> missing_tracer;
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
-  TileSelection missing_payload = {sun.xyz, true, origin.xy, 0xffffffffU, 0xffffffffU};
+  TileSelection missing_payload = {sun.xyz, true, origin.xy, 0xffffffffU, 0xffffffffU, false};
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {

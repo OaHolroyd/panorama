@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace panorama {
@@ -61,12 +62,30 @@ struct TerrainTransformPatch {
   TerrainTileTransform transform;
 };
 
+/// One coverage-only polygon. The perimeter follows exact projected
+/// source-grid points, so two ownership regions that meet at a grid edge use
+/// identical coordinates there. This makes the coverage walk continuous
+/// without requiring independently fitted affine transforms to agree.
+struct TerrainCoveragePolygon {
+  std::vector<Coord> vertices;
+};
+
 /// Subdivide a tile until every local affine approximation meets the requested
 /// horizontal residual. Patch edges remain on logical cell boundaries.
 [[nodiscard]] std::vector<TerrainTransformPatch> make_terrain_transform_patches(
     const MetalTileHeader &header,
     const TerrainRenderFrame &frame,
     double maximum_residual_metres = 1.0
+);
+
+/// Triangulate ownership regions with a regular shared-vertex grid.  The
+/// triangles are used only to establish source continuity; fine affine
+/// patches continue to provide the rendered terrain geometry.
+[[nodiscard]] std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
+    const MetalTileHeader &header,
+    const TerrainRenderFrame &frame,
+    std::span<const TerrainTransformPatch> ownership,
+    uint32_t maximum_cells_per_side = 256U
 );
 
 } // namespace panorama

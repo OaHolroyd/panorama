@@ -116,6 +116,7 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
               dataset_index,
               {},
               {},
+              {},
               0.0,
               config.vertical_offset_metres,
           }
@@ -544,8 +545,8 @@ TerrainCatalogue TerrainCatalogue::discover(
         *source.minimum_elevation += static_cast<float>(source.vertical_offset_metres);
       // Geometry uses sufficiently small affine regions that independently
       // transformed neighbouring tiles differ by less than half a metre at a
-      // shared edge. Coverage retains one region per tile: it proves source
-      // continuity but never supplies a rendered surface.
+      // shared edge. Coverage uses a coarser shared-vertex tessellation: it
+      // proves source continuity but never supplies a rendered surface.
       constexpr double geometry_residual_metres = 0.25;
       const std::vector<TerrainTransformPatch> geometry_patches =
           make_terrain_transform_patches(header, frame, geometry_residual_metres);
@@ -557,21 +558,28 @@ TerrainCatalogue TerrainCatalogue::discover(
           geometry_patches,
           std::span<const TerrainDataset>(datasets).first(dataset.index)
       );
-      source.coverage_patches = owned_transform_patches(
+      const std::vector<TerrainTransformPatch> coverage_ownership = owned_transform_patches(
           header,
           coverage_patches,
           std::span<const TerrainDataset>(datasets).first(dataset.index)
       );
-      if (source.transform_patches.empty() || source.coverage_patches.empty())
+      if (source.transform_patches.empty() || coverage_ownership.empty())
         continue;
+      // Physical data coverage is the full source footprint. Cell-centre
+      // ownership rounding can leave narrow gaps where different grids meet;
+      // those gaps must not terminate otherwise continuous catalogue coverage.
+      source.coverage_polygons = make_terrain_coverage_polygons(header, frame, coverage_patches);
       uint64_t owned_cells = 0U;
       for (const TerrainTransformPatch &patch : source.transform_patches)
         owned_cells += uint64_t(patch.cell_width) * patch.cell_height;
       // A coarse sample can straddle an ownership edge. Keep boundary sources
       // at native resolution so lower-priority geometry never expands back
       // into a region removed above.
-      if (owned_cells != uint64_t(header.cell_count) * header.cell_count)
+      if (owned_cells != uint64_t(header.cell_count) * header.cell_count) {
         source.lod_count = 1U;
+        source.ownership_polygons =
+            make_terrain_coverage_polygons(header, frame, coverage_ownership);
+      }
       source.effective_cell_size_metres = whole.maximum_cell_size_metres();
       candidates.push_back({std::move(source), distance, available.key == observer_key});
     }

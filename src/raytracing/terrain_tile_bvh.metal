@@ -77,29 +77,84 @@ BvhIntersection terrain_patch_intersection(
   return {true, max(entry, min_distance)};
 }
 
-kernel void select_terrain_patches(
+/// Exact horizontal ray/polygon test for the shared coverage tessellation.
+[[intersection(bounding_box)]]
+BvhIntersection terrain_coverage_polygon_intersection(
+    float min_distance [[min_distance]],
+    float max_distance [[max_distance]],
+    uint primitive [[primitive_id]],
+    ray_data TileSelection &payload [[payload]],
+    device const BvhCoveragePolygon *polygons [[buffer(0)]],
+    device const BvhCoverageVertex *vertices [[buffer(1)]],
+    device const uint *resident [[buffer(2)]]
+) {
+  const BvhCoveragePolygon polygon = polygons[primitive];
+  if (polygon.source == payload.excluded_source ||
+      (payload.skip_resident && resident[polygon.source] != 0U))
+    return {false, 0};
+  // Begin at the requested progress: a non-convex footprint or a source's
+  // separate ownership regions can be entered more than once by the same ray.
+  float entry = min_distance, exit = max_distance;
+  if (!bvh_source_interval(
+          polygon,
+          polygons,
+          vertices,
+          payload.ownership_only,
+          payload.origin,
+          payload.world_direction.xy,
+          entry,
+          exit
+      ) ||
+      entry >= exit || exit <= min_distance)
+    return {false, 0};
+  return {true, max(entry, min_distance)};
+}
+
+kernel void select_terrain_coverage_polygons(
     primitive_acceleration_structure catalogue [[buffer(0)]],
     intersection_function_table<> functions [[buffer(1)]],
     device const RayDirection *rays [[buffer(2)]],
     device BvhRayState *states [[buffer(3)]],
     constant BvhParameters &params [[buffer(4)]],
-    device const BvhAffinePatch *patches [[buffer(5)]],
+    device const BvhCoveragePolygon *polygons [[buffer(5)]],
+    device const BvhCoverageVertex *vertices [[buffer(6)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.trace.image_width + position.x;
   if (index >= params.trace.ray_count || states[index].done || states[index].source != 0xffffffffU)
     return;
-  const auto selected = select_next_terrain_patch(
+  auto selected = select_next_coverage_polygon(
       catalogue,
       functions,
-      patches,
+      polygons,
+      vertices,
       rays[index],
       params.trace.observer_elevation,
       states[index].progress,
       params.trace.max_distance,
       0xffffffffU,
-      states[index].primitive
+      states[index].primitive,
+      float2(0.0F),
+      true
   );
+  // Ownership can leave a sliver between source grids. Skip it only when
+  // physical dataset footprints still cover the complete interval.
+  if (selected.source != 0xffffffffU && selected.entry > states[index].progress) {
+    const float limit = transformed_coverage_limit(
+        catalogue,
+        functions,
+        polygons,
+        vertices,
+        rays[index],
+        params.trace.observer_elevation,
+        selected.entry,
+        params.coverage_step_limit,
+        float2(0.0F),
+        states[index].progress
+    );
+    if (limit + 8.0F * FLT_EPSILON * max(1.0F, limit) < selected.entry)
+      selected.source = 0xffffffffU;
+  }
   states[index].source = selected.source;
   states[index].primitive = selected.primitive;
   states[index].exit = selected.exit;

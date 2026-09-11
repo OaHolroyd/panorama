@@ -185,4 +185,60 @@ std::vector<TerrainTransformPatch> make_terrain_transform_patches(
   return result;
 }
 
+std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
+    const MetalTileHeader &header,
+    const TerrainRenderFrame &frame,
+    std::span<const TerrainTransformPatch> ownership,
+    uint32_t maximum_cells_per_side
+) {
+  if (maximum_cells_per_side == 0U)
+    throw std::invalid_argument("Coverage triangle side must be positive");
+  if (header.epsg_code == 0U || header.cell_count == 0U || !std::isfinite(header.cell_size) ||
+      header.cell_size <= 0.0)
+    throw std::invalid_argument("Cannot transform invalid terrain tile geometry");
+
+  const CoordinateTransform projector = frame.projector(header.epsg_code);
+  std::vector<TerrainCoveragePolygon> result;
+
+  for (const TerrainTransformPatch &region : ownership) {
+    const uint32_t maximum_column = region.minimum_column + region.cell_width;
+    const uint32_t maximum_row = region.minimum_row + region.cell_height;
+    const auto grid_coordinates = [maximum_cells_per_side](uint32_t minimum, uint32_t maximum) {
+      std::vector<uint32_t> coordinates = {minimum};
+      while (coordinates.back() < maximum) {
+        const uint32_t coordinate = coordinates.back();
+        coordinates.push_back(
+            std::min(maximum, ((coordinate / maximum_cells_per_side) + 1U) * maximum_cells_per_side)
+        );
+      }
+      return coordinates;
+    };
+    const auto columns = grid_coordinates(region.minimum_column, maximum_column);
+    const auto rows = grid_coordinates(region.minimum_row, maximum_row);
+    std::vector<Coord> native;
+    native.reserve(2U * (columns.size() + rows.size()) - 4U);
+    for (uint32_t column : columns)
+      native.push_back(native_coordinate(header, column, rows.front()));
+    for (size_t row = 1U; row < rows.size(); ++row)
+      native.push_back(native_coordinate(header, columns.back(), rows[row]));
+    for (size_t column = columns.size() - 1U; column-- > 0U;)
+      native.push_back(native_coordinate(header, columns[column], rows.back()));
+    for (size_t row = rows.size() - 1U; row-- > 1U;)
+      native.push_back(native_coordinate(header, columns.front(), rows[row]));
+    std::vector<Coord> projected = projector.apply(native);
+    double signed_area = 0.0;
+    for (size_t index = 0; index < projected.size(); ++index) {
+      const Coord a = projected[index];
+      const Coord b = projected[(index + 1U) % projected.size()];
+      signed_area += a.x * b.y - a.y * b.x;
+    }
+    if (std::abs(signed_area) > std::numeric_limits<double>::epsilon()) {
+      if (signed_area < 0.0)
+        std::reverse(projected.begin(), projected.end());
+      result.push_back({std::move(projected)});
+    }
+  }
+  return result;
+}
+
 } // namespace panorama

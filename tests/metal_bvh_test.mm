@@ -378,6 +378,39 @@ void check_dataset_foundation(const std::filesystem::path &root) {
       ),
       "Adaptive terrain transform exceeded its residual bound"
   );
+  const std::array<TerrainTransformPatch, 2> split_ownership = {
+      TerrainTransformPatch{0U, 0U, 256U, 512U, {}},
+      TerrainTransformPatch{256U, 0U, 256U, 512U, {}},
+  };
+  const auto coverage = make_terrain_coverage_polygons(header, frame, split_ownership, 256U);
+  require(
+      coverage.size() == 2U && coverage[0].vertices.size() == 6U &&
+          coverage[1].vertices.size() == 6U,
+      "Coverage tessellation did not respect the shared grid"
+  );
+  const auto same_point = [](Coord left, Coord right) {
+    return std::hypot(left.x - right.x, left.y - right.y) < 1e-9;
+  };
+  const auto shared_edge_count =
+      [&same_point](const TerrainCoveragePolygon &left, const TerrainCoveragePolygon &right) {
+        uint32_t count = 0U;
+        for (size_t left_index = 0; left_index < left.vertices.size(); ++left_index) {
+          const Coord left_start = left.vertices[left_index];
+          const Coord left_end = left.vertices[(left_index + 1U) % left.vertices.size()];
+          for (size_t right_index = 0; right_index < right.vertices.size(); ++right_index) {
+            const Coord right_start = right.vertices[right_index];
+            const Coord right_end = right.vertices[(right_index + 1U) % right.vertices.size()];
+            if ((same_point(left_start, right_start) && same_point(left_end, right_end)) ||
+                (same_point(left_start, right_end) && same_point(left_end, right_start)))
+              ++count;
+          }
+        }
+        return count;
+      };
+  require(
+      shared_edge_count(coverage[0], coverage[1]) == 2U,
+      "Coverage ownership regions did not share identical projected edges"
+  );
   std::printf(
       "Dataset foundation: %zu + %zu sources, EPSG:%u -> local AEQD anchored from EPSG:%u, "
       "%.3f m/cell, "
@@ -406,7 +439,7 @@ void check_dataset_foundation(const std::filesystem::path &root) {
   );
   for (const TerrainSource &source : combined.sources()) {
     require(!source.transform_patches.empty(), "Combined source has no render transform");
-    require(!source.coverage_patches.empty(), "Combined source has no coverage transform");
+    require(!source.coverage_polygons.empty(), "Combined source has no coverage tessellation");
     require(
         std::all_of(
             source.transform_patches.begin(),
@@ -636,6 +669,130 @@ void check_mixed_priority(const std::filesystem::path &root) {
   const MetalTileHeader grid = read_metal_tile_header(owned.origin().path);
   compare(software, hardware, field, 0.1F, &grid);
   std::puts("Mixed ownership: higher-priority surface matched with a closer fallback underneath.");
+}
+
+void write_flat_coverage_fixture(
+    const std::filesystem::path &directory,
+    double x_min,
+    double spacing,
+    float elevation
+) {
+  std::filesystem::create_directories(directory);
+  constexpr uint32_t cells = 16U;
+  const std::vector<uint16_t> heights(17U * 17U, uint16_t(std::lround(elevation * 10.0F) - 9000));
+  const MetalTileLod lod = {1U,
+                            cells,
+                            5U,
+                            9000,
+                            elevation,
+                            0U,
+                            kMetalTileLodHeaderSize + sizeof(MetalTileLod),
+                            heights.size() * sizeof(uint16_t)};
+  const MetalTileHeader header = {kMetalTileLodMagic,
+                                  kMetalTileLodVersion,
+                                  kMetalTileLodHeaderSize,
+                                  MetalTileCompression::None,
+                                  2056U,
+                                  cells,
+                                  5U,
+                                  elevation,
+                                  MetalTileSampleType::Uint16Decimeters,
+                                  9000,
+                                  0U,
+                                  0,
+                                  0,
+                                  x_min,
+                                  1199840.0,
+                                  spacing,
+                                  lod.vertex_offset,
+                                  lod.vertex_byte_count,
+                                  1U,
+                                  uint32_t(sizeof(MetalTileLod)),
+                                  kMetalTileLodHeaderSize,
+                                  sizeof(MetalTileLod)};
+  std::vector<std::byte> payload(lod.vertex_byte_count);
+  std::memcpy(payload.data(), heights.data(), payload.size());
+  const std::array<MetalTileLod, 1> lods = {lod};
+  const std::array<TerrainManifestEntry, 1> manifest = {
+      TerrainManifestEntry{0, 0, elevation, elevation}};
+  write_metal_tile_lods(directory / "flat_r0_c0.ptile", header, lods, payload);
+  write_terrain_manifest(terrain_manifest_path(directory), manifest);
+}
+
+void check_misaligned_coverage(const std::filesystem::path &root) {
+  // The primary ends at x=160. Fallback cell centres at x=153 and x=173
+  // round the ownership handoff to x=163, leaving a 3 m ownership sliver
+  // even though the two physical datasets overlap by 77 m.
+  const auto primary = root / "coverage-primary";
+  const auto fallback = root / "coverage-fallback";
+  const auto gap = root / "coverage-gap";
+  const auto raised = root / "coverage-raised";
+  const auto reference = root / "coverage-reference";
+  write_flat_coverage_fixture(primary, 2600000.0, 10.0, 1000.0F);
+  write_flat_coverage_fixture(fallback, 2600083.0, 20.0, 1000.0F);
+  write_flat_coverage_fixture(gap, 2600183.0, 20.0, 1000.0F);
+  write_flat_coverage_fixture(raised, 2600083.0, 20.0, 1010.0F);
+  write_flat_coverage_fixture(reference, 2600000.0, 40.0, 1000.0F);
+  const auto far_field = angular_field({9, 3}, {1.5, 1.6, std::atan(-0.11), std::atan(-0.09)});
+  const auto near_field = angular_field({9, 3}, {1.5, 1.6, std::atan(-0.21), std::atan(-0.19)});
+  RaytraceConfig config{reference, {2600045, 1199945, 1020}, 500, 0, 16384, 2, true, true, false};
+  TerrainTraceSession expected(config, far_field, {true, true, true});
+  expected.trace(far_field);
+  const auto *distances = static_cast<const float *>(expected.distances().contents);
+  require(
+      std::all_of(
+          distances,
+          distances + pixel_count(far_field.image),
+          [](float t) { return t > 180.0F && t < 225.0F; }
+      ),
+      "Coverage regression reference did not hit terrain beyond the ownership sliver"
+  );
+  config.tile_dir = primary;
+  config.raytracer = Raytracer::MetalBvh;
+  auto *geometry = [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+  geometry.boundingBoxCount = 16;
+  geometry.boundingBoxStride = 24;
+  geometry.opaque = NO;
+  geometry.allowDuplicateIntersectionFunctionInvocation = NO;
+  auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+  descriptor.geometryDescriptors = @[ geometry ];
+  const auto sizes = [expected.device() accelerationStructureSizesWithDescriptor:descriptor];
+  const uint64_t one_tile_budget = 17U * 17U * 2U + 16U * (sizeof(BvhBlock) + sizeof(BvhBounds)) +
+                                   sizeof(BvhAffinePatch) + sizeof(BvhTile) + sizeof(uint64_t) +
+                                   2U * sizes.accelerationStructureSize +
+                                   sizes.buildScratchBufferSize;
+  for (bool bounded : {false, true}) {
+    for (bool bilinear : {false, true}) {
+      @autoreleasepool {
+        config.bvh_cache_size_bytes = bounded ? one_tile_budget : 1048576U;
+        config.bilinear_collisions = bilinear;
+        config.terrain_datasets = {{primary, 0.0}, {fallback, 0.0}};
+        TerrainTraceSession mixed(config, far_field, {true, true, true});
+        compare(expected, mixed, far_field, 0.01F);
+        compare(expected, mixed, far_field, 0.01F);
+        if (bounded)
+          require(mixed.bvh_statistics().evictions > 0, "Coverage fixture did not force streaming");
+        config.terrain_datasets = {{primary, 0.0}, {gap, 0.0}};
+        TerrainTraceSession missing(config, far_field, {true, true, true});
+        missing.trace(far_field);
+        const auto *missing_distances = static_cast<const float *>(missing.distances().contents);
+        require(
+            std::none_of(
+                missing_distances,
+                missing_distances + pixel_count(far_field.image),
+                [](float t) { return t > 0.0F; }
+            ),
+            "Physical coverage proof accepted terrain beyond a real missing-data gap"
+        );
+        config.terrain_datasets = {{primary, 0.0}, {raised, 0.0}};
+        TerrainTraceSession priority(config, near_field, {true, true, true});
+        compare(expected, priority, near_field, 0.01F);
+      }
+    }
+  }
+  std::puts(
+      "Mixed coverage: crossed grid-rounding slivers, stopped at real gaps, retained priority."
+  );
 }
 
 void check_tile_selection(const std::filesystem::path &directory, bool retain, double spacing) {
@@ -1718,8 +1875,9 @@ int main(int argc, const char *argv[]) {
           argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-quantized";
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
+      const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
-          !shadow_float && !shadow_quantized && !metalfx) {
+          !shadow_float && !shadow_quantized && !metalfx && !mixed_coverage) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -1835,6 +1993,8 @@ int main(int argc, const char *argv[]) {
           @autoreleasepool {
             check_producer(root / "quantized", true, true);
           }
+        } else if (mixed_coverage) {
+          check_misaligned_coverage(root);
         } else if (streaming) {
           check_streaming(root / "quantized");
         } else if (edge_cases) {

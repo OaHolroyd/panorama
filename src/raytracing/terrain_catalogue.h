@@ -51,10 +51,13 @@ struct TerrainSource {
   uint32_t dataset_index = 0U;
   /// Tile-local logical-cell transforms into the selected render frame.
   std::vector<TerrainTransformPatch> transform_patches;
-  /// Coarse ownership transforms used only to prove uninterrupted dataset
-  /// coverage. Keeping these separate prevents geometry refinement from
-  /// multiplying the cost of every coverage walk.
-  std::vector<TerrainTransformPatch> coverage_patches;
+  /// Full source footprint with shared edges, used to prove uninterrupted
+  /// physical data coverage independently of cell-rounded ownership.
+  std::vector<TerrainCoveragePolygon> coverage_polygons;
+  /// Cell-rounded ownership regions for bounded streaming. Empty means the
+  /// complete source footprint is owned. These must not define data coverage:
+  /// rounding between different source grids can leave sub-cell slivers.
+  std::vector<TerrainCoveragePolygon> ownership_polygons;
   /// Largest transformed LOD-1 cell axis, used by per-source LOD policy.
   double effective_cell_size_metres = 0.0;
   double vertical_offset_metres = 0.0;

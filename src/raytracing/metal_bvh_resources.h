@@ -30,7 +30,8 @@ BvhPipeline make_bvh_pipeline(
     NSString *intersection_name,
     MTLFunctionConstantValues *constants = nil,
     bool scene_mode = false,
-    NSString *missing_intersection_name = nil
+    NSString *missing_intersection_name = nil,
+    NSString *coverage_intersection_name = nil
 );
 
 } // namespace panorama::bvh_resources

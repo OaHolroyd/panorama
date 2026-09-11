@@ -16,7 +16,8 @@ struct TerrainTileBvh::State {
   ObserverLocation observer = {};
   float curvature = 0;
   std::vector<BvhTile> tile_metadata;
-  id<MTLBuffer> tiles, patches, candidate_patches, catalogue_bounds, candidate_bounds;
+  id<MTLBuffer> tiles, coverage_polygons, coverage_vertices, candidate_patches, catalogue_bounds,
+      candidate_bounds;
   id<MTLAccelerationStructure> catalogue, candidates;
   uint64_t generation = 0;
   double build_ms = 0;
@@ -28,7 +29,11 @@ struct TerrainTileBvh::State {
     const auto &sources = manager.sources();
     const auto &geometry = manager.origin_geometry();
     tile_metadata.resize(sources.size());
-    std::vector<BvhAffinePatch> patch_metadata, candidate_patch_metadata;
+    // The first records are full source footprints and correspond to BVH
+    // primitive IDs. Ownership polygons follow as metadata for streaming.
+    std::vector<BvhCoveragePolygon> coverage_metadata(sources.size());
+    std::vector<BvhCoverageVertex> coverage_vertex_metadata;
+    std::vector<BvhAffinePatch> candidate_patch_metadata;
     std::vector<BvhBounds> boxes, candidate_boxes;
     const Coord render_observer =
         manager.catalogue().render_coordinate({observer.easting, observer.northing});
@@ -65,18 +70,15 @@ struct TerrainTileBvh::State {
                           1,
                           source.key.row,
                           source.key.column};
-      const auto append_patch = [&](std::vector<BvhAffinePatch> &metadata,
-                                    std::vector<BvhBounds> &output,
-                                    const TerrainTileTransform &transform,
-                                    uint32_t minimum_column,
-                                    uint32_t minimum_row,
-                                    uint32_t maximum_column,
-                                    uint32_t maximum_row,
-                                    bool coverage) {
+      const auto append_candidate_patch = [&](const TerrainTileTransform &transform,
+                                              uint32_t minimum_column,
+                                              uint32_t minimum_row,
+                                              uint32_t maximum_column,
+                                              uint32_t maximum_row) {
         const double ox = transform.origin.x - render_observer.x;
         const double oy = transform.origin.y - render_observer.y;
         const double determinant = transform.determinant();
-        metadata.push_back(
+        candidate_patch_metadata.push_back(
             {float(ox),
              float(oy),
              float(transform.column_step.x),
@@ -118,38 +120,52 @@ struct TerrainTileBvh::State {
                                      source.maximum_elevation.has_value()
                                          ? float(*source.maximum_elevation - near_lift + guard)
                                          : 1e30F};
-        // Coverage proves only that a source is present, so transformed tiles
-        // retain their unbounded vertical interval there. Fine candidate
-        // patches use their elevation bounds for hardware culling.
-        output.push_back(
-            coverage && transformed
-                ? BvhBounds{float(bx0), float(by0), -1e30F, float(bx1), float(by1), 1e30F}
-                : candidate
-        );
+        candidate_boxes.push_back(candidate);
       };
       if (transformed) {
-        for (const TerrainTransformPatch &patch : source.coverage_patches) {
-          append_patch(
-              patch_metadata,
-              boxes,
-              patch.transform,
-              patch.minimum_column,
-              patch.minimum_row,
-              patch.minimum_column + patch.cell_width,
-              patch.minimum_row + patch.cell_height,
-              true
-          );
+        const auto append_vertices = [&](const TerrainCoveragePolygon &polygon) {
+          const uint32_t offset = checked_count(coverage_vertex_metadata.size());
+          float minimum_x = std::numeric_limits<float>::infinity();
+          float minimum_y = std::numeric_limits<float>::infinity();
+          float maximum_x = -std::numeric_limits<float>::infinity();
+          float maximum_y = -std::numeric_limits<float>::infinity();
+          for (const Coord vertex : polygon.vertices) {
+            const float vertex_x = float(vertex.x - render_observer.x);
+            const float vertex_y = float(vertex.y - render_observer.y);
+            coverage_vertex_metadata.push_back({vertex_x, vertex_y});
+            minimum_x = std::min(minimum_x, vertex_x);
+            minimum_y = std::min(minimum_y, vertex_y);
+            maximum_x = std::max(maximum_x, vertex_x);
+            maximum_y = std::max(maximum_y, vertex_y);
+          }
+          return std::pair{BvhCoveragePolygon{offset,
+                                              checked_count(polygon.vertices.size()),
+                                              checked_count(i),
+                                              0U,
+                                              0U,
+                                              0U},
+                           BvhBounds{minimum_x, minimum_y, -1e30F, maximum_x, maximum_y, 1e30F}};
+        };
+        if (source.coverage_polygons.size() != 1U)
+          throw std::runtime_error("Transformed source must have one physical coverage footprint");
+        auto [footprint, footprint_bounds] = append_vertices(source.coverage_polygons.front());
+        footprint.ownership_offset = checked_count(i);
+        footprint.ownership_count = 1U;
+        if (!source.ownership_polygons.empty()) {
+          footprint.ownership_offset = checked_count(coverage_metadata.size());
+          footprint.ownership_count = checked_count(source.ownership_polygons.size());
+          for (const TerrainCoveragePolygon &polygon : source.ownership_polygons)
+            coverage_metadata.push_back(append_vertices(polygon).first);
         }
+        coverage_metadata[i] = footprint;
+        boxes.push_back(footprint_bounds);
         for (const TerrainTransformPatch &patch : source.transform_patches) {
-          append_patch(
-              candidate_patch_metadata,
-              candidate_boxes,
+          append_candidate_patch(
               patch.transform,
               patch.minimum_column,
               patch.minimum_row,
               patch.minimum_column + patch.cell_width,
-              patch.minimum_row + patch.cell_height,
-              false
+              patch.minimum_row + patch.cell_height
           );
         }
       } else {
@@ -162,31 +178,24 @@ struct TerrainTileBvh::State {
              double(y) + render_observer.y,
              double(x + width) + render_observer.x,
              double(y + width) + render_observer.y}};
-        append_patch(
-            patch_metadata,
-            boxes,
-            transform,
-            0U,
-            0U,
-            geometry.cell_count,
-            geometry.cell_count,
-            true
-        );
-        append_patch(
-            candidate_patch_metadata,
-            candidate_boxes,
-            transform,
-            0U,
-            0U,
-            geometry.cell_count,
-            geometry.cell_count,
-            false
-        );
+        coverage_vertex_metadata.push_back({});
+        append_candidate_patch(transform, 0U, 0U, geometry.cell_count, geometry.cell_count);
+        boxes.push_back(candidate_boxes.back());
       }
     }
     tiles = buffer(gpu.device(), sources.size(), sizeof(BvhTile), @"catalogue tiles");
-    patches =
-        buffer(gpu.device(), patch_metadata.size(), sizeof(BvhAffinePatch), @"catalogue patches");
+    coverage_polygons = buffer(
+        gpu.device(),
+        coverage_metadata.size(),
+        sizeof(BvhCoveragePolygon),
+        @"catalogue coverage polygons"
+    );
+    coverage_vertices = buffer(
+        gpu.device(),
+        coverage_vertex_metadata.size(),
+        sizeof(BvhCoverageVertex),
+        @"catalogue coverage vertices"
+    );
     candidate_patches = buffer(
         gpu.device(),
         candidate_patch_metadata.size(),
@@ -197,7 +206,12 @@ struct TerrainTileBvh::State {
     candidate_bounds =
         buffer(gpu.device(), candidate_boxes.size(), sizeof(BvhBounds), @"candidate bounds");
     std::memcpy(tiles.contents, tile_metadata.data(), tiles.length);
-    std::memcpy(patches.contents, patch_metadata.data(), patches.length);
+    std::memcpy(coverage_polygons.contents, coverage_metadata.data(), coverage_polygons.length);
+    std::memcpy(
+        coverage_vertices.contents,
+        coverage_vertex_metadata.data(),
+        coverage_vertices.length
+    );
     std::memcpy(
         candidate_patches.contents,
         candidate_patch_metadata.data(),
@@ -206,7 +220,7 @@ struct TerrainTileBvh::State {
     std::memcpy(catalogue_bounds.contents, boxes.data(), catalogue_bounds.length);
     std::memcpy(candidate_bounds.contents, candidate_boxes.data(), candidate_bounds.length);
 
-    auto descriptor = primitive_descriptor(checked_count(patch_metadata.size()), catalogue_bounds);
+    auto descriptor = primitive_descriptor(checked_count(boxes.size()), catalogue_bounds);
     auto candidate_descriptor =
         primitive_descriptor(checked_count(candidate_patch_metadata.size()), candidate_bounds);
     const auto sizes = [gpu.device() accelerationStructureSizesWithDescriptor:descriptor];
@@ -277,11 +291,16 @@ id<MTLAccelerationStructure> TerrainTileBvh::candidate_acceleration() const {
   return state_->candidates;
 }
 id<MTLBuffer> TerrainTileBvh::tiles() const { return state_->tiles; }
-id<MTLBuffer> TerrainTileBvh::patches() const { return state_->patches; }
+id<MTLBuffer> TerrainTileBvh::coverage_polygons() const { return state_->coverage_polygons; }
+id<MTLBuffer> TerrainTileBvh::coverage_vertices() const { return state_->coverage_vertices; }
 id<MTLBuffer> TerrainTileBvh::candidate_patches() const { return state_->candidate_patches; }
 std::span<const BvhTile> TerrainTileBvh::metadata() const { return state_->tile_metadata; }
+uint32_t TerrainTileBvh::coverage_step_limit() const {
+  return checked_count(state_->coverage_vertices.length / sizeof(BvhCoverageVertex));
+}
 uint64_t TerrainTileBvh::bytes() const {
-  return state_->tiles.length + state_->patches.length + state_->candidate_patches.length +
+  return state_->tiles.length + state_->coverage_polygons.length +
+         state_->coverage_vertices.length + state_->candidate_patches.length +
          state_->catalogue_bounds.length + state_->candidate_bounds.length +
          state_->catalogue.size + state_->candidates.size;
 }

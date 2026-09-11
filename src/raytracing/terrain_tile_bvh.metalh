@@ -33,6 +33,7 @@ struct TileSelection {
   float2 origin;
   uint excluded_source;
   uint excluded_primitive;
+  bool ownership_only;
 };
 
 inline float tile_coverage_limit(
@@ -115,17 +116,144 @@ struct SelectedTerrainTile {
   float exit;
 };
 
-inline SelectedTerrainTile select_next_terrain_patch(
+inline float bvh_cross(float2 a, float2 b) { return a.x * b.y - a.y * b.x; }
+
+inline bool bvh_point_in_polygon(
+    BvhCoveragePolygon polygon,
+    device const BvhCoverageVertex *vertices,
+    float2 point,
+    float coordinate_error
+) {
+  bool inside = false;
+  for (uint index = 0U; index < polygon.vertex_count; ++index) {
+    const BvhCoverageVertex a = vertices[polygon.vertex_offset + index];
+    const BvhCoverageVertex b =
+        vertices[polygon.vertex_offset + ((index + 1U) % polygon.vertex_count)];
+    const float2 start = float2(a.x, a.y);
+    const float2 edge = float2(b.x - a.x, b.y - a.y);
+    const float edge_scale = max(1.0F, max(abs(edge.x), abs(edge.y)));
+    const float along = dot(point - start, edge);
+    if (abs(bvh_cross(edge, point - start)) <= coordinate_error * edge_scale && along >= 0.0F &&
+        along <= dot(edge, edge))
+      return true;
+    const bool straddles = (a.y > point.y) != (b.y > point.y);
+    if (straddles) {
+      const float x = a.x + (point.y - a.y) * edge.x / (b.y - a.y);
+      if (point.x < x)
+        inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/// Find the first horizontal-ray interval inside a coverage polygon. The
+/// perimeter can be slightly non-convex after projection, so this evaluates
+/// its even-odd interior instead of relying on convex half-plane clipping.
+/// The small outward edge tolerance absorbs Float32 arithmetic at long range
+/// but does not bridge a missing source tile.
+inline bool bvh_polygon_interval(
+    BvhCoveragePolygon polygon,
+    device const BvhCoverageVertex *vertices,
+    float2 origin,
+    float2 direction,
+    thread float &entry,
+    thread float &exit
+) {
+  if (polygon.vertex_count < 3U)
+    return false;
+  float coordinate_scale = max(1.0F, max(abs(origin.x), abs(origin.y)));
+  for (uint index = 0U; index < polygon.vertex_count; ++index) {
+    const BvhCoverageVertex a = vertices[polygon.vertex_offset + index];
+    coordinate_scale = max(coordinate_scale, max(abs(a.x), abs(a.y)));
+  }
+  const float coordinate_error = 8.0F * FLT_EPSILON * coordinate_scale + 1e-4F;
+  // Coalesce crossings at the current position, independently of the query's
+  // far limit. A distant maximum must not erase a short valid near interval.
+  const float distance_error = max(1e-4F, 4.0F * FLT_EPSILON * max(1.0F, abs(entry)));
+  float cursor = entry;
+  for (uint interval = 0U; interval <= polygon.vertex_count; ++interval) {
+    float next = exit;
+    for (uint index = 0U; index < polygon.vertex_count; ++index) {
+      const BvhCoverageVertex a = vertices[polygon.vertex_offset + index];
+      const BvhCoverageVertex b =
+          vertices[polygon.vertex_offset + ((index + 1U) % polygon.vertex_count)];
+      const float2 start = float2(a.x, a.y);
+      const float2 edge = float2(b.x - a.x, b.y - a.y);
+      const float determinant = bvh_cross(direction, edge);
+      if (abs(determinant) <= FLT_MIN)
+        continue;
+      const float2 relative = start - origin;
+      const float distance = bvh_cross(relative, edge) / determinant;
+      const float edge_fraction = bvh_cross(relative, direction) / determinant;
+      if (distance > cursor + distance_error && distance < next && edge_fraction >= 0.0F &&
+          edge_fraction <= 1.0F)
+        next = distance;
+    }
+    if (next > cursor && bvh_point_in_polygon(
+                             polygon,
+                             vertices,
+                             origin + 0.5F * (cursor + next) * direction,
+                             coordinate_error
+                         )) {
+      entry = cursor;
+      exit = next;
+      return true;
+    }
+    if (!(next < exit))
+      return false;
+    cursor = next;
+  }
+  return false;
+}
+
+inline bool bvh_source_interval(
+    BvhCoveragePolygon footprint,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
+    bool ownership_only,
+    float2 origin,
+    float2 direction,
+    thread float &entry,
+    thread float &exit
+) {
+  if (!ownership_only)
+    return bvh_polygon_interval(footprint, vertices, origin, direction, entry, exit);
+  bool found = false;
+  float nearest = exit, farthest = entry;
+  for (uint index = 0U; index < footprint.ownership_count; ++index) {
+    float start = entry, end = exit;
+    if (bvh_polygon_interval(
+            polygons[footprint.ownership_offset + index],
+            vertices,
+            origin,
+            direction,
+            start,
+            end
+        ) &&
+        (!found || start < nearest || (start == nearest && end > farthest))) {
+      nearest = start;
+      farthest = end;
+      found = true;
+    }
+  }
+  entry = nearest;
+  exit = farthest;
+  return found;
+}
+
+inline SelectedTerrainTile select_next_coverage_polygon(
     primitive_acceleration_structure catalogue,
     intersection_function_table<> functions,
-    device const BvhAffinePatch *patches,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
     RayDirection direction,
     float elevation,
     float progress,
     float limit,
     uint excluded_source = 0xffffffffU,
     uint excluded_primitive = 0xffffffffU,
-    float2 ray_origin = float2(0.0F)
+    float2 ray_origin = float2(0.0F),
+    bool ownership_only = false
 ) {
   ray r;
   r.origin = float3(ray_origin, elevation);
@@ -135,44 +263,26 @@ inline SelectedTerrainTile select_next_terrain_patch(
   r.max_distance = limit;
   intersector<> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
-  TileSelection payload = {r.direction, false, ray_origin, excluded_source, excluded_primitive};
+  TileSelection payload =
+      {r.direction, false, ray_origin, excluded_source, excluded_primitive, ownership_only};
   const auto hit = tracer.intersect(r, catalogue, functions, payload);
   if (hit.type == intersection_type::none)
     return {0xffffffffU, 0xffffffffU, limit, limit};
-  const BvhAffinePatch patch = patches[hit.primitive_id];
-  const float2 relative = ray_origin - float2(patch.origin_x, patch.origin_y);
-  const float2 logical_origin = float2(
-      patch.inverse_xx * relative.x + patch.inverse_xy * relative.y,
-      patch.inverse_yx * relative.x + patch.inverse_yy * relative.y
-  );
-  const float2 logical_direction = float2(
-      patch.inverse_xx * direction.x + patch.inverse_xy * direction.y,
-      patch.inverse_yx * direction.x + patch.inverse_yy * direction.y
-  );
-  float entry = 0, exit = limit;
-  bvh_slab(
-      logical_origin.x,
-      logical_direction.x,
-      patch.minimum_column,
-      patch.maximum_column,
-      entry,
-      exit
-  );
-  bvh_slab(
-      logical_origin.y,
-      logical_direction.y,
-      patch.minimum_row,
-      patch.maximum_row,
-      entry,
-      exit
-  );
-  // Independently linearised neighbouring tiles can differ by their measured
-  // projection residual at a shared edge. Treat only that small affine seam as
-  // continuous; genuine missing-tile gaps remain much wider.
-  const float seam_tolerance = 2.0F * patch.coverage_guard + 2.0F * tolerance;
-  if (entry > progress + seam_tolerance)
+  const BvhCoveragePolygon polygon = polygons[hit.primitive_id];
+  float entry = progress, exit = limit;
+  if (!bvh_source_interval(
+          polygon,
+          polygons,
+          vertices,
+          ownership_only,
+          ray_origin,
+          float2(direction.x, direction.y),
+          entry,
+          exit
+      ) ||
+      (!ownership_only && entry > progress + tolerance))
     return {0xffffffffU, 0xffffffffU, progress, progress};
-  return {patch.source, hit.primitive_id, max(progress, entry), exit};
+  return {polygon.source, hit.primitive_id, max(progress, entry), exit};
 }
 
 /// Find the end of continuous transformed-dataset coverage along a ray. The
@@ -181,20 +291,22 @@ inline SelectedTerrainTile select_next_terrain_patch(
 inline float transformed_coverage_limit(
     primitive_acceleration_structure catalogue,
     intersection_function_table<> functions,
-    device const BvhAffinePatch *patches,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
     RayDirection direction,
     float elevation,
     float limit,
-    uint source_count,
-    float2 origin = float2(0.0F)
+    uint step_limit,
+    float2 origin = float2(0.0F),
+    float progress = 0.0F
 ) {
-  float progress = 0.0F;
   uint previous = 0xffffffffU;
-  for (uint crossed = 0; crossed <= source_count; ++crossed) {
-    const SelectedTerrainTile selected = select_next_terrain_patch(
+  for (uint crossed = 0; crossed <= step_limit; ++crossed) {
+    const SelectedTerrainTile selected = select_next_coverage_polygon(
         catalogue,
         functions,
-        patches,
+        polygons,
+        vertices,
         direction,
         elevation,
         progress,
@@ -233,7 +345,8 @@ inline SelectedTerrainTile select_next_terrain_tile(
   r.max_distance = limit;
   intersector<> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
-  TileSelection payload = {r.direction, false, float2(0), excluded_source, excluded_primitive};
+  TileSelection payload =
+      {r.direction, false, float2(0), excluded_source, excluded_primitive, false};
   const auto hit = tracer.intersect(r, catalogue, functions, payload);
   if (hit.type == intersection_type::none)
     return {0xffffffffU, 0xffffffffU, limit, limit};
