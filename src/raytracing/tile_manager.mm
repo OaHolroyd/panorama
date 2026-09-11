@@ -234,9 +234,7 @@ TileManager::TileManager(const RaytraceConfig &config) : state_(std::make_unique
   );
   state.config.observer = state.catalogue->observer();
   state.origin = std::make_unique<TileGeometry>(read_tile_geometry(state.catalogue->origin().path));
-  const MetalTileHeader header = read_metal_tile_header(state.catalogue->origin().path);
-  state.trace_quantized =
-      state.config.retain_quantized && header.sample_type == MetalTileSampleType::Uint16Decimeters;
+  state.trace_quantized = state.config.retain_quantized;
   if (config.terrain_datasets.empty())
     validate_tile_position(*state.origin, state.catalogue->origin().key, state.catalogue->grid());
   const size_t mip_count =

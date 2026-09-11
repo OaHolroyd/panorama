@@ -277,10 +277,13 @@ void validate_metal_tile_header(
     MetalTileCompression expected_compression
 ) {
   if (header.magic != kMetalTileLodMagic || header.version != kMetalTileLodVersion ||
-      header.header_size != kMetalTileLodHeaderSize ||
-      (header.sample_type != MetalTileSampleType::Float32 &&
-       header.sample_type != MetalTileSampleType::Uint16Decimeters)) {
+      header.header_size != kMetalTileLodHeaderSize) {
     throw std::runtime_error("Metal tile has an unsupported header or version");
+  }
+  if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
+    throw std::runtime_error(
+        "Metal tiles require uint16 samples; regenerate this tile from its source data"
+    );
   }
   if (header.compression != expected_compression || header.epsg_code == 0U ||
       !std::has_single_bit(header.cell_count) || header.cell_count == 0U ||
@@ -292,8 +295,7 @@ void validate_metal_tile_header(
   }
 
   const uint64_t vertex_side = static_cast<uint64_t>(header.cell_count) + 1U;
-  const uint64_t sample_bytes =
-      header.sample_type == MetalTileSampleType::Float32 ? sizeof(float) : sizeof(uint16_t);
+  constexpr uint64_t sample_bytes = sizeof(uint16_t);
   if (vertex_side > std::numeric_limits<uint64_t>::max() / vertex_side ||
       vertex_side * vertex_side > std::numeric_limits<uint64_t>::max() / sample_bytes) {
     throw std::runtime_error("Metal tile payload dimensions overflow its byte count");
@@ -309,15 +311,12 @@ void validate_metal_tile_header(
     throw std::runtime_error("Metal tile payload layout does not match its dimensions");
   }
 
-  if (header.sample_type == MetalTileSampleType::Uint16Decimeters) {
-    const double minimum_elevation = static_cast<double>(header.elevation_base_decimeters) / 10.0;
-    const double maximum_representable =
-        static_cast<double>(header.elevation_base_decimeters) / 10.0 +
-        static_cast<double>(std::numeric_limits<uint16_t>::max()) / 10.0;
-    const double maximum = static_cast<double>(header.maximum_elevation);
-    if (maximum < minimum_elevation - 0.1 || maximum > maximum_representable + 0.1) {
-      throw std::runtime_error("Metal tile maximum elevation is outside its fixed-point range");
-    }
+  const double minimum_elevation = static_cast<double>(header.elevation_base_decimeters) / 10.0;
+  const double maximum_representable =
+      minimum_elevation + static_cast<double>(std::numeric_limits<uint16_t>::max()) / 10.0;
+  const double maximum = static_cast<double>(header.maximum_elevation);
+  if (maximum < minimum_elevation - 0.1 || maximum > maximum_representable + 0.1) {
+    throw std::runtime_error("Metal tile maximum elevation is outside its fixed-point range");
   }
 }
 
@@ -361,9 +360,7 @@ read_metal_tile_lods(const std::filesystem::path &path, const MetalTileHeader &h
     const MetalTileLod &lod = lods[index];
     const uint32_t expected_cell_count = header.cell_count >> index;
     const uint64_t side = static_cast<uint64_t>(expected_cell_count) + 1U;
-    const uint64_t bytes =
-        side * side *
-        (header.sample_type == MetalTileSampleType::Float32 ? sizeof(float) : sizeof(uint16_t));
+    const uint64_t bytes = side * side * sizeof(uint16_t);
     if (lod.lod != index + 1U || lod.cell_count != expected_cell_count ||
         lod.level_count != std::countr_zero(expected_cell_count) + 1U ||
         !std::isfinite(lod.maximum_elevation) || lod.vertex_byte_count != bytes ||

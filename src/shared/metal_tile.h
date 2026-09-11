@@ -24,9 +24,9 @@ enum class MetalTileCompression : uint32_t {
   LzBitmap = 5U,
 };
 
-/// Scalar sample representation stored in the terrain payload.
+/// Scalar sample representation stored in the terrain payload. Value 1 was
+/// Float32 in older files and is no longer supported; keep uint16's wire ID.
 enum class MetalTileSampleType : uint32_t {
-  Float32 = 1U,
   Uint16Decimeters = 2U,
 };
 

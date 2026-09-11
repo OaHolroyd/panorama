@@ -119,10 +119,10 @@ void TileManager::State::load_custom_vertices(
     throw std::logic_error("Metal tile loading resources are unavailable");
   }
 
-  // Float32 sources and retained uint16 records already match their final
-  // atlas representation. Split out only compressed, unaligned ranges which
+  // Retained uint16 records already match their final atlas representation.
+  // Split out only compressed, unaligned ranges which
   // require the compatibility staging path below.
-  if (header_template.sample_type == MetalTileSampleType::Float32 || trace_quantized) {
+  if (trace_quantized) {
     std::vector<MetalTileBufferLoad> direct_loads;
     std::vector<MetalTileBufferLoad> prefixed_loads;
     std::vector<NSUInteger> prefixed_destinations;
@@ -131,11 +131,8 @@ void TileManager::State::load_custom_vertices(
     prefixed_destinations.reserve(loads.size());
     for (size_t index = 0U; index < loads.size(); index++) {
       MetalTileBufferLoad load = loads[index];
-      load.destination_offset +=
-          trace_quantized
-              ? static_cast<NSUInteger>(slots[index]) * quantized_record.stride +
-                    quantized_record.vertex_offset
-              : static_cast<NSUInteger>(slots[index]) * header_template.vertex_byte_count;
+      load.destination_offset += static_cast<NSUInteger>(slots[index]) * quantized_record.stride +
+                                 quantized_record.vertex_offset;
       const size_t compression_chunk = metal_tile_compression_chunk_size();
       if (metal_tile_compression(load.path) != MetalTileCompression::None &&
           load.source_offset % compression_chunk != 0U) {
@@ -144,15 +141,13 @@ void TileManager::State::load_custom_vertices(
       } else {
         direct_loads.push_back(load);
       }
-      if (trace_quantized) {
-        auto *record = static_cast<std::byte *>(vertex_atlas.contents) +
-                       static_cast<size_t>(slots[index]) * quantized_record.stride;
-        std::memcpy(
-            record + quantized_record.elevation_base_offset,
-            &elevation_bases[index],
-            sizeof(int32_t)
-        );
-      }
+      auto *record = static_cast<std::byte *>(vertex_atlas.contents) +
+                     static_cast<size_t>(slots[index]) * quantized_record.stride;
+      std::memcpy(
+          record + quantized_record.elevation_base_offset,
+          &elevation_bases[index],
+          sizeof(int32_t)
+      );
     }
     if (!direct_loads.empty()) {
       timer.start_wall("Metal tile I/O");
@@ -170,8 +165,7 @@ void TileManager::State::load_custom_vertices(
     }
     return;
   }
-  if (header_template.sample_type != MetalTileSampleType::Uint16Decimeters ||
-      conversion_pipeline == nil || quantized_staging == nil) {
+  if (conversion_pipeline == nil || quantized_staging == nil) {
     throw std::logic_error("Fixed-point tile conversion resources are unavailable");
   }
 
@@ -473,16 +467,11 @@ void TileManager::State::attach_atlas(
   const double origin_y =
       origin_tile.lower_left_y + static_cast<double>(origin_key.row + 1) * width;
   const MetalTileHeader header = read_metal_tile_header(sources.front().path);
-  if (retain && header.sample_type != MetalTileSampleType::Uint16Decimeters) {
-    throw std::invalid_argument("Quantized atlas retention requires uint16 prepared terrain");
-  }
   device = metal_device;
   // All prepared tiles in a catalogue share the reference grid and encoding.
   // Keep one template so later installations need only their compact LOD row.
   header_template = header;
-  quantized_record = header.sample_type == MetalTileSampleType::Uint16Decimeters
-                         ? quantized_metal_tile_record_layout(header)
-                         : QuantizedMetalTileRecordLayout{};
+  quantized_record = quantized_metal_tile_record_layout(header);
   grid_origin_x = origin_x;
   grid_origin_y = origin_y;
   tile_width = width;
@@ -533,9 +522,9 @@ void TileManager::State::attach_atlas(
   state->preparation_slots.label = @"Terrain preparation slots";
   state->io_queue = make_metal_io_queue(metal_device);
 
-  // Custom files contain atlas-ordered vertices. Both representations need
-  // GPU mipmap reduction; the default fixed-point path additionally converts
-  // vertices, while retained fixed-point records stay uint16 throughout.
+  // Custom files contain atlas-ordered uint16 vertices. Both atlas modes need
+  // GPU mipmap reduction; expanded mode first converts the vertices, while
+  // the default retained mode stays uint16 throughout.
   NSError *error = nil;
   NSURL *library_url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:kMetallibPath]];
   id<MTLLibrary> library = [metal_device newLibraryWithURL:library_url error:&error];
@@ -573,7 +562,7 @@ void TileManager::State::attach_atlas(
     throw std::runtime_error("Could not create the mipmap-generation command queue");
   }
 
-  if (state->header_template.sample_type == MetalTileSampleType::Uint16Decimeters && !retain) {
+  if (!retain) {
     id<MTLFunction> conversion_function =
         [library newFunctionWithName:@"convert_quantized_vertices"];
     if (conversion_function == nil) {
@@ -888,7 +877,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
   const double ty = std::clamp(y - y0, 0.0, 1.0);
 
   const void *values = nullptr;
-  MetalTileSampleType sample_type = header_template.sample_type;
+  bool expanded_vertices = false;
   int32_t elevation_base = 0;
   const auto resident = slot_by_variant.find({source_index, 1U});
   if (resident != slot_by_variant.end()) {
@@ -908,7 +897,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
     } else {
       values = static_cast<const float *>(vertex_atlas.contents) +
                static_cast<size_t>(slot) * vertex_count;
-      sample_type = MetalTileSampleType::Float32;
+      expanded_vertices = true;
     }
   } else {
     // A render may legitimately retain only a coarse variant. Keep a separate
@@ -947,7 +936,6 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
       sampled_source_index = source_index;
     }
     values = sampled_vertices.contents;
-    sample_type = sampled_header.sample_type;
     elevation_base = sampled_header.elevation_base_decimeters;
   }
 
@@ -958,7 +946,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
   // Boundary samples select the final cell with interpolation weight one.
   const auto vertex = [&](uint32_t column, uint32_t row) {
     const size_t index = static_cast<size_t>(row) * side + column;
-    if (sample_type == MetalTileSampleType::Float32) {
+    if (expanded_vertices) {
       return static_cast<double>(static_cast<const float *>(values)[index]);
     }
     return static_cast<double>(elevation_base) / 10.0 +

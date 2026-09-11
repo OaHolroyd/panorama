@@ -59,20 +59,21 @@ tiles there is part of the planned multi-source ray-tracing work.
 
 ### Prepare tracing tiles
 
-Metal tiles with quantized decimetre elevations without compression provide a
-compact, fast-loading representation. First inspect the proposed operation,
-then generate the tiles:
+The generator writes uint16 Metal tiles with quantized decimetre elevations.
+Uncompressed tiles provide a compact, fast-loading representation. Existing
+Float32 `.ptile` files must be regenerated from their source rasters. Generate
+the tiles with:
 
 ```sh
 ./panorama-tile-gen \
   --input downloads/swissalti3d \
   --output data/swissalti3d-2m-metal \
-  --format metal --sample-type uint16 --compression none
+  --compression none
 ```
 
 Use the directory containing the Terrain 50 ZIP or extracted ASC packages as
 the input directory to prepare OS data in the same way. Run
-`./panorama-tile-gen --help` for GeoTIFF output, chunk-size, grid-origin, and
+`./panorama-tile-gen --help` for chunk-size, grid-origin, compression, and
 overwrite options.
 
 Observer eastings and northings are always expressed in the prepared dataset's
@@ -237,10 +238,10 @@ For a headless shadow-cache check with the viewer's 600 km range and 1.5 LOD,
 run `obj/release/metal-bvh-test --benchmark-camera TILE_DIR gpu-shadows`.
 This logs caster loads, repair passes and terrain I/O through warm pans, movement
 and zoom. `make check-bvh` also checks shadow reuse and bounded-cache fallback
-against software visibility, using float/quantized terrain and both collision modes.
+against software visibility, using retained/expanded uint16 terrain and both collision modes.
 
 `make check-bvh` runs Metal API validation and software/BVH comparisons on
-generated terrain, including retained and expanded uint16, float samples,
+generated terrain, including retained and expanded uint16, directories without manifests,
 partial blocks, coverage gaps, range clipping, resizing, relocation, backend
 switching, cold and resident shadows, producer fallback, and forced cache eviction.
 `make check-camera` checks projection/reprojection, angular pixel centres, inverse

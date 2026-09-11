@@ -1,7 +1,5 @@
 #include "metal_tile_writer.h"
 
-#include "geotiff_writer.h"
-
 #include <ogr_spatialref.h>
 
 #include <algorithm>
@@ -9,7 +7,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -71,8 +68,12 @@ std::filesystem::path metal_tile_chunk_path(
     ChunkKey key,
     MetalTileCompression compression
 ) {
+  if (grid.layout != RasterLayout::Level0 || !std::has_single_bit(grid.tile_cell_count))
+    throw std::invalid_argument("Metal tiles require a power-of-two level-0 destination grid");
   return output_directory /
-         (terrain_chunk_stem(dataset_name, grid, key) + metal_tile_suffix(compression));
+         (dataset_name + "_level-0_p" + std::to_string(std::countr_zero(grid.tile_cell_count)) +
+          "_r" + std::to_string(key.row) + "_c" + std::to_string(key.column) +
+          metal_tile_suffix(compression));
 }
 
 TerrainElevationRange write_metal_tile_chunk(
@@ -81,8 +82,7 @@ TerrainElevationRange write_metal_tile_chunk(
     const DestinationGrid &grid,
     ChunkKey key,
     const SourceGrid &source_grid,
-    MetalTileCompression compression,
-    MetalTileSampleType sample_type
+    MetalTileCompression compression
 ) {
   if (grid.layout != RasterLayout::Level0 || chunk.sample_side != grid.tile_cell_count + 1U ||
       !std::has_single_bit(grid.tile_cell_count)) {
@@ -146,23 +146,16 @@ TerrainElevationRange write_metal_tile_chunk(
     const VariantVertices &variant = variants[index];
     const auto [minimum, maximum] =
         std::minmax_element(variant.values.begin(), variant.values.end());
-    const uint64_t byte_count =
-        static_cast<uint64_t>(variant.values.size()) *
-        (sample_type == MetalTileSampleType::Float32 ? sizeof(float) : sizeof(uint16_t));
-    const int32_t base =
-        sample_type == MetalTileSampleType::Uint16Decimeters ? elevation_decimeters(*minimum) : 0;
-    const float stored_maximum = sample_type == MetalTileSampleType::Uint16Decimeters
-                                     ? static_cast<float>(elevation_decimeters(*maximum)) / 10.0F
-                                     : *maximum;
-    const float stored_minimum =
-        sample_type == MetalTileSampleType::Uint16Decimeters ? float(base) * 0.1F : *minimum;
+    const uint64_t byte_count = static_cast<uint64_t>(variant.values.size()) * sizeof(uint16_t);
+    const int32_t base = elevation_decimeters(*minimum);
+    const float stored_maximum = static_cast<float>(elevation_decimeters(*maximum)) / 10.0F;
+    const float stored_minimum = float(base) * 0.1F;
     const float guard = 4.0F * std::numeric_limits<float>::epsilon() *
                         std::max({1.0F, std::abs(stored_minimum), std::abs(stored_maximum)});
     range.minimum = std::min(range.minimum, stored_minimum - guard);
     range.maximum = std::max(range.maximum, stored_maximum + guard);
-    if (sample_type == MetalTileSampleType::Uint16Decimeters &&
-        static_cast<int64_t>(elevation_decimeters(*maximum)) - base >
-            static_cast<int64_t>(std::numeric_limits<uint16_t>::max())) {
+    if (static_cast<int64_t>(elevation_decimeters(*maximum)) - base >
+        static_cast<int64_t>(std::numeric_limits<uint16_t>::max())) {
       throw std::runtime_error("Terrain LOD elevation range exceeds 6553.5 metres");
     }
     lods.push_back(
@@ -177,19 +170,11 @@ TerrainElevationRange write_metal_tile_chunk(
     );
     const size_t old_size = payload.size();
     payload.resize(old_size + static_cast<size_t>(byte_count));
-    if (sample_type == MetalTileSampleType::Float32) {
-      std::memcpy(
-          payload.data() + old_size,
-          variant.values.data(),
-          static_cast<size_t>(byte_count)
+    auto *destination = reinterpret_cast<uint16_t *>(payload.data() + old_size);
+    for (size_t sample = 0U; sample < variant.values.size(); sample++) {
+      destination[sample] = static_cast<uint16_t>(
+          static_cast<int64_t>(elevation_decimeters(variant.values[sample])) - base
       );
-    } else {
-      auto *destination = reinterpret_cast<uint16_t *>(payload.data() + old_size);
-      for (size_t sample = 0U; sample < variant.values.size(); sample++) {
-        destination[sample] = static_cast<uint16_t>(
-            static_cast<int64_t>(elevation_decimeters(variant.values[sample])) - base
-        );
-      }
     }
     offset += byte_count;
     if (index + 1U < variants.size()) {
@@ -210,7 +195,7 @@ TerrainElevationRange write_metal_tile_chunk(
       base.cell_count,
       base.level_count,
       base.maximum_elevation,
-      sample_type,
+      MetalTileSampleType::Uint16Decimeters,
       base.elevation_base_decimeters,
       0U,
       key.row,
@@ -251,11 +236,9 @@ TerrainElevationRange read_metal_tile_elevation_range(
       load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
       const uint64_t count = (uint64_t(lod.cell_count) + 1U) * (uint64_t(lod.cell_count) + 1U);
       for (uint64_t i = 0; i < count; ++i) {
-        const float value = header.sample_type == MetalTileSampleType::Float32
-                                ? static_cast<const float *>(data.contents)[i]
-                                : (float(lod.elevation_base_decimeters) +
-                                   float(static_cast<const uint16_t *>(data.contents)[i])) *
-                                      0.1F;
+        const float value = (float(lod.elevation_base_decimeters) +
+                             float(static_cast<const uint16_t *>(data.contents)[i])) *
+                            0.1F;
         if (!std::isfinite(value))
           throw std::runtime_error("Non-finite terrain sample in manifest scan");
         range.minimum = std::min(range.minimum, value);

@@ -207,7 +207,7 @@ void benchmark_camera(int argc, const char *argv[]) {
 
 void write_fixture(
     const std::filesystem::path &directory,
-    bool quantized,
+    bool with_manifest,
     double spacing,
     uint32_t epsg = 2056U,
     double origin_x = 2600000.0,
@@ -244,13 +244,13 @@ void write_fixture(
             );
           }
         }
-        const uint64_t bytes = heights.size() * (quantized ? sizeof(uint16_t) : sizeof(float));
+        const uint64_t bytes = heights.size() * sizeof(uint16_t);
         const float maximum = *std::max_element(heights.begin(), heights.end());
         lods.push_back(
             {lod,
              side - 1U,
              uint32_t(std::countr_zero(side - 1U)) + 1U,
-             quantized ? 9000 : 0,
+             9000,
              maximum,
              0U,
              offset,
@@ -258,13 +258,10 @@ void write_fixture(
         );
         const size_t start = payload.size();
         payload.resize(start + bytes);
-        if (quantized) {
-          for (size_t i = 0; i < heights.size(); ++i) {
-            const uint16_t value = static_cast<uint16_t>(std::lround(heights[i] * 10.0F) - 9000);
-            std::memcpy(payload.data() + start + i * sizeof(value), &value, sizeof(value));
-          }
-        } else
-          std::memcpy(payload.data() + start, heights.data(), bytes);
+        for (size_t i = 0; i < heights.size(); ++i) {
+          const uint16_t value = static_cast<uint16_t>(std::lround(heights[i] * 10.0F) - 9000);
+          std::memcpy(payload.data() + start + i * sizeof(value), &value, sizeof(value));
+        }
         offset += bytes;
       }
       const auto &base = lods.front();
@@ -276,8 +273,7 @@ void write_fixture(
                                 cells,
                                 5U,
                                 base.maximum_elevation,
-                                quantized ? MetalTileSampleType::Uint16Decimeters
-                                          : MetalTileSampleType::Float32,
+                                MetalTileSampleType::Uint16Decimeters,
                                 base.elevation_base_decimeters,
                                 0U,
                                 row,
@@ -299,8 +295,8 @@ void write_fixture(
       );
     }
   }
-  // Leave float fixtures without a sidecar to retain legacy/no-manifest coverage.
-  if (quantized)
+  // Exercise both indexed and legacy/no-manifest uint16 directories.
+  if (with_manifest)
     write_terrain_manifest(terrain_manifest_path(directory), manifest);
 }
 
@@ -1697,9 +1693,14 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
   }
 }
 
-void check_shadow_reuse(const std::filesystem::path &directory, bool bilinear, bool bounded) {
+void check_shadow_reuse(
+    const std::filesystem::path &directory,
+    bool bilinear,
+    bool bounded,
+    bool retain
+) {
   RaytraceConfig
-      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
+      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, retain, bilinear, false};
   auto camera = camera_request({129, 65});
   auto field = camera_field(camera.image, camera.projection);
   TerrainTraceSession reference(config, field, {true, true, true});
@@ -1713,15 +1714,8 @@ void check_shadow_reuse(const std::filesystem::path &directory, bool bilinear, b
     auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
     descriptor.geometryDescriptors = @[ geometry ];
     const auto sizes = [reference.device() accelerationStructureSizesWithDescriptor:descriptor];
-    const bool quantized =
-        read_metal_tile_header(
-            TerrainCatalogue::discover(directory, config.observer, config.max_distance, 0)
-                .origin()
-                .path
-        )
-            .sample_type == MetalTileSampleType::Uint16Decimeters;
     config.bvh_cache_size_bytes =
-        17U * 17U * (quantized ? 2U : 4U) + 16U * (sizeof(BvhBlock) + sizeof(BvhBounds)) +
+        17U * 17U * (retain ? 2U : 4U) + 16U * (sizeof(BvhBlock) + sizeof(BvhBounds)) +
         sizeof(BvhAffinePatch) + sizeof(BvhTile) + sizeof(uint64_t) +
         2U * sizes.accelerationStructureSize + sizes.buildScratchBufferSize;
   }
@@ -1870,14 +1864,15 @@ int main(int argc, const char *argv[]) {
       const bool camera = argc == 2 && std::string_view(argv[1]) == "--camera";
       const bool metalfx = argc == 2 && std::string_view(argv[1]) == "--metalfx";
       const bool producer = argc == 2 && std::string_view(argv[1]) == "--producer";
-      const bool shadow_float = argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-float";
+      const bool shadow_expanded =
+          argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-expanded";
       const bool shadow_quantized =
           argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-quantized";
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
       const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
-          !shadow_float && !shadow_quantized && !metalfx && !mixed_coverage) {
+          !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -1932,20 +1927,21 @@ int main(int argc, const char *argv[]) {
         require(created != nullptr, "Could not create fixture directory");
         const std::filesystem::path root(created);
         std::printf("Test fixtures: %s\n", created);
-        write_fixture(root / "float", false, 10.0);
+        write_fixture(root / "unindexed", false, 10.0);
         write_fixture(root / "quantized", true, 10.0);
         write_fixture(root / "overlap", true, 10.0, 2056U, 2600000.0, 1200000.0, 100.0);
         write_fixture(root / "partial-overlap", true, 10.0, 2056U, 2600080.0, 1200000.0, 100.0);
         write_fixture(root / "distant", true, 1000.0);
         check_dataset_foundation(root);
-        if (shadow_float || shadow_quantized) {
+        if (shadow_expanded || shadow_quantized) {
           for (bool bilinear : {false, true}) {
             for (bool bounded : {false, true}) {
               @autoreleasepool {
                 check_shadow_reuse(
-                    root / (shadow_float ? "float" : "quantized"),
+                    root / (shadow_expanded ? "unindexed" : "quantized"),
                     bilinear,
-                    bounded
+                    bounded,
+                    !shadow_expanded
                 );
               }
             }
@@ -1971,7 +1967,7 @@ int main(int argc, const char *argv[]) {
           }
         } else if (tile_selection) {
           @autoreleasepool {
-            check_tile_selection(root / "float", false, 10.0);
+            check_tile_selection(root / "unindexed", false, 10.0);
           }
           @autoreleasepool {
             check_tile_selection(root / "quantized", true, 10.0);
@@ -2014,7 +2010,7 @@ int main(int argc, const char *argv[]) {
           check_mixed_priority(root);
           for (uint32_t block : {1U, 4U, 7U}) {
             @autoreleasepool {
-              exercise(root / "float", false, 10.0, block);
+              exercise(root / "unindexed", false, 10.0, block);
             }
             @autoreleasepool {
               exercise(root / "quantized", true, 10.0, block);
