@@ -12,6 +12,8 @@ struct MetalBvhStatistics {
   uint64_t peak_bytes = 0U;
   uint64_t budget_bytes = 0U;
   uint64_t builds = 0U;
+  /// Batches share one build submission and one compaction submission.
+  uint64_t tile_build_batches = 0U;
   uint64_t cache_hits = 0U;
   uint64_t evictions = 0U;
   uint64_t catalogue_bytes = 0U;

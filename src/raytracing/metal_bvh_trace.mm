@@ -26,7 +26,7 @@ static_assert(sizeof(BvhCoveragePolygon) == 56U);
 static_assert(sizeof(BvhCoverageVertex) == 8U);
 static_assert(sizeof(BvhBlock) == 24U);
 static_assert(sizeof(BvhBounds) == sizeof(MTLAxisAlignedBoundingBox));
-static_assert(sizeof(BvhParameters) == 72U);
+static_assert(sizeof(BvhParameters) == 80U);
 static_assert(sizeof(BvhChunk) == 104U);
 static_assert(sizeof(BvhRayState) == 20U);
 
@@ -103,6 +103,7 @@ struct MetalBvhTrace::State {
   uint64_t catalogue_generation = 0;
   std::vector<uint32_t> selected_lods;
   std::vector<double> tile_shells;
+  bool shells_valid = false;
   uint32_t ray_capacity = 0;
   uint64_t clock = 0;
 
@@ -115,6 +116,12 @@ struct MetalBvhTrace::State {
     bool transformed = false;
     float anchor_x = 0.0F, anchor_y = 0.0F;
     float vertical_offset = 0.0F;
+  };
+  struct StagedTile {
+    std::unique_ptr<Entry> entry;
+    id<MTLBuffer> metadata;
+    MTLAccelerationStructureSizes sizes;
+    uint64_t base_bytes, peak_bytes;
   };
   std::map<TileVariant, std::unique_ptr<Entry>> cache;
   Hierarchy scene;
@@ -229,16 +236,11 @@ struct MetalBvhTrace::State {
     return result;
   }
 
-  id<MTLAccelerationStructure> build(
-      MTLAccelerationStructureDescriptor *descriptor,
-      bool compact,
-      id<MTLCommandBuffer> command = nil
-  ) {
-    trace_activity::Scope activity("BVH build/compaction");
+  id<MTLAccelerationStructure> build(MTLAccelerationStructureDescriptor *descriptor) {
+    trace_activity::Scope activity("BVH instance build");
     const auto sizes = [gpu.device() accelerationStructureSizesWithDescriptor:descriptor];
-    id<MTLAccelerationStructure> original =
-        [gpu.device() newAccelerationStructureWithSize:sizes.accelerationStructureSize];
-    if (original == nil)
+    auto result = [gpu.device() newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+    if (result == nil)
       throw std::runtime_error("Could not allocate BVH acceleration structure");
     auto scratch = buffer(
         gpu.device(),
@@ -247,37 +249,14 @@ struct MetalBvhTrace::State {
         @"build scratch",
         MTLResourceStorageModePrivate
     );
-    auto size_buffer = compact ? buffer(gpu.device(), 1, sizeof(uint64_t), @"compacted size") : nil;
-    if (command == nil)
-      command = [gpu.command_queue() commandBuffer];
+    auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command accelerationStructureCommandEncoder];
     if (encoder == nil)
       throw std::runtime_error("Could not encode BVH build");
-    [encoder buildAccelerationStructure:original
+    [encoder buildAccelerationStructure:result
                              descriptor:descriptor
                           scratchBuffer:scratch
                     scratchBufferOffset:0];
-    if (compact)
-      [encoder writeCompactedAccelerationStructureSize:original
-                                              toBuffer:size_buffer
-                                                offset:0
-                                          sizeDataType:MTLDataTypeULong];
-    [encoder endEncoding];
-    stats.build_gpu_ms += complete(command);
-    ++stats.submissions;
-    if (!compact)
-      return original;
-    const uint64_t size = *static_cast<const uint64_t *>(size_buffer.contents);
-    if (size == 0 || size > sizes.accelerationStructureSize)
-      throw std::runtime_error("Invalid compacted BVH size");
-    id<MTLAccelerationStructure> result = [gpu.device() newAccelerationStructureWithSize:size];
-    if (result == nil)
-      throw std::runtime_error("Could not allocate compacted BVH");
-    command = [gpu.command_queue() commandBuffer];
-    encoder = [command accelerationStructureCommandEncoder];
-    if (encoder == nil)
-      throw std::runtime_error("Could not encode BVH compaction");
-    [encoder copyAndCompactAccelerationStructure:original toAccelerationStructure:result];
     [encoder endEncoding];
     stats.build_gpu_ms += complete(command);
     ++stats.submissions;
@@ -296,6 +275,13 @@ struct MetalBvhTrace::State {
     tile_metadata = shared.metadata();
     catalogue_generation = shared.generation();
     current.coverage_step_limit = shared.coverage_step_limit();
+    shells_valid = false;
+    stats.catalogue_bytes = shared.bytes();
+  }
+
+  void update_shells() {
+    if (shells_valid)
+      return;
     const auto &sources = manager->sources();
     tile_shells.resize(sources.size());
     if (current.transformed_catalogue) {
@@ -341,7 +327,7 @@ struct MetalBvhTrace::State {
         tile_shells[i] = std::abs(double(sources[i].key.row) - double(origin.row)) +
                          std::abs(double(sources[i].key.column) - double(origin.column));
     }
-    stats.catalogue_bytes = shared.bytes();
+    shells_valid = true;
   }
 
   bool make_room(uint64_t required, const std::vector<Entry *> &pinned) {
@@ -390,18 +376,14 @@ struct MetalBvhTrace::State {
     return entries;
   }
 
-  Entry *acquire(
+  std::optional<StagedTile> stage_tile(
       uint32_t source,
       const std::vector<Entry *> &pinned,
       Timer &timer,
-      bool optional = false
+      uint64_t reserved,
+      bool optional
   ) {
     const TileVariant key{source, manager->lod_for_source(source)};
-    if (auto found = cache.find(key); found != cache.end()) {
-      found->second->used = ++clock;
-      ++stats.cache_hits;
-      return found->second.get();
-    }
     trace_activity::Scope activity("BVH tile admission/loading/building");
     const auto &geometry = manager->origin_geometry();
     const TerrainSource &source_metadata = manager->sources()[source];
@@ -456,9 +438,15 @@ struct MetalBvhTrace::State {
     const uint64_t peak = base_bytes + 2 * sizes.accelerationStructureSize +
                           sizes.buildScratchBufferSize + sizeof(BvhTile) + sizeof(uint64_t);
     if (optional && peak > stats.budget_bytes)
-      return nullptr;
-    if (!make_room(peak, pinned))
-      return nullptr;
+      return std::nullopt;
+    if (peak <= stats.budget_bytes && reserved > stats.budget_bytes - peak)
+      return std::nullopt;
+    // Do not evict extra cached terrain just to enlarge a build batch. Flush
+    // staged work first when the next build would need more temporary space.
+    if (reserved != 0 && stats.resident_bytes > stats.budget_bytes - reserved - peak)
+      return std::nullopt;
+    if (!make_room(peak + reserved, pinned))
+      return std::nullopt;
     const auto started = std::chrono::steady_clock::now();
     auto entry = std::make_unique<Entry>();
     entry->key = key;
@@ -540,32 +528,161 @@ struct MetalBvhTrace::State {
     std::memcpy(entry->blocks.contents, block_metadata.data(), entry->blocks.length);
     auto metadata = buffer(gpu.device(), 1, sizeof(BvhTile), @"tile build metadata");
     std::memcpy(metadata.contents, &entry->local, sizeof(BvhTile));
-    current.primitive_count = count;
-    std::memcpy(parameters.contents, &current, sizeof(current));
+    timer.add_work("BVH tile loading/preparation", std::chrono::steady_clock::now() - started);
+    return StagedTile{std::move(entry), metadata, sizes, base_bytes, peak};
+  }
+
+  void build_tiles(std::vector<StagedTile> &staged, std::vector<Entry *> &installed, Timer &timer) {
+    trace_activity::Scope activity("BVH tile batch build/compaction");
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<id<MTLAccelerationStructure>> originals;
+    std::vector<id<MTLBuffer>> scratch;
+    auto compact_sizes = buffer(gpu.device(), staged.size(), sizeof(uint64_t), @"compacted sizes");
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command computeCommandEncoder];
     if (encoder == nil)
       throw std::runtime_error("Could not encode tile bounds");
     [encoder setComputePipelineState:bounds_pipeline];
-    [encoder setBuffer:entry->vertices offset:0 atIndex:0];
-    [encoder setBuffer:metadata offset:0 atIndex:1];
-    [encoder setBuffer:entry->blocks offset:0 atIndex:2];
-    [encoder setBuffer:entry->bounds offset:0 atIndex:3];
-    [encoder setBuffer:parameters offset:0 atIndex:4];
-    [encoder setBuffer:entry->transforms offset:0 atIndex:5];
-    dispatch_linear(encoder, bounds_pipeline, count);
+    for (const auto &tile : staged) {
+      const Entry &entry = *tile.entry;
+      BvhParameters build_parameters = current;
+      build_parameters.primitive_count = checked_count(entry.blocks.length / sizeof(BvhBlock));
+      [encoder setBuffer:entry.vertices offset:0 atIndex:0];
+      [encoder setBuffer:tile.metadata offset:0 atIndex:1];
+      [encoder setBuffer:entry.blocks offset:0 atIndex:2];
+      [encoder setBuffer:entry.bounds offset:0 atIndex:3];
+      [encoder setBytes:&build_parameters length:sizeof(build_parameters) atIndex:4];
+      [encoder setBuffer:entry.transforms offset:0 atIndex:5];
+      dispatch_linear(encoder, bounds_pipeline, build_parameters.primitive_count);
+    }
     [encoder endEncoding];
-    // Tracked resources and encoder ordering make the generated bounds
-    // available to the build without a separate submission and CPU wait.
-    entry->acceleration = build(primitive_descriptor(count, entry->bounds), true, command);
-    entry->bytes = base_bytes + entry->acceleration.size;
-    stats.resident_bytes += entry->bytes;
-    ++stats.builds;
-    Entry *result = entry.get();
-    invalidate_scene(SceneInvalidation::Admission);
-    cache.emplace(key, std::move(entry));
-    timer.add_work("BVH tile loading/building", std::chrono::steady_clock::now() - started);
-    return result;
+    auto builder = [command accelerationStructureCommandEncoder];
+    if (builder == nil)
+      throw std::runtime_error("Could not encode tile batch build");
+    for (size_t i = 0; i < staged.size(); ++i) {
+      const auto &tile = staged[i];
+      const auto &entry = *tile.entry;
+      auto original =
+          [gpu.device() newAccelerationStructureWithSize:tile.sizes.accelerationStructureSize];
+      if (original == nil)
+        throw std::runtime_error("Could not allocate tile BVH");
+      originals.push_back(original);
+      scratch.push_back(buffer(
+          gpu.device(),
+          tile.sizes.buildScratchBufferSize,
+          1,
+          @"tile build scratch",
+          MTLResourceStorageModePrivate
+      ));
+      auto descriptor =
+          primitive_descriptor(checked_count(entry.blocks.length / sizeof(BvhBlock)), entry.bounds);
+      [builder buildAccelerationStructure:original
+                               descriptor:descriptor
+                            scratchBuffer:scratch.back()
+                      scratchBufferOffset:0];
+      [builder writeCompactedAccelerationStructureSize:original
+                                              toBuffer:compact_sizes
+                                                offset:i * sizeof(uint64_t)
+                                          sizeDataType:MTLDataTypeULong];
+    }
+    [builder endEncoding];
+    stats.build_gpu_ms += complete(command);
+    ++stats.submissions;
+    command = [gpu.command_queue() commandBuffer];
+    builder = [command accelerationStructureCommandEncoder];
+    if (builder == nil)
+      throw std::runtime_error("Could not encode tile batch compaction");
+    const auto *sizes = static_cast<const uint64_t *>(compact_sizes.contents);
+    for (size_t i = 0; i < staged.size(); ++i) {
+      if (sizes[i] == 0 || sizes[i] > staged[i].sizes.accelerationStructureSize)
+        throw std::runtime_error("Invalid compacted tile BVH size");
+      auto compacted = [gpu.device() newAccelerationStructureWithSize:sizes[i]];
+      if (compacted == nil)
+        throw std::runtime_error("Could not allocate compacted tile BVH");
+      staged[i].entry->acceleration = compacted;
+      [builder copyAndCompactAccelerationStructure:originals[i] toAccelerationStructure:compacted];
+    }
+    [builder endEncoding];
+    stats.build_gpu_ms += complete(command);
+    ++stats.submissions;
+    ++stats.tile_build_batches;
+    for (auto &tile : staged) {
+      auto &entry = tile.entry;
+      entry->bytes = tile.base_bytes + entry->acceleration.size;
+      stats.resident_bytes += entry->bytes;
+      ++stats.builds;
+      installed.push_back(entry.get());
+      invalidate_scene(SceneInvalidation::Admission);
+      const TileVariant key = entry->key;
+      cache.emplace(key, std::move(entry));
+    }
+    timer.add_work("BVH tile batch build/compaction", std::chrono::steady_clock::now() - started);
+  }
+
+  Entry *acquire(
+      uint32_t source,
+      const std::vector<Entry *> &pinned,
+      Timer &timer,
+      bool optional = false
+  ) {
+    const TileVariant key{source, manager->lod_for_source(source)};
+    if (auto found = cache.find(key); found != cache.end()) {
+      found->second->used = ++clock;
+      ++stats.cache_hits;
+      return found->second.get();
+    }
+    @autoreleasepool {
+      auto tile = stage_tile(source, pinned, timer, 0, optional);
+      if (!tile)
+        return nullptr;
+      std::vector<StagedTile> staged;
+      staged.push_back(std::move(*tile));
+      std::vector<Entry *> installed;
+      build_tiles(staged, installed, timer);
+      return installed.front();
+    }
+  }
+
+  bool
+  acquire_many(const std::vector<uint32_t> &sources, std::vector<Entry *> &pinned, Timer &timer) {
+    size_t next = 0, prefetched = 0;
+    const size_t lookahead = std::min<size_t>(8, manager->slot_capacity());
+    while (next < sources.size()) {
+      @autoreleasepool {
+        std::vector<StagedTile> staged;
+        uint64_t reserved = 0;
+        while (next < sources.size() && staged.size() < 8U) {
+          // Open upcoming payloads concurrently. Installation can batch their
+          // Metal I/O; the queue and lookahead are bounded by atlas capacity.
+          while (prefetched < std::min(sources.size(), next + lookahead)) {
+            const uint32_t source = sources[prefetched++];
+            if (!cache.contains({source, manager->lod_for_source(source)}))
+              manager->request(source, float(prefetched - next));
+          }
+          const uint32_t source = sources[next];
+          if (auto found = cache.find({source, manager->lod_for_source(source)});
+              found != cache.end()) {
+            found->second->used = ++clock;
+            ++stats.cache_hits;
+            pinned.push_back(found->second.get());
+            ++next;
+            continue;
+          }
+          auto tile = stage_tile(source, pinned, timer, reserved, true);
+          if (!tile)
+            break;
+          reserved += tile->peak_bytes;
+          staged.push_back(std::move(*tile));
+          ++next;
+        }
+        if (staged.empty())
+          return next == sources.size();
+        build_tiles(staged, pinned, timer);
+        // Completed command/descriptor objects drain before reserving the next
+        // batch. Peak accounting includes every staged build and compact copy.
+      }
+    }
+    return true;
   }
 
   Hierarchy make_hierarchy(const std::vector<Entry *> &batch, Timer &timer) {
@@ -640,7 +757,7 @@ struct MetalBvhTrace::State {
     descriptor.instanceCount = batch.size();
     descriptor.instanceDescriptorBuffer = instances;
     descriptor.instancedAccelerationStructures = structures;
-    auto acceleration = build(descriptor, false);
+    auto acceleration = build(descriptor);
     ++stats.instance_builds;
     timer.add_work("BVH instance setup", std::chrono::steady_clock::now() - started);
     return {instances, chunks, acceleration};
@@ -838,6 +955,7 @@ struct MetalBvhTrace::State {
 
   void select(const std::vector<uint32_t> &indices, Timer &timer) {
     trace_activity::Scope activity("BVH streaming tile selection");
+    update_shells();
     current.work_count = checked_count(indices.size());
     std::memcpy(work.contents, indices.data(), indices.size() * sizeof(uint32_t));
     std::memcpy(parameters.contents, &current, sizeof(current));
@@ -1002,25 +1120,20 @@ bool MetalBvhTrace::trace_shadows(double azimuth, double elevation, Timer &timer
           return true;
       }
     const auto *requested = static_cast<const uint32_t *>(state.shadow_requested_sources.contents);
-    bool loaded = false;
+    std::vector<uint32_t> sources;
     for (uint32_t source = 0; source < state.current.source_count; ++source) {
-      if (requested[source] == 0)
-        continue;
-      @autoreleasepool {
-        // Each request names a source absent from the preceding scene. Loading
-        // can invalidate that scene, but never modifies the request buffer.
-        State::Entry *entry = state.acquire(source, pinned, timer, true);
-        if (entry == nullptr) {
-          ++state.stats.shadow_cache_fallbacks;
-          return state.current.transformed_catalogue ? stream_shadows(azimuth, elevation, timer)
-                                                     : false;
-        }
-        pinned.push_back(entry);
-        ++state.stats.shadow_tiles_built;
-        loaded = true;
-      }
+      if (requested[source] != 0)
+        sources.push_back(source);
     }
-    if (!loaded)
+    const uint64_t before = state.stats.builds;
+    const bool fits = state.acquire_many(sources, pinned, timer);
+    state.stats.shadow_tiles_built += state.stats.builds - before;
+    if (!fits) {
+      ++state.stats.shadow_cache_fallbacks;
+      return state.current.transformed_catalogue ? stream_shadows(azimuth, elevation, timer)
+                                                 : false;
+    }
+    if (state.stats.builds == before)
       break;
   }
   ++state.stats.shadow_cache_fallbacks;
@@ -1098,6 +1211,10 @@ void MetalBvhTrace::prepare(
   State &state = *state_;
   state.shadow_requests_ready = false;
   state.manager = &tiles;
+  if (state.observer.easting != observer.easting || state.observer.northing != observer.northing) {
+    state.invalidate_scene(State::SceneInvalidation::Catalogue);
+    state.shells_valid = false;
+  }
   state.observer = observer;
   state.current.trace = parameters;
   state.current.quantized = tiles.traces_quantized();
@@ -1153,6 +1270,9 @@ void MetalBvhTrace::prepare(
     }
     if (state.catalogue_generation != shared.generation())
       state.update_catalogue();
+    const Coord offset = shared.observer_offset();
+    state.current.catalogue_x = float(offset.x);
+    state.current.catalogue_y = float(offset.y);
   }
 
   if (parameters.ray_count > state.ray_capacity) {
@@ -1209,22 +1329,18 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
         }
         const auto *requested =
             static_cast<const uint32_t *>(state.scene_requested_sources.contents);
-        bool loaded = false;
-        bool fits = true;
+        std::vector<uint32_t> sources;
         for (uint32_t source = 0; source < state.current.source_count; ++source) {
           if (requested[source] == 0U)
             continue;
           const TileVariant key{source, state.manager->lod_for_source(source)};
           if (state.cache.contains(key))
             continue;
-          State::Entry *entry = state.acquire(source, repair_pins, timer, true);
-          if (entry == nullptr) {
-            fits = false;
-            break;
-          }
-          repair_pins.push_back(entry);
-          loaded = true;
+          sources.push_back(source);
         }
+        const uint64_t before = state.stats.builds;
+        const bool fits = state.acquire_many(sources, repair_pins, timer);
+        const bool loaded = state.stats.builds != before;
         if (!fits || !loaded)
           break;
         state.scene_requests_ready = false;

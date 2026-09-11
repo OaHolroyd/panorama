@@ -43,6 +43,19 @@ struct SelectedTerrainTile {
   float exit;
 };
 
+/// Convert the observer's curvature frame to the fixed hardware catalogue.
+/// Callback payloads and exact terrain metadata remain observer-relative.
+inline ray bvh_catalogue_ray(ray r, constant BvhParameters &params) {
+  const float2 offset(params.catalogue_x, params.catalogue_y);
+  if (any(offset != float2(0.0F))) {
+    const float k = params.trace.curvature_coefficient;
+    r.origin.z -= k * (2.0F * dot(offset, r.origin.xy) + dot(offset, offset));
+    r.direction.z -= 2.0F * k * dot(offset, r.direction.xy);
+    r.origin.xy += offset;
+  }
+  return r;
+}
+
 inline float bvh_cross(float2 a, float2 b) { return a.x * b.y - a.y * b.x; }
 
 /// First representable distance whose world XY point differs from a rejected
@@ -292,7 +305,8 @@ inline SelectedTerrainTile select_next_coverage_polygon(
     uint excluded_source = 0xffffffffU,
     uint excluded_primitive = 0xffffffffU,
     float2 ray_origin = float2(0.0F),
-    bool ownership_only = false
+    bool ownership_only = false,
+    float2 catalogue_offset = float2(0.0F)
 ) {
   ray r;
   r.origin = float3(ray_origin, elevation);
@@ -303,6 +317,7 @@ inline SelectedTerrainTile select_next_coverage_polygon(
   tracer.assume_geometry_type(geometry_type::bounding_box);
   TileSelection payload =
       {r.direction, false, ray_origin, excluded_source, excluded_primitive, ownership_only};
+  r.origin.xy += catalogue_offset; // Coverage has unbounded Z; only XY needs translation.
   const auto hit = tracer.intersect(r, catalogue, functions, payload);
   if (hit.type == intersection_type::none)
     return {0xffffffffU, 0xffffffffU, limit, limit};
@@ -335,7 +350,8 @@ inline float transformed_coverage_limit(
     float limit,
     uint step_limit,
     float2 origin = float2(0.0F),
-    float progress = 0.0F
+    float progress = 0.0F,
+    float2 catalogue_offset = float2(0.0F)
 ) {
   uint previous = 0xffffffffU;
   for (uint crossed = 0; crossed <= step_limit; ++crossed) {
@@ -350,7 +366,9 @@ inline float transformed_coverage_limit(
         limit,
         0xffffffffU,
         previous,
-        origin
+        origin,
+        false,
+        catalogue_offset
     );
     const float tolerance = max(1e-3F, 8.0F * FLT_EPSILON * max(1.0F, progress));
     if (selected.source == 0xffffffffU || selected.entry > progress + tolerance)

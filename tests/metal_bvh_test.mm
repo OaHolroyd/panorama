@@ -5,6 +5,7 @@
 #include "metal_tile.h"
 #include "metalfx_upscaler.h"
 #include "terrain_manifest.h"
+#include "terrain_tile_bvh.h"
 #include "terrain_trace_session.h"
 #include "terrain_transform.h"
 #include "timer.h"
@@ -650,6 +651,84 @@ void check_dataset_foundation(const std::filesystem::path &root) {
   require(
       owned.coverage().datasets.size() == 2U && owned.coverage().datasets[1].tiles.size() == 9U,
       "Minimap coverage hid an available dataset because another source owns its terrain"
+  );
+}
+
+// Moving the hardware broad phase must not accumulate Float32 translations
+// in the exact callback metadata. Compare rebasing with fresh construction.
+void check_catalogue_relocation(const std::filesystem::path &root) {
+  RaytraceConfig
+      config{root / "quantized", {2600045, 1199945, 1120}, 600000, 0, 16384, 2, true, true, false};
+  config.terrain_datasets = {{root / "quantized", 0}, {root / "distant", 0}};
+  TileManager tiles(config);
+  GpuRaytraceResources gpu(1, tiles.sources(), true, true, false, {false, false, false});
+  TerrainTileBvh catalogue(gpu);
+  RaytraceParameters parameters = {};
+  parameters.max_distance = config.max_distance;
+  parameters.curvature_coefficient = 6.8e-8F;
+  require(catalogue.prepare(tiles, config.observer, parameters), "Initial catalogue was not built");
+  const std::array<Coord, 5> moves = {
+      {{0.0001, 0}, {30000, -10000}, {30001, -10000}, {40000, -10000}, {0, 0}}};
+  for (size_t i = 0; i < moves.size(); ++i) {
+    auto observer = config.observer;
+    observer.easting += moves[i].x;
+    observer.northing += moves[i].y;
+    auto coverage = catalogue.acceleration(), candidates = catalogue.candidate_acceleration();
+    const uint64_t generation = catalogue.generation();
+    const bool rebuilt = catalogue.prepare(tiles, observer, parameters);
+    require(rebuilt == (i >= 3), "Catalogue did not retain its bounded anchor across movement");
+    require(
+        catalogue.generation() == generation + uint64_t(rebuilt),
+        "Catalogue generation changed"
+    );
+    if (!rebuilt)
+      require(
+          catalogue.acceleration() == coverage && catalogue.candidate_acceleration() == candidates,
+          "Movement replaced anchored acceleration structures"
+      );
+    TerrainTileBvh reference(gpu);
+    require(reference.prepare(tiles, observer, parameters), "Fresh catalogue was not built");
+    for (const auto &pair :
+         {std::pair{catalogue.tiles(), reference.tiles()},
+          std::pair{catalogue.coverage_polygons(), reference.coverage_polygons()},
+          std::pair{catalogue.coverage_vertices(), reference.coverage_vertices()},
+          std::pair{catalogue.candidate_patches(), reference.candidate_patches()}})
+      if (pair.first.length != pair.second.length ||
+          std::memcmp(pair.first.contents, pair.second.contents, pair.first.length) != 0) {
+        const auto *a = static_cast<const uint32_t *>(pair.first.contents);
+        const auto *b = static_cast<const uint32_t *>(pair.second.contents);
+        for (size_t word = 0; word < std::min(pair.first.length, pair.second.length) / 4; ++word)
+          if (a[word] != b[word]) {
+            std::printf(
+                "Catalogue mismatch move=%zu buffer=%s word=%zu: %.9g vs %.9g\n",
+                i,
+                pair.first.label.UTF8String,
+                word,
+                std::bit_cast<float>(a[word]),
+                std::bit_cast<float>(b[word])
+            );
+            break;
+          }
+        require(false, "Anchored catalogue changed observer-relative exact metadata");
+      }
+  }
+  parameters.curvature_coefficient *= 0.5F;
+  require(
+      catalogue.prepare(tiles, config.observer, parameters),
+      "Changed curvature reused stale bounds"
+  );
+  parameters.max_distance *= 2;
+  require(
+      catalogue.prepare(tiles, config.observer, parameters),
+      "Increased range reused stale guards"
+  );
+  parameters.max_distance *= 0.5F;
+  require(
+      !catalogue.prepare(tiles, config.observer, parameters),
+      "Reduced range rebuilt safe bounds"
+  );
+  std::puts(
+      "Catalogue movement preserves exact metadata, reanchors at range, and refreshes curvature."
   );
 }
 
@@ -1760,6 +1839,14 @@ void check_scene_misses(const std::filesystem::path &directory) {
           after.builds > before.builds && after.streaming_rays == before.streaming_rays,
       "Partial scene did not repair requested sources directly"
   );
+  require(
+      after.tile_build_batches - before.tile_build_batches < after.builds - before.builds,
+      "Scene repair submitted separate build/compaction commands for every tile"
+  );
+  require(
+      after.peak_bytes <= after.budget_bytes && after.resident_bytes <= after.budget_bytes,
+      "Batched scene repair exceeded its cache budget"
+  );
   compare(software, hardware, wide, 0.01F);
   const auto reused = hardware.bvh_statistics();
   require(
@@ -2774,6 +2861,7 @@ int main(int argc, const char *argv[]) {
         } else if (mixed_coverage) {
           check_ownership_progress();
           check_coverage_index();
+          check_catalogue_relocation(root);
           check_misaligned_coverage(root);
         } else if (streaming) {
           check_streaming(root / "quantized");

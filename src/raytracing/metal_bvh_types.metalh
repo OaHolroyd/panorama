@@ -87,6 +87,7 @@ struct BvhParameters {
   BvhUint transformed_catalogue;
   BvhUint coverage_step_limit;
   BvhUint scene_resume;
+  float catalogue_x, catalogue_y;
 };
 
 /// CPU/GPU continuations. Progress advances to a tile's far XY edge only

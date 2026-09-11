@@ -138,7 +138,8 @@ kernel void select_terrain_coverage_polygons(
       0xffffffffU,
       states[index].primitive,
       float2(0.0F),
-      true
+      true,
+      float2(params.catalogue_x, params.catalogue_y)
   );
   states[index].source = selected.source;
   states[index].primitive = selected.primitive;

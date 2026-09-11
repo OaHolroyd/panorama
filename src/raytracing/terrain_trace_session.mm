@@ -697,7 +697,8 @@ void TerrainTraceSession::print_trace_statistics() const {
     const auto &a = state.frame_bvh_before;
     std::printf(
         "; tiles built/hit/evicted %llu/%llu/%llu, catalogue/instance builds %llu/%llu, "
-        "BVH submissions %llu, GPU selection/detail/build %.3f/%.3f/%.3f ms, "
+        "tile build batches %llu, BVH submissions %llu, GPU selection/detail/build %.3f/%.3f/%.3f "
+        "ms, "
         "CPU grouping %.3f ms, resident %.1f/%.1f MiB, "
         "scene builds/passes/fallback rays %llu/%llu/%llu (%.3f MiB), "
         "repair passes/rays %llu/%llu",
@@ -706,6 +707,7 @@ void TerrainTraceSession::print_trace_statistics() const {
         static_cast<unsigned long long>(b.evictions - a.evictions),
         static_cast<unsigned long long>(b.catalogue_builds - a.catalogue_builds),
         static_cast<unsigned long long>(b.instance_builds - a.instance_builds),
+        static_cast<unsigned long long>(b.tile_build_batches - a.tile_build_batches),
         static_cast<unsigned long long>(b.submissions - a.submissions),
         b.selection_gpu_ms - a.selection_gpu_ms,
         b.trace_gpu_ms - a.trace_gpu_ms,

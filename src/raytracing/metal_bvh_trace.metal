@@ -510,7 +510,9 @@ inline bool recovered_step_crosses_gap(
       payload.world_origin.z,
       distance,
       params.coverage_step_limit,
-      payload.world_origin.xy
+      payload.world_origin.xy,
+      0.0F,
+      float2(params.catalogue_x, params.catalogue_y)
   );
   return distance > limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
 }
@@ -676,7 +678,12 @@ kernel void trace_terrain_scene(
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
   TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU, 0xffffffffU, false};
-  auto missing = missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
+  auto missing = missing_tracer.intersect(
+      bvh_catalogue_ray(r, params),
+      missing_tiles,
+      missing_functions,
+      missing_payload
+  );
   // A distant provisional step can require a long continuity walk, only to
   // lose to nearer terrain on the next repair pass. Load missing candidates
   // first. A step becomes an output (or a reusable hit bound) only after its
@@ -702,7 +709,12 @@ kernel void trace_terrain_scene(
           min(params.trace.max_distance,
               result.distance + 8.0F * FLT_EPSILON * max(1.0F, result.distance));
     // The invalid step may have hidden both resident and unloaded terrain.
-    missing = missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
+    missing = missing_tracer.intersect(
+        bvh_catalogue_ray(r, params),
+        missing_tiles,
+        missing_functions,
+        missing_payload
+    );
   }
   if (hit && (missing.type == intersection_type::none || !payload.covered_step))
     atomic_store_explicit(
@@ -826,8 +838,12 @@ kernel void trace_scene_shadows(
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
   TileSelection missing_payload = {sun.xyz, true, origin.xy, 0xffffffffU, 0xffffffffU, false};
-  const auto missing =
-      missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
+  const auto missing = missing_tracer.intersect(
+      bvh_catalogue_ray(r, params),
+      missing_tiles,
+      missing_functions,
+      missing_payload
+  );
   if (missing.type != intersection_type::none) {
     const uint source = params.transformed_catalogue
                             ? candidate_patches[missing.primitive_id].source
