@@ -5,6 +5,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace panorama {
@@ -223,43 +224,62 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
       std::sort(cuts.begin(), cuts.end());
       cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
     }
+  // Adjacent coverage rectangles share most boundary vertices. Project each
+  // grid point once, in one batch, then reuse it in the original perimeters.
+  std::unordered_map<uint64_t, size_t> vertex_indices;
+  std::vector<Coord> native;
+  std::vector<std::vector<size_t>> perimeters;
+  perimeters.reserve(ownership.size());
   for (const TerrainTransformPatch &region : ownership) {
     const uint32_t x0 = region.minimum_column, x1 = x0 + region.cell_width;
     const uint32_t y0 = region.minimum_row, y1 = y0 + region.cell_height;
-    std::vector<Coord> native;
-    const auto append_edge = [&](bool is_horizontal,
-                                 uint32_t fixed,
-                                 uint32_t minimum,
-                                 uint32_t maximum,
-                                 bool reverse) {
-      std::vector<uint32_t> coordinates = {minimum};
-      for (uint32_t value = minimum; value < maximum;) {
-        value = std::min(maximum, ((value / maximum_cells_per_side) + 1U) * maximum_cells_per_side);
-        coordinates.push_back(value);
-      }
-      const auto &cuts = (is_horizontal ? horizontal : vertical).at(fixed);
-      coordinates.insert(
-          coordinates.end(),
-          std::lower_bound(cuts.begin(), cuts.end(), minimum),
-          std::upper_bound(cuts.begin(), cuts.end(), maximum)
-      );
-      std::sort(coordinates.begin(), coordinates.end());
-      coordinates.erase(std::unique(coordinates.begin(), coordinates.end()), coordinates.end());
-      if (reverse)
-        std::reverse(coordinates.begin(), coordinates.end());
-      for (uint32_t value : coordinates) {
-        const Coord point =
-            native_coordinate(header, is_horizontal ? value : fixed, is_horizontal ? fixed : value);
-        if (native.empty() || native.back().x != point.x || native.back().y != point.y)
-          native.push_back(point);
-      }
-    };
+    std::vector<size_t> perimeter;
+    const auto append_edge =
+        [&](bool is_horizontal, uint32_t fixed, uint32_t minimum, uint32_t maximum, bool reverse) {
+          std::vector<uint32_t> coordinates = {minimum};
+          for (uint32_t value = minimum; value < maximum;) {
+            value =
+                std::min(maximum, ((value / maximum_cells_per_side) + 1U) * maximum_cells_per_side);
+            coordinates.push_back(value);
+          }
+          const auto &cuts = (is_horizontal ? horizontal : vertical).at(fixed);
+          coordinates.insert(
+              coordinates.end(),
+              std::lower_bound(cuts.begin(), cuts.end(), minimum),
+              std::upper_bound(cuts.begin(), cuts.end(), maximum)
+          );
+          std::sort(coordinates.begin(), coordinates.end());
+          coordinates.erase(std::unique(coordinates.begin(), coordinates.end()), coordinates.end());
+          if (reverse)
+            std::reverse(coordinates.begin(), coordinates.end());
+          for (uint32_t value : coordinates) {
+            const uint32_t column = is_horizontal ? value : fixed;
+            const uint32_t row = is_horizontal ? fixed : value;
+            const Coord point = native_coordinate(header, column, row);
+            const auto [vertex, inserted] =
+                vertex_indices.try_emplace((uint64_t(column) << 32U) | row, native.size());
+            if (inserted)
+              native.push_back(point);
+            if (perimeter.empty() || native[perimeter.back()].x != point.x ||
+                native[perimeter.back()].y != point.y)
+              perimeter.push_back(vertex->second);
+          }
+        };
     append_edge(true, y0, x0, x1, false);
     append_edge(false, x1, y0, y1, false);
     append_edge(true, y1, x0, x1, true);
     append_edge(false, x0, y0, y1, true);
-    native.pop_back(); // The last edge closes at the first vertex.
-    std::vector<Coord> projected = projector.apply(native);
+    perimeter.pop_back(); // The last edge closes at the first vertex.
+    perimeters.push_back(std::move(perimeter));
+  }
+  if (native.empty())
+    return result;
+  const std::vector<Coord> vertices = projector.apply(native);
+  for (const auto &perimeter : perimeters) {
+    std::vector<Coord> projected;
+    projected.reserve(perimeter.size());
+    for (size_t index : perimeter)
+      projected.push_back(vertices[index]);
     double signed_area = 0.0;
     for (size_t index = 0; index < projected.size(); ++index) {
       const Coord a = projected[index];

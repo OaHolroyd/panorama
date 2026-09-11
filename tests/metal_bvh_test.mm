@@ -2459,6 +2459,22 @@ void check_streaming(const std::filesystem::path &directory) {
       stats.peak_bytes <= stats.budget_bytes && stats.resident_bytes <= stats.budget_bytes,
       "BVH cache exceeded its budget"
   );
+  require(
+      stats.selection_rays < stats.selection_passes * pixel_count(field.image),
+      "Streaming selection kept dispatching the complete image after rays finished"
+  );
+  // Turn through the full horizon with a cache that cannot retain the view.
+  // Completed/provisional hits and exact continuation must survive eviction.
+  for (uint32_t turn = 0U; turn < 8U; ++turn) {
+    const double heading = double(turn) * std::numbers::pi / 4.0;
+    const auto view = angular_field({129, 65}, {heading, heading + 1.2, -1.3, 0.1});
+    compare(software, hardware, view);
+    const auto turned = hardware.bvh_statistics();
+    require(
+        turned.peak_bytes <= turned.budget_bytes && turned.resident_bytes <= turned.budget_bytes,
+        "Panning exceeded the bounded BVH cache"
+    );
+  }
 }
 } // namespace
 

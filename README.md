@@ -212,15 +212,20 @@ and device.
 Metal BVH streams full-resolution tiles on demand; LOD is optional. Detailed tile
 BVHs and their immutable vertices are cached by tile and LOD. Rays retain their
 progress across batches, including when a frame's terrain exceeds the cache. Tiles are scheduled in outward grid shells to avoid
-rebuilding the same tile for successive groups of rays within a frame.
+rebuilding the same tile for successive groups of rays within a frame. Streaming
+selection and CPU grouping use only unfinished rays, preserving completed pixels
+when a sparse remainder needs more terrain.
 
 `--bvh-cache-mib` bounds the requested Metal storage for detailed BVHs, owned
 vertices, block metadata, bounds, and peak build/compaction workspace. It is
 **additional to** `--tile-cache-mib`; ray/output buffers, the small catalogue
 BVH, batch instance structures (at most 64 tiles), and driver allocation overhead
 are separate. A cache must fit at least one tile plus its build workspace;
-otherwise the error reports the required bytes. LRU eviction occurs only after
-GPU work completes. Statistics report resident bytes, peak reservation, builds,
+otherwise the error reports the required bytes. Eviction occurs only after GPU
+work completes, discarding obsolete LODs first and then the least recently used
+tiles. Primary hits and shadow occluders refresh usage; repair protects these
+tiles and newly admitted terrain while allowing unrelated cached tiles to leave.
+Statistics report resident bytes, peak reservation, builds,
 cache hits, and evictions. A small cache increases construction costs, particularly
 between viewer frames.
 

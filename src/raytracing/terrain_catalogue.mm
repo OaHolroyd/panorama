@@ -647,13 +647,24 @@ TerrainCatalogue TerrainCatalogue::discover(
       // into a region removed above.
       if (owned_cells != uint64_t(header.cell_count) * header.cell_count) {
         source.lod_count = 1U;
-        source.ownership_polygons = make_terrain_coverage_polygons(
-            header,
-            frame,
-            coverage_ownership,
-            256U,
-            boundary_junctions
+        const bool same_coverage = std::equal(
+            coverage_ownership.begin(),
+            coverage_ownership.end(),
+            coverage_patches.begin(),
+            coverage_patches.end(),
+            [](const TerrainTransformPatch &a, const TerrainTransformPatch &b) {
+              return a.minimum_column == b.minimum_column && a.minimum_row == b.minimum_row &&
+                     a.cell_width == b.cell_width && a.cell_height == b.cell_height;
+            }
         );
+        source.ownership_polygons = same_coverage ? source.coverage_polygons
+                                                  : make_terrain_coverage_polygons(
+                                                        header,
+                                                        frame,
+                                                        coverage_ownership,
+                                                        256U,
+                                                        boundary_junctions
+                                                    );
       }
       source.effective_cell_size_metres = whole.maximum_cell_size_metres();
       const bool contains_observer =

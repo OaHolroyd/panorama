@@ -526,6 +526,8 @@ kernel void trace_terrain_bvh(
     device float *steps [[buffer(6)]],
     device float *evaluations [[buffer(7)]],
     constant BvhParameters &params [[buffer(8)]],
+    device const BvhChunk *chunks [[buffer(9)]],
+    device atomic_uint *used_sources [[buffer(10)]],
     device BvhRayState *states [[buffer(11)]],
     device const uint *work [[buffer(12)]],
     primitive_acceleration_structure coverage [[buffer(20)]],
@@ -571,6 +573,12 @@ kernel void trace_terrain_bvh(
   }
   states[index].source = 0xffffffffU;
   bool hit = result.type != intersection_type::none;
+  if (hit)
+    atomic_store_explicit(
+        used_sources + chunks[result.instance_id].source,
+        1U,
+        memory_order_relaxed
+    );
   states[index].progress = states[index].exit;
   states[index].done = hit || states[index].progress >= params.trace.max_distance;
   distances[index] = hit ? result.distance : 0.0F;
@@ -603,6 +611,8 @@ kernel void trace_terrain_scene(
     device float *steps [[buffer(6)]],
     device float *evaluations [[buffer(7)]],
     constant BvhParameters &params [[buffer(8)]],
+    device const BvhChunk *chunks [[buffer(9)]],
+    device atomic_uint *used_sources [[buffer(10)]],
     device BvhRayState *states [[buffer(11)]],
     device const uint *work [[buffer(12)]],
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
@@ -672,6 +682,11 @@ kernel void trace_terrain_scene(
   }
   bool hit = result.type != intersection_type::none;
   if (hit) {
+    atomic_store_explicit(
+        used_sources + chunks[result.instance_id].source,
+        1U,
+        memory_order_relaxed
+    );
     r.max_distance =
         min(params.trace.max_distance,
             result.distance + 8.0F * FLT_EPSILON * max(1.0F, result.distance));
@@ -690,7 +705,7 @@ kernel void trace_terrain_scene(
     const uint pending = atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
     pending_rays[pending] = index;
     // Retain a conservative closest-hit bound while missing sources load.
-    // Atlas/BVH admission pins the scene which supplied this candidate.
+    // Admission pins the source recorded above, which supplied this candidate.
     states[index].exit = hit ? result.distance : previous_hit;
     return;
   }
@@ -723,6 +738,8 @@ kernel void trace_scene_shadows(
     device const float *elevations [[buffer(4)]],
     device const uint *gradients [[buffer(5)]],
     constant BvhParameters &params [[buffer(8)]],
+    device const BvhChunk *chunks [[buffer(9)]],
+    device atomic_uint *used_sources [[buffer(10)]],
     device const BvhRayState *states [[buffer(11)]],
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
     intersection_function_table<> missing_functions [[buffer(14)]],
@@ -788,6 +805,7 @@ kernel void trace_scene_shadows(
     hit = tracer.intersect(r, terrain, functions, payload);
   }
   if (hit.type != intersection_type::none) {
+    atomic_store_explicit(used_sources + chunks[hit.instance_id].source, 1U, memory_order_relaxed);
     visibility[index] = 0U;
     return; // A known occluder proves shadow even if other tiles still need loading.
   }

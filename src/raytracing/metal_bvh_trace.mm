@@ -120,7 +120,7 @@ struct MetalBvhTrace::State {
   Hierarchy scene;
   std::vector<Entry *> scene_entries;
   id<MTLBuffer> scene_resident, scene_missing_count;
-  id<MTLBuffer> scene_requested_sources;
+  id<MTLBuffer> scene_requested_sources, used_sources;
   std::array<id<MTLBuffer>, 2> scene_pending_rays = {};
   uint32_t scene_pending_output = 0U;
   id<MTLBuffer> scene_shadows, shadow_missing_count;
@@ -350,7 +350,12 @@ struct MetalBvhTrace::State {
       for (auto it = cache.begin(); it != cache.end(); ++it) {
         if (std::find(pinned.begin(), pinned.end(), it->second.get()) != pinned.end())
           continue;
-        if (victim == cache.end() || it->second->used < victim->second->used)
+        const bool obsolete = it->first.lod != manager->lod_for_source(it->first.source_index);
+        const bool victim_obsolete =
+            victim != cache.end() &&
+            victim->first.lod != manager->lod_for_source(victim->first.source_index);
+        if (victim == cache.end() || (obsolete && !victim_obsolete) ||
+            (obsolete == victim_obsolete && it->second->used < victim->second->used))
           victim = it;
       }
       if (victim == cache.end())
@@ -362,6 +367,22 @@ struct MetalBvhTrace::State {
     }
     stats.peak_bytes = std::max(stats.peak_bytes, stats.resident_bytes + required);
     return true;
+  }
+
+  // The completed GPU pass identifies primary hits (including provisional
+  // hits) and shadow occluders. Protect these during repair, rather than every
+  // old tile that happens to remain in the scene. No command may be in flight.
+  std::vector<Entry *> used_entries() {
+    const auto *used = static_cast<const uint32_t *>(used_sources.contents);
+    const uint64_t stamp = ++clock;
+    std::vector<Entry *> entries;
+    for (auto &[key, entry] : cache) {
+      if (key.lod == manager->lod_for_source(key.source_index) && used[key.source_index]) {
+        entry->used = stamp;
+        entries.push_back(entry.get());
+      }
+    }
+    return entries;
   }
 
   Entry *acquire(
@@ -642,6 +663,13 @@ struct MetalBvhTrace::State {
     const bool submit = command == nil;
     if (submit)
       command = [gpu.command_queue() commandBuffer];
+    if (scene_mode && !shadows && !current.scene_resume) {
+      auto clear = [command blitCommandEncoder];
+      if (clear == nil)
+        throw std::runtime_error("Could not clear terrain usage");
+      [clear fillBuffer:used_sources range:NSMakeRange(0, used_sources.length) value:0];
+      [clear endEncoding];
+    }
     auto encoder = [command computeCommandEncoder];
     if (encoder == nil)
       throw std::runtime_error("Could not encode BVH trace");
@@ -657,6 +685,8 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:outputs.debugging_info ? gpu.num_steps() : dummy offset:0 atIndex:6];
     [encoder setBuffer:outputs.debugging_info ? gpu.num_evaluations() : dummy offset:0 atIndex:7];
     [encoder setBuffer:parameters offset:0 atIndex:8];
+    [encoder setBuffer:hierarchy.chunks offset:0 atIndex:9];
+    [encoder setBuffer:used_sources offset:0 atIndex:10];
     [encoder setBuffer:rays offset:0 atIndex:11];
     [encoder setBuffer:work offset:0 atIndex:12];
     if (scene_mode && !shadows) {
@@ -797,11 +827,14 @@ struct MetalBvhTrace::State {
     const uint32_t missing = *static_cast<const uint32_t *>(scene_missing_count.contents);
     scene_requests_ready = true;
     stats.scene_fallback_rays += missing;
+    (void)used_entries();
     return missing == 0U;
   }
 
-  void select(Timer &timer) {
+  void select(const std::vector<uint32_t> &indices, Timer &timer) {
     trace_activity::Scope activity("BVH streaming tile selection");
+    current.work_count = checked_count(indices.size());
+    std::memcpy(work.contents, indices.data(), indices.size() * sizeof(uint32_t));
     std::memcpy(parameters.contents, &current, sizeof(current));
     Pipeline &selector = current.transformed_catalogue ? patch_selector : tile_selector;
     id<MTLBuffer> selection_metadata = current.transformed_catalogue ? coverage_polygons : tiles;
@@ -823,16 +856,18 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:selection_metadata offset:0 atIndex:5];
     if (current.transformed_catalogue)
       [encoder setBuffer:coverage_vertices offset:0 atIndex:6];
+    [encoder setBuffer:work offset:0 atIndex:7];
     [encoder useResource:selection_metadata usage:MTLResourceUsageRead];
     if (current.transformed_catalogue)
       [encoder useResource:coverage_vertices usage:MTLResourceUsageRead];
     [encoder useResource:catalogue usage:MTLResourceUsageRead];
     [encoder useResource:selector.table usage:MTLResourceUsageRead];
-    dispatch_image(encoder, selector.state, current.trace);
+    dispatch_linear(encoder, selector.state, current.work_count);
     [encoder endEncoding];
     const double gpu_ms = complete(command);
     stats.selection_gpu_ms += gpu_ms;
     ++stats.selection_passes;
+    stats.selection_rays += indices.size();
     ++stats.submissions;
     timer.add_work("GPU BVH tile selection", gpu_ms);
   }
@@ -884,6 +919,7 @@ bool MetalBvhTrace::scene_complete() {
   ++state.stats.scene_passes;
   ++state.stats.trace_passes;
   ++state.stats.submissions;
+  (void)state.used_entries();
   return missing == 0U;
 }
 
@@ -930,6 +966,7 @@ bool MetalBvhTrace::encode_shadows(id<MTLCommandBuffer> command, double azimuth,
 
 bool MetalBvhTrace::shadows_complete() {
   state_->shadow_requests_ready = true;
+  (void)state_->used_entries();
   return *static_cast<const uint32_t *>(state_->shadow_missing_count.contents) == 0U;
 }
 
@@ -938,14 +975,7 @@ id<MTLBuffer> MetalBvhTrace::shadow_visibility() const { return state_->scene_sh
 bool MetalBvhTrace::trace_shadows(double azimuth, double elevation, Timer &timer) {
   State &state = *state_;
   trace_activity::Scope activity("BVH shadow terrain repair");
-  // Pin the current LOD scene throughout repair. Evicting these entries would
-  // undo progress, or trade primary terrain for shadow terrain every frame.
-  // Other LOD variants remain eligible for ordinary budgeted eviction.
-  std::vector<State::Entry *> pinned;
-  for (auto &[key, entry] : state.cache) {
-    if (key.lod == state.manager->lod_for_source(key.source_index))
-      pinned.push_back(entry.get());
-  }
+  std::vector<State::Entry *> pinned = state.used_entries();
   for (uint32_t round = 0; round <= state.current.source_count; ++round) {
     // Reuse the completed producer's requests when its primary outputs and
     // sun are unchanged. Primary repair/relocation invalidate this snapshot.
@@ -1073,13 +1103,21 @@ void MetalBvhTrace::prepare(
       !tiles.sources().empty() && !tiles.sources().front().transform_patches.empty();
   if (state.scene_requested_sources == nil ||
       state.scene_requested_sources.length <
-          uint64_t(state.current.source_count) * sizeof(uint32_t))
+          uint64_t(state.current.source_count) * sizeof(uint32_t)) {
     state.scene_requested_sources = buffer(
         state.gpu.device(),
         state.current.source_count,
         sizeof(uint32_t),
         @"primary terrain requests"
     );
+    state.used_sources = buffer(
+        state.gpu.device(),
+        state.current.source_count,
+        sizeof(uint32_t),
+        @"used terrain sources"
+    );
+    std::memset(state.used_sources.contents, 0, state.used_sources.length);
+  }
   uint32_t changed_lods = state.selected_lods.size() == tiles.sources().size()
                               ? 0U
                               : checked_count(tiles.sources().size());
@@ -1148,7 +1186,7 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
       // of walking every already-resident tile again in one full-image pass
       // per distance shell. The bounded streaming path below remains the
       // exact fallback when the complete working set cannot fit the cache.
-      std::vector<State::Entry *> repair_pins = state.scene_entries;
+      std::vector<State::Entry *> repair_pins;
       for (uint32_t repair = 0; repair <= state.current.source_count; ++repair) {
         const uint32_t missing =
             state.scene_requests_ready
@@ -1158,6 +1196,12 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
             (!state.scene_requests_ready && state.trace_scene(timer, resume)))
           return;
         resume = true;
+        // Include the provisional winners of every completed repair pass:
+        // their hit bounds are reused by the next pass, so they must survive.
+        for (auto *entry : state.used_entries()) {
+          if (std::find(repair_pins.begin(), repair_pins.end(), entry) == repair_pins.end())
+            repair_pins.push_back(entry);
+        }
         const auto *requested =
             static_cast<const uint32_t *>(state.scene_requested_sources.contents);
         bool loaded = false;
@@ -1205,16 +1249,26 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
   const uint32_t traversal_limit = state.current.transformed_catalogue
                                        ? state.current.coverage_step_limit
                                        : state.current.source_count;
+  // Keep the sparse unresolved tail compact through selection and CPU grouping,
+  // including when eviction forces us out of the resident-scene repair path.
+  const auto *rays = static_cast<const BvhRayState *>(state.rays.contents);
+  std::vector<uint32_t> active;
+  for (uint32_t i = 0; i < parameters.ray_count; ++i) {
+    if (!rays[i].done)
+      active.push_back(i);
+  }
   for (uint32_t round = 0; round <= traversal_limit; ++round) {
+    std::erase_if(active, [&](uint32_t i) { return rays[i].done != 0U; });
+    if (active.empty())
+      return;
     @autoreleasepool {
-      state.select(timer);
+      state.select(active, timer);
     }
     const auto grouping_started = std::chrono::steady_clock::now();
-    const auto *rays = static_cast<const BvhRayState *>(state.rays.contents);
     double nearest_shell = std::numeric_limits<double>::infinity();
     uint32_t active_rays = 0U;
     uint32_t failed_ray = parameters.ray_count;
-    for (uint32_t i = 0; i < parameters.ray_count; ++i) {
+    for (uint32_t i : active) {
       if (rays[i].done)
         continue;
       ++active_rays;
@@ -1290,7 +1344,7 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
     // source arrive before it is processed. Native grids use Manhattan shells;
     // mixed-CRS catalogues use radial bands in their common render frame.
     std::map<uint32_t, std::vector<uint32_t>> groups;
-    for (uint32_t i = 0; i < parameters.ray_count; ++i) {
+    for (uint32_t i : active) {
       if (rays[i].done)
         continue;
       if (state.tile_shells[rays[i].source] != nearest_shell)

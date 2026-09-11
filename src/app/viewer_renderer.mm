@@ -1479,7 +1479,8 @@ private:
                 "Frame work %llu: BVH built/hit/evicted=%llu/%llu/%llu, "
                 "catalogue/instance/scene builds=%llu/%llu/%llu, "
                 "cached/scene tiles=%llu/%llu, scene %.1f MiB, "
-                "selection/detail passes=%llu/%llu, fallback ray attempts=%llu, "
+                "selection/detail passes=%llu/%llu, selection rays=%llu, fallback ray "
+                "attempts=%llu, "
                 "repair passes/rays=%llu/%llu, "
                 "GPU build/selection/detail=%.3f/%.3f/%.3f ms, CPU grouping=%.3f ms; "
                 "atlas installed/evicted=%llu/%llu, mipmaps=%llu, I/O=%.3f MiB, resident=%u/%u\n",
@@ -1495,6 +1496,7 @@ private:
                 double(bvh.scene_bytes) / 1048576.0,
                 delta(bvh.selection_passes, bvh_before.selection_passes),
                 delta(bvh.trace_passes, bvh_before.trace_passes),
+                delta(bvh.selection_rays, bvh_before.selection_rays),
                 delta(bvh.scene_fallback_rays, bvh_before.scene_fallback_rays),
                 delta(bvh.scene_repair_passes, bvh_before.scene_repair_passes),
                 delta(bvh.scene_repair_rays, bvh_before.scene_repair_rays),

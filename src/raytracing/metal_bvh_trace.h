@@ -18,6 +18,7 @@ struct MetalBvhStatistics {
   uint64_t catalogue_builds = 0U;
   uint64_t instance_builds = 0U;
   uint64_t selection_passes = 0U;
+  uint64_t selection_rays = 0U;
   uint64_t trace_passes = 0U;
   uint64_t submissions = 0U;
   uint64_t scene_builds = 0U;

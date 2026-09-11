@@ -97,10 +97,32 @@ struct TerrainTileBvh::State {
              checked_count(i),
              float(transform.maximum_residual_metres)}
         );
-        const double bx0 = transform.bounds[0] - render_observer.x;
-        const double by0 = transform.bounds[1] - render_observer.y;
-        const double bx1 = transform.bounds[2] - render_observer.x;
-        const double by1 = transform.bounds[3] - render_observer.y;
+        // Coverage clipping can leave many small rectangles sharing one
+        // affine transform. Bound this rectangle, not the transform's entire
+        // original region, or those candidates overlap almost everywhere.
+        double bx0 = INFINITY, by0 = INFINITY, bx1 = -INFINITY, by1 = -INFINITY;
+        for (uint32_t column : {minimum_column, maximum_column}) {
+          for (uint32_t row : {minimum_row, maximum_row}) {
+            const Coord corner = transform.apply(column, row);
+            bx0 = std::min(bx0, corner.x - render_observer.x);
+            by0 = std::min(by0, corner.y - render_observer.y);
+            bx1 = std::max(bx1, corner.x - render_observer.x);
+            by1 = std::max(by1, corner.y - render_observer.y);
+          }
+        }
+        // Cover projection residual and the Float32 forward/inverse affine
+        // arithmetic used by the shaders, including cancellation at long range.
+        const double coordinate_scale =
+            1.0 + std::abs(ox) + std::abs(oy) +
+            maximum_column *
+                (std::abs(transform.column_step.x) + std::abs(transform.column_step.y)) +
+            maximum_row * (std::abs(transform.row_step.x) + std::abs(transform.row_step.y));
+        const double xy_guard = transform.maximum_residual_metres +
+                                32 * std::numeric_limits<float>::epsilon() * coordinate_scale;
+        bx0 = std::nextafter(float(bx0 - xy_guard), -INFINITY);
+        by0 = std::nextafter(float(by0 - xy_guard), -INFINITY);
+        bx1 = std::nextafter(float(bx1 + xy_guard), INFINITY);
+        by1 = std::nextafter(float(by1 + xy_guard), INFINITY);
         const double near_x = std::clamp(0.0, bx0, bx1);
         const double near_y = std::clamp(0.0, by0, by1);
         const double far_x = std::max(std::abs(bx0), std::abs(bx1));

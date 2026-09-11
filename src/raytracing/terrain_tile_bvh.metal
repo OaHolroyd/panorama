@@ -118,10 +118,13 @@ kernel void select_terrain_coverage_polygons(
     constant BvhParameters &params [[buffer(4)]],
     device const BvhCoveragePolygon *polygons [[buffer(5)]],
     device const BvhCoverageVertex *vertices [[buffer(6)]],
-    uint2 position [[thread_position_in_grid]]
+    device const uint *work [[buffer(7)]],
+    uint work_index [[thread_position_in_grid]]
 ) {
-  const uint index = position.y * params.trace.image_width + position.x;
-  if (index >= params.trace.ray_count || states[index].done || states[index].source != 0xffffffffU)
+  if (work_index >= params.work_count)
+    return;
+  const uint index = work[work_index];
+  if (states[index].done || states[index].source != 0xffffffffU)
     return;
   auto selected = select_next_coverage_polygon(
       catalogue,
@@ -151,10 +154,13 @@ kernel void select_terrain_tiles(
     device BvhRayState *states [[buffer(3)]],
     constant BvhParameters &params [[buffer(4)]],
     device const BvhTile *tiles [[buffer(5)]],
-    uint2 position [[thread_position_in_grid]]
+    device const uint *work [[buffer(7)]],
+    uint work_index [[thread_position_in_grid]]
 ) {
-  const uint index = position.y * params.trace.image_width + position.x;
-  if (index >= params.trace.ray_count || states[index].done || states[index].source != 0xffffffffU)
+  if (work_index >= params.work_count)
+    return;
+  const uint index = work[work_index];
+  if (states[index].done || states[index].source != 0xffffffffU)
     return;
   const auto selected = select_next_terrain_tile(
       catalogue,
