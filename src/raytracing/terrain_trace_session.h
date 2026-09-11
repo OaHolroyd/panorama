@@ -45,7 +45,11 @@ public:
   /// Append resident primary tracing to an uncommitted producer. Preparation
   /// may build scene structures synchronously. False encodes nothing.
   /// Do not mutate session resources until the producer has completed.
-  bool encode_trace(id<MTLCommandBuffer> command, const RayFieldRequest &camera);
+  bool encode_trace(
+      id<MTLCommandBuffer> command,
+      const RayFieldRequest &camera,
+      float lod_footprint_scale = 1.0F
+  );
   [[nodiscard]] GpuCameraStatistics camera_statistics() const;
   /// After producer completion, false requires synchronous trace_prepared() and
   /// a new presentation pass before publishing the image.

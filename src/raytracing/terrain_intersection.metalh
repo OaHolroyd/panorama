@@ -317,7 +317,8 @@ inline Collision triangle_collision(
     float2 direction,
     float slope,
     float curvature,
-    float t_entry
+    float t_entry,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   const uint lower_left = i * vertex_count + j;
 
@@ -346,7 +347,7 @@ inline Collision triangle_collision(
 
   // Evaluate ray properties once
   const float z = observer_elevation + slope * t_entry + curvature * (t_entry * t_entry);
-  const float3 origin = float3(direction.x * t_entry, direction.y * t_entry, z);
+  const float3 origin = float3(horizontal_origin + direction * t_entry, z);
   const float3 direction3 = float3(direction.x, direction.y, slope);
 
   // Perform intersection of both triangles at once
@@ -385,7 +386,8 @@ inline uint triangle_packed_surface_gradients(
     uint i,
     uint j,
     float2 direction,
-    float distance
+    float distance,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   const uint lower_left = i * vertex_count + j;
   const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
@@ -394,8 +396,10 @@ inline uint triangle_packed_surface_gradients(
   const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
 
   // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
-  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
-  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+  const float sx =
+      clamp((horizontal_origin.x + distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy =
+      clamp((horizontal_origin.y + distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
 
   // Re-evaluate the data-dependent split rule
   bool split = fabs(z00 - z11) < fabs(z01 - z10);
@@ -457,14 +461,15 @@ inline Collision bilinear_collision(
     float slope,
     float curvature,
     float t_entry,
-    float t_exit
+    float t_exit,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   constexpr float kPolynomialEpsilon = 1e-12F;
   const uint lower_left = i * vertex_count + j;
   const float interval_length = t_exit - t_entry;
 
-  const float sx0 = (t_entry * direction.x - cell_x) * inverse_delta;
-  const float sy0 = (t_entry * direction.y - cell_y) * inverse_delta;
+  const float sx0 = (horizontal_origin.x + t_entry * direction.x - cell_x) * inverse_delta;
+  const float sy0 = (horizontal_origin.y + t_entry * direction.y - cell_y) * inverse_delta;
   const float sx1 = direction.x * inverse_delta;
   const float sy1 = direction.y * inverse_delta;
 
@@ -625,7 +630,8 @@ inline uint bilinear_packed_surface_gradients(
     uint i,
     uint j,
     float2 direction,
-    float distance
+    float distance,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   const uint lower_left = i * vertex_count + j;
   const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
@@ -633,8 +639,10 @@ inline uint bilinear_packed_surface_gradients(
   const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
   const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
   const float twist = z11 - z10 - z01 + z00;
-  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
-  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+  const float sx =
+      clamp((horizontal_origin.x + distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy =
+      clamp((horizontal_origin.y + distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
   constexpr float kMaximumHalf = 65504.0F;
   const float east_gradient =
       clamp((z01 - z00 + twist * sy) * inverse_delta, -kMaximumHalf, kMaximumHalf);
@@ -698,7 +706,8 @@ inline uint interpolated_packed_surface_gradients(
     uint i,
     uint j,
     float2 direction,
-    float distance
+    float distance,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   const uint lower_left = i * vertex_count + j;
   const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
@@ -707,8 +716,10 @@ inline uint interpolated_packed_surface_gradients(
   const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
 
   // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
-  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
-  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+  const float sx =
+      clamp((horizontal_origin.x + distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy =
+      clamp((horizontal_origin.y + distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
 
   // Fetch surrounding 1-ring neighbor elevations required for central differences
   const float z_w0 = sample_elevation(vertices[lower_left - 1U], base_decimeters);

@@ -822,18 +822,25 @@ void TileManager::State::rebase_observer(ObserverLocation observer) {
   if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing)) {
     throw std::invalid_argument("Resident terrain rebase requires a finite observer");
   }
+  const Coord rendered_observer =
+      state.catalogue->render_coordinate({observer.easting, observer.northing});
   for (uint32_t slot = 0U; slot < state.slot_capacity; slot++) {
     const std::optional<TileVariant> variant = state.variant_by_slot[slot];
     if (!variant.has_value()) {
       continue;
     }
     const TerrainSource &source = state.catalogue->sources()[variant->source_index];
+    const bool transformed = !source.transform_patches.empty();
     const double lower_left_x =
-        state.grid_origin_x + static_cast<double>(source.key.column) * state.tile_width;
+        transformed
+            ? source.transform_patches.front().transform.bounds[0]
+            : state.grid_origin_x + static_cast<double>(source.key.column) * state.tile_width;
     const double lower_left_y =
-        state.grid_origin_y - static_cast<double>(source.key.row + 1) * state.tile_width;
-    const double relative_x = lower_left_x - observer.easting;
-    const double relative_y = lower_left_y - observer.northing;
+        transformed
+            ? source.transform_patches.front().transform.bounds[1]
+            : state.grid_origin_y - static_cast<double>(source.key.row + 1) * state.tile_width;
+    const double relative_x = lower_left_x - rendered_observer.x;
+    const double relative_y = lower_left_y - rendered_observer.y;
     if (relative_x < static_cast<double>(std::numeric_limits<float>::lowest()) ||
         relative_x > static_cast<double>(std::numeric_limits<float>::max()) ||
         relative_y < static_cast<double>(std::numeric_limits<float>::lowest()) ||
@@ -853,21 +860,23 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
     throw std::logic_error("Terrain sampling requires an attached TileManager atlas");
   }
 
-  const TileKey key = tile_key_at(catalogue->grid(), easting, northing);
-  const std::optional<uint32_t> source_index = catalogue->find_source(key);
-  if (!source_index.has_value()) {
+  const auto location = catalogue->locate_source({easting, northing});
+  if (!location.has_value()) {
     return std::nullopt;
   }
 
-  const TerrainSource &source = catalogue->sources()[*source_index];
+  const uint32_t source_index = location->source_index;
+  const TerrainSource &source = catalogue->sources()[source_index];
   const uint32_t cell_count = header_template.cell_count;
   const size_t side = static_cast<size_t>(cell_count) + 1U;
-  const double lower_left_x =
-      catalogue->grid().origin_x + static_cast<double>(key.column) * catalogue->grid().width;
-  const double lower_left_y =
-      catalogue->grid().origin_y - static_cast<double>(key.row + 1) * catalogue->grid().width;
-  const double x = (easting - lower_left_x) / header_template.cell_size;
-  const double y = (northing - lower_left_y) / header_template.cell_size;
+  const TileGrid &grid = catalogue->datasets().empty()
+                             ? catalogue->grid()
+                             : catalogue->datasets()[source.dataset_index].grid;
+  const double cell_size = grid.width / cell_count;
+  const double lower_left_x = grid.origin_x + static_cast<double>(source.key.column) * grid.width;
+  const double lower_left_y = grid.origin_y - static_cast<double>(source.key.row + 1) * grid.width;
+  const double x = (location->native_coordinate.x - lower_left_x) / cell_size;
+  const double y = (location->native_coordinate.y - lower_left_y) / cell_size;
   if (!std::isfinite(x) || !std::isfinite(y) || x < 0.0 || y < 0.0 || x > cell_count ||
       y > cell_count) {
     return std::nullopt;
@@ -881,7 +890,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
   const void *values = nullptr;
   MetalTileSampleType sample_type = header_template.sample_type;
   int32_t elevation_base = 0;
-  const auto resident = slot_by_variant.find({*source_index, 1U});
+  const auto resident = slot_by_variant.find({source_index, 1U});
   if (resident != slot_by_variant.end()) {
     // Inspection requires exact LOD-1 terrain. Reuse it in place when the
     // render atlas already contains that variant, decoding packed records
@@ -905,7 +914,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
     // A render may legitimately retain only a coarse variant. Keep a separate
     // one-tile LOD-1 payload so cursor queries do not perturb frontier
     // residency or force the selected rendering LOD to change.
-    if (!sampled_source_index.has_value() || *sampled_source_index != *source_index) {
+    if (!sampled_source_index.has_value() || *sampled_source_index != source_index) {
       const MetalTileHeader header = read_metal_tile_header(source.path);
       if (header.cell_count != cell_count || header.sample_type != header_template.sample_type ||
           header.vertex_byte_count > std::numeric_limits<NSUInteger>::max()) {
@@ -935,7 +944,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
       );
       bytes_loaded_with_metal_io += header.vertex_byte_count;
       sampled_header = header;
-      sampled_source_index = *source_index;
+      sampled_source_index = source_index;
     }
     values = sampled_vertices.contents;
     sample_type = sampled_header.sample_type;
@@ -957,7 +966,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
   };
   const double south = std::lerp(vertex(x0, y0), vertex(x0 + 1U, y0), tx);
   const double north = std::lerp(vertex(x0, y0 + 1U), vertex(x0 + 1U, y0 + 1U), tx);
-  return static_cast<float>(std::lerp(south, north, ty));
+  return static_cast<float>(std::lerp(south, north, ty) + source.vertical_offset_metres);
 }
 
 TileManagerBindings TileManager::State::bindings() const {

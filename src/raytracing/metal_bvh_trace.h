@@ -23,6 +23,15 @@ struct MetalBvhStatistics {
   uint64_t scene_builds = 0U;
   uint64_t scene_passes = 0U;
   uint64_t scene_fallback_rays = 0U;
+  uint64_t streaming_rounds = 0U;
+  uint64_t streaming_groups = 0U;
+  uint64_t streaming_rays = 0U;
+  uint64_t lod_plan_changes = 0U;
+  uint64_t lod_sources_changed = 0U;
+  uint64_t scene_catalogue_invalidations = 0U;
+  uint64_t scene_lod_invalidations = 0U;
+  uint64_t scene_admission_invalidations = 0U;
+  uint64_t scene_eviction_invalidations = 0U;
   // Small scene metadata/TLAS overhead, separate from detailed tile storage.
   uint64_t scene_bytes = 0U;
   uint64_t cached_tiles = 0U;

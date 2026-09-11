@@ -58,7 +58,8 @@ BvhPipeline make_bvh_pipeline(
     NSString *kernel_name,
     NSString *intersection_name,
     MTLFunctionConstantValues *constants,
-    bool scene_mode
+    bool scene_mode,
+    NSString *missing_intersection_name
 ) {
   NSError *error = nil;
   id<MTLFunction> kernel = constants == nil ? [gpu.library() newFunctionWithName:kernel_name]
@@ -78,7 +79,9 @@ BvhPipeline make_bvh_pipeline(
   descriptor.linkedFunctions.functions = @[ intersection ];
   id<MTLFunction> missing = nil;
   if (scene_mode) {
-    missing = [gpu.library() newFunctionWithName:@"terrain_tile_intersection"];
+    missing = [gpu.library() newFunctionWithName:missing_intersection_name == nil
+                                                     ? @"terrain_tile_intersection"
+                                                     : missing_intersection_name];
     if (missing == nil)
       throw std::runtime_error("Could not load scene missing-tile intersection function");
     descriptor.linkedFunctions.functions = @[ intersection, missing ];
@@ -99,10 +102,12 @@ BvhPipeline make_bvh_pipeline(
   [result.table setFunction:handle atIndex:0];
   if (scene_mode) {
     result.missing_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
+    result.coverage_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
     auto missing_handle = [result.state functionHandleWithFunction:missing];
-    if (result.missing_table == nil || missing_handle == nil)
+    if (result.missing_table == nil || result.coverage_table == nil || missing_handle == nil)
       throw std::runtime_error("Could not create scene missing-tile intersection table");
     [result.missing_table setFunction:missing_handle atIndex:0];
+    [result.coverage_table setFunction:missing_handle atIndex:0];
   }
   return result;
 }

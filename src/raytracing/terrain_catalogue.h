@@ -1,11 +1,15 @@
 #pragma once
 
+#include "metal_tile.h"
 #include "raytrace_config.h"
+#include "terrain_transform.h"
 
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace panorama {
@@ -43,7 +47,45 @@ struct TerrainSource {
   /// Independently loadable terrain representations, including LOD 1.
   uint32_t lod_count = 1U;
   std::optional<float> minimum_elevation = std::nullopt;
+  /// Position of the owning dataset in the configured priority order.
+  uint32_t dataset_index = 0U;
+  /// Tile-local logical-cell transforms into the selected render frame.
+  std::vector<TerrainTransformPatch> transform_patches;
+  /// Largest transformed LOD-1 cell axis, used by per-source LOD policy.
+  double effective_cell_size_metres = 0.0;
+  double vertical_offset_metres = 0.0;
 };
+
+/// One independently gridded prepared dataset before observer filtering and
+/// cross-dataset ownership resolution.
+struct TerrainDataset {
+  TerrainDatasetConfig config;
+  uint32_t index;
+  TileGrid grid;
+  uint32_t epsg_code;
+  uint32_t cell_count;
+  uint32_t level_count;
+  uint32_t lod_count;
+  MetalTileSampleType sample_type;
+  MetalTileCompression compression;
+  std::vector<TerrainSource> sources;
+};
+
+/// A navigation-frame point resolved into one source dataset's native grid.
+struct TerrainLocation {
+  uint32_t source_index;
+  Coord native_coordinate;
+};
+
+/// Discover an ordered stack and enforce the payload/atlas layout shared by
+/// all datasets. Native CRS and cell spacing may differ.
+[[nodiscard]] std::vector<TerrainDataset>
+discover_terrain_datasets(std::span<const TerrainDatasetConfig> configs);
+
+/// Select the native projected frame for one metre dataset, otherwise centre
+/// an AEQD metre frame on the observer expressed in the first dataset's CRS.
+[[nodiscard]] TerrainRenderFrame
+select_terrain_render_frame(std::span<const TerrainDataset> datasets, Coord navigation_observer);
 
 /// A finite, indexed catalogue of terrain sources relevant to one render.
 ///
@@ -58,6 +100,15 @@ public:
   /// Infer the prepared grid, discover sources, and put the observer tile first.
   [[nodiscard]] static TerrainCatalogue discover(
       const std::filesystem::path &tile_dir,
+      const ObserverLocation &observer,
+      float max_distance,
+      uint32_t max_tile_count,
+      bool allow_observer_fallback = false
+  );
+
+  /// Discover, transform, and observer-filter an ordered terrain stack.
+  [[nodiscard]] static TerrainCatalogue discover(
+      std::span<const TerrainDatasetConfig> datasets,
       const ObserverLocation &observer,
       float max_distance,
       uint32_t max_tile_count,
@@ -85,6 +136,16 @@ public:
 
   /// Return a source index for a grid key, or no value when coverage is absent.
   [[nodiscard]] std::optional<uint32_t> find_source(TileKey key) const;
+  [[nodiscard]] std::optional<uint32_t> find_source(uint32_t dataset_index, TileKey key) const;
+  /// Resolve a point in the first dataset's navigation CRS, respecting the
+  /// configured dataset priority.
+  [[nodiscard]] std::optional<TerrainLocation> locate_source(Coord navigation_coordinate) const;
+  [[nodiscard]] const std::vector<TerrainDataset> &datasets() const;
+  [[nodiscard]] const TerrainRenderFrame &render_frame() const;
+  [[nodiscard]] Coord render_coordinate(Coord navigation_coordinate) const;
+  /// Unit render-frame directions corresponding to the navigation CRS's
+  /// positive easting and northing axes at a point.
+  [[nodiscard]] std::array<Coord, 2> render_basis(Coord navigation_coordinate) const;
 
 private:
   /// Construct an already validated, indexable catalogue.
@@ -92,15 +153,26 @@ private:
       TileGrid grid,
       std::vector<TerrainSource> sources,
       ObserverLocation observer,
-      std::vector<TileKey> coverage_tiles
+      std::vector<TileKey> coverage_tiles,
+      std::vector<TerrainDataset> datasets = {},
+      std::optional<TerrainRenderFrame> render_frame = std::nullopt
   );
+
+  struct SourceKey {
+    uint32_t dataset;
+    TileKey tile;
+    [[nodiscard]] bool operator<(const SourceKey &other) const;
+  };
 
   TileGrid grid_;
   std::vector<TerrainSource> sources_;
   ObserverLocation observer_;
   TerrainCoverage coverage_;
-  std::map<TileKey, uint32_t> source_index_by_key_;
+  std::map<SourceKey, uint32_t> source_index_by_key_;
   std::optional<float> maximum_elevation_;
+  std::vector<TerrainDataset> datasets_;
+  std::vector<std::unique_ptr<CoordinateTransform>> navigation_to_dataset_;
+  std::optional<TerrainRenderFrame> render_frame_;
 };
 
 /// Return the global rechunked tile key containing one projected coordinate.

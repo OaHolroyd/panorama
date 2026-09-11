@@ -13,7 +13,10 @@ public:
   bool
   prepare(TileManager &manager, ObserverLocation observer, const RaytraceParameters &parameters);
   id<MTLAccelerationStructure> acceleration() const;
+  /// Height-bounded candidates used to find unloaded possible occluders.
+  id<MTLAccelerationStructure> candidate_acceleration() const;
   id<MTLBuffer> tiles() const;
+  id<MTLBuffer> patches() const;
   std::span<const BvhTile> metadata() const;
   uint64_t bytes() const;
   uint64_t generation() const;

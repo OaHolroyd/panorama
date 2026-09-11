@@ -1,0 +1,1047 @@
+Health t=1.558: memory ok footprint/resident 2608.1/434.9 MiB, Metal allocated/recommended 2482.8/18186.2 MiB, thermal=0
+Health t=1.558: worker stage=render age=1004.9 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=1.558: display stage=idle age=24.0 ms, calls=11 revision=0, submitted/completed/presented=11/11/11, stale=0 unavailable=0 refreshed=0
+Health t=1.558: minimap stage=idle age=1558.0 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=1.558: terrain stage=primary repair age=988.8 ms
+Health t=2.563: memory ok footprint/resident 2671.8/479.4 MiB, Metal allocated/recommended 2537.9/18186.2 MiB, thermal=0
+Health t=2.563: worker stage=render age=2010.0 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=2.563: display stage=idle age=29.0 ms, calls=41 revision=0, submitted/completed/presented=41/41/41, stale=0 unavailable=0 refreshed=0
+Health t=2.563: minimap stage=idle age=2563.1 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=2.563: terrain stage=BVH instance hierarchy age=0.7 ms
+Health t=3.567: memory ok footprint/resident 2762.2/536.7 MiB, Metal allocated/recommended 2629.5/18186.2 MiB, thermal=0
+Health t=3.567: worker stage=render age=3014.2 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=3.567: display stage=drawable age=-0.0 ms, calls=72 revision=0, submitted/completed/presented=71/71/71, stale=0 unavailable=0 refreshed=0
+Health t=3.567: minimap stage=idle age=3567.3 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=3.567: terrain stage=BVH tile admission/loading/building age=2.9 ms
+Health t=4.569: memory ok footprint/resident 2776.7/545.6 MiB, Metal allocated/recommended 2644.5/18186.2 MiB, thermal=0
+Health t=4.569: worker stage=render age=4016.2 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=4.569: display stage=idle age=1.8 ms, calls=102 revision=0, submitted/completed/presented=102/101/101, stale=0 unavailable=0 refreshed=0
+Health t=4.569: minimap stage=idle age=4569.3 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=4.569: terrain stage=BVH build/compaction age=2.6 ms
+Health t=5.574: memory ok footprint/resident 2862.7/593.8 MiB, Metal allocated/recommended 2729.0/18186.2 MiB, thermal=0
+Health t=5.574: worker stage=render age=5021.2 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=5.574: display stage=idle age=7.7 ms, calls=132 revision=0, submitted/completed/presented=132/132/131, stale=0 unavailable=0 refreshed=0
+Health t=5.574: minimap stage=idle age=5574.3 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=5.574: terrain stage=BVH tile admission/loading/building age=3.1 ms
+Slow stage: primary repair wall 5328.964 ms (inclusive)
+Health t=6.579: memory ok footprint/resident 2957.2/638.4 MiB, Metal allocated/recommended 2821.7/18186.2 MiB, thermal=0
+Health t=6.579: worker stage=render age=6025.4 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=6.579: display stage=idle age=11.7 ms, calls=162 revision=0, submitted/completed/presented=162/162/161, stale=0 unavailable=0 refreshed=0
+Health t=6.579: minimap stage=idle age=6578.5 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=6.579: terrain stage=BVH build/compaction age=0.8 ms
+Health t=7.584: memory ok footprint/resident 3056.3/673.0 MiB, Metal allocated/recommended 2919.2/18186.2 MiB, thermal=0
+Health t=7.584: worker stage=render age=7030.5 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=7.584: display stage=idle age=16.1 ms, calls=192 revision=0, submitted/completed/presented=192/192/191, stale=0 unavailable=0 refreshed=0
+Health t=7.584: minimap stage=idle age=7583.6 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=7.584: terrain stage=BVH build/compaction age=1.3 ms
+Health t=8.584: memory ok footprint/resident 3188.1/737.9 MiB, Metal allocated/recommended 3040.9/18186.2 MiB, thermal=0
+Health t=8.584: worker stage=render age=8030.9 ms, calls=1 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=8.584: display stage=idle age=16.9 ms, calls=222 revision=0, submitted/completed/presented=222/221/221, stale=0 unavailable=0 refreshed=0
+Health t=8.584: minimap stage=idle age=8583.9 ms, calls=0 revision=0, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=8.584: terrain stage=BVH shadow terrain repair age=2632.0 ms
+Slow stage: BVH shadow terrain repair wall 2777.413 ms (inclusive)
+Slow stage: shadow repair wall 2777.455 ms (inclusive)
+Slow stage: terrain frame wall 8177.411 ms (inclusive)
+Frame 1: wall 8177.417 ms, GPU producer 41.375 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=8.730, BVH resident/budget 728.9/2048.0 MiB, builds/hits/evictions=1071/226/0, scene builds=25
+Frame phases 1: pre-render 0.012 ms, prepare 16.137 ms, primary repair 5328.964 ms, shadow repair 2777.455 ms, producer wait 42.672 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=0
+Frame work 1: BVH built/hit/evicted=1071/226/0, catalogue/instance/scene builds=1/167/25, cached/scene tiles=1071/1071, scene 0.4 MiB, selection/detail passes=143/142, fallback ray attempts=0, GPU build/selection/detail=1026.302/700.327/85.037 ms, CPU grouping=580.329 ms; atlas installed/evicted=1070/633, I/O=148.211 MiB, resident=438/438
+Frame shadows 1: BVH caster builds=343, repair passes=24, repair GPU=807.298 ms, capacity fallbacks=0
+Frame scheduling 1: streaming rounds/groups/rays=143/954/30516427, LOD plans/sources changed=1/2236, scene invalidations catalogue/LOD/admission/eviction=0/0/24/0
+Camera preparation: wall 1.167 ms, GPU LOD 0.000 ms, plans/footprints=1/1
+Slow stage: worker iteration wall 8177.573 ms (inclusive)
+Slow stage: producer wait wall 153.268 ms (inclusive)
+Slow stage: BVH detail encode/traverse wall 103.915 ms (inclusive)
+Slow stage: primary repair wall 234.826 ms (inclusive)
+Slow stage: terrain frame wall 439.085 ms (inclusive)
+Frame 3: wall 439.091 ms, GPU producer 153.398 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=9.170, BVH resident/budget 728.9/2048.0 MiB, builds/hits/evictions=1071/257/0, scene builds=25
+Frame phases 3: pre-render 0.008 ms, prepare 2.579 ms, primary repair 234.826 ms, shadow repair 45.213 ms, producer wait 154.426 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 3: BVH built/hit/evicted=0/31/0, catalogue/instance/scene builds=0/30/0, cached/scene tiles=1071/1071, scene 0.4 MiB, selection/detail passes=31/32, fallback ray attempts=8030, GPU build/selection/detail=1.886/19.382/101.753 ms, CPU grouping=60.795 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 3: BVH caster builds=0, repair passes=1, repair GPU=44.098 ms, capacity fallbacks=0
+Frame scheduling 3: streaming rounds/groups/rays=31/31/120450, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.703 ms, GPU LOD 0.000 ms, plans/footprints=1/1
+Peak labels: 8/52 visible, 52 onscreen, 622 within range, best margin 5165.2 m
+Slow stage: worker iteration wall 439.160 ms (inclusive)
+Minimap mask: 552x472, 1440000 rays, worker 12.337 ms, GPU 0.712 ms
+Minimap publish: request-to-image 22.202 ms
+Health t=9.589: memory ok footprint/resident 3207.8/738.1 MiB, Metal allocated/recommended 3050.6/18186.2 MiB, thermal=0
+Health t=9.589: worker stage=idle age=419.2 ms, calls=2 revision=3, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=9.589: display stage=idle age=5.0 ms, calls=250 revision=3, submitted/completed/presented=250/250/249, stale=0 unavailable=0 refreshed=0
+Health t=9.589: minimap stage=idle age=389.2 ms, calls=1 revision=0, submitted/completed/presented=1/1/1, stale=0 unavailable=0 refreshed=2
+Health t=9.589: terrain stage=idle age=9589.0 ms
+Health t=10.592: memory ok footprint/resident 3200.6/738.1 MiB, Metal allocated/recommended 3050.6/18186.2 MiB, thermal=0
+Health t=10.592: worker stage=idle age=8.0 ms, calls=3 revision=3, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=10.592: display stage=idle age=8.2 ms, calls=280 revision=3, submitted/completed/presented=280/280/279, stale=0 unavailable=0 refreshed=0
+Health t=10.592: minimap stage=idle age=1392.7 ms, calls=1 revision=0, submitted/completed/presented=1/1/1, stale=0 unavailable=0 refreshed=2
+Health t=10.592: terrain stage=idle age=10592.4 ms
+Health t=11.597: memory ok footprint/resident 3196.0/739.5 MiB, Metal allocated/recommended 3050.6/18186.2 MiB, thermal=0
+Health t=11.597: worker stage=idle age=505.7 ms, calls=34 revision=3, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=11.597: display stage=idle age=14.0 ms, calls=310 revision=3, submitted/completed/presented=310/310/310, stale=0 unavailable=0 refreshed=0
+Health t=11.597: minimap stage=idle age=2397.7 ms, calls=1 revision=0, submitted/completed/presented=1/1/1, stale=0 unavailable=0 refreshed=2
+Health t=11.597: terrain stage=idle age=11597.5 ms
+LOD plan: sources=2236, changed finer/coarser=0/2, selected LOD-1=61
+Slow stage: producer wait wall 114.870 ms (inclusive)
+Health t=12.601: memory ok footprint/resident 3198.3/738.4 MiB, Metal allocated/recommended 3031.2/18186.2 MiB, thermal=0
+Health t=12.601: worker stage=render age=192.5 ms, calls=54 revision=3, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=12.601: display stage=drawable age=1.1 ms, calls=340 revision=3, submitted/completed/presented=339/337/337, stale=0 unavailable=0 refreshed=0
+Health t=12.601: minimap stage=idle age=3401.3 ms, calls=1 revision=0, submitted/completed/presented=1/1/1, stale=0 unavailable=0 refreshed=3
+Health t=12.601: terrain stage=BVH detail encode/traverse age=49.0 ms
+Slow stage: primary repair wall 152.600 ms (inclusive)
+Slow stage: terrain frame wall 388.384 ms (inclusive)
+Frame 4: wall 390.778 ms, GPU producer 116.561 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=12.797, BVH resident/budget 728.9/2048.0 MiB, builds/hits/evictions=1072/288/0, scene builds=27
+Frame phases 4: pre-render 2.396 ms, prepare 27.862 ms, primary repair 152.600 ms, shadow repair 89.754 ms, producer wait 117.251 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 4: BVH built/hit/evicted=1/31/0, catalogue/instance/scene builds=0/32/2, cached/scene tiles=1072/1071, scene 0.4 MiB, selection/detail passes=31/32, fallback ray attempts=4818, GPU build/selection/detail=5.937/12.292/69.431 ms, CPU grouping=25.578 ms; atlas installed/evicted=1/1, I/O=0.008 MiB, resident=438/438
+Frame shadows 4: BVH caster builds=1, repair passes=2, repair GPU=55.712 ms, capacity fallbacks=0
+Frame scheduling 4: streaming rounds/groups/rays=31/31/72270, LOD plans/sources changed=1/2, scene invalidations catalogue/LOD/admission/eviction=0/1/1/0
+Camera preparation: wall 13.253 ms, GPU LOD 0.386 ms, plans/footprints=2/2
+Peak labels: 8/52 visible, 52 onscreen, 622 within range, best margin 17112.6 m
+Slow stage: worker iteration wall 390.869 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 96.737 ms, GPU 9.870 ms
+Minimap publish: request-to-image 108.309 ms
+Health t=13.606: memory ok footprint/resident 3205.3/742.1 MiB, Metal allocated/recommended 3026.2/18186.2 MiB, thermal=0
+Health t=13.606: worker stage=render age=809.0 ms, calls=55 revision=4, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=13.606: display stage=idle age=22.0 ms, calls=369 revision=4, submitted/completed/presented=369/369/369, stale=0 unavailable=0 refreshed=0
+Health t=13.606: minimap stage=idle age=708.4 ms, calls=2 revision=0, submitted/completed/presented=2/2/2, stale=0 unavailable=0 refreshed=5
+Health t=13.606: terrain stage=primary repair age=708.9 ms
+Health t=14.611: memory ok footprint/resident 3210.3/747.9 MiB, Metal allocated/recommended 3037.1/18186.2 MiB, thermal=0
+Health t=14.611: worker stage=render age=1814.1 ms, calls=55 revision=4, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=14.611: display stage=idle age=27.1 ms, calls=399 revision=4, submitted/completed/presented=399/399/399, stale=0 unavailable=0 refreshed=0
+Health t=14.611: minimap stage=idle age=1713.5 ms, calls=2 revision=0, submitted/completed/presented=2/2/2, stale=0 unavailable=0 refreshed=5
+Health t=14.611: terrain stage=BVH build/compaction age=0.1 ms
+Slow stage: primary repair wall 1890.204 ms (inclusive)
+Slow stage: terrain frame wall 2057.342 ms (inclusive)
+Frame 25: wall 2057.347 ms, GPU producer 99.416 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=14.854, BVH resident/budget 749.2/2048.0 MiB, builds/hits/evictions=1342/578/0, scene builds=28
+Frame phases 25: pre-render 0.008 ms, prepare 0.520 ms, primary repair 1890.204 ms, shadow repair 64.939 ms, producer wait 100.773 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 25: BVH built/hit/evicted=270/290/0, catalogue/instance/scene builds=0/146/1, cached/scene tiles=1342/1341, scene 0.5 MiB, selection/detail passes=146/147, fallback ray attempts=104818, GPU build/selection/detail=202.213/145.181/75.684 ms, CPU grouping=217.766 ms; atlas installed/evicted=270/270, I/O=3.891 MiB, resident=438/438
+Frame shadows 25: BVH caster builds=0, repair passes=1, repair GPU=49.470 ms, capacity fallbacks=0
+Frame scheduling 25: streaming rounds/groups/rays=146/560/4695025, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/1/0
+Camera preparation: wall 0.162 ms, GPU LOD 0.000 ms, plans/footprints=2/2
+Peak labels: 8/35 visible, 35 onscreen, 622 within range, best margin 5224.2 m
+Slow stage: worker iteration wall 2057.472 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=2/0, selected LOD-1=61
+Slow stage: producer wait wall 135.894 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 112.277 ms, GPU 9.079 ms
+Minimap publish: request-to-image 122.730 ms
+Health t=15.616: memory ok footprint/resident 3261.4/752.7 MiB, Metal allocated/recommended 3105.0/18186.2 MiB, thermal=0
+Health t=15.616: worker stage=render age=761.7 ms, calls=56 revision=25, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=15.616: display stage=idle age=15.4 ms, calls=428 revision=25, submitted/completed/presented=428/428/428, stale=0 unavailable=0 refreshed=0
+Health t=15.616: minimap stage=idle age=617.6 ms, calls=3 revision=0, submitted/completed/presented=3/3/3, stale=0 unavailable=0 refreshed=7
+Health t=15.616: terrain stage=BVH terrain loading age=0.7 ms
+Health t=16.617: memory ok footprint/resident 3276.6/767.7 MiB, Metal allocated/recommended 3127.9/18186.2 MiB, thermal=0
+Health t=16.617: worker stage=render age=1762.7 ms, calls=56 revision=25, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=16.617: display stage=idle age=16.5 ms, calls=458 revision=25, submitted/completed/presented=458/458/458, stale=0 unavailable=0 refreshed=0
+Health t=16.617: minimap stage=idle age=1618.7 ms, calls=3 revision=0, submitted/completed/presented=3/3/3, stale=0 unavailable=0 refreshed=7
+Health t=16.617: terrain stage=BVH streaming tile selection age=1.1 ms
+Health t=17.622: memory ok footprint/resident 3310.0/784.1 MiB, Metal allocated/recommended 3166.1/18186.2 MiB, thermal=0
+Health t=17.622: worker stage=render age=2767.8 ms, calls=56 revision=25, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=17.622: display stage=idle age=22.3 ms, calls=488 revision=25, submitted/completed/presented=488/488/488, stale=0 unavailable=0 refreshed=0
+Health t=17.622: minimap stage=idle age=2623.7 ms, calls=3 revision=0, submitted/completed/presented=3/3/3, stale=0 unavailable=0 refreshed=7
+Health t=17.622: terrain stage=primary repair age=2624.3 ms
+Slow stage: primary repair wall 2665.315 ms (inclusive)
+Slow stage: terrain frame wall 2895.877 ms (inclusive)
+Frame 78: wall 2895.881 ms, GPU producer 135.919 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=17.750, BVH resident/budget 809.5/2048.0 MiB, builds/hits/evictions=1710/1088/0, scene builds=30
+Frame phases 78: pre-render 0.007 ms, prepare 6.298 ms, primary repair 2665.315 ms, shadow repair 85.473 ms, producer wait 137.208 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 78: BVH built/hit/evicted=368/510/0, catalogue/instance/scene builds=0/129/2, cached/scene tiles=1710/1709, scene 0.7 MiB, selection/detail passes=128/129, fallback ray attempts=301518, GPU build/selection/detail=301.727/237.890/111.467 ms, CPU grouping=374.104 ms; atlas installed/evicted=368/368, I/O=13.275 MiB, resident=438/438
+Frame shadows 78: BVH caster builds=0, repair passes=1, repair GPU=66.792 ms, capacity fallbacks=0
+Frame scheduling 78: streaming rounds/groups/rays=128/878/10394226, LOD plans/sources changed=1/2, scene invalidations catalogue/LOD/admission/eviction=0/1/1/0
+Camera preparation: wall 1.553 ms, GPU LOD 0.210 ms, plans/footprints=3/3
+Peak labels: 2/26 visible, 26 onscreen, 622 within range, best margin 132.4 m
+Slow stage: worker iteration wall 2896.021 ms (inclusive)
+Minimap mask: 552x472, 1440000 rays, worker 1.101 ms, GPU 0.740 ms
+Minimap publish: request-to-image 3.423 ms
+Health t=18.627: memory ok footprint/resident 3316.5/784.9 MiB, Metal allocated/recommended 3161.6/18186.2 MiB, thermal=0
+Health t=18.627: worker stage=idle age=876.9 ms, calls=56 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=18.627: display stage=idle age=26.6 ms, calls=518 revision=78, submitted/completed/presented=518/518/518, stale=0 unavailable=0 refreshed=0
+Health t=18.627: minimap stage=idle age=857.1 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=18.627: terrain stage=idle age=18627.4 ms
+Health t=19.632: memory ok footprint/resident 3306.3/784.9 MiB, Metal allocated/recommended 3161.6/18186.2 MiB, thermal=0
+Health t=19.632: worker stage=idle age=1881.6 ms, calls=56 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=19.632: display stage=idle age=31.5 ms, calls=548 revision=78, submitted/completed/presented=548/548/548, stale=0 unavailable=0 refreshed=0
+Health t=19.632: minimap stage=idle age=1861.9 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=19.632: terrain stage=idle age=19632.2 ms
+Health t=20.637: memory ok footprint/resident 3303.2/784.8 MiB, Metal allocated/recommended 3161.6/18186.2 MiB, thermal=0
+Health t=20.637: worker stage=idle age=2886.7 ms, calls=56 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=20.637: display stage=idle age=3.7 ms, calls=579 revision=78, submitted/completed/presented=579/579/578, stale=0 unavailable=0 refreshed=0
+Health t=20.637: minimap stage=idle age=2867.0 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=20.637: terrain stage=idle age=20637.3 ms
+Health t=21.639: memory ok footprint/resident 3303.2/785.1 MiB, Metal allocated/recommended 3161.6/18186.2 MiB, thermal=0
+Health t=21.639: worker stage=idle age=13.8 ms, calls=63 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=21.639: display stage=idle age=3.9 ms, calls=609 revision=78, submitted/completed/presented=609/609/608, stale=0 unavailable=0 refreshed=0
+Health t=21.639: minimap stage=idle age=3868.7 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=21.639: terrain stage=idle age=21639.0 ms
+Health t=22.643: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3161.6/18186.2 MiB, thermal=0
+Health t=22.643: worker stage=idle age=172.2 ms, calls=113 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=22.643: display stage=idle age=8.7 ms, calls=639 revision=78, submitted/completed/presented=639/639/638, stale=0 unavailable=0 refreshed=0
+Health t=22.643: minimap stage=idle age=4872.5 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=22.643: terrain stage=idle age=22642.8 ms
+Health t=23.648: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3161.6/18186.2 MiB, thermal=0
+Health t=23.648: worker stage=idle age=313.3 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=23.648: display stage=idle age=13.8 ms, calls=669 revision=78, submitted/completed/presented=669/669/669, stale=0 unavailable=0 refreshed=0
+Health t=23.648: minimap stage=idle age=5877.6 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=23.648: terrain stage=idle age=23647.9 ms
+Health t=24.651: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3161.6/18186.2 MiB, thermal=0
+Health t=24.651: worker stage=idle age=1316.1 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=24.651: display stage=idle age=16.5 ms, calls=699 revision=78, submitted/completed/presented=699/699/699, stale=0 unavailable=0 refreshed=0
+Health t=24.651: minimap stage=idle age=6880.3 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=24.651: terrain stage=idle age=24650.6 ms
+Health t=25.655: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=25.655: worker stage=idle age=2320.5 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=25.655: display stage=idle age=21.0 ms, calls=729 revision=78, submitted/completed/presented=729/729/729, stale=0 unavailable=0 refreshed=0
+Health t=25.655: minimap stage=idle age=7884.7 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=25.655: terrain stage=idle age=25655.1 ms
+Health t=26.660: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=26.660: worker stage=idle age=3325.6 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=26.660: display stage=idle age=26.0 ms, calls=759 revision=78, submitted/completed/presented=759/759/759, stale=0 unavailable=0 refreshed=0
+Health t=26.660: minimap stage=idle age=8889.8 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=26.660: terrain stage=idle age=26660.1 ms
+Health t=27.662: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=27.662: worker stage=idle age=4327.1 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=27.662: display stage=idle age=27.5 ms, calls=789 revision=78, submitted/completed/presented=789/789/789, stale=0 unavailable=0 refreshed=0
+Health t=27.662: minimap stage=idle age=9891.3 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=27.662: terrain stage=idle age=27661.6 ms
+Health t=28.667: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=28.667: worker stage=idle age=5332.1 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=28.667: display stage=idle age=32.6 ms, calls=819 revision=78, submitted/completed/presented=819/819/819, stale=0 unavailable=0 refreshed=0
+Health t=28.667: minimap stage=idle age=10896.4 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=28.667: terrain stage=idle age=28666.7 ms
+Health t=29.670: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=29.670: worker stage=idle age=6335.3 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=29.670: display stage=idle age=3.3 ms, calls=850 revision=78, submitted/completed/presented=850/850/849, stale=0 unavailable=0 refreshed=0
+Health t=29.670: minimap stage=idle age=11899.6 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=29.670: terrain stage=idle age=29669.9 ms
+Health t=30.675: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=30.675: worker stage=idle age=7340.4 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=30.675: display stage=idle age=7.6 ms, calls=880 revision=78, submitted/completed/presented=880/880/879, stale=0 unavailable=0 refreshed=0
+Health t=30.675: minimap stage=idle age=12904.7 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=30.675: terrain stage=idle age=30675.0 ms
+Health t=31.675: memory ok footprint/resident 3303.2/785.7 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=31.675: worker stage=idle age=8340.5 ms, calls=134 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=31.675: display stage=idle age=7.6 ms, calls=910 revision=78, submitted/completed/presented=910/910/909, stale=0 unavailable=0 refreshed=0
+Health t=31.675: minimap stage=idle age=13904.8 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=31.675: terrain stage=idle age=31675.1 ms
+Health t=32.678: memory ok footprint/resident 3303.2/785.8 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=32.678: worker stage=idle age=2.9 ms, calls=160 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=32.678: display stage=idle age=9.7 ms, calls=940 revision=78, submitted/completed/presented=940/940/939, stale=0 unavailable=0 refreshed=0
+Health t=32.678: minimap stage=idle age=14907.7 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=32.678: terrain stage=idle age=32678.1 ms
+Health t=33.683: memory ok footprint/resident 3303.2/785.8 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=33.683: worker stage=idle age=924.7 ms, calls=165 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=33.683: display stage=idle age=15.8 ms, calls=970 revision=78, submitted/completed/presented=970/970/970, stale=0 unavailable=0 refreshed=0
+Health t=33.683: minimap stage=idle age=15912.8 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=33.683: terrain stage=idle age=33683.1 ms
+Health t=34.684: memory ok footprint/resident 3303.2/785.8 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=34.684: worker stage=idle age=1925.2 ms, calls=165 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=34.684: display stage=idle age=16.2 ms, calls=1000 revision=78, submitted/completed/presented=1000/1000/1000, stale=0 unavailable=0 refreshed=0
+Health t=34.684: minimap stage=idle age=16913.3 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=34.684: terrain stage=idle age=34683.7 ms
+Health t=35.688: memory ok footprint/resident 3303.2/785.8 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=35.688: worker stage=idle age=2929.4 ms, calls=165 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=35.688: display stage=idle age=20.5 ms, calls=1030 revision=78, submitted/completed/presented=1030/1030/1030, stale=0 unavailable=0 refreshed=0
+Health t=35.688: minimap stage=idle age=17917.6 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=35.688: terrain stage=idle age=35687.9 ms
+Health t=36.693: memory ok footprint/resident 3303.2/785.8 MiB, Metal allocated/recommended 3160.2/18186.2 MiB, thermal=0
+Health t=36.693: worker stage=idle age=3934.5 ms, calls=165 revision=78, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=36.693: display stage=idle age=25.5 ms, calls=1060 revision=78, submitted/completed/presented=1060/1060/1060, stale=0 unavailable=0 refreshed=0
+Health t=36.693: minimap stage=idle age=18922.7 ms, calls=4 revision=0, submitted/completed/presented=4/4/4, stale=0 unavailable=0 refreshed=8
+Health t=36.693: terrain stage=idle age=36693.0 ms
+LOD plan: sources=2236, changed finer/coarser=0/2, selected LOD-1=61
+Slow stage: producer wait wall 110.447 ms (inclusive)
+Slow stage: terrain frame wall 127.344 ms (inclusive)
+Frame 79: wall 127.350 ms, GPU producer 109.946 ms, 1 producer submission(s), resident trace and presentation combined; t=36.855, BVH resident/budget 809.5/2048.0 MiB, builds/hits/evictions=1710/1088/0, scene builds=31
+Frame phases 79: pre-render 0.008 ms, prepare 15.613 ms, primary repair 0.000 ms, shadow repair 0.000 ms, producer wait 110.447 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 79: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/1/1, cached/scene tiles=1710/1709, scene 0.7 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.739/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 79: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=0
+Frame scheduling 79: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=1/2, scene invalidations catalogue/LOD/admission/eviction=0/1/0/0
+Camera preparation: wall 3.983 ms, GPU LOD 0.180 ms, plans/footprints=4/4
+Peak labels: 2/26 visible, 26 onscreen, 622 within range, best margin 170.0 m
+Slow stage: worker iteration wall 127.473 ms (inclusive)
+Slow stage: producer wait wall 110.366 ms (inclusive)
+Slow stage: terrain frame wall 112.494 ms (inclusive)
+Frame 86: wall 112.499 ms, GPU producer 109.519 ms, 1 producer submission(s), resident trace and presentation combined; t=36.967, BVH resident/budget 809.5/2048.0 MiB, builds/hits/evictions=1710/1088/0, scene builds=31
+Frame phases 86: pre-render 0.007 ms, prepare 1.307 ms, primary repair 0.000 ms, shadow repair 0.000 ms, producer wait 110.366 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 86: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=1710/1709, scene 0.7 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 86: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=0
+Frame scheduling 86: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.323 ms, GPU LOD 0.000 ms, plans/footprints=4/4
+Peak labels: 7/30 visible, 30 onscreen, 622 within range, best margin 5204.4 m
+Slow stage: worker iteration wall 112.868 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 107.187 ms, GPU 15.506 ms
+Minimap publish: request-to-image 121.047 ms
+Slow stage: producer wait wall 107.150 ms (inclusive)
+Slow stage: terrain frame wall 109.577 ms (inclusive)
+Frame 90: wall 109.582 ms, GPU producer 106.815 ms, 1 producer submission(s), resident trace and presentation combined; t=37.077, BVH resident/budget 809.5/2048.0 MiB, builds/hits/evictions=1710/1088/0, scene builds=31
+Frame phases 90: pre-render 0.006 ms, prepare 1.308 ms, primary repair 0.000 ms, shadow repair 0.000 ms, producer wait 107.150 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 90: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=1710/1709, scene 0.7 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 90: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=0
+Frame scheduling 90: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.278 ms, GPU LOD 0.000 ms, plans/footprints=4/4
+Peak labels: 8/36 visible, 36 onscreen, 622 within range, best margin 5212.5 m
+Slow stage: worker iteration wall 109.671 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 96.071 ms, GPU 4.897 ms
+Minimap publish: request-to-image 126.595 ms
+Slow stage: producer wait wall 105.102 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 81.002 ms, GPU 2.958 ms
+Minimap publish: request-to-image 95.135 ms
+Slow stage: primary repair wall 199.244 ms (inclusive)
+Slow stage: terrain frame wall 337.287 ms (inclusive)
+Frame 93: wall 337.293 ms, GPU producer 104.354 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=37.414, BVH resident/budget 809.8/2048.0 MiB, builds/hits/evictions=1712/1122/0, scene builds=32
+Frame phases 93: pre-render 0.009 ms, prepare 0.951 ms, primary repair 199.244 ms, shadow repair 29.111 ms, producer wait 107.154 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 93: BVH built/hit/evicted=2/34/0, catalogue/instance/scene builds=0/32/1, cached/scene tiles=1712/1711, scene 0.7 MiB, selection/detail passes=32/33, fallback ray attempts=4670, GPU build/selection/detail=2.878/12.867/63.848 ms, CPU grouping=33.611 ms; atlas installed/evicted=2/2, I/O=0.063 MiB, resident=438/438
+Frame shadows 93: BVH caster builds=0, repair passes=1, repair GPU=26.268 ms, capacity fallbacks=0
+Frame scheduling 93: streaming rounds/groups/rays=32/36/69609, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/1/0
+Camera preparation: wall 0.265 ms, GPU LOD 0.000 ms, plans/footprints=4/4
+Peak labels: 8/55 visible, 55 onscreen, 622 within range, best margin 5242.6 m
+Slow stage: worker iteration wall 337.348 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 60.054 ms, GPU 2.888 ms
+Minimap publish: request-to-image 60.090 ms
+Health t=37.698: memory ok footprint/resident 3309.7/793.8 MiB, Metal allocated/recommended 3125.2/18186.2 MiB, thermal=0
+Health t=37.698: worker stage=render age=283.5 ms, calls=170 revision=93, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=37.698: display stage=idle age=30.7 ms, calls=1086 revision=93, submitted/completed/presented=1086/1086/1086, stale=0 unavailable=0 refreshed=3
+Health t=37.698: minimap stage=idle age=202.6 ms, calls=8 revision=0, submitted/completed/presented=8/8/8, stale=0 unavailable=0 refreshed=14
+Health t=37.698: terrain stage=BVH terrain loading age=0.3 ms
+Slow stage: primary repair wall 500.397 ms (inclusive)
+Slow stage: BVH shadow terrain repair wall 392.165 ms (inclusive)
+Slow stage: shadow repair wall 392.168 ms (inclusive)
+Slow stage: terrain frame wall 975.034 ms (inclusive)
+Frame 101: wall 975.036 ms, GPU producer 80.346 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=38.390, BVH resident/budget 939.0/2048.0 MiB, builds/hits/evictions=1810/1217/0, scene builds=40
+Frame phases 101: pre-render 0.004 ms, prepare 0.698 ms, primary repair 500.397 ms, shadow repair 392.168 ms, producer wait 81.037 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 101: BVH built/hit/evicted=98/95/0, catalogue/instance/scene builds=0/70/8, cached/scene tiles=1810/1809, scene 0.7 MiB, selection/detail passes=63/64, fallback ray attempts=173774, GPU build/selection/detail=88.344/49.203/58.168 ms, CPU grouping=65.535 ms; atlas installed/evicted=98/98, I/O=24.679 MiB, resident=438/438
+Frame shadows 101: BVH caster builds=14, repair passes=8, repair GPU=265.594 ms, capacity fallbacks=0
+Frame scheduling 101: streaming rounds/groups/rays=63/179/3198210, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/8/0
+Camera preparation: wall 0.132 ms, GPU LOD 0.000 ms, plans/footprints=4/4
+Peak labels: 8/241 visible, 241 onscreen, 622 within range, best margin 5217.9 m
+Slow stage: worker iteration wall 975.108 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=2/0, selected LOD-1=61
+Slow stage: producer wait wall 155.806 ms (inclusive)
+Slow stage: terrain frame wall 159.708 ms (inclusive)
+Frame 102: wall 159.709 ms, GPU producer 155.446 ms, 1 producer submission(s), resident trace and presentation combined; t=38.549, BVH resident/budget 939.0/2048.0 MiB, builds/hits/evictions=1810/1217/0, scene builds=41
+Frame phases 102: pre-render 0.003 ms, prepare 3.359 ms, primary repair 0.000 ms, shadow repair 0.000 ms, producer wait 155.806 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 102: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/1/1, cached/scene tiles=1810/1809, scene 0.7 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.355/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 102: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=0
+Frame scheduling 102: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=1/2, scene invalidations catalogue/LOD/admission/eviction=0/1/0/0
+Camera preparation: wall 0.835 ms, GPU LOD 0.210 ms, plans/footprints=5/5
+Peak labels: 8/241 visible, 241 onscreen, 622 within range, best margin 5149.9 m
+Slow stage: worker iteration wall 159.864 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 148.393 ms, GPU 5.222 ms
+Minimap publish: request-to-image 163.244 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.129 ms, GPU 0.768 ms
+Minimap publish: request-to-image 6.410 ms
+Health t=38.701: memory ok footprint/resident 3451.7/848.5 MiB, Metal allocated/recommended 3294.9/18186.2 MiB, thermal=0
+Health t=38.701: worker stage=idle age=9.4 ms, calls=182 revision=102, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=38.701: display stage=ui-update age=1.3 ms, calls=1115 revision=102, submitted/completed/presented=1115/1115/1114, stale=0 unavailable=0 refreshed=4
+Health t=38.701: minimap stage=idle age=134.7 ms, calls=10 revision=0, submitted/completed/presented=10/10/10, stale=0 unavailable=0 refreshed=16
+Health t=38.701: terrain stage=idle age=38701.2 ms
+Health t=39.702: memory ok footprint/resident 3451.2/849.2 MiB, Metal allocated/recommended 3294.9/18186.2 MiB, thermal=0
+Health t=39.702: worker stage=idle age=10.2 ms, calls=236 revision=102, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=39.702: display stage=idle age=0.6 ms, calls=1145 revision=102, submitted/completed/presented=1145/1145/1144, stale=0 unavailable=0 refreshed=4
+Health t=39.702: minimap stage=idle age=1135.6 ms, calls=10 revision=0, submitted/completed/presented=10/10/10, stale=0 unavailable=0 refreshed=16
+Health t=39.702: terrain stage=idle age=39702.2 ms
+LOD plan: sources=2236, changed finer/coarser=0/2, selected LOD-1=61
+Slow stage: producer wait wall 125.796 ms (inclusive)
+Slow stage: terrain frame wall 149.473 ms (inclusive)
+Frame 103: wall 149.478 ms, GPU producer 125.515 ms, 1 producer submission(s), resident trace and presentation combined; t=40.579, BVH resident/budget 939.0/2048.0 MiB, builds/hits/evictions=1810/1217/0, scene builds=42
+Frame phases 103: pre-render 0.028 ms, prepare 22.906 ms, primary repair 0.000 ms, shadow repair 0.000 ms, producer wait 125.796 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 103: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/1/1, cached/scene tiles=1810/1809, scene 0.7 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=4.140/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 103: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=0
+Frame scheduling 103: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=1/2, scene invalidations catalogue/LOD/admission/eviction=0/1/0/0
+Camera preparation: wall 5.460 ms, GPU LOD 2.310 ms, plans/footprints=6/6
+Peak labels: 8/241 visible, 241 onscreen, 622 within range, best margin 5217.9 m
+Slow stage: worker iteration wall 149.660 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=0/6, selected LOD-1=61
+Minimap mask: 552x472, 810000 rays, worker 84.508 ms, GPU 42.788 ms
+Minimap publish: request-to-image 99.821 ms
+Health t=40.707: memory ok footprint/resident 3425.3/848.0 MiB, Metal allocated/recommended 3245.2/18186.2 MiB, thermal=0
+Health t=40.707: worker stage=render age=127.4 ms, calls=260 revision=103, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=40.707: display stage=drawable age=7.0 ms, calls=1173 revision=103, submitted/completed/presented=1172/1171/1170, stale=0 unavailable=0 refreshed=5
+Health t=40.707: minimap stage=idle age=29.5 ms, calls=11 revision=0, submitted/completed/presented=11/11/11, stale=0 unavailable=0 refreshed=18
+Health t=40.707: terrain stage=BVH detail encode/traverse age=30.0 ms
+Slow stage: primary repair wall 240.372 ms (inclusive)
+Slow stage: terrain frame wall 406.792 ms (inclusive)
+Frame 106: wall 406.802 ms, GPU producer 94.564 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=40.986, BVH resident/budget 939.1/2048.0 MiB, builds/hits/evictions=1812/1313/0, scene builds=45
+Frame phases 106: pre-render 0.013 ms, prepare 4.421 ms, primary repair 240.372 ms, shadow repair 65.861 ms, producer wait 95.407 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 106: BVH built/hit/evicted=2/96/0, catalogue/instance/scene builds=0/60/3, cached/scene tiles=1812/1806, scene 0.7 MiB, selection/detail passes=58/59, fallback ray attempts=33896, GPU build/selection/detail=5.306/31.334/55.632 ms, CPU grouping=46.375 ms; atlas installed/evicted=2/2, I/O=0.016 MiB, resident=438/438
+Frame shadows 106: BVH caster builds=1, repair passes=2, repair GPU=58.016 ms, capacity fallbacks=0
+Frame scheduling 106: streaming rounds/groups/rays=58/97/843514, LOD plans/sources changed=1/6, scene invalidations catalogue/LOD/admission/eviction=0/1/2/0
+Camera preparation: wall 1.476 ms, GPU LOD 0.575 ms, plans/footprints=7/7
+Peak labels: 8/132 visible, 132 onscreen, 622 within range, best margin 5184.8 m
+Slow stage: worker iteration wall 406.897 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=911/0, selected LOD-1=87
+Minimap mask: 552x472, 810000 rays, worker 49.797 ms, GPU 2.452 ms
+Minimap publish: request-to-image 49.834 ms
+Health t=41.708: memory ok footprint/resident 3619.8/927.4 MiB, Metal allocated/recommended 3454.5/18186.2 MiB, thermal=0
+Health t=41.708: worker stage=render age=721.9 ms, calls=261 revision=106, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=41.708: display stage=idle age=7.4 ms, calls=1203 revision=106, submitted/completed/presented=1203/1203/1202, stale=0 unavailable=0 refreshed=5
+Health t=41.708: minimap stage=idle age=657.0 ms, calls=12 revision=0, submitted/completed/presented=12/12/12, stale=0 unavailable=0 refreshed=20
+Health t=41.708: terrain stage=BVH detail encode/traverse age=0.0 ms
+Slow stage: primary repair wall 706.859 ms (inclusive)
+Health t=42.708: memory ok footprint/resident 3790.4/1004.2 MiB, Metal allocated/recommended 3631.4/18186.2 MiB, thermal=0
+Health t=42.708: worker stage=render age=1722.1 ms, calls=261 revision=106, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=42.708: display stage=idle age=7.5 ms, calls=1233 revision=106, submitted/completed/presented=1233/1232/1232, stale=0 unavailable=0 refreshed=5
+Health t=42.708: minimap stage=idle age=1657.3 ms, calls=12 revision=0, submitted/completed/presented=12/12/12, stale=0 unavailable=0 refreshed=20
+Health t=42.708: terrain stage=BVH shadow terrain repair age=950.5 ms
+Slow stage: BVH shadow terrain repair wall 1219.930 ms (inclusive)
+Slow stage: shadow repair wall 1219.933 ms (inclusive)
+Slow stage: terrain frame wall 1993.065 ms (inclusive)
+Frame 109: wall 1993.067 ms, GPU producer 61.955 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=42.979, BVH resident/budget 1274.1/2048.0 MiB, builds/hits/evictions=2067/1557/0, scene builds=61
+Frame phases 109: pre-render 0.004 ms, prepare 2.849 ms, primary repair 706.859 ms, shadow repair 1219.933 ms, producer wait 62.855 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 109: BVH built/hit/evicted=255/244/0, catalogue/instance/scene builds=0/67/16, cached/scene tiles=2067/1320, scene 0.5 MiB, selection/detail passes=52/53, fallback ray attempts=1809844, GPU build/selection/detail=202.859/135.448/84.087 ms, CPU grouping=138.166 ms; atlas installed/evicted=255/255, I/O=64.007 MiB, resident=438/438
+Frame shadows 109: BVH caster builds=179, repair passes=15, repair GPU=677.051 ms, capacity fallbacks=0
+Frame scheduling 109: streaming rounds/groups/rays=52/320/17757120, LOD plans/sources changed=1/911, scene invalidations catalogue/LOD/admission/eviction=0/1/15/0
+Camera preparation: wall 0.827 ms, GPU LOD 0.211 ms, plans/footprints=8/8
+Peak labels: 6/28 visible, 28 onscreen, 622 within range, best margin 5101.5 m
+Slow stage: worker iteration wall 1993.175 ms (inclusive)
+Minimap mask: 552x472, 1440000 rays, worker 1.232 ms, GPU 0.924 ms
+Minimap publish: request-to-image 3.765 ms
+Health t=43.708: memory ok footprint/resident 3800.7/1012.2 MiB, Metal allocated/recommended 3638.0/18186.2 MiB, thermal=0
+Health t=43.708: worker stage=idle age=199.9 ms, calls=272 revision=109, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=43.708: display stage=idle age=8.2 ms, calls=1263 revision=109, submitted/completed/presented=1263/1263/1262, stale=0 unavailable=0 refreshed=5
+Health t=43.708: minimap stage=idle age=705.9 ms, calls=13 revision=0, submitted/completed/presented=13/13/13, stale=0 unavailable=0 refreshed=21
+Health t=43.708: terrain stage=idle age=43708.4 ms
+Health t=44.713: memory ok footprint/resident 3789.3/1013.1 MiB, Metal allocated/recommended 3638.0/18186.2 MiB, thermal=0
+Health t=44.713: worker stage=idle age=454.8 ms, calls=297 revision=109, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=44.713: display stage=idle age=12.7 ms, calls=1293 revision=109, submitted/completed/presented=1293/1293/1293, stale=0 unavailable=0 refreshed=5
+Health t=44.713: minimap stage=idle age=1710.9 ms, calls=13 revision=0, submitted/completed/presented=13/13/13, stale=0 unavailable=0 refreshed=21
+Health t=44.713: terrain stage=idle age=44713.4 ms
+Health t=45.717: memory ok footprint/resident 3787.8/1013.5 MiB, Metal allocated/recommended 3638.0/18186.2 MiB, thermal=0
+Health t=45.717: worker stage=idle age=8.8 ms, calls=317 revision=109, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=45.717: display stage=idle age=13.0 ms, calls=1323 revision=109, submitted/completed/presented=1323/1323/1323, stale=0 unavailable=0 refreshed=5
+Health t=45.717: minimap stage=idle age=2714.7 ms, calls=13 revision=0, submitted/completed/presented=13/13/13, stale=0 unavailable=0 refreshed=21
+Health t=45.717: terrain stage=idle age=45717.2 ms
+Health t=46.722: memory ok footprint/resident 3787.8/1013.6 MiB, Metal allocated/recommended 3638.0/18186.2 MiB, thermal=0
+Health t=46.722: worker stage=idle age=609.0 ms, calls=327 revision=109, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=46.722: display stage=idle age=20.8 ms, calls=1353 revision=109, submitted/completed/presented=1353/1353/1353, stale=0 unavailable=0 refreshed=5
+Health t=46.722: minimap stage=idle age=3719.0 ms, calls=13 revision=0, submitted/completed/presented=13/13/13, stale=0 unavailable=0 refreshed=21
+Health t=46.722: terrain stage=idle age=46721.6 ms
+Health t=47.726: memory ok footprint/resident 3787.8/1013.6 MiB, Metal allocated/recommended 3636.5/18186.2 MiB, thermal=0
+Health t=47.726: worker stage=idle age=1613.9 ms, calls=327 revision=109, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=47.726: display stage=idle age=26.3 ms, calls=1383 revision=109, submitted/completed/presented=1383/1383/1383, stale=0 unavailable=0 refreshed=5
+Health t=47.726: minimap stage=idle age=4723.9 ms, calls=13 revision=0, submitted/completed/presented=13/13/13, stale=0 unavailable=0 refreshed=21
+Health t=47.726: terrain stage=idle age=47726.4 ms
+LOD plan: sources=2236, changed finer/coarser=0/1, selected LOD-1=87
+Slow stage: producer wait wall 129.587 ms (inclusive)
+Slow stage: terrain frame wall 163.718 ms (inclusive)
+Frame 110: wall 163.722 ms, GPU producer 129.305 ms, 1 producer submission(s), resident trace and presentation combined; t=48.668, BVH resident/budget 1274.1/2048.0 MiB, builds/hits/evictions=2067/1557/0, scene builds=62
+Frame phases 110: pre-render 0.007 ms, prepare 33.496 ms, primary repair 0.000 ms, shadow repair 0.000 ms, producer wait 129.587 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 110: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/1/1, cached/scene tiles=2067/1321, scene 0.5 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=1.038/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 110: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=0
+Frame scheduling 110: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=1/1, scene invalidations catalogue/LOD/admission/eviction=0/1/0/0
+Camera preparation: wall 15.595 ms, GPU LOD 0.408 ms, plans/footprints=9/9
+Peak labels: 7/28 visible, 28 onscreen, 622 within range, best margin 5132.9 m
+Slow stage: worker iteration wall 164.049 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=388/0, selected LOD-1=110
+Health t=48.728: memory ok footprint/resident 3776.8/1011.6 MiB, Metal allocated/recommended 3586.4/18186.2 MiB, thermal=0
+Health t=48.728: worker stage=render age=59.9 ms, calls=336 revision=110, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=48.728: display stage=drawable age=10.8 ms, calls=1413 revision=110, submitted/completed/presented=1412/1410/1410, stale=0 unavailable=0 refreshed=6
+Health t=48.728: minimap stage=mask-gpu age=50.0 ms, calls=14 revision=0, submitted/completed/presented=14/13/13, stale=0 unavailable=0 refreshed=23
+Health t=48.728: terrain stage=producer wait age=53.6 ms
+Minimap mask: 552x472, 810000 rays, worker 53.218 ms, GPU 3.591 ms
+Minimap publish: request-to-image 64.634 ms
+Slow stage: primary repair wall 445.683 ms (inclusive)
+Health t=49.733: memory ok footprint/resident 3968.0/1100.6 MiB, Metal allocated/recommended 3775.2/18186.2 MiB, thermal=0
+Health t=49.733: worker stage=render age=1064.8 ms, calls=336 revision=110, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=49.733: display stage=idle age=16.1 ms, calls=1443 revision=110, submitted/completed/presented=1443/1443/1442, stale=0 unavailable=0 refreshed=6
+Health t=49.733: minimap stage=idle age=1001.7 ms, calls=14 revision=0, submitted/completed/presented=14/14/14, stale=0 unavailable=0 refreshed=23
+Health t=49.733: terrain stage=BVH terrain loading age=2.8 ms
+Slow stage: BVH shadow terrain repair wall 1020.317 ms (inclusive)
+Slow stage: shadow repair wall 1020.327 ms (inclusive)
+Slow stage: terrain frame wall 1531.736 ms (inclusive)
+Frame 113: wall 1531.745 ms, GPU producer 56.764 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=50.200, BVH resident/budget 1472.8/2048.0 MiB, builds/hits/evictions=2191/1817/0, scene builds=75
+Frame phases 113: pre-render 0.015 ms, prepare 5.195 ms, primary repair 445.683 ms, shadow repair 1020.327 ms, producer wait 58.606 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 113: BVH built/hit/evicted=124/260/0, catalogue/instance/scene builds=0/60/13, cached/scene tiles=2191/1123, scene 0.5 MiB, selection/detail passes=48/49, fallback ray attempts=602000, GPU build/selection/detail=117.147/68.364/54.741 ms, CPU grouping=64.931 ms; atlas installed/evicted=124/124, I/O=37.969 MiB, resident=438/438
+Frame shadows 113: BVH caster builds=92, repair passes=12, repair GPU=402.332 ms, capacity fallbacks=0
+Frame scheduling 113: streaming rounds/groups/rays=48/292/8171586, LOD plans/sources changed=1/388, scene invalidations catalogue/LOD/admission/eviction=0/1/12/0
+Camera preparation: wall 1.215 ms, GPU LOD 0.130 ms, plans/footprints=10/10
+Peak labels: 6/24 visible, 24 onscreen, 622 within range, best margin 5108.3 m
+Slow stage: worker iteration wall 1531.964 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=1434/0, selected LOD-1=244
+Minimap mask: 552x472, 810000 rays, worker 44.627 ms, GPU 1.118 ms
+Minimap publish: request-to-image 44.847 ms
+Health t=50.738: memory ok footprint/resident 4144.1/1152.0 MiB, Metal allocated/recommended 3976.2/18186.2 MiB, thermal=0
+Health t=50.738: worker stage=render age=537.9 ms, calls=337 revision=113, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=50.738: display stage=idle age=20.7 ms, calls=1473 revision=113, submitted/completed/presented=1473/1473/1473, stale=0 unavailable=0 refreshed=6
+Health t=50.738: minimap stage=idle age=472.0 ms, calls=15 revision=0, submitted/completed/presented=15/15/15, stale=0 unavailable=0 refreshed=25
+Health t=50.738: terrain stage=BVH streaming tile selection age=2.2 ms
+Slow stage: primary repair wall 831.910 ms (inclusive)
+Health t=51.743: memory ok footprint/resident 4488.7/1311.2 MiB, Metal allocated/recommended 4328.2/18186.2 MiB, thermal=0
+Health t=51.743: worker stage=render age=1543.0 ms, calls=337 revision=113, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=51.743: display stage=idle age=25.6 ms, calls=1503 revision=113, submitted/completed/presented=1503/1503/1503, stale=0 unavailable=0 refreshed=6
+Health t=51.743: minimap stage=idle age=1477.1 ms, calls=15 revision=0, submitted/completed/presented=15/15/15, stale=0 unavailable=0 refreshed=25
+Health t=51.743: terrain stage=BVH terrain loading age=1.7 ms
+Health t=52.745: memory ok footprint/resident 4577.3/1358.0 MiB, Metal allocated/recommended 4415.5/18186.2 MiB, thermal=0
+Health t=52.745: worker stage=render age=2544.6 ms, calls=337 revision=113, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=52.745: display stage=idle age=27.3 ms, calls=1533 revision=113, submitted/completed/presented=1533/1533/1532, stale=0 unavailable=0 refreshed=6
+Health t=52.745: minimap stage=idle age=2478.7 ms, calls=15 revision=0, submitted/completed/presented=15/15/15, stale=0 unavailable=0 refreshed=25
+Health t=52.745: terrain stage=BVH build/compaction age=0.7 ms
+Health t=53.750: memory ok footprint/resident 4582.6/1376.5 MiB, Metal allocated/recommended 4419.7/18186.2 MiB, thermal=0
+Health t=53.750: worker stage=render age=3549.7 ms, calls=337 revision=113, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=53.750: display stage=idle age=32.5 ms, calls=1563 revision=113, submitted/completed/presented=1563/1562/1562, stale=0 unavailable=0 refreshed=6
+Health t=53.750: minimap stage=idle age=3483.8 ms, calls=15 revision=0, submitted/completed/presented=15/15/15, stale=0 unavailable=0 refreshed=25
+Health t=53.750: terrain stage=BVH shadow terrain repair age=2652.0 ms
+Health t=54.753: memory ok footprint/resident 4576.1/1374.4 MiB, Metal allocated/recommended 4413.1/18186.2 MiB, thermal=0
+Health t=54.753: worker stage=render age=4552.9 ms, calls=337 revision=113, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=54.753: display stage=drawable age=2.4 ms, calls=1594 revision=113, submitted/completed/presented=1593/1593/1591, stale=0 unavailable=0 refreshed=6
+Health t=54.753: minimap stage=idle age=4486.9 ms, calls=15 revision=0, submitted/completed/presented=15/15/15, stale=0 unavailable=0 refreshed=25
+Health t=54.753: terrain stage=BVH shadow terrain repair age=3655.1 ms
+Slow stage: BVH shadow terrain repair wall 4009.671 ms (inclusive)
+Slow stage: shadow repair wall 4009.683 ms (inclusive)
+Slow stage: terrain frame wall 4909.261 ms (inclusive)
+Frame 119: wall 4909.268 ms, GPU producer 61.602 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=55.109, BVH resident/budget 2045.4/2048.0 MiB, builds/hits/evictions=2584/1953/1356, scene builds=103
+Frame phases 119: pre-render 0.010 ms, prepare 4.004 ms, primary repair 831.910 ms, shadow repair 4009.683 ms, producer wait 62.704 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 119: BVH built/hit/evicted=393/136/1356, catalogue/instance/scene builds=0/70/28, cached/scene tiles=1228/669, scene 0.3 MiB, selection/detail passes=43/44, fallback ray attempts=2037498, GPU build/selection/detail=469.291/123.781/85.372 ms, CPU grouping=137.674 ms; atlas installed/evicted=393/393, I/O=163.445 MiB, resident=438/438
+Frame shadows 119: BVH caster builds=317, repair passes=27, repair GPU=1601.384 ms, capacity fallbacks=0
+Frame scheduling 119: streaming rounds/groups/rays=43/212/16618756, LOD plans/sources changed=1/1434, scene invalidations catalogue/LOD/admission/eviction=0/1/19/8
+Camera preparation: wall 1.618 ms, GPU LOD 0.210 ms, plans/footprints=11/11
+Peak labels: 2/14 visible, 14 onscreen, 622 within range, best margin 121.1 m
+Slow stage: worker iteration wall 4909.448 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=1749/0, selected LOD-1=653
+Minimap mask: 552x472, 1440000 rays, worker 45.732 ms, GPU 32.732 ms
+Minimap publish: request-to-image 45.924 ms
+Health t=55.758: memory ok footprint/resident 4573.0/1394.3 MiB, Metal allocated/recommended 4399.5/18186.2 MiB, thermal=0
+Health t=55.758: worker stage=render age=648.3 ms, calls=338 revision=119, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=55.758: display stage=idle age=7.2 ms, calls=1623 revision=119, submitted/completed/presented=1623/1623/1622, stale=0 unavailable=0 refreshed=6
+Health t=55.758: minimap stage=idle age=585.0 ms, calls=16 revision=0, submitted/completed/presented=16/16/16, stale=0 unavailable=0 refreshed=27
+Health t=55.758: terrain stage=BVH tile admission/loading/building age=0.5 ms
+Slow stage: primary repair wall 620.388 ms (inclusive)
+Health t=56.759: memory ok footprint/resident 4545.8/1428.1 MiB, Metal allocated/recommended 4376.8/18186.2 MiB, thermal=0
+Health t=56.759: worker stage=render age=1649.2 ms, calls=338 revision=119, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=56.759: display stage=idle age=8.1 ms, calls=1653 revision=119, submitted/completed/presented=1653/1652/1652, stale=0 unavailable=0 refreshed=6
+Health t=56.759: minimap stage=idle age=1585.8 ms, calls=16 revision=0, submitted/completed/presented=16/16/16, stale=0 unavailable=0 refreshed=27
+Health t=56.759: terrain stage=BVH shadow terrain repair age=965.6 ms
+Slow stage: BVH shadow terrain repair wall 1599.190 ms (inclusive)
+Slow stage: shadow repair wall 1697.019 ms (inclusive)
+Slow stage: terrain frame wall 2382.126 ms (inclusive)
+Frame 126: wall 2382.129 ms, GPU producer 61.627 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=57.492, BVH resident/budget 2038.3/2048.0 MiB, builds/hits/evictions=2746/2000/2439, scene builds=117
+Frame phases 126: pre-render 0.005 ms, prepare 1.738 ms, primary repair 620.388 ms, shadow repair 1697.019 ms, producer wait 62.606 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 126: BVH built/hit/evicted=162/47/1083, catalogue/instance/scene builds=0/49/14, cached/scene tiles=307/0, scene 0.0 MiB, selection/detail passes=36/37, fallback ray attempts=1937712, GPU build/selection/detail=447.376/99.846/94.148 ms, CPU grouping=85.057 ms; atlas installed/evicted=175/175, I/O=222.642 MiB, resident=438/438
+Frame shadows 126: BVH caster builds=118, repair passes=13, repair GPU=591.895 ms, capacity fallbacks=1
+Frame scheduling 126: streaming rounds/groups/rays=36/91/14371272, LOD plans/sources changed=1/1749, scene invalidations catalogue/LOD/admission/eviction=0/1/3/11
+Camera preparation: wall 0.926 ms, GPU LOD 0.210 ms, plans/footprints=12/12
+Peak labels: 0/0 visible, 0 onscreen, 622 within range, best margin -inf m
+Slow stage: worker iteration wall 2382.191 ms (inclusive)
+Minimap mask: 552x472, 1440000 rays, worker 1.626 ms, GPU 1.130 ms
+Minimap publish: request-to-image 2.591 ms
+Health t=57.764: memory ok footprint/resident 4568.7/1474.2 MiB, Metal allocated/recommended 4436.6/18186.2 MiB, thermal=0
+Health t=57.764: worker stage=idle age=5.0 ms, calls=347 revision=126, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=57.764: display stage=idle age=12.1 ms, calls=1683 revision=126, submitted/completed/presented=1683/1683/1683, stale=0 unavailable=0 refreshed=6
+Health t=57.764: minimap stage=idle age=243.6 ms, calls=17 revision=0, submitted/completed/presented=17/17/17, stale=0 unavailable=0 refreshed=28
+Health t=57.764: terrain stage=idle age=57763.7 ms
+Health t=58.767: memory ok footprint/resident 4555.8/1470.8 MiB, Metal allocated/recommended 4432.6/18186.2 MiB, thermal=0
+Health t=58.767: worker stage=idle age=158.6 ms, calls=366 revision=126, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=58.767: display stage=idle age=16.5 ms, calls=1713 revision=126, submitted/completed/presented=1713/1713/1713, stale=0 unavailable=0 refreshed=6
+Health t=58.767: minimap stage=idle age=1247.1 ms, calls=17 revision=0, submitted/completed/presented=17/17/17, stale=0 unavailable=0 refreshed=28
+Health t=58.767: terrain stage=idle age=58767.2 ms
+LOD plan: sources=2236, changed finer/coarser=0/0, selected LOD-1=653
+Health t=59.772: memory ok footprint/resident 4541.2/1464.3 MiB, Metal allocated/recommended 4392.3/18186.2 MiB, thermal=0
+Health t=59.772: worker stage=render age=100.5 ms, calls=367 revision=126, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=59.772: display stage=idle age=21.7 ms, calls=1743 revision=126, submitted/completed/presented=1743/1741/1741, stale=0 unavailable=0 refreshed=6
+Health t=59.772: minimap stage=idle age=2252.2 ms, calls=17 revision=0, submitted/completed/presented=17/17/17, stale=0 unavailable=0 refreshed=29
+Health t=59.772: terrain stage=producer wait age=60.3 ms
+Slow stage: producer wait wall 126.568 ms (inclusive)
+Slow stage: primary repair wall 162.495 ms (inclusive)
+Slow stage: terrain frame wall 427.452 ms (inclusive)
+Frame 127: wall 427.467 ms, GPU producer 129.116 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=60.099, BVH resident/budget 2041.0/2048.0 MiB, builds/hits/evictions=2747/2024/2439, scene builds=119
+Frame phases 127: pre-render 0.018 ms, prepare 39.549 ms, primary repair 162.495 ms, shadow repair 93.019 ms, producer wait 131.574 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 127: BVH built/hit/evicted=1/24/0, catalogue/instance/scene builds=0/27/2, cached/scene tiles=308/308, scene 0.1 MiB, selection/detail passes=26/27, fallback ray attempts=2, GPU build/selection/detail=3.636/9.668/62.510 ms, CPU grouping=20.464 ms; atlas installed/evicted=1/1, I/O=0.502 MiB, resident=438/438
+Frame shadows 127: BVH caster builds=0, repair passes=1, repair GPU=43.545 ms, capacity fallbacks=1
+Frame scheduling 127: streaming rounds/groups/rays=26/25/25, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/1/0
+Camera preparation: wall 13.744 ms, GPU LOD 0.215 ms, plans/footprints=13/13
+Peak labels: 0/0 visible, 0 onscreen, 622 within range, best margin -inf m
+Slow stage: worker iteration wall 427.621 ms (inclusive)
+Slow stage: producer wait wall 109.912 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 91.855 ms, GPU 7.627 ms
+Minimap publish: request-to-image 107.524 ms
+Slow stage: primary repair wall 173.342 ms (inclusive)
+Slow stage: terrain frame wall 369.932 ms (inclusive)
+Frame 152: wall 369.937 ms, GPU producer 110.496 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=60.469, BVH resident/budget 2035.7/2048.0 MiB, builds/hits/evictions=2753/2082/2441, scene builds=120
+Frame phases 152: pre-render 0.007 ms, prepare 0.660 ms, primary repair 173.342 ms, shadow repair 84.473 ms, producer wait 111.081 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 152: BVH built/hit/evicted=6/58/2, catalogue/instance/scene builds=0/31/1, cached/scene tiles=312/312, scene 0.1 MiB, selection/detail passes=31/32, fallback ray attempts=49276, GPU build/selection/detail=9.092/12.286/63.257 ms, CPU grouping=24.214 ms; atlas installed/evicted=6/6, I/O=3.012 MiB, resident=438/438
+Frame shadows 152: BVH caster builds=0, repair passes=1, repair GPU=42.740 ms, capacity fallbacks=1
+Frame scheduling 152: streaming rounds/groups/rays=31/64/599213, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/1/0
+Camera preparation: wall 0.501 ms, GPU LOD 0.000 ms, plans/footprints=13/13
+Peak labels: 0/1 visible, 1 onscreen, 622 within range, best margin -46386.1 m
+Slow stage: worker iteration wall 369.979 ms (inclusive)
+Slow stage: producer wait wall 107.683 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 76.394 ms, GPU 3.612 ms
+Minimap publish: request-to-image 90.829 ms
+Slow stage: terrain frame wall 148.358 ms (inclusive)
+Frame 173: wall 148.362 ms, GPU producer 108.348 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=60.618, BVH resident/budget 2035.7/2048.0 MiB, builds/hits/evictions=2753/2082/2441, scene builds=120
+Frame phases 173: pre-render 0.005 ms, prepare 0.309 ms, primary repair 0.000 ms, shadow repair 38.889 ms, producer wait 108.842 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 173: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=312/312, scene 0.1 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 173: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=1
+Frame scheduling 173: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.157 ms, GPU LOD 0.000 ms, plans/footprints=13/13
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33174.2 m
+Slow stage: worker iteration wall 148.407 ms (inclusive)
+Slow stage: producer wait wall 110.028 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 92.777 ms, GPU 0.420 ms
+Minimap publish: request-to-image 106.533 ms
+Slow stage: terrain frame wall 148.099 ms (inclusive)
+Frame 177: wall 148.102 ms, GPU producer 110.799 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=60.766, BVH resident/budget 2035.7/2048.0 MiB, builds/hits/evictions=2753/2082/2441, scene builds=120
+Frame phases 177: pre-render 0.005 ms, prepare 0.323 ms, primary repair 0.000 ms, shadow repair 33.374 ms, producer wait 114.135 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 177: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=312/312, scene 0.1 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 177: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=1
+Frame scheduling 177: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.170 ms, GPU LOD 0.000 ms, plans/footprints=13/13
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33173.7 m
+Slow stage: worker iteration wall 148.153 ms (inclusive)
+Health t=60.777: memory ok footprint/resident 4518.5/1464.7 MiB, Metal allocated/recommended 4359.9/18186.2 MiB, thermal=0
+Health t=60.777: worker stage=render age=11.5 ms, calls=371 revision=177, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=60.777: display stage=idle age=18.6 ms, calls=1771 revision=173, submitted/completed/presented=1771/1771/1769, stale=0 unavailable=0 refreshed=6
+Health t=60.777: minimap stage=idle age=49.0 ms, calls=20 revision=0, submitted/completed/presented=20/20/20, stale=0 unavailable=0 refreshed=37
+Health t=60.777: terrain stage=producer wait age=10.9 ms
+Slow stage: producer wait wall 107.465 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 88.523 ms, GPU 2.448 ms
+Minimap publish: request-to-image 90.822 ms
+Slow stage: terrain frame wall 151.372 ms (inclusive)
+Frame 179: wall 151.375 ms, GPU producer 108.090 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=60.917, BVH resident/budget 2035.7/2048.0 MiB, builds/hits/evictions=2753/2082/2441, scene builds=120
+Frame phases 179: pre-render 0.004 ms, prepare 0.381 ms, primary repair 0.000 ms, shadow repair 42.096 ms, producer wait 108.618 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 179: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=312/312, scene 0.1 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 179: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=1
+Frame scheduling 179: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.172 ms, GPU LOD 0.000 ms, plans/footprints=13/13
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33166.9 m
+Slow stage: worker iteration wall 151.423 ms (inclusive)
+Slow stage: producer wait wall 111.772 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 77.056 ms, GPU 5.654 ms
+Minimap publish: request-to-image 89.972 ms
+Slow stage: terrain frame wall 160.159 ms (inclusive)
+Frame 184: wall 160.163 ms, GPU producer 112.366 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=61.077, BVH resident/budget 2035.7/2048.0 MiB, builds/hits/evictions=2753/2082/2441, scene builds=120
+Frame phases 184: pre-render 0.005 ms, prepare 0.597 ms, primary repair 0.000 ms, shadow repair 46.240 ms, producer wait 112.970 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 184: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=312/312, scene 0.1 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 184: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=1
+Frame scheduling 184: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.328 ms, GPU LOD 0.000 ms, plans/footprints=13/13
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33175.2 m
+Slow stage: worker iteration wall 160.203 ms (inclusive)
+Slow stage: producer wait wall 108.772 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 101.782 ms, GPU 0.460 ms
+Minimap publish: request-to-image 106.989 ms
+Slow stage: terrain frame wall 160.426 ms (inclusive)
+Frame 186: wall 160.430 ms, GPU producer 107.577 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=61.238, BVH resident/budget 2035.7/2048.0 MiB, builds/hits/evictions=2753/2082/2441, scene builds=120
+Frame phases 186: pre-render 0.005 ms, prepare 0.580 ms, primary repair 0.000 ms, shadow repair 49.637 ms, producer wait 109.900 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 186: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=312/312, scene 0.1 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 186: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=1
+Frame scheduling 186: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.384 ms, GPU LOD 0.000 ms, plans/footprints=13/13
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33168.4 m
+Slow stage: worker iteration wall 160.477 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=0/0, selected LOD-1=653
+Slow stage: producer wait wall 175.954 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 153.577 ms, GPU 5.081 ms
+Minimap publish: request-to-image 156.893 ms
+Slow stage: terrain frame wall 235.983 ms (inclusive)
+Frame 187: wall 235.988 ms, GPU producer 175.492 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=61.481, BVH resident/budget 2035.7/2048.0 MiB, builds/hits/evictions=2753/2082/2441, scene builds=120
+Frame phases 187: pre-render 0.011 ms, prepare 2.040 ms, primary repair 0.000 ms, shadow repair 55.240 ms, producer wait 178.305 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 187: BVH built/hit/evicted=0/0/0, catalogue/instance/scene builds=0/0/0, cached/scene tiles=312/312, scene 0.1 MiB, selection/detail passes=0/1, fallback ray attempts=0, GPU build/selection/detail=0.000/0.000/0.000 ms, CPU grouping=0.000 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 187: BVH caster builds=0, repair passes=0, repair GPU=0.000 ms, capacity fallbacks=1
+Frame scheduling 187: streaming rounds/groups/rays=0/0/0, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 1.526 ms, GPU LOD 0.210 ms, plans/footprints=14/14
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33181.3 m
+Slow stage: worker iteration wall 236.095 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=0/0, selected LOD-1=653
+Slow stage: producer wait wall 108.561 ms (inclusive)
+Minimap mask: 552x472, 1440000 rays, worker 92.498 ms, GPU 46.154 ms
+Minimap publish: request-to-image 110.004 ms
+Slow stage: primary repair wall 178.517 ms (inclusive)
+Health t=61.782: memory ok footprint/resident 4540.3/1468.2 MiB, Metal allocated/recommended 4379.2/18186.2 MiB, thermal=0
+Health t=61.782: worker stage=render age=301.5 ms, calls=375 revision=187, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=61.782: display stage=idle age=32.7 ms, calls=1798 revision=187, submitted/completed/presented=1798/1798/1798, stale=0 unavailable=0 refreshed=6
+Health t=61.782: minimap stage=idle age=189.2 ms, calls=25 revision=0, submitted/completed/presented=25/25/25, stale=0 unavailable=0 refreshed=45
+Health t=61.782: terrain stage=BVH shadow terrain repair age=11.0 ms
+Slow stage: terrain frame wall 369.946 ms (inclusive)
+Frame 192: wall 369.954 ms, GPU producer 109.196 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=61.851, BVH resident/budget 2025.2/2048.0 MiB, builds/hits/evictions=2754/2142/2443, scene builds=121
+Frame phases 192: pre-render 0.011 ms, prepare 3.107 ms, primary repair 178.517 ms, shadow repair 78.190 ms, producer wait 109.734 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 192: BVH built/hit/evicted=1/60/2, catalogue/instance/scene builds=0/38/1, cached/scene tiles=311/311, scene 0.1 MiB, selection/detail passes=38/39, fallback ray attempts=52, GPU build/selection/detail=7.371/12.446/62.281 ms, CPU grouping=32.914 ms; atlas installed/evicted=1/1, I/O=2.004 MiB, resident=438/438
+Frame shadows 192: BVH caster builds=0, repair passes=1, repair GPU=37.474 ms, capacity fallbacks=1
+Frame scheduling 192: streaming rounds/groups/rays=38/61/812, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/1
+Camera preparation: wall 2.622 ms, GPU LOD 0.598 ms, plans/footprints=15/15
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33181.1 m
+Slow stage: worker iteration wall 370.026 ms (inclusive)
+Slow stage: producer wait wall 106.406 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 73.708 ms, GPU 1.479 ms
+Minimap publish: request-to-image 74.204 ms
+Slow stage: primary repair wall 164.698 ms (inclusive)
+Slow stage: terrain frame wall 359.331 ms (inclusive)
+Frame 211: wall 359.338 ms, GPU producer 107.086 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=62.210, BVH resident/budget 2025.2/2048.0 MiB, builds/hits/evictions=2754/2209/2443, scene builds=121
+Frame phases 211: pre-render 0.013 ms, prepare 0.495 ms, primary repair 164.698 ms, shadow repair 85.969 ms, producer wait 107.716 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 211: BVH built/hit/evicted=0/67/0, catalogue/instance/scene builds=0/34/0, cached/scene tiles=311/311, scene 0.1 MiB, selection/detail passes=35/36, fallback ray attempts=7836, GPU build/selection/detail=2.369/11.640/63.872 ms, CPU grouping=37.259 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 211: BVH caster builds=0, repair passes=1, repair GPU=35.958 ms, capacity fallbacks=1
+Frame scheduling 211: streaming rounds/groups/rays=35/67/120707, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.324 ms, GPU LOD 0.000 ms, plans/footprints=15/15
+Peak labels: 0/2 visible, 2 onscreen, 622 within range, best margin -33174.6 m
+Slow stage: worker iteration wall 359.504 ms (inclusive)
+Slow stage: producer wait wall 100.889 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 94.678 ms, GPU 45.839 ms
+Minimap publish: request-to-image 106.788 ms
+Slow stage: primary repair wall 159.063 ms (inclusive)
+Slow stage: terrain frame wall 342.160 ms (inclusive)
+Frame 225: wall 342.167 ms, GPU producer 99.687 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=62.553, BVH resident/budget 2025.2/2048.0 MiB, builds/hits/evictions=2754/2265/2443, scene builds=121
+Frame phases 225: pre-render 0.011 ms, prepare 1.578 ms, primary repair 159.063 ms, shadow repair 78.907 ms, producer wait 102.016 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 225: BVH built/hit/evicted=0/56/0, catalogue/instance/scene builds=0/37/0, cached/scene tiles=311/311, scene 0.1 MiB, selection/detail passes=38/39, fallback ray attempts=20144, GPU build/selection/detail=2.632/13.248/60.507 ms, CPU grouping=32.222 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 225: BVH caster builds=0, repair passes=1, repair GPU=35.083 ms, capacity fallbacks=1
+Frame scheduling 225: streaming rounds/groups/rays=38/56/310487, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 1.099 ms, GPU LOD 0.000 ms, plans/footprints=15/15
+Peak labels: 0/3 visible, 3 onscreen, 622 within range, best margin -33173.4 m
+Slow stage: worker iteration wall 342.233 ms (inclusive)
+Slow stage: producer wait wall 104.726 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 87.850 ms, GPU 32.463 ms
+Minimap publish: request-to-image 88.580 ms
+Health t=62.787: memory ok footprint/resident 4504.5/1463.7 MiB, Metal allocated/recommended 4339.1/18186.2 MiB, thermal=0
+Health t=62.787: worker stage=render age=234.8 ms, calls=378 revision=225, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=62.787: display stage=idle age=21.1 ms, calls=1828 revision=225, submitted/completed/presented=1828/1828/1828, stale=0 unavailable=0 refreshed=6
+Health t=62.787: minimap stage=idle age=128.6 ms, calls=28 revision=0, submitted/completed/presented=28/28/28, stale=0 unavailable=0 refreshed=51
+Health t=62.787: terrain stage=BVH detail encode/traverse age=0.1 ms
+Slow stage: primary repair wall 164.381 ms (inclusive)
+Slow stage: terrain frame wall 347.466 ms (inclusive)
+Frame 229: wall 347.472 ms, GPU producer 105.236 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=62.900, BVH resident/budget 2025.2/2048.0 MiB, builds/hits/evictions=2754/2321/2443, scene builds=121
+Frame phases 229: pre-render 0.008 ms, prepare 0.618 ms, primary repair 164.381 ms, shadow repair 76.322 ms, producer wait 105.834 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 229: BVH built/hit/evicted=0/56/0, catalogue/instance/scene builds=0/37/0, cached/scene tiles=311/311, scene 0.1 MiB, selection/detail passes=38/39, fallback ray attempts=21440, GPU build/selection/detail=2.612/14.232/63.413 ms, CPU grouping=31.791 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 229: BVH caster builds=0, repair passes=1, repair GPU=39.669 ms, capacity fallbacks=1
+Frame scheduling 229: streaming rounds/groups/rays=38/56/330493, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.334 ms, GPU LOD 0.000 ms, plans/footprints=15/15
+Peak labels: 0/3 visible, 3 onscreen, 622 within range, best margin -33182.5 m
+Slow stage: worker iteration wall 347.518 ms (inclusive)
+Slow stage: producer wait wall 104.368 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 103.898 ms, GPU 54.659 ms
+Minimap publish: request-to-image 107.022 ms
+Slow stage: primary repair wall 150.921 ms (inclusive)
+Slow stage: terrain frame wall 326.852 ms (inclusive)
+Frame 232: wall 326.857 ms, GPU producer 105.024 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=63.227, BVH resident/budget 2025.2/2048.0 MiB, builds/hits/evictions=2754/2377/2443, scene builds=121
+Frame phases 232: pre-render 0.007 ms, prepare 0.383 ms, primary repair 150.921 ms, shadow repair 68.823 ms, producer wait 105.706 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 232: BVH built/hit/evicted=0/56/0, catalogue/instance/scene builds=0/37/0, cached/scene tiles=311/311, scene 0.1 MiB, selection/detail passes=38/39, fallback ray attempts=23482, GPU build/selection/detail=1.967/14.084/61.885 ms, CPU grouping=25.758 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 232: BVH caster builds=0, repair passes=1, repair GPU=40.272 ms, capacity fallbacks=1
+Frame scheduling 232: streaming rounds/groups/rays=38/56/362001, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.184 ms, GPU LOD 0.000 ms, plans/footprints=15/15
+Peak labels: 0/3 visible, 3 onscreen, 622 within range, best margin -33175.7 m
+Slow stage: worker iteration wall 326.906 ms (inclusive)
+Slow stage: producer wait wall 112.610 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 105.366 ms, GPU 22.077 ms
+Minimap publish: request-to-image 107.082 ms
+Slow stage: primary repair wall 155.325 ms (inclusive)
+Slow stage: terrain frame wall 338.309 ms (inclusive)
+Frame 235: wall 338.314 ms, GPU producer 115.076 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=63.565, BVH resident/budget 2025.2/2048.0 MiB, builds/hits/evictions=2754/2433/2443, scene builds=121
+Frame phases 235: pre-render 0.008 ms, prepare 0.513 ms, primary repair 155.325 ms, shadow repair 65.514 ms, producer wait 116.625 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1200x675, MetalFX=Quality, LOD=1.500, shadows=1, minimap=1
+Frame work 235: BVH built/hit/evicted=0/56/0, catalogue/instance/scene builds=0/37/0, cached/scene tiles=311/311, scene 0.1 MiB, selection/detail passes=38/39, fallback ray attempts=26894, GPU build/selection/detail=3.243/14.920/65.169 ms, CPU grouping=25.556 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 235: BVH caster builds=0, repair passes=1, repair GPU=36.565 ms, capacity fallbacks=1
+Frame scheduling 235: streaming rounds/groups/rays=38/56/414596, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.371 ms, GPU LOD 0.000 ms, plans/footprints=15/15
+Peak labels: 0/4 visible, 4 onscreen, 622 within range, best margin -33166.1 m
+Slow stage: worker iteration wall 338.376 ms (inclusive)
+LOD plan: sources=2236, changed finer/coarser=0/0, selected LOD-1=653
+Slow stage: producer wait wall 165.485 ms (inclusive)
+Minimap mask: 552x472, 810000 rays, worker 146.941 ms, GPU 12.311 ms
+Minimap publish: request-to-image 156.648 ms
+Health t=63.792: memory ok footprint/resident 4545.7/1469.9 MiB, Metal allocated/recommended 4400.4/18186.2 MiB, thermal=0
+Health t=63.792: worker stage=render age=226.2 ms, calls=381 revision=235, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=63.792: display stage=drawable age=7.8 ms, calls=1856 revision=235, submitted/completed/presented=1855/1853/1853, stale=0 unavailable=0 refreshed=6
+Health t=63.792: minimap stage=idle age=59.1 ms, calls=31 revision=0, submitted/completed/presented=31/31/31, stale=0 unavailable=0 refreshed=57
+Health t=63.792: terrain stage=BVH detail encode/traverse age=59.3 ms
+Slow stage: BVH detail encode/traverse wall 101.367 ms (inclusive)
+Slow stage: primary repair wall 227.237 ms (inclusive)
+Slow stage: shadow repair wall 111.416 ms (inclusive)
+Slow stage: terrain frame wall 506.964 ms (inclusive)
+Frame 236: wall 506.967 ms, GPU producer 165.888 ms, 2 producer submission(s), streaming work excluded from GPU producer timing; t=64.072, BVH resident/budget 2025.2/2048.0 MiB, builds/hits/evictions=2754/2520/2443, scene builds=121
+Frame phases 236: pre-render 0.004 ms, prepare 1.202 ms, primary repair 227.237 ms, shadow repair 111.416 ms, producer wait 166.816 ms; observer=2623452.40/1100502.20/3415.00, moved=0.00 m, roam=0, replaced=0, output=1600x900, trace=1600x900, MetalFX=Native, LOD=1.500, shadows=1, minimap=1
+Frame work 236: BVH built/hit/evicted=0/87/0, catalogue/instance/scene builds=0/37/0, cached/scene tiles=311/311, scene 0.1 MiB, selection/detail passes=38/39, fallback ray attempts=47824, GPU build/selection/detail=3.185/20.768/102.561 ms, CPU grouping=49.457 ms; atlas installed/evicted=0/0, I/O=0.000 MiB, resident=438/438
+Frame shadows 236: BVH caster builds=0, repair passes=1, repair GPU=64.238 ms, capacity fallbacks=1
+Frame scheduling 236: streaming rounds/groups/rays=38/87/737206, LOD plans/sources changed=0/0, scene invalidations catalogue/LOD/admission/eviction=0/0/0/0
+Camera preparation: wall 0.929 ms, GPU LOD 0.210 ms, plans/footprints=16/16
+Peak labels: 0/4 visible, 4 onscreen, 622 within range, best margin -33173.6 m
+Slow stage: worker iteration wall 507.022 ms (inclusive)
+Minimap mask: 552x472, 1440000 rays, worker 0.938 ms, GPU 0.624 ms
+Minimap publish: request-to-image 2.568 ms
+Health t=64.797: memory ok footprint/resident 4560.7/1472.6 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=64.797: worker stage=idle age=724.3 ms, calls=381 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=64.797: display stage=idle age=12.7 ms, calls=1885 revision=236, submitted/completed/presented=1885/1885/1884, stale=0 unavailable=0 refreshed=6
+Health t=64.797: minimap stage=idle age=710.7 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=64.797: terrain stage=idle age=64796.7 ms
+Health t=65.801: memory ok footprint/resident 4546.9/1472.6 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=65.801: worker stage=idle age=1728.1 ms, calls=381 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=65.801: display stage=idle age=16.9 ms, calls=1915 revision=236, submitted/completed/presented=1915/1915/1915, stale=0 unavailable=0 refreshed=6
+Health t=65.801: minimap stage=idle age=1714.6 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=65.801: terrain stage=idle age=65800.5 ms
+Health t=66.802: memory ok footprint/resident 4544.1/1472.9 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=66.802: worker stage=idle age=9.9 ms, calls=388 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=66.802: display stage=idle age=16.7 ms, calls=1945 revision=236, submitted/completed/presented=1945/1945/1945, stale=0 unavailable=0 refreshed=6
+Health t=66.802: minimap stage=idle age=2715.7 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=66.802: terrain stage=idle age=66801.6 ms
+Health t=67.807: memory ok footprint/resident 4544.0/1473.2 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=67.807: worker stage=idle age=748.3 ms, calls=404 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=67.807: display stage=idle age=22.7 ms, calls=1975 revision=236, submitted/completed/presented=1975/1975/1975, stale=0 unavailable=0 refreshed=6
+Health t=67.807: minimap stage=idle age=3720.8 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=67.807: terrain stage=idle age=67806.7 ms
+Health t=68.808: memory ok footprint/resident 4544.0/1473.2 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=68.808: worker stage=idle age=1749.5 ms, calls=404 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=68.808: display stage=idle age=23.9 ms, calls=2005 revision=236, submitted/completed/presented=2005/2005/2005, stale=0 unavailable=0 refreshed=6
+Health t=68.808: minimap stage=idle age=4721.9 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=68.808: terrain stage=idle age=68807.9 ms
+Health t=69.813: memory ok footprint/resident 4544.0/1473.2 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=69.813: worker stage=idle age=2754.5 ms, calls=404 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=69.813: display stage=idle age=28.9 ms, calls=2035 revision=236, submitted/completed/presented=2035/2035/2035, stale=0 unavailable=0 refreshed=6
+Health t=69.813: minimap stage=idle age=5727.0 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=69.813: terrain stage=idle age=69812.9 ms
+Health t=70.817: memory ok footprint/resident 4544.0/1473.2 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=70.817: worker stage=idle age=3758.6 ms, calls=404 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=70.817: display stage=idle age=33.0 ms, calls=2065 revision=236, submitted/completed/presented=2065/2065/2065, stale=0 unavailable=0 refreshed=6
+Health t=70.817: minimap stage=idle age=6731.0 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=70.817: terrain stage=idle age=70817.0 ms
+Health t=71.822: memory ok footprint/resident 4544.0/1473.2 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=71.822: worker stage=idle age=4763.7 ms, calls=404 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=71.822: display stage=idle age=5.3 ms, calls=2096 revision=236, submitted/completed/presented=2096/2096/2095, stale=0 unavailable=0 refreshed=6
+Health t=71.822: minimap stage=idle age=7736.1 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=71.822: terrain stage=idle age=71822.1 ms
+Health t=72.823: memory ok footprint/resident 4544.0/1473.1 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=72.823: worker stage=idle age=5764.9 ms, calls=404 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=72.823: display stage=idle age=6.0 ms, calls=2126 revision=236, submitted/completed/presented=2126/2126/2125, stale=0 unavailable=0 refreshed=6
+Health t=72.823: minimap stage=idle age=8737.3 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=72.823: terrain stage=idle age=72823.3 ms
+Health t=73.828: memory ok footprint/resident 4544.1/1474.1 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=73.828: worker stage=idle age=236.6 ms, calls=439 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=73.828: display stage=idle age=11.0 ms, calls=2156 revision=236, submitted/completed/presented=2156/2156/2156, stale=0 unavailable=0 refreshed=6
+Health t=73.828: minimap stage=idle age=9742.4 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=73.828: terrain stage=idle age=73828.3 ms
+Health t=74.833: memory ok footprint/resident 4544.1/1474.2 MiB, Metal allocated/recommended 4419.6/18186.2 MiB, thermal=0
+Health t=74.833: worker stage=idle age=40.9 ms, calls=462 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=74.833: display stage=idle age=13.0 ms, calls=2186 revision=236, submitted/completed/presented=2186/2186/2186, stale=0 unavailable=0 refreshed=6
+Health t=74.833: minimap stage=idle age=10746.9 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=74.833: terrain stage=idle age=74832.8 ms
+Health t=75.834: memory ok footprint/resident 4547.7/1477.4 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=75.834: worker stage=idle age=71.6 ms, calls=505 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=75.834: display stage=idle age=17.6 ms, calls=2216 revision=236, submitted/completed/presented=2216/2216/2216, stale=0 unavailable=0 refreshed=6
+Health t=75.834: minimap stage=idle age=11748.2 ms, calls=32 revision=0, submitted/completed/presented=32/32/32, stale=0 unavailable=0 refreshed=58
+Health t=75.834: terrain stage=idle age=75834.1 ms
+Minimap mask: 552x472, 1440000 rays, worker 9.320 ms, GPU 5.027 ms
+Minimap publish: request-to-image 9.374 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.566 ms, GPU 2.188 ms
+Minimap publish: request-to-image 4.598 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.728 ms, GPU 1.860 ms
+Minimap publish: request-to-image 4.258 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.780 ms, GPU 1.890 ms
+Minimap publish: request-to-image 3.966 ms
+Minimap mask: 552x472, 1440000 rays, worker 7.464 ms, GPU 5.292 ms
+Minimap publish: request-to-image 7.495 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.871 ms, GPU 2.091 ms
+Minimap publish: request-to-image 4.022 ms
+Minimap mask: 552x472, 1440000 rays, worker 3.101 ms, GPU 2.074 ms
+Minimap publish: request-to-image 4.202 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.724 ms, GPU 2.002 ms
+Minimap publish: request-to-image 3.941 ms
+Minimap mask: 552x472, 1440000 rays, worker 3.107 ms, GPU 2.184 ms
+Minimap publish: request-to-image 4.146 ms
+Minimap mask: 552x472, 1440000 rays, worker 3.201 ms, GPU 2.315 ms
+Minimap publish: request-to-image 3.224 ms
+Minimap mask: 552x472, 1440000 rays, worker 7.686 ms, GPU 5.462 ms
+Minimap publish: request-to-image 7.715 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.564 ms, GPU 3.138 ms
+Minimap publish: request-to-image 4.608 ms
+Minimap mask: 552x472, 1440000 rays, worker 5.264 ms, GPU 3.659 ms
+Minimap publish: request-to-image 5.293 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.133 ms, GPU 2.915 ms
+Minimap publish: request-to-image 4.156 ms
+Minimap mask: 552x472, 1440000 rays, worker 3.197 ms, GPU 2.550 ms
+Minimap publish: request-to-image 3.233 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.517 ms, GPU 3.221 ms
+Minimap publish: request-to-image 4.546 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.241 ms, GPU 2.911 ms
+Minimap publish: request-to-image 4.280 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.474 ms, GPU 2.834 ms
+Minimap publish: request-to-image 4.497 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.614 ms, GPU 3.771 ms
+Minimap publish: request-to-image 4.644 ms
+Minimap mask: 552x472, 1440000 rays, worker 5.022 ms, GPU 3.675 ms
+Minimap publish: request-to-image 5.046 ms
+Minimap mask: 552x472, 1440000 rays, worker 1.956 ms, GPU 1.419 ms
+Minimap publish: request-to-image 3.185 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.571 ms, GPU 3.261 ms
+Minimap publish: request-to-image 4.611 ms
+Minimap mask: 552x472, 1440000 rays, worker 5.271 ms, GPU 3.746 ms
+Minimap publish: request-to-image 5.302 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.925 ms, GPU 3.424 ms
+Minimap publish: request-to-image 4.955 ms
+Minimap mask: 552x472, 1440000 rays, worker 6.177 ms, GPU 3.496 ms
+Minimap publish: request-to-image 6.232 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.876 ms, GPU 2.217 ms
+Minimap publish: request-to-image 3.162 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.900 ms, GPU 2.238 ms
+Minimap publish: request-to-image 3.131 ms
+Minimap mask: 552x472, 1440000 rays, worker 4.826 ms, GPU 3.339 ms
+Minimap publish: request-to-image 4.850 ms
+Minimap mask: 552x472, 1440000 rays, worker 1.838 ms, GPU 1.081 ms
+Minimap publish: request-to-image 3.157 ms
+Minimap mask: 552x472, 1440000 rays, worker 1.860 ms, GPU 1.071 ms
+Minimap publish: request-to-image 3.852 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.675 ms, GPU 1.363 ms
+Minimap publish: request-to-image 3.343 ms
+Minimap mask: 552x472, 1440000 rays, worker 1.948 ms, GPU 1.340 ms
+Minimap publish: request-to-image 2.879 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.573 ms, GPU 1.709 ms
+Minimap publish: request-to-image 3.177 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.394 ms, GPU 1.626 ms
+Minimap publish: request-to-image 3.378 ms
+Minimap mask: 552x472, 1440000 rays, worker 3.162 ms, GPU 2.217 ms
+Minimap publish: request-to-image 3.291 ms
+Minimap mask: 552x472, 1440000 rays, worker 5.421 ms, GPU 4.694 ms
+Minimap publish: request-to-image 5.496 ms
+Minimap mask: 552x472, 1440000 rays, worker 1.752 ms, GPU 0.997 ms
+Minimap publish: request-to-image 3.200 ms
+Minimap mask: 552x472, 1440000 rays, worker 1.727 ms, GPU 0.725 ms
+Minimap publish: request-to-image 3.198 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.473 ms, GPU 1.271 ms
+Minimap publish: request-to-image 5.033 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.688 ms, GPU 1.225 ms
+Minimap publish: request-to-image 4.637 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.299 ms, GPU 1.214 ms
+Minimap publish: request-to-image 4.189 ms
+Minimap mask: 552x472, 1440000 rays, worker 1.981 ms, GPU 1.225 ms
+Minimap publish: request-to-image 3.168 ms
+Minimap mask: 552x472, 1440000 rays, worker 2.087 ms, GPU 1.012 ms
+Minimap publish: request-to-image 3.115 ms
+Health t=76.835: memory ok footprint/resident 4549.1/1474.4 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=76.835: worker stage=idle age=59.4 ms, calls=508 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=76.835: display stage=idle age=18.2 ms, calls=2246 revision=236, submitted/completed/presented=2246/2246/2246, stale=0 unavailable=0 refreshed=6
+Health t=76.835: minimap stage=idle age=158.0 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=76.835: terrain stage=idle age=76835.4 ms
+Health t=77.840: memory ok footprint/resident 4548.7/1471.7 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=77.840: worker stage=idle age=47.8 ms, calls=558 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=77.840: display stage=idle age=19.0 ms, calls=2276 revision=236, submitted/completed/presented=2276/2276/2276, stale=0 unavailable=0 refreshed=6
+Health t=77.840: minimap stage=idle age=1162.2 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=77.840: terrain stage=idle age=77839.6 ms
+Health t=78.842: memory ok footprint/resident 4547.8/1471.9 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=78.842: worker stage=idle age=283.9 ms, calls=588 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=78.842: display stage=idle age=24.9 ms, calls=2306 revision=236, submitted/completed/presented=2306/2306/2306, stale=0 unavailable=0 refreshed=6
+Health t=78.842: minimap stage=idle age=2164.9 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=78.842: terrain stage=idle age=78842.3 ms
+Health t=79.847: memory ok footprint/resident 4546.1/1472.0 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=79.847: worker stage=idle age=5.6 ms, calls=633 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=79.847: display stage=idle age=30.2 ms, calls=2336 revision=236, submitted/completed/presented=2336/2336/2336, stale=0 unavailable=0 refreshed=6
+Health t=79.847: minimap stage=idle age=3170.0 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=79.847: terrain stage=idle age=79847.4 ms
+Health t=80.848: memory ok footprint/resident 4546.1/1472.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=80.848: worker stage=idle age=6.2 ms, calls=667 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=80.848: display stage=idle age=29.8 ms, calls=2366 revision=236, submitted/completed/presented=2366/2366/2366, stale=0 unavailable=0 refreshed=6
+Health t=80.848: minimap stage=idle age=4170.6 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=80.848: terrain stage=idle age=80848.0 ms
+Health t=81.853: memory ok footprint/resident 4546.1/1472.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=81.853: worker stage=idle age=128.0 ms, calls=701 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=81.853: display stage=idle age=2.3 ms, calls=2397 revision=236, submitted/completed/presented=2397/2397/2396, stale=0 unavailable=0 refreshed=6
+Health t=81.853: minimap stage=idle age=5175.7 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=81.853: terrain stage=idle age=81853.1 ms
+Health t=82.858: memory ok footprint/resident 4546.1/1472.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=82.858: worker stage=idle age=599.8 ms, calls=719 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=82.858: display stage=idle age=7.4 ms, calls=2427 revision=236, submitted/completed/presented=2427/2427/2426, stale=0 unavailable=0 refreshed=6
+Health t=82.858: minimap stage=idle age=6180.8 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=82.858: terrain stage=idle age=82858.1 ms
+Health t=83.860: memory ok footprint/resident 4546.2/1472.4 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=83.860: worker stage=idle age=68.8 ms, calls=740 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=83.860: display stage=idle age=10.4 ms, calls=2457 revision=236, submitted/completed/presented=2457/2457/2456, stale=0 unavailable=0 refreshed=6
+Health t=83.860: minimap stage=idle age=7183.1 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=83.860: terrain stage=idle age=83860.5 ms
+Health t=84.865: memory ok footprint/resident 4546.2/1472.4 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=84.865: worker stage=idle age=6.0 ms, calls=755 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=84.865: display stage=idle age=12.9 ms, calls=2487 revision=236, submitted/completed/presented=2487/2487/2487, stale=0 unavailable=0 refreshed=6
+Health t=84.865: minimap stage=idle age=8187.2 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=84.865: terrain stage=idle age=84864.5 ms
+Health t=85.867: memory ok footprint/resident 4546.2/1472.4 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=85.867: worker stage=idle age=108.6 ms, calls=782 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=85.867: display stage=idle age=16.4 ms, calls=2517 revision=236, submitted/completed/presented=2517/2517/2517, stale=0 unavailable=0 refreshed=6
+Health t=85.867: minimap stage=idle age=9189.8 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=85.867: terrain stage=idle age=85867.2 ms
+Health t=86.872: memory ok footprint/resident 4546.2/1472.4 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=86.872: worker stage=idle age=147.2 ms, calls=799 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=86.872: display stage=idle age=21.5 ms, calls=2547 revision=236, submitted/completed/presented=2547/2547/2547, stale=0 unavailable=0 refreshed=6
+Health t=86.872: minimap stage=idle age=10194.9 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=86.872: terrain stage=idle age=86872.2 ms
+Health t=87.877: memory ok footprint/resident 4547.6/1472.4 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=87.877: worker stage=idle age=2.3 ms, calls=825 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=87.877: display stage=idle age=26.5 ms, calls=2577 revision=236, submitted/completed/presented=2577/2577/2577, stale=0 unavailable=0 refreshed=6
+Health t=87.877: minimap stage=idle age=11200.0 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=87.877: terrain stage=idle age=87877.3 ms
+Health t=88.882: memory ok footprint/resident 4547.7/1472.8 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=88.882: worker stage=idle age=70.3 ms, calls=869 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=88.882: display stage=idle age=31.7 ms, calls=2607 revision=236, submitted/completed/presented=2607/2607/2607, stale=0 unavailable=0 refreshed=6
+Health t=88.882: minimap stage=idle age=12205.0 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=88.882: terrain stage=idle age=88882.4 ms
+Health t=89.885: memory ok footprint/resident 4547.7/1473.1 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=89.885: worker stage=idle age=9.5 ms, calls=921 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=89.885: display stage=ui-update age=0.6 ms, calls=2638 revision=236, submitted/completed/presented=2638/2637/2637, stale=0 unavailable=0 refreshed=6
+Health t=89.885: minimap stage=idle age=13207.2 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=89.885: terrain stage=idle age=89884.6 ms
+Health t=90.890: memory ok footprint/resident 4547.7/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=90.890: worker stage=idle age=577.5 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=90.890: display stage=idle age=6.3 ms, calls=2668 revision=236, submitted/completed/presented=2668/2668/2667, stale=0 unavailable=0 refreshed=6
+Health t=90.890: minimap stage=idle age=14212.3 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=90.890: terrain stage=idle age=90889.7 ms
+Health t=91.894: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=91.894: worker stage=idle age=1582.1 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=91.894: display stage=idle age=10.4 ms, calls=2698 revision=236, submitted/completed/presented=2698/2698/2697, stale=0 unavailable=0 refreshed=6
+Health t=91.894: minimap stage=idle age=15216.9 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=91.894: terrain stage=idle age=91894.3 ms
+Health t=92.895: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=92.895: worker stage=idle age=2582.6 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=92.895: display stage=idle age=10.8 ms, calls=2728 revision=236, submitted/completed/presented=2728/2728/2728, stale=0 unavailable=0 refreshed=6
+Health t=92.895: minimap stage=idle age=16217.4 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=92.895: terrain stage=idle age=92894.8 ms
+Health t=93.899: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=93.899: worker stage=idle age=3586.9 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=93.899: display stage=idle age=15.2 ms, calls=2758 revision=236, submitted/completed/presented=2758/2758/2758, stale=0 unavailable=0 refreshed=6
+Health t=93.899: minimap stage=idle age=17221.8 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=93.899: terrain stage=idle age=93899.1 ms
+Health t=94.904: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=94.904: worker stage=idle age=4592.0 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=94.904: display stage=idle age=20.9 ms, calls=2788 revision=236, submitted/completed/presented=2788/2788/2788, stale=0 unavailable=0 refreshed=6
+Health t=94.904: minimap stage=idle age=18226.9 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=94.904: terrain stage=idle age=94904.2 ms
+Health t=95.909: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=95.909: worker stage=idle age=5597.1 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=95.909: display stage=idle age=25.9 ms, calls=2818 revision=236, submitted/completed/presented=2818/2818/2818, stale=0 unavailable=0 refreshed=6
+Health t=95.909: minimap stage=idle age=19231.9 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=95.909: terrain stage=idle age=95909.3 ms
+Health t=96.910: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=96.910: worker stage=idle age=6597.8 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=96.910: display stage=idle age=26.0 ms, calls=2848 revision=236, submitted/completed/presented=2848/2848/2848, stale=0 unavailable=0 refreshed=6
+Health t=96.910: minimap stage=idle age=20232.6 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=96.910: terrain stage=idle age=96909.9 ms
+Health t=97.915: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=97.915: worker stage=idle age=7602.8 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=97.915: display stage=idle age=31.1 ms, calls=2878 revision=236, submitted/completed/presented=2878/2878/2878, stale=0 unavailable=0 refreshed=6
+Health t=97.915: minimap stage=idle age=21237.7 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=97.915: terrain stage=idle age=97915.0 ms
+Health t=98.917: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=98.917: worker stage=idle age=8604.9 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=98.917: display stage=encode age=0.0 ms, calls=2909 revision=236, submitted/completed/presented=2908/2908/2908, stale=0 unavailable=0 refreshed=6
+Health t=98.917: minimap stage=idle age=22239.7 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=98.917: terrain stage=idle age=98917.1 ms
+Health t=99.922: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=99.922: worker stage=idle age=9610.0 ms, calls=935 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=99.922: display stage=idle age=4.9 ms, calls=2939 revision=236, submitted/completed/presented=2939/2939/2938, stale=0 unavailable=0 refreshed=6
+Health t=99.922: minimap stage=idle age=23244.8 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=99.922: terrain stage=idle age=99922.2 ms
+Health t=100.927: memory ok footprint/resident 4546.2/1473.2 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=100.927: worker stage=idle age=506.4 ms, calls=937 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=100.927: display stage=idle age=10.1 ms, calls=2969 revision=236, submitted/completed/presented=2969/2969/2968, stale=0 unavailable=0 refreshed=6
+Health t=100.927: minimap stage=idle age=24250.0 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=100.927: terrain stage=idle age=100927.3 ms
+Health t=101.932: memory ok footprint/resident 4546.2/1473.2 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=101.932: worker stage=idle age=7.4 ms, calls=940 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=101.932: display stage=idle age=14.2 ms, calls=2999 revision=236, submitted/completed/presented=2999/2999/2999, stale=0 unavailable=0 refreshed=6
+Health t=101.932: minimap stage=idle age=25255.0 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=101.932: terrain stage=idle age=101932.4 ms
+Health t=102.938: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=102.938: worker stage=idle age=12.6 ms, calls=956 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=102.938: display stage=idle age=19.3 ms, calls=3029 revision=236, submitted/completed/presented=3029/3029/3029, stale=0 unavailable=0 refreshed=6
+Health t=102.938: minimap stage=idle age=26260.2 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=102.938: terrain stage=idle age=102937.5 ms
+Health t=103.943: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=103.943: worker stage=idle age=34.2 ms, calls=992 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=103.943: display stage=idle age=22.2 ms, calls=3059 revision=236, submitted/completed/presented=3059/3059/3059, stale=0 unavailable=0 refreshed=6
+Health t=103.943: minimap stage=idle age=27265.2 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=103.943: terrain stage=idle age=103942.6 ms
+Health t=104.944: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=104.944: worker stage=idle age=828.7 ms, calls=995 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=104.944: display stage=idle age=28.0 ms, calls=3089 revision=236, submitted/completed/presented=3089/3089/3089, stale=0 unavailable=0 refreshed=6
+Health t=104.944: minimap stage=idle age=28267.0 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=104.944: terrain stage=idle age=104944.4 ms
+Health t=105.949: memory ok footprint/resident 4546.2/1473.3 MiB, Metal allocated/recommended 4421.6/18186.2 MiB, thermal=0
+Health t=105.949: worker stage=idle age=1833.8 ms, calls=995 revision=236, submitted/completed/presented=0/0/0, stale=0 unavailable=0 refreshed=0
+Health t=105.949: display stage=idle age=32.3 ms, calls=3119 revision=236, submitted/completed/presented=3119/3119/3119, stale=0 unavailable=0 refreshed=6
+Health t=105.949: minimap stage=idle age=29272.1 ms, calls=75 revision=0, submitted/completed/presented=75/75/75, stale=0 unavailable=0 refreshed=58
+Health t=105.949: terrain stage=idle age=105949.5 ms

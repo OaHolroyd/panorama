@@ -32,6 +32,7 @@ struct TileSelection {
   bool skip_resident;
   float2 origin;
   uint excluded_source;
+  uint excluded_primitive;
 };
 
 inline float tile_coverage_limit(
@@ -109,9 +110,110 @@ inline float bvh_coverage_limit(
 
 struct SelectedTerrainTile {
   uint source;
+  uint primitive;
   float entry;
   float exit;
 };
+
+inline SelectedTerrainTile select_next_terrain_patch(
+    primitive_acceleration_structure catalogue,
+    intersection_function_table<> functions,
+    device const BvhAffinePatch *patches,
+    RayDirection direction,
+    float elevation,
+    float progress,
+    float limit,
+    uint excluded_source = 0xffffffffU,
+    uint excluded_primitive = 0xffffffffU,
+    float2 ray_origin = float2(0.0F)
+) {
+  ray r;
+  r.origin = float3(ray_origin, elevation);
+  r.direction = float3(direction.x, direction.y, direction.slope);
+  const float tolerance = max(1e-3F, 8.0F * FLT_EPSILON * max(1.0F, progress));
+  r.min_distance = progress;
+  r.max_distance = limit;
+  intersector<> tracer;
+  tracer.assume_geometry_type(geometry_type::bounding_box);
+  TileSelection payload = {r.direction, false, ray_origin, excluded_source, excluded_primitive};
+  const auto hit = tracer.intersect(r, catalogue, functions, payload);
+  if (hit.type == intersection_type::none)
+    return {0xffffffffU, 0xffffffffU, limit, limit};
+  const BvhAffinePatch patch = patches[hit.primitive_id];
+  const float2 relative = ray_origin - float2(patch.origin_x, patch.origin_y);
+  const float2 logical_origin = float2(
+      patch.inverse_xx * relative.x + patch.inverse_xy * relative.y,
+      patch.inverse_yx * relative.x + patch.inverse_yy * relative.y
+  );
+  const float2 logical_direction = float2(
+      patch.inverse_xx * direction.x + patch.inverse_xy * direction.y,
+      patch.inverse_yx * direction.x + patch.inverse_yy * direction.y
+  );
+  float entry = 0, exit = limit;
+  bvh_slab(
+      logical_origin.x,
+      logical_direction.x,
+      patch.minimum_column,
+      patch.maximum_column,
+      entry,
+      exit
+  );
+  bvh_slab(
+      logical_origin.y,
+      logical_direction.y,
+      patch.minimum_row,
+      patch.maximum_row,
+      entry,
+      exit
+  );
+  // Independently linearised neighbouring tiles can differ by their measured
+  // projection residual at a shared edge. Treat only that small affine seam as
+  // continuous; genuine missing-tile gaps remain much wider.
+  const float seam_tolerance = 2.0F * patch.coverage_guard + 2.0F * tolerance;
+  if (entry > progress + seam_tolerance)
+    return {0xffffffffU, 0xffffffffU, progress, progress};
+  return {patch.source, hit.primitive_id, max(progress, entry), exit};
+}
+
+/// Find the end of continuous transformed-dataset coverage along a ray. The
+/// coverage hierarchy deliberately has unbounded Z slabs; candidate culling
+/// uses a separate elevation-bounded hierarchy.
+inline float transformed_coverage_limit(
+    primitive_acceleration_structure catalogue,
+    intersection_function_table<> functions,
+    device const BvhAffinePatch *patches,
+    RayDirection direction,
+    float elevation,
+    float limit,
+    uint source_count,
+    float2 origin = float2(0.0F)
+) {
+  float progress = 0.0F;
+  uint previous = 0xffffffffU;
+  for (uint crossed = 0; crossed <= source_count; ++crossed) {
+    const SelectedTerrainTile selected = select_next_terrain_patch(
+        catalogue,
+        functions,
+        patches,
+        direction,
+        elevation,
+        progress,
+        limit,
+        0xffffffffU,
+        previous,
+        origin
+    );
+    if (selected.source == 0xffffffffU)
+      return progress;
+    if (selected.exit >= limit)
+      return limit;
+    if (!(selected.exit > progress))
+      return progress;
+    progress = selected.exit;
+    previous = selected.primitive;
+  }
+  return progress;
+}
 
 inline SelectedTerrainTile select_next_terrain_tile(
     primitive_acceleration_structure catalogue,
@@ -121,7 +223,8 @@ inline SelectedTerrainTile select_next_terrain_tile(
     float elevation,
     float progress,
     float limit,
-    uint excluded_source = 0xffffffffU
+    uint excluded_source = 0xffffffffU,
+    uint excluded_primitive = 0xffffffffU
 ) {
   ray r;
   r.origin = float3(0, 0, elevation);
@@ -130,15 +233,15 @@ inline SelectedTerrainTile select_next_terrain_tile(
   r.max_distance = limit;
   intersector<> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
-  TileSelection payload = {r.direction, false, float2(0), excluded_source};
+  TileSelection payload = {r.direction, false, float2(0), excluded_source, excluded_primitive};
   const auto hit = tracer.intersect(r, catalogue, functions, payload);
   if (hit.type == intersection_type::none)
-    return {0xffffffffU, limit, limit};
+    return {0xffffffffU, 0xffffffffU, limit, limit};
   // Callback invocation order is unspecified; use the closest primitive ID.
   const BvhTile tile = tiles[hit.primitive_id];
   const float width = tile.cell_size * float(tile.cell_count);
   float entry = 0, exit = limit;
   bvh_slab(0, r.direction.x, tile.x_min, tile.x_min + width, entry, exit);
   bvh_slab(0, r.direction.y, tile.y_min, tile.y_min + width, entry, exit);
-  return {hit.primitive_id, max(progress, entry), exit};
+  return {hit.primitive_id, hit.primitive_id, max(progress, entry), exit};
 }

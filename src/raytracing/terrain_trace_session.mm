@@ -31,9 +31,12 @@ void validate_configuration(const RaytraceConfig &config) {
   if (config.raytracer != Raytracer::Software && config.raytracer != Raytracer::MetalBvh) {
     throw std::invalid_argument("Unknown terrain raytracer");
   }
-  if (config.tile_cache_size_bytes == 0U || config.tile_dir.empty()) {
+  const auto datasets = configured_terrain_datasets(config);
+  if (config.tile_cache_size_bytes == 0U || datasets.empty()) {
     throw std::invalid_argument("Terrain trace session requires a tile directory and cache");
   }
+  if (datasets.size() > 1U && config.raytracer != Raytracer::MetalBvh)
+    throw std::invalid_argument("Multiple terrain datasets require the Metal BVH raytracer");
   if (!std::isfinite(config.observer.easting) || !std::isfinite(config.observer.northing) ||
       !std::isfinite(config.observer.elevation) || !std::isfinite(config.max_distance) ||
       config.max_distance <= 0.0F || !std::isfinite(config.lod_scale) || config.lod_scale < 0.0F) {
@@ -108,8 +111,10 @@ struct TerrainTraceSession::State {
   std::unique_ptr<GpuCamera> camera;
   bool camera_rays_ready = false;
 
-  void prepare_camera(const RayFieldRequest &request) {
+  void prepare_camera(const RayFieldRequest &request, float lod_footprint_scale = 1.0F) {
     const uint32_t count = validate_camera_request(request);
+    if (!(lod_footprint_scale > 0.0F) || !std::isfinite(lod_footprint_scale))
+      throw std::invalid_argument("LOD footprint scale must be finite and positive");
     camera_rays_ready = false;
     if (!camera)
       camera =
@@ -121,7 +126,7 @@ struct TerrainTraceSession::State {
     parameters.image_height = request.image.height;
     bvh_shadow_active = false;
     shadow_revision = std::numeric_limits<uint64_t>::max();
-    camera->prepare(request, config.observer, config.lod_scale, *tiles);
+    camera->prepare(request, config.observer, config.lod_scale * lod_footprint_scale, *tiles);
   }
 
   void complete_camera() {
@@ -420,10 +425,11 @@ void TerrainTraceSession::trace_prepared() {
 
 bool TerrainTraceSession::encode_trace(
     id<MTLCommandBuffer> command,
-    const RayFieldRequest &camera
+    const RayFieldRequest &camera,
+    float lod_footprint_scale
 ) {
   State &state = *state_;
-  state.prepare_camera(camera);
+  state.prepare_camera(camera, lod_footprint_scale);
   if (command == nil || state.config.raytracer != Raytracer::MetalBvh)
     return false;
   state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);

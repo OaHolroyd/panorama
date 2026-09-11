@@ -218,6 +218,7 @@ void print_usage(const char *program) {
       "  --bvh-block-cells N  cells per BVH block axis (default: 4)\n"
       "  --bvh-cache-mib N    BVH cache and build budget (default: 2048)\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
+      "  --terrain DIR         add a prepared dataset in priority order; repeat for fallback\n"
       "  --peak-gazetteer CSV  peak labels dataset (default: data/gazetteers/peaks.csv)\n"
       "  --tile-cache-mib N    resident terrain-cache budget (default: 128)\n"
       "  --workers N           tile preparation workers (default: 8)\n"
@@ -226,7 +227,10 @@ void print_usage(const char *program) {
       "                        (default: 1.5)\n"
       "  --discard-quantized   expand uint16 terrain to Float32 in the GPU atlas\n"
       "                        (default: retain uint16)\n"
-      "  --trace-diagnostics   log frame timing, BVH cache, memory and display progress\n"
+      "  --trace-diagnostics   log frame timing, BVH cache, memory and display progress "
+      "(temporarily enabled by default)\n"
+      "  --no-trace-diagnostics\n"
+      "                        disable trace diagnostics\n"
       "  --easting M           fixed observer easting (default: 2623452.4)\n"
       "  --northing M          fixed observer northing (default: 1100502.2)\n"
       "  --elevation M         fixed observer elevation (default: 3415)\n"
@@ -265,9 +269,16 @@ void print_usage(const char *program) {
       settings.trace_diagnostics = true;
       continue;
     }
+    if (option == "--no-trace-diagnostics") {
+      settings.trace_diagnostics = false;
+      continue;
+    }
     const std::string_view value = arguments::option_value(argc, argv, index, option);
     if (option == "--tile-dir") {
       settings.tile_dir = value;
+      settings.terrain_datasets.clear();
+    } else if (option == "--terrain") {
+      settings.terrain_datasets.push_back({std::filesystem::path(value), 0.0});
     } else if (option == "--peak-gazetteer") {
       settings.peak_gazetteer = value;
     } else if (option == "--raytracer") {
@@ -488,6 +499,8 @@ public:
               settings_.raytracer,
               settings_.bvh_block_cells,
               settings_.bvh_cache_size_bytes,
+              true,
+              settings_.terrain_datasets,
           };
         };
     const ObserverLocation requestedObserver = settings_.observer;
@@ -1334,6 +1347,8 @@ private:
                     raytracer,
                     settings_.bvh_block_cells,
                     settings_.bvh_cache_size_bytes,
+                    true,
+                    settings_.terrain_datasets,
                 };
                 auto replacement = std::make_unique<TerrainTraceSession>(
                     config,
@@ -1373,6 +1388,8 @@ private:
               metalfx_->begin_frame();
               upscale_frame_started = true;
             }
+            const float lod_footprint_scale =
+                float(current_field_.image.height) / float(current_output_image_.height);
             producer_timing = render_terrain_frame(
                 *trace_,
                 trace_requested ? &current_field_ : nullptr,
@@ -1394,7 +1411,8 @@ private:
                         current_field_.image,
                         command
                     );
-                }
+                },
+                lod_footprint_scale
             );
             unpublished_frame = true;
             current_visibility_points_ = next_visibility_points;
@@ -1496,6 +1514,21 @@ private:
                 delta(bvh.shadow_passes, bvh_before.shadow_passes),
                 bvh.shadow_gpu_ms - bvh_before.shadow_gpu_ms,
                 delta(bvh.shadow_cache_fallbacks, bvh_before.shadow_cache_fallbacks)
+            );
+            std::printf(
+                "Frame scheduling %llu: streaming rounds/groups/rays=%llu/%llu/%llu, "
+                "LOD plans/sources changed=%llu/%llu, "
+                "scene invalidations catalogue/LOD/admission/eviction=%llu/%llu/%llu/%llu\n",
+                static_cast<unsigned long long>(revision),
+                delta(bvh.streaming_rounds, bvh_before.streaming_rounds),
+                delta(bvh.streaming_groups, bvh_before.streaming_groups),
+                delta(bvh.streaming_rays, bvh_before.streaming_rays),
+                delta(bvh.lod_plan_changes, bvh_before.lod_plan_changes),
+                delta(bvh.lod_sources_changed, bvh_before.lod_sources_changed),
+                delta(bvh.scene_catalogue_invalidations, bvh_before.scene_catalogue_invalidations),
+                delta(bvh.scene_lod_invalidations, bvh_before.scene_lod_invalidations),
+                delta(bvh.scene_admission_invalidations, bvh_before.scene_admission_invalidations),
+                delta(bvh.scene_eviction_invalidations, bvh_before.scene_eviction_invalidations)
             );
             std::fflush(stdout);
           }
@@ -1615,6 +1648,36 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = exception.what();
         printf("ERROR: %s\n", error_.c_str());
+        if (settings_.trace_diagnostics) {
+          const auto bvh = trace_->bvh_statistics();
+          const auto tiles = trace_->tile_statistics();
+          std::printf(
+              "ERROR state frame=%llu: BVH resident/budget=%.1f/%.1f MiB, "
+              "cached/scene=%llu/%llu, builds/hits/evictions=%llu/%llu/%llu, "
+              "catalogue/instance/scene builds=%llu/%llu/%llu, "
+              "selection/detail/streaming rounds=%llu/%llu/%llu, "
+              "fallback rays=%llu, atlas resident/capacity=%u/%u, I/O=%.1f MiB\n",
+              static_cast<unsigned long long>(revision),
+              double(bvh.resident_bytes) / 1048576.0,
+              double(bvh.budget_bytes) / 1048576.0,
+              static_cast<unsigned long long>(bvh.cached_tiles),
+              static_cast<unsigned long long>(bvh.scene_tiles),
+              static_cast<unsigned long long>(bvh.builds),
+              static_cast<unsigned long long>(bvh.cache_hits),
+              static_cast<unsigned long long>(bvh.evictions),
+              static_cast<unsigned long long>(bvh.catalogue_builds),
+              static_cast<unsigned long long>(bvh.instance_builds),
+              static_cast<unsigned long long>(bvh.scene_builds),
+              static_cast<unsigned long long>(bvh.selection_passes),
+              static_cast<unsigned long long>(bvh.trace_passes),
+              static_cast<unsigned long long>(bvh.streaming_rounds),
+              static_cast<unsigned long long>(bvh.scene_fallback_rays),
+              tiles.resident_tiles,
+              tiles.slot_capacity,
+              double(tiles.bytes_loaded_with_metal_io) / 1048576.0
+          );
+          std::fflush(stdout);
+        }
       }
     }
   }

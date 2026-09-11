@@ -12,7 +12,8 @@ BvhIntersection terrain_tile_intersection(
     device const BvhTile *tiles [[buffer(0)]],
     device const uint *resident [[buffer(1)]]
 ) {
-  if (primitive == payload.excluded_source || (payload.skip_resident && resident[primitive] != 0U))
+  if (primitive == payload.excluded_source || primitive == payload.excluded_primitive ||
+      (payload.skip_resident && resident[primitive] != 0U))
     return {false, 0};
   const BvhTile tile = tiles[primitive];
   const float width = tile.cell_size * float(tile.cell_count);
@@ -42,6 +43,70 @@ BvhIntersection terrain_tile_intersection(
   return {true, max(entry, min_distance)};
 }
 
+/// Exact ray/parallelogram test for transformed catalogue patches.
+[[intersection(bounding_box)]]
+BvhIntersection terrain_patch_intersection(
+    float min_distance [[min_distance]],
+    float max_distance [[max_distance]],
+    uint primitive [[primitive_id]],
+    ray_data TileSelection &payload [[payload]],
+    device const BvhAffinePatch *patches [[buffer(0)]],
+    device const uint *resident [[buffer(1)]]
+) {
+  const BvhAffinePatch patch = patches[primitive];
+  if (primitive == payload.excluded_primitive || patch.source == payload.excluded_source ||
+      (payload.skip_resident && resident[patch.source] != 0U))
+    return {false, 0};
+  const float2 relative = payload.origin - float2(patch.origin_x, patch.origin_y);
+  const float2 origin = float2(
+      patch.inverse_xx * relative.x + patch.inverse_xy * relative.y,
+      patch.inverse_yx * relative.x + patch.inverse_yy * relative.y
+  );
+  const float2 direction = float2(
+      patch.inverse_xx * payload.world_direction.x + patch.inverse_xy * payload.world_direction.y,
+      patch.inverse_yx * payload.world_direction.x + patch.inverse_yy * payload.world_direction.y
+  );
+  float entry = 0.0F, exit = max_distance;
+  if (!bvh_slab(origin.x, direction.x, patch.minimum_column, patch.maximum_column, entry, exit) ||
+      !bvh_slab(origin.y, direction.y, patch.minimum_row, patch.maximum_row, entry, exit) ||
+      entry >= exit || exit <= min_distance)
+    return {false, 0};
+  if ((direction.x == 0 && origin.x >= patch.maximum_column) ||
+      (direction.y == 0 && origin.y >= patch.maximum_row))
+    return {false, 0};
+  return {true, max(entry, min_distance)};
+}
+
+kernel void select_terrain_patches(
+    primitive_acceleration_structure catalogue [[buffer(0)]],
+    intersection_function_table<> functions [[buffer(1)]],
+    device const RayDirection *rays [[buffer(2)]],
+    device BvhRayState *states [[buffer(3)]],
+    constant BvhParameters &params [[buffer(4)]],
+    device const BvhAffinePatch *patches [[buffer(5)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+  const uint index = position.y * params.trace.image_width + position.x;
+  if (index >= params.trace.ray_count || states[index].done || states[index].source != 0xffffffffU)
+    return;
+  const auto selected = select_next_terrain_patch(
+      catalogue,
+      functions,
+      patches,
+      rays[index],
+      params.trace.observer_elevation,
+      states[index].progress,
+      params.trace.max_distance,
+      0xffffffffU,
+      states[index].primitive
+  );
+  states[index].source = selected.source;
+  states[index].primitive = selected.primitive;
+  states[index].exit = selected.exit;
+  if (selected.source == 0xffffffffU)
+    states[index].done = 1U;
+}
+
 kernel void select_terrain_tiles(
     primitive_acceleration_structure catalogue [[buffer(0)]],
     intersection_function_table<> functions [[buffer(1)]],
@@ -61,9 +126,12 @@ kernel void select_terrain_tiles(
       rays[index],
       params.trace.observer_elevation,
       states[index].progress,
-      params.trace.max_distance
+      params.trace.max_distance,
+      0xffffffffU,
+      states[index].primitive
   );
   states[index].source = selected.source;
+  states[index].primitive = selected.primitive;
   states[index].exit = selected.exit;
   if (selected.source == 0xffffffffU)
     states[index].done = 1U;

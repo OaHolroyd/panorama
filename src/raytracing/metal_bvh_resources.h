@@ -21,6 +21,7 @@ struct BvhPipeline {
   id<MTLComputePipelineState> state;
   id<MTLIntersectionFunctionTable> table;
   id<MTLIntersectionFunctionTable> missing_table;
+  id<MTLIntersectionFunctionTable> coverage_table;
 };
 
 BvhPipeline make_bvh_pipeline(
@@ -28,7 +29,8 @@ BvhPipeline make_bvh_pipeline(
     NSString *kernel_name,
     NSString *intersection_name,
     MTLFunctionConstantValues *constants = nil,
-    bool scene_mode = false
+    bool scene_mode = false,
+    NSString *missing_intersection_name = nil
 );
 
 } // namespace panorama::bvh_resources

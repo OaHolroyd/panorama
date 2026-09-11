@@ -215,19 +215,30 @@ TileManager::TileManager(const RaytraceConfig &config) : state_(std::make_unique
   state.config = config;
   // Discovery places the observer source at index zero and fixes source
   // indices for the lifetime of GPU catalogue hashes and deferred work.
-  state.catalogue = std::make_unique<TerrainCatalogue>(TerrainCatalogue::discover(
-      config.tile_dir,
-      config.observer,
-      config.max_distance,
-      config.max_tile_count,
-      config.allow_observer_fallback
-  ));
+  const auto datasets = configured_terrain_datasets(config);
+  state.catalogue = std::make_unique<TerrainCatalogue>(
+      config.terrain_datasets.empty() ? TerrainCatalogue::discover(
+                                            config.tile_dir,
+                                            config.observer,
+                                            config.max_distance,
+                                            config.max_tile_count,
+                                            config.allow_observer_fallback
+                                        )
+                                      : TerrainCatalogue::discover(
+                                            datasets,
+                                            config.observer,
+                                            config.max_distance,
+                                            config.max_tile_count,
+                                            config.allow_observer_fallback
+                                        )
+  );
   state.config.observer = state.catalogue->observer();
   state.origin = std::make_unique<TileGeometry>(read_tile_geometry(state.catalogue->origin().path));
   const MetalTileHeader header = read_metal_tile_header(state.catalogue->origin().path);
   state.trace_quantized =
       state.config.retain_quantized && header.sample_type == MetalTileSampleType::Uint16Decimeters;
-  validate_tile_position(*state.origin, state.catalogue->origin().key, state.catalogue->grid());
+  if (config.terrain_datasets.empty())
+    validate_tile_position(*state.origin, state.catalogue->origin().key, state.catalogue->grid());
   const size_t mip_count =
       static_cast<size_t>(metal_tile_mipmap_value_count(state.origin->cell_count));
   if (mip_count > std::numeric_limits<uint32_t>::max()) {
@@ -282,13 +293,12 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
 
 bool TileManager::relocate_observer(ObserverLocation observer) {
   State &state = *state_;
-  const TileKey key = tile_key_at(state.catalogue->grid(), observer.easting, observer.northing);
-  const std::optional<uint32_t> source = state.catalogue->find_source(key);
-  if (!source.has_value()) {
+  const auto location = state.catalogue->locate_source({observer.easting, observer.northing});
+  if (!location.has_value()) {
     return false;
   }
   state.config.observer = observer;
-  state.observer_source_index = *source;
+  state.observer_source_index = location->source_index;
   // LOD distance and observer-relative Float32 metadata both change, but the
   // catalogue, resident payload bytes, pipelines, and worker pool remain valid.
   if (state.atlas_attached) {

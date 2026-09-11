@@ -10,7 +10,7 @@ kernel void initialize_bvh_continuations(
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.image_width + position.x;
-  states[index] = {0, 0, 0xffffffffU, 0};
+  states[index] = {0, 0, 0xffffffffU, 0xffffffffU, 0};
 }
 
 inline float bvh_height(device const uchar *vertices, BvhTile tile, uint index, bool quantized) {
@@ -30,6 +30,7 @@ kernel void build_terrain_bvh_bounds(
     device const BvhBlock *blocks [[buffer(2)]],
     device BvhBounds *bounds [[buffer(3)]],
     constant BvhParameters &params [[buffer(4)]],
+    device const BvhAffinePatch *transforms [[buffer(5)]],
     uint index [[thread_position_in_grid]]
 ) {
   if (index >= params.primitive_count)
@@ -44,10 +45,42 @@ kernel void build_terrain_bvh_bounds(
       high = max(high, z);
     }
   }
-  const float x0 = tile.x_min + float(block.x) * tile.cell_size;
-  const float y0 = tile.y_min + float(block.y) * tile.cell_size;
-  const float x1 = tile.x_min + float(block.x + block.width) * tile.cell_size;
-  const float y1 = tile.y_min + float(block.y + block.height) * tile.cell_size;
+  float x0 = tile.x_min + float(block.x) * tile.cell_size;
+  float y0 = tile.y_min + float(block.y) * tile.cell_size;
+  float x1 = tile.x_min + float(block.x + block.width) * tile.cell_size;
+  float y1 = tile.y_min + float(block.y + block.height) * tile.cell_size;
+  if (params.transformed_catalogue) {
+    const BvhAffinePatch transform = transforms[block.transform];
+    const float2 p00 = float2(transform.origin_x, transform.origin_y) +
+                       x0 * float2(transform.column_x, transform.column_y) +
+                       y0 * float2(transform.row_x, transform.row_y);
+    const float2 p10 = float2(transform.origin_x, transform.origin_y) +
+                       x1 * float2(transform.column_x, transform.column_y) +
+                       y0 * float2(transform.row_x, transform.row_y);
+    const float2 p01 = float2(transform.origin_x, transform.origin_y) +
+                       x0 * float2(transform.column_x, transform.column_y) +
+                       y1 * float2(transform.row_x, transform.row_y);
+    const float2 p11 = float2(transform.origin_x, transform.origin_y) +
+                       x1 * float2(transform.column_x, transform.column_y) +
+                       y1 * float2(transform.row_x, transform.row_y);
+    const float2 low_xy = min(min(p00, p10), min(p01, p11));
+    const float2 high_xy = max(max(p00, p10), max(p01, p11));
+    x0 = low_xy.x;
+    y0 = low_xy.y;
+    x1 = high_xy.x;
+    y1 = high_xy.y;
+    const float base_side = float(tile.cell_count) * tile.cell_size;
+    const float2 anchor =
+        float2(transform.origin_x, transform.origin_y) +
+        0.5F * base_side *
+            float2(transform.column_x + transform.row_x, transform.column_y + transform.row_y);
+    const float radius =
+        max(max(distance(p00, anchor), distance(p10, anchor)),
+            max(distance(p01, anchor), distance(p11, anchor)));
+    const float curvature_guard = params.trace.curvature_coefficient * radius * radius + 1.01F;
+    bounds[index] = {x0, y0, low - curvature_guard, x1, y1, high + curvature_guard};
+    return;
+  }
   const float2 closest = clamp(float2(0.0F), float2(x0, y0), float2(x1, y1));
   const float2 farthest = max(abs(float2(x0, y0)), abs(float2(x1, y1)));
   const float k = params.trace.curvature_coefficient;
@@ -83,6 +116,7 @@ inline BvhIntersection intersect_terrain_block(
     device const Sample *vertices,
     BvhTile tile,
     BvhBlock block,
+    float2 horizontal_origin,
     float3 direction,
     float observer_elevation,
     float min_distance,
@@ -96,7 +130,7 @@ inline BvhIntersection intersect_terrain_block(
   const int sy = int(direction.y > 0.0F) - int(direction.y < 0.0F);
   float entry = 0.0F, exit = params.trace.max_distance;
   if (!bvh_slab(
-          0.0F,
+          horizontal_origin.x,
           direction.x,
           tile.x_min + float(block.x) * delta,
           tile.x_min + float(block.x + block.width) * delta,
@@ -104,7 +138,7 @@ inline BvhIntersection intersect_terrain_block(
           exit
       ) ||
       !bvh_slab(
-          0.0F,
+          horizontal_origin.y,
           direction.y,
           tile.y_min + float(block.y) * delta,
           tile.y_min + float(block.y + block.height) * delta,
@@ -115,8 +149,8 @@ inline BvhIntersection intersect_terrain_block(
     return {false, 0.0F};
   }
   const float nudge = max(1e-3F * delta, 8.0F * FLT_EPSILON * max(1.0F, entry));
-  const float x_classify = entry * direction.x + float(sx) * nudge;
-  const float y_classify = entry * direction.y + float(sy) * nudge;
+  const float x_classify = horizontal_origin.x + entry * direction.x + float(sx) * nudge;
+  const float y_classify = horizontal_origin.y + entry * direction.y + float(sy) * nudge;
   int x = clamp(
       int(floor((x_classify - tile.x_min) * inverse_delta)),
       int(block.x),
@@ -129,10 +163,12 @@ inline BvhIntersection intersect_terrain_block(
   );
   const float dtx = sx == 0 ? INFINITY : delta * abs(1.0F / direction.x);
   const float dty = sy == 0 ? INFINITY : delta * abs(1.0F / direction.y);
-  float tx = sx == 0 ? INFINITY
-                     : float(sx) * (tile.x_min * inverse_delta + float(x) + float(sx > 0)) * dtx;
-  float ty = sy == 0 ? INFINITY
-                     : float(sy) * (tile.y_min * inverse_delta + float(y) + float(sy > 0)) * dty;
+  float tx =
+      sx == 0 ? INFINITY
+              : (tile.x_min + float(x + int(sx > 0)) * delta - horizontal_origin.x) / direction.x;
+  float ty =
+      sy == 0 ? INFINITY
+              : (tile.y_min + float(y + int(sy > 0)) * delta - horizontal_origin.y) / direction.y;
   if (sx != 0)
     tx = next_boundary_after(tx, entry, dtx);
   if (sy != 0)
@@ -183,7 +219,8 @@ inline BvhIntersection intersect_terrain_block(
                                                           direction.z,
                                                           params.trace.curvature_coefficient,
                                                           start,
-                                                          end
+                                                          end,
+                                                          horizontal_origin
                                                       )
                                                     : triangle_collision(
                                                           vertices,
@@ -198,7 +235,8 @@ inline BvhIntersection intersect_terrain_block(
                                                           direction.xy,
                                                           direction.z,
                                                           params.trace.curvature_coefficient,
-                                                          start
+                                                          start,
+                                                          horizontal_origin
                                                       );
       // The catalogue DDA and cell DDA can round a shared far edge differently.
       // Clamp only a few ULPs so an edge hit remains in Metal's legal ray range.
@@ -224,7 +262,8 @@ inline BvhIntersection intersect_terrain_block(
                   uint(y),
                   uint(x),
                   direction.xy,
-                  collision.distance
+                  collision.distance,
+                  horizontal_origin
               );
             } else if (use_bilinear_collisions) {
               payload.gradients = bilinear_packed_surface_gradients(
@@ -237,7 +276,8 @@ inline BvhIntersection intersect_terrain_block(
                   uint(y),
                   uint(x),
                   direction.xy,
-                  collision.distance
+                  collision.distance,
+                  horizontal_origin
               );
             } else {
               payload.gradients = triangle_packed_surface_gradients(
@@ -250,7 +290,8 @@ inline BvhIntersection intersect_terrain_block(
                   uint(y),
                   uint(x),
                   direction.xy,
-                  collision.distance
+                  collision.distance,
+                  horizontal_origin
               );
             }
           }
@@ -290,10 +331,12 @@ BvhIntersection terrain_bvh_intersection(
     return {false, 0};
   // The whole-scene path must preserve the streaming selector's half-open
   // ownership when a ray lies exactly on a shared tile edge.
-  const float width = chunk.tile.cell_size * float(chunk.tile.cell_count);
-  if ((payload.world_direction.x == 0 && chunk.tile.x_min + width <= payload.world_origin.x) ||
-      (payload.world_direction.y == 0 && chunk.tile.y_min + width <= payload.world_origin.y))
-    return {false, 0};
+  if (!chunk.transformed) {
+    const float width = chunk.tile.cell_size * float(chunk.tile.cell_count);
+    if ((payload.world_direction.x == 0 && chunk.tile.x_min + width <= payload.world_origin.x) ||
+        (payload.world_direction.y == 0 && chunk.tile.y_min + width <= payload.world_origin.y))
+      return {false, 0};
+  }
   const BvhBounds box = chunk.bounds[primitive];
   float near_t = min_distance, far_t = max_distance;
   if (!bvh_slab(origin.x, direction.x, box.min_x, box.max_x, near_t, far_t) ||
@@ -303,31 +346,65 @@ BvhIntersection terrain_bvh_intersection(
   }
   const BvhBlock block = chunk.blocks[primitive];
   BvhTile tile = chunk.tile;
-  tile.x_min -= payload.world_origin.x;
-  tile.y_min -= payload.world_origin.y;
+  float2 horizontal_origin(0.0F);
+  float3 collision_direction = payload.world_direction;
+  BvhAffinePatch transform = {};
+  if (chunk.transformed) {
+    transform = chunk.transforms[block.transform];
+    const float2 relative = origin.xy - float2(transform.origin_x, transform.origin_y);
+    horizontal_origin = float2(
+        transform.inverse_xx * relative.x + transform.inverse_xy * relative.y,
+        transform.inverse_yx * relative.x + transform.inverse_yy * relative.y
+    );
+    collision_direction.xy = float2(
+        transform.inverse_xx * direction.x + transform.inverse_xy * direction.y,
+        transform.inverse_yx * direction.x + transform.inverse_yy * direction.y
+    );
+  } else {
+    tile.x_min -= payload.world_origin.x;
+    tile.y_min -= payload.world_origin.y;
+  }
   device const uchar *data = chunk.vertices;
-  return params.quantized ? intersect_terrain_block(
-                                reinterpret_cast<device const ushort *>(data),
-                                tile,
-                                block,
-                                payload.world_direction,
-                                payload.world_origin.z,
-                                min_distance,
-                                max_distance,
-                                params,
-                                payload
-                            )
-                          : intersect_terrain_block(
-                                reinterpret_cast<device const float *>(data),
-                                tile,
-                                block,
-                                payload.world_direction,
-                                payload.world_origin.z,
-                                min_distance,
-                                max_distance,
-                                params,
-                                payload
-                            );
+  const float raw_observer_elevation = payload.world_origin.z - chunk.vertical_offset;
+  const BvhIntersection result = params.quantized
+                                     ? intersect_terrain_block(
+                                           reinterpret_cast<device const ushort *>(data),
+                                           tile,
+                                           block,
+                                           horizontal_origin,
+                                           collision_direction,
+                                           raw_observer_elevation,
+                                           min_distance,
+                                           max_distance,
+                                           params,
+                                           payload
+                                       )
+                                     : intersect_terrain_block(
+                                           reinterpret_cast<device const float *>(data),
+                                           tile,
+                                           block,
+                                           horizontal_origin,
+                                           collision_direction,
+                                           raw_observer_elevation,
+                                           min_distance,
+                                           max_distance,
+                                           params,
+                                           payload
+                                       );
+  if (result.accept && chunk.transformed && compute_surface_gradients) {
+    const float2 logical = float2(as_type<half2>(payload.gradients));
+    constexpr float kMaximumHalf = 65504.0F;
+    const float2 world = clamp(
+        float2(
+            transform.inverse_xx * logical.x + transform.inverse_yx * logical.y,
+            transform.inverse_xy * logical.x + transform.inverse_yy * logical.y
+        ),
+        -kMaximumHalf,
+        kMaximumHalf
+    );
+    payload.gradients = as_type<uint>(half2(world));
+  }
+  return result;
 }
 
 /// Match the software frontier's termination at the first missing source.
@@ -366,7 +443,7 @@ kernel void trace_terrain_bvh(
   states[index].done = hit || states[index].progress >= params.trace.max_distance;
   // Only successful rays need coverage verification, and only up to the hit.
   // Walking the entire catalogue first wastes work on sky and nearby terrain.
-  if (hit) {
+  if (hit && !params.transformed_catalogue) {
     const float limit = bvh_coverage_limit(direction, params, tiles, catalogue, result.distance);
     hit = result.distance <= limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
   }
@@ -406,12 +483,16 @@ kernel void trace_terrain_scene(
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
     intersection_function_table<> missing_functions [[buffer(14)]],
     device atomic_uint *missing_count [[buffer(15)]],
+    device const BvhAffinePatch *patches [[buffer(16)]],
+    device atomic_uint *requested_sources [[buffer(17)]],
+    primitive_acceleration_structure coverage [[buffer(20)]],
+    intersection_function_table<> coverage_functions [[buffer(21)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.trace.image_width + position.x;
   if (index >= params.trace.ray_count)
     return;
-  states[index] = {0, 0, 0xffffffffU, 0};
+  states[index] = {0, 0, 0xffffffffU, 0xffffffffU, 0};
   distances[index] = 0.0F;
   if (store_collision_elevations)
     elevations[index] = 0.0F;
@@ -440,15 +521,29 @@ kernel void trace_terrain_scene(
   intersector<> missing_tracer;
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
-  TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU};
+  TileSelection missing_payload = {r.direction, true, float2(0), 0xffffffffU, 0xffffffffU};
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {
+    const uint source =
+        params.transformed_catalogue ? patches[missing.primitive_id].source : missing.primitive_id;
+    atomic_store_explicit(requested_sources + source, 1U, memory_order_relaxed);
     atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
     return;
   }
   if (hit) {
-    const float limit = bvh_coverage_limit(direction, params, tiles, catalogue, result.distance);
+    const float limit =
+        params.transformed_catalogue
+            ? transformed_coverage_limit(
+                  coverage,
+                  coverage_functions,
+                  patches,
+                  direction,
+                  params.trace.observer_elevation,
+                  result.distance,
+                  params.source_count
+              )
+            : bvh_coverage_limit(direction, params, tiles, catalogue, result.distance);
     hit = result.distance <= limit + 8.0F * FLT_EPSILON * max(1.0F, limit);
   }
   states[index].done = 1U;
@@ -489,6 +584,9 @@ kernel void trace_scene_shadows(
     constant float4 &sun [[buffer(16)]],
     device uchar *visibility [[buffer(17)]],
     device atomic_uint *requested_sources [[buffer(18)]],
+    device const BvhAffinePatch *patches [[buffer(19)]],
+    primitive_acceleration_structure coverage [[buffer(20)]],
+    intersection_function_table<> coverage_functions [[buffer(21)]],
     uint2 position [[thread_position_in_grid]]
 ) {
   const uint index = position.y * params.trace.image_width + position.x;
@@ -508,28 +606,32 @@ kernel void trace_scene_shadows(
       distances[index] * float2(camera.x, camera.y) + horizontal_bias * sun.xy,
       elevations[index] + horizontal_bias * sun.z + vertical_bias
   );
-  const BvhTile observer_tile = tiles[params.observer_source];
-  const float width = observer_tile.cell_size * float(observer_tile.cell_count);
-  const long column = observer_tile.column + long(floor((origin.x - observer_tile.x_min) / width));
-  const long row = observer_tile.row - long(floor((origin.y - observer_tile.y_min) / width));
-  device const CatalogueTileHashEntry *source =
-      lookup_catalogue_tile(catalogue, params.hash_capacity, row, column);
-  if (source == nullptr)
-    return;
   const RayDirection direction = {sun.x,
                                   sun.y,
                                   sun.x == 0 ? INFINITY : 1 / sun.x,
                                   sun.y == 0 ? INFINITY : 1 / sun.y,
                                   sun.z};
-  const float limit = bvh_coverage_limit(
-      direction,
-      params,
-      tiles,
-      catalogue,
-      params.trace.max_distance,
-      origin.xy,
-      source->source_index
-  );
+  float limit = params.trace.max_distance;
+  if (!params.transformed_catalogue) {
+    const BvhTile observer_tile = tiles[params.observer_source];
+    const float width = observer_tile.cell_size * float(observer_tile.cell_count);
+    const long column =
+        observer_tile.column + long(floor((origin.x - observer_tile.x_min) / width));
+    const long row = observer_tile.row - long(floor((origin.y - observer_tile.y_min) / width));
+    device const CatalogueTileHashEntry *source =
+        lookup_catalogue_tile(catalogue, params.hash_capacity, row, column);
+    if (source == nullptr)
+      return;
+    limit = bvh_coverage_limit(
+        direction,
+        params,
+        tiles,
+        catalogue,
+        params.trace.max_distance,
+        origin.xy,
+        source->source_index
+    );
+  }
   if (!(limit > 0))
     return;
   const float k = params.trace.curvature_coefficient;
@@ -544,17 +646,32 @@ kernel void trace_scene_shadows(
   BvhPayload payload = {INFINITY, 0U, 0U, 0U, 0xffffffffU, sun.xyz, origin};
   const auto hit = tracer.intersect(r, terrain, functions, payload);
   if (hit.type != intersection_type::none) {
-    visibility[index] = 0U;
-    return; // A known occluder proves shadow, even if other tiles are absent.
+    const float coverage_limit = params.transformed_catalogue ? transformed_coverage_limit(
+                                                                    coverage,
+                                                                    coverage_functions,
+                                                                    patches,
+                                                                    direction,
+                                                                    origin.z,
+                                                                    hit.distance,
+                                                                    params.source_count,
+                                                                    origin.xy
+                                                                )
+                                                              : limit;
+    if (hit.distance <= coverage_limit + 8.0F * FLT_EPSILON * max(1.0F, coverage_limit)) {
+      visibility[index] = 0U;
+      return; // A reachable known occluder proves shadow even if later tiles are absent.
+    }
   }
   intersector<> missing_tracer;
   missing_tracer.assume_geometry_type(geometry_type::bounding_box);
   missing_tracer.accept_any_intersection(true);
-  TileSelection missing_payload = {sun.xyz, true, origin.xy, 0xffffffffU};
+  TileSelection missing_payload = {sun.xyz, true, origin.xy, 0xffffffffU, 0xffffffffU};
   const auto missing =
       missing_tracer.intersect(r, missing_tiles, missing_functions, missing_payload);
   if (missing.type != intersection_type::none) {
-    atomic_store_explicit(requested_sources + missing.primitive_id, 1U, memory_order_relaxed);
+    const uint source =
+        params.transformed_catalogue ? patches[missing.primitive_id].source : missing.primitive_id;
+    atomic_store_explicit(requested_sources + source, 1U, memory_order_relaxed);
     atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
   }
 }
