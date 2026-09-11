@@ -182,8 +182,14 @@ clean:
 # between debug and release object directories.
 FORCE:
 
-$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB)
-	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) -framework MetalFX $(LDLIBS)
+$(OBJ_DIR)/metal-bvh-helpers.air: tests/metal_bvh_helpers.metal $(wildcard $(RAYTRACE_SRC_DIR)/*.metalh) | $(OBJ_DIR)/raytracing
+	$(METAL) -c -o $@ $<
+
+$(OBJ_DIR)/metal-bvh-helpers.metallib: $(OBJ_DIR)/metal-bvh-helpers.air
+	$(METALLIB) -o $@ $^
+
+$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB) $(OBJ_DIR)/metal-bvh-helpers.metallib
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) -DPANORAMA_TEST_HELPERS_PATH=\"$(OBJ_DIR)/metal-bvh-helpers.metallib\" $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) -framework MetalFX $(LDLIBS)
 
 .PHONY: check-bvh
 check-bvh: $(OBJ_DIR)/metal-bvh-test

@@ -110,12 +110,14 @@ struct TerrainTraceSession::State {
 
   std::unique_ptr<GpuCamera> camera;
   bool camera_rays_ready = false;
+  bool primary_repair_pending = false;
 
   void prepare_camera(const RayFieldRequest &request, float lod_footprint_scale = 1.0F) {
     const uint32_t count = validate_camera_request(request);
     if (!(lod_footprint_scale > 0.0F) || !std::isfinite(lod_footprint_scale))
       throw std::invalid_argument("LOD footprint scale must be finite and positive");
     camera_rays_ready = false;
+    primary_repair_pending = false;
     if (!camera)
       camera =
           std::make_unique<GpuCamera>(gpu->device(), gpu->command_queue(), gpu->library(), *tiles);
@@ -215,6 +217,7 @@ void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
     );
   }
   state.config.raytracer = raytracer;
+  state.primary_repair_pending = false;
   state.bvh_shadow_active = false;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
@@ -230,6 +233,7 @@ bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
     return false;
   }
   state.config.observer = observer;
+  state.primary_repair_pending = false;
   state.bvh_shadow_active = false;
   state.parameters.observer_elevation = static_cast<float>(observer.elevation);
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
@@ -245,6 +249,7 @@ void TerrainTraceSession::set_lod_scale(float lod_scale) {
     return;
   }
   state.config.lod_scale = lod_scale;
+  state.primary_repair_pending = false;
   state.bvh_shadow_active = false;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
@@ -265,6 +270,7 @@ void TerrainTraceSession::set_collision_options(bool bilinear_collisions, bool c
   }
   state.config.bilinear_collisions = bilinear_collisions;
   state.config.c1_normals = c1_normals;
+  state.primary_repair_pending = false;
   state.bvh_shadow_active = false;
   state.shadow_revision = std::numeric_limits<uint64_t>::max();
 }
@@ -302,7 +308,8 @@ void TerrainTraceSession::trace_prepared() {
     state.gpu->start_capture_if_requested();
     state.timer.start_wall("BVH streaming trace");
     try {
-      state.bvh->trace(state.parameters, state.timer);
+      state.bvh->trace(state.parameters, state.timer, state.primary_repair_pending);
+      state.primary_repair_pending = false;
     } catch (...) {
       state.timer.stop("BVH streaming trace");
       state.gpu->stop_capture();
@@ -359,6 +366,7 @@ void TerrainTraceSession::trace_prepared() {
       frontier.record_active_slot_use();
       state.timer.stop("Frontier bookkeeping");
 
+      state.tiles->ensure_mipmaps(state.timer);
       const GpuFrontierPassResult pass = state.gpu->trace_frontier(
           state.tiles->bindings(),
           state.parameters,
@@ -443,7 +451,8 @@ bool TerrainTraceSession::complete_encoded_trace(id<MTLCommandBuffer> command) {
   if (command.status != MTLCommandBufferStatusCompleted)
     throw std::logic_error("Primary producer has not completed successfully");
   state_->complete_camera();
-  if (!state_->bvh->scene_complete())
+  state_->primary_repair_pending = !state_->bvh->scene_complete();
+  if (state_->primary_repair_pending)
     return false;
   ++state_->frames;
   ++state_->trace_revision;
@@ -589,6 +598,7 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
     frontier.validate_frontier(state.shadows->active_frontier(), active_count, "shadow frontier");
 #endif
     frontier.record_active_slot_use();
+    state.tiles->ensure_mipmaps(state.timer);
     const GpuFrontierPassResult pass = state.shadows->trace_frontier(
         state.tiles->bindings(),
         state.gpu->catalogue_hash(),
@@ -689,7 +699,8 @@ void TerrainTraceSession::print_trace_statistics() const {
         "; tiles built/hit/evicted %llu/%llu/%llu, catalogue/instance builds %llu/%llu, "
         "BVH submissions %llu, GPU selection/detail/build %.3f/%.3f/%.3f ms, "
         "CPU grouping %.3f ms, resident %.1f/%.1f MiB, "
-        "scene builds/passes/fallback rays %llu/%llu/%llu (%.3f MiB)",
+        "scene builds/passes/fallback rays %llu/%llu/%llu (%.3f MiB), "
+        "repair passes/rays %llu/%llu",
         static_cast<unsigned long long>(b.builds - a.builds),
         static_cast<unsigned long long>(b.cache_hits - a.cache_hits),
         static_cast<unsigned long long>(b.evictions - a.evictions),
@@ -705,7 +716,9 @@ void TerrainTraceSession::print_trace_statistics() const {
         static_cast<unsigned long long>(b.scene_builds - a.scene_builds),
         static_cast<unsigned long long>(b.scene_passes - a.scene_passes),
         static_cast<unsigned long long>(b.scene_fallback_rays - a.scene_fallback_rays),
-        double(b.scene_bytes) / 1048576.0
+        double(b.scene_bytes) / 1048576.0,
+        static_cast<unsigned long long>(b.scene_repair_passes - a.scene_repair_passes),
+        static_cast<unsigned long long>(b.scene_repair_rays - a.scene_repair_rays)
     );
   }
   std::putchar('\n');
@@ -764,10 +777,11 @@ void TerrainTraceSession::print_statistics() const {
   );
   std::printf(
       "  Atlas installations: %llu, Metal I/O: %.3f GiB, "
-      "evictions: %llu.\n",
+      "evictions: %llu, mipmaps generated: %llu.\n",
       static_cast<unsigned long long>(tiles.installations),
       static_cast<double>(tiles.bytes_loaded_with_metal_io) / (1024.0 * 1024.0 * 1024.0),
-      static_cast<unsigned long long>(tiles.evictions)
+      static_cast<unsigned long long>(tiles.evictions),
+      static_cast<unsigned long long>(tiles.mipmap_generations)
   );
   state.timer.print();
 }

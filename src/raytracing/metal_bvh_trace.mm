@@ -26,7 +26,7 @@ static_assert(sizeof(BvhCoveragePolygon) == 56U);
 static_assert(sizeof(BvhCoverageVertex) == 8U);
 static_assert(sizeof(BvhBlock) == 24U);
 static_assert(sizeof(BvhBounds) == sizeof(MTLAxisAlignedBoundingBox));
-static_assert(sizeof(BvhParameters) == 68U);
+static_assert(sizeof(BvhParameters) == 72U);
 static_assert(sizeof(BvhChunk) == 104U);
 static_assert(sizeof(BvhRayState) == 20U);
 
@@ -121,6 +121,8 @@ struct MetalBvhTrace::State {
   std::vector<Entry *> scene_entries;
   id<MTLBuffer> scene_resident, scene_missing_count;
   id<MTLBuffer> scene_requested_sources;
+  std::array<id<MTLBuffer>, 2> scene_pending_rays = {};
+  uint32_t scene_pending_output = 0U;
   id<MTLBuffer> scene_shadows, shadow_missing_count;
   id<MTLBuffer> shadow_tested;
   id<MTLBuffer> shadow_requested_sources;
@@ -657,6 +659,10 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:parameters offset:0 atIndex:8];
     [encoder setBuffer:rays offset:0 atIndex:11];
     [encoder setBuffer:work offset:0 atIndex:12];
+    if (scene_mode && !shadows) {
+      [encoder setBuffer:scene_pending_rays[1U - scene_pending_output] offset:0 atIndex:12];
+      [encoder setBuffer:scene_pending_rays[scene_pending_output] offset:0 atIndex:18];
+    }
     if (scene_mode) {
       [p.missing_table setBuffer:current.transformed_catalogue ? candidate_patches : tiles
                           offset:0
@@ -708,7 +714,7 @@ struct MetalBvhTrace::State {
       [encoder useResource:entry->transforms usage:MTLResourceUsageRead];
       [encoder useResource:entry->acceleration usage:MTLResourceUsageRead];
     }
-    if (scene_mode)
+    if (scene_mode && (shadows || !current.scene_resume))
       dispatch_image(encoder, p.state, current.trace);
     else
       dispatch_linear(encoder, p.state, current.work_count);
@@ -771,13 +777,22 @@ struct MetalBvhTrace::State {
     return true;
   }
 
-  bool trace_scene(Timer &timer) {
+  bool trace_scene(Timer &timer, bool resume) {
     if (!prepare_scene(timer))
       return false;
+    current.scene_resume = resume;
+    current.work_count = resume ? *static_cast<const uint32_t *>(scene_missing_count.contents)
+                                : current.trace.ray_count;
+    if (resume) {
+      scene_pending_output = 1U - scene_pending_output;
+      ++stats.scene_repair_passes;
+      stats.scene_repair_rays += current.work_count;
+    } else {
+      scene_pending_output = 0U;
+    }
     *static_cast<uint32_t *>(scene_missing_count.contents) = 0U;
     std::memset(scene_requested_sources.contents, 0, scene_requested_sources.length);
     scene_requests_ready = false;
-    current.work_count = current.trace.ray_count;
     trace_hierarchy(scene_entries, scene, true, timer);
     const uint32_t missing = *static_cast<const uint32_t *>(scene_missing_count.contents);
     scene_requests_ready = true;
@@ -855,6 +870,8 @@ bool MetalBvhTrace::encode_scene(id<MTLCommandBuffer> command, Timer &timer) {
               value:0];
   [clear endEncoding];
   state.current.work_count = state.current.trace.ray_count;
+  state.current.scene_resume = 0U;
+  state.scene_pending_output = 0U;
   state.trace_hierarchy(state.scene_entries, state.scene, true, timer, command);
   return true;
 }
@@ -1100,17 +1117,24 @@ void MetalBvhTrace::prepare(
         buffer(state.gpu.device(), parameters.ray_count, sizeof(BvhRayState), @"ray continuations");
     state.work =
         buffer(state.gpu.device(), parameters.ray_count, sizeof(uint32_t), @"ray work indices");
+    for (auto &pending : state.scene_pending_rays)
+      pending = buffer(
+          state.gpu.device(),
+          parameters.ray_count,
+          sizeof(uint32_t),
+          @"unresolved scene rays"
+      );
     state.ray_capacity = parameters.ray_count;
   }
 }
 
-void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
+void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bool resume) {
   State &state = *state_;
   state.current.trace = parameters;
-  // Each synchronous trace owns a fresh ray field. Request flags from an
-  // earlier encoded producer describe different rays and cannot prove this
-  // trace complete, even when the resident scene itself is unchanged.
-  state.scene_requests_ready = false;
+  // Only an explicitly resumed producer may reuse requests and completed rays.
+  // Ordinary synchronous traces own a fresh ray field, even if the scene stays.
+  if (!resume)
+    state.scene_requests_ready = false;
   @autoreleasepool {
     bool has_scene = state.prepare_scene(timer);
     if (!has_scene) {
@@ -1131,8 +1155,9 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer) {
                 ? *static_cast<const uint32_t *>(state.scene_missing_count.contents)
                 : std::numeric_limits<uint32_t>::max();
         if ((state.scene_requests_ready && missing == 0U) ||
-            (!state.scene_requests_ready && state.trace_scene(timer)))
+            (!state.scene_requests_ready && state.trace_scene(timer, resume)))
           return;
+        resume = true;
         const auto *requested =
             static_cast<const uint32_t *>(state.scene_requested_sources.contents);
         bool loaded = false;

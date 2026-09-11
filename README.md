@@ -154,6 +154,13 @@ presentations. `idle` means that path is outside its instrumented callback, not
 necessarily that the whole UI is responsive. Keep capturing for about ten seconds
 after the slowdown begins before closing the app.
 
+Primary scene repair retains completed pixels and compacts unresolved rays into
+a GPU work list. Newly loaded tiles retry only that list, retaining the previous
+closest-hit bound. `Frame work` reports repair passes/rays and generated mipmaps.
+BVH admission loads vertices and builds acceleration structures without generating
+maximum mipmaps. The software renderer and software shadow fallback generate any
+missing mipmaps on demand, reusing them until their atlas slot is overwritten.
+
 The minimap retains the camera cone and visible-terrain coverage. Coverage uses a
 compute-generated bitmap displayed by MapKit, with no separate transparent Metal
 view. Map panning and zooming reuse the latest collision snapshot. Updates are

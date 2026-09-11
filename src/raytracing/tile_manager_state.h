@@ -176,6 +176,8 @@ struct TileManager::State {
   std::map<TileVariant, uint32_t> slot_by_variant;
   /// Reverse mapping used to identify the variant displaced from an LRU slot.
   std::vector<std::optional<TileVariant>> variant_by_slot;
+  std::vector<uint8_t> mipmaps_ready;
+  uint64_t mipmap_generations = 0U;
   /// Per-slot LRU stamps; the smallest unpinned stamp is evicted first.
   std::vector<uint64_t> last_used;
 

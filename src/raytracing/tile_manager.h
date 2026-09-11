@@ -58,6 +58,8 @@ struct TileManagerStatistics {
   uint32_t resident_tiles;
   /// Total number of fixed-stride slots allocated in the atlas.
   uint32_t slot_capacity;
+  /// Tile maximum hierarchies generated on demand for software traversal.
+  uint64_t mipmap_generations;
 };
 
 /// Own prepared-terrain discovery, LOD selection, residency, and loading.
@@ -107,6 +109,9 @@ public:
   [[nodiscard]] uint32_t slot_capacity() const;
   /// Buffers and packed layout required by a terrain frontier dispatch.
   [[nodiscard]] TileManagerBindings bindings() const;
+  /// Generate missing maximum hierarchies before a software frontier reads
+  /// the atlas. BVH loading and point sampling require only the vertices.
+  void ensure_mipmaps(Timer &timer);
 
   /// Return the selected variant's slot, or `slot_capacity()` if nonresident.
   [[nodiscard]] uint32_t slot_for_source(uint32_t source_index) const;

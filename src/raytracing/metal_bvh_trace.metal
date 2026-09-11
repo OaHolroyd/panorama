@@ -273,7 +273,12 @@ inline BvhIntersection intersect_terrain_block(
         // root, or a step into higher fallback terrain, may be outside primary
         // coverage. Resume at the next interval this source actually owns.
         float next =
-            max(nextafter(collision.distance, INFINITY), nextafter(collision_start, INFINITY));
+            max(bvh_next_distinct_point(
+                    payload.world_origin.xy,
+                    payload.world_direction.xy,
+                    collision.distance
+                ),
+                nextafter(collision_start, INFINITY));
         float next_end = end;
         collision.hit = false;
         if (!bvh_source_interval(
@@ -599,21 +604,27 @@ kernel void trace_terrain_scene(
     device float *evaluations [[buffer(7)]],
     constant BvhParameters &params [[buffer(8)]],
     device BvhRayState *states [[buffer(11)]],
+    device const uint *work [[buffer(12)]],
     primitive_acceleration_structure missing_tiles [[buffer(13)]],
     intersection_function_table<> missing_functions [[buffer(14)]],
     device atomic_uint *missing_count [[buffer(15)]],
     device const BvhAffinePatch *candidate_patches [[buffer(16)]],
     device atomic_uint *requested_sources [[buffer(17)]],
+    device uint *pending_rays [[buffer(18)]],
     primitive_acceleration_structure coverage [[buffer(20)]],
     intersection_function_table<> coverage_functions [[buffer(21)]],
     device const BvhCoveragePolygon *coverage_polygons [[buffer(22)]],
     device const BvhCoverageVertex *coverage_vertices [[buffer(23)]],
     uint2 position [[thread_position_in_grid]]
 ) {
-  const uint index = position.y * params.trace.image_width + position.x;
-  if (index >= params.trace.ray_count)
+  const uint work_index = position.y * params.trace.image_width + position.x;
+  if (work_index >= params.work_count)
     return;
-  states[index] = {0, 0, 0xffffffffU, 0xffffffffU, 0};
+  const uint index = params.scene_resume ? work[work_index] : work_index;
+  if (!params.scene_resume)
+    states[index] = {0, 0, 0xffffffffU, 0xffffffffU, 0};
+  else if (states[index].done)
+    return;
   distances[index] = 0.0F;
   if (store_collision_elevations)
     elevations[index] = 0.0F;
@@ -628,7 +639,11 @@ kernel void trace_terrain_scene(
   r.origin = float3(0.0F, 0.0F, params.trace.observer_elevation);
   r.direction = float3(direction.x, direction.y, direction.slope);
   r.min_distance = 0.0F;
-  r.max_distance = params.trace.max_distance;
+  const float previous_hit = states[index].exit;
+  r.max_distance = previous_hit > 0.0F
+                       ? min(params.trace.max_distance,
+                             previous_hit + 8.0F * FLT_EPSILON * max(1.0F, previous_hit))
+                       : params.trace.max_distance;
   intersector<instancing> tracer;
   tracer.assume_geometry_type(geometry_type::bounding_box);
   BvhPayload payload = {INFINITY,
@@ -672,7 +687,11 @@ kernel void trace_terrain_scene(
                             ? candidate_patches[missing.primitive_id].source
                             : missing.primitive_id;
     atomic_store_explicit(requested_sources + source, 1U, memory_order_relaxed);
-    atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
+    const uint pending = atomic_fetch_add_explicit(missing_count, 1U, memory_order_relaxed);
+    pending_rays[pending] = index;
+    // Retain a conservative closest-hit bound while missing sources load.
+    // Atlas/BVH admission pins the scene which supplied this candidate.
+    states[index].exit = hit ? result.distance : previous_hit;
     return;
   }
   states[index].done = 1U;

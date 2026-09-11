@@ -84,12 +84,14 @@ struct BvhParameters {
   BvhUint work_count;
   BvhUint transformed_catalogue;
   BvhUint coverage_step_limit;
+  BvhUint scene_resume;
 };
 
 /// CPU/GPU continuations. Progress advances to a tile's far XY edge only
 /// after that tile has been traced; cache eviction cannot erase this progress.
 struct BvhRayState {
   float progress;
+  // Streaming tile exit, or provisional closest-hit bound during scene repair.
   float exit;
   BvhUint source;
   BvhUint primitive;

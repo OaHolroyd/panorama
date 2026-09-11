@@ -23,6 +23,9 @@ struct MetalBvhStatistics {
   uint64_t scene_builds = 0U;
   uint64_t scene_passes = 0U;
   uint64_t scene_fallback_rays = 0U;
+  // Compacted primary repair dispatches, excluding the initial image pass.
+  uint64_t scene_repair_passes = 0U;
+  uint64_t scene_repair_rays = 0U;
   uint64_t streaming_rounds = 0U;
   uint64_t streaming_groups = 0U;
   uint64_t streaming_rays = 0U;
@@ -71,7 +74,8 @@ public:
       Timer &timer
   );
   /// Trace primary rays into the session's ordinary distance/gradient buffers.
-  void trace(const RaytraceParameters &parameters, Timer &timer);
+  /// Resume only after scene_complete() reported missing terrain for this input.
+  void trace(const RaytraceParameters &parameters, Timer &timer, bool resume = false);
   [[nodiscard]] MetalBvhStatistics statistics() const;
 
   /// Encode a resident primary pass without committing or waiting. False

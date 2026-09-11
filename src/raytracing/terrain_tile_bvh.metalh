@@ -45,6 +45,42 @@ struct SelectedTerrainTile {
 
 inline float bvh_cross(float2 a, float2 b) { return a.x * b.y - a.y * b.x; }
 
+/// First representable distance whose world XY point differs from a rejected
+/// hit. Shadow distances can be tiny beside their world origin: nextafter(t)
+/// alone can leave the ownership predicate unchanged for thousands of retries.
+/// Skip only distances mapping to that same point, so no owned root is lost.
+inline float bvh_next_distinct_point(float2 origin, float2 direction, float distance) {
+  const float2 point = origin + distance * direction;
+  float lower = distance;
+  float upper = nextafter(distance, INFINITY);
+  if (any(origin + upper * direction != point))
+    return upper;
+  float step = INFINITY;
+  for (uint axis = 0; axis < 2; ++axis) {
+    if (direction[axis] != 0.0F) {
+      const float coordinate = nextafter(point[axis], copysign(INFINITY, direction[axis]));
+      step = min(step, abs((coordinate - point[axis]) / direction[axis]));
+    }
+  }
+  step = max(step, FLT_MIN);
+  do {
+    upper = max(nextafter(lower, INFINITY), distance + step);
+    step *= 2.0F;
+  } while (all(origin + upper * direction == point));
+  // The rounded coordinates are monotonic along a ray. Locate their first
+  // change rather than nudging past a potentially narrow ownership interval.
+  while (nextafter(lower, INFINITY) < upper) {
+    const float middle = lower + 0.5F * (upper - lower);
+    if (!(middle > lower && middle < upper))
+      break;
+    if (all(origin + middle * direction == point))
+      lower = middle;
+    else
+      upper = middle;
+  }
+  return upper;
+}
+
 inline bool bvh_point_in_polygon(
     BvhCoveragePolygon polygon,
     device const BvhCoverageVertex *vertices,

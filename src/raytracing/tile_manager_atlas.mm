@@ -628,12 +628,6 @@ void TileManager::State::attach_atlas(
       vertex_values,
       timer
   );
-  state->generate_mipmaps(
-      std::span<const uint32_t>(&slot, 1U),
-      state->header_template.cell_count,
-      state->header_template.level_count,
-      timer
-  );
   state->bytes_loaded_with_metal_io =
       retain ? state->quantized_record.logical_size : state->header_template.vertex_byte_count;
   state->metadata[0] = make_resident_tile(
@@ -647,6 +641,7 @@ void TileManager::State::attach_atlas(
   );
   state->slot_by_variant[{0U, 1U}] = 0U;
   state->variant_by_slot.assign(capacity, std::nullopt);
+  state->mipmaps_ready.assign(capacity, 0U);
   state->variant_by_slot[0] = TileVariant{0U, 1U};
   state->last_used.assign(capacity, 0U);
   state->last_used[0] = 1U;
@@ -757,8 +752,8 @@ TileManager::State::install_prepared(std::span<const uint8_t> pinned_slots, Time
   }
 
   if (!loads_by_variant.empty()) {
-    // Metal I/O loads the selected representation before mipmap generation
-    // reads the new vertex slots.
+    // Publish vertices independently of the traversal backend. Maximum
+    // hierarchies are generated only when software traversal needs them.
     for (const auto &[lod, indices] : load_indices_by_lod) {
       std::vector<MetalTileBufferLoad> loads;
       std::vector<uint32_t> slots;
@@ -772,10 +767,8 @@ TileManager::State::install_prepared(std::span<const uint8_t> pinned_slots, Time
         elevation_bases.push_back(elevation_bases_by_variant[index]);
       }
       const uint32_t cell_count = state.header_template.cell_count >> (lod - 1U);
-      const uint32_t level_count = state.header_template.level_count - (lod - 1U);
       const uint32_t vertex_value_count = (cell_count + 1U) * (cell_count + 1U);
       state.load_custom_vertices(loads, slots, elevation_bases, vertex_value_count, timer);
-      state.generate_mipmaps(slots, cell_count, level_count, timer);
     }
     for (const MetalTileBufferLoad &load : loads_by_variant) {
       state.bytes_loaded_with_metal_io += load.byte_count;
@@ -803,6 +796,7 @@ TileManager::State::install_prepared(std::span<const uint8_t> pinned_slots, Time
 
     state.slot_by_variant[variant] = slot;
     state.variant_by_slot[slot] = variant;
+    state.mipmaps_ready[slot] = 0U;
     state.last_used[slot] = state.next_use_stamp++;
     state.installation_count++;
     state.load_states.at(variant) = TileLoadState::Resident;
@@ -981,6 +975,26 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
                                   : std::nullopt;
 }
 
+void TileManager::ensure_mipmaps(Timer &timer) {
+  State &state = *state_;
+  std::map<uint32_t, std::vector<uint32_t>> slots_by_lod;
+  for (uint32_t slot = 0; slot < state.slot_capacity; ++slot) {
+    if (state.variant_by_slot[slot] && !state.mipmaps_ready[slot])
+      slots_by_lod[state.variant_by_slot[slot]->lod].push_back(slot);
+  }
+  for (const auto &[lod, slots] : slots_by_lod) {
+    state.generate_mipmaps(
+        slots,
+        state.header_template.cell_count >> (lod - 1U),
+        state.header_template.level_count - (lod - 1U),
+        timer
+    );
+    for (uint32_t slot : slots)
+      state.mipmaps_ready[slot] = 1U;
+    state.mipmap_generations += slots.size();
+  }
+}
+
 TileManagerBindings TileManager::State::bindings() const {
   const State &state = *this;
   return {
@@ -1009,7 +1023,8 @@ TileManagerStatistics TileManager::State::statistics() const {
           state.bytes_loaded_with_metal_io,
           state.evictions,
           state.resident_count,
-          state.slot_capacity};
+          state.slot_capacity,
+          state.mipmap_generations};
 }
 
 } // namespace panorama

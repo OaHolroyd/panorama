@@ -1480,8 +1480,9 @@ private:
                 "catalogue/instance/scene builds=%llu/%llu/%llu, "
                 "cached/scene tiles=%llu/%llu, scene %.1f MiB, "
                 "selection/detail passes=%llu/%llu, fallback ray attempts=%llu, "
+                "repair passes/rays=%llu/%llu, "
                 "GPU build/selection/detail=%.3f/%.3f/%.3f ms, CPU grouping=%.3f ms; "
-                "atlas installed/evicted=%llu/%llu, I/O=%.3f MiB, resident=%u/%u\n",
+                "atlas installed/evicted=%llu/%llu, mipmaps=%llu, I/O=%.3f MiB, resident=%u/%u\n",
                 static_cast<unsigned long long>(revision),
                 delta(bvh.builds, bvh_before.builds),
                 delta(bvh.cache_hits, bvh_before.cache_hits),
@@ -1495,12 +1496,15 @@ private:
                 delta(bvh.selection_passes, bvh_before.selection_passes),
                 delta(bvh.trace_passes, bvh_before.trace_passes),
                 delta(bvh.scene_fallback_rays, bvh_before.scene_fallback_rays),
+                delta(bvh.scene_repair_passes, bvh_before.scene_repair_passes),
+                delta(bvh.scene_repair_rays, bvh_before.scene_repair_rays),
                 bvh.build_gpu_ms - bvh_before.build_gpu_ms,
                 bvh.selection_gpu_ms - bvh_before.selection_gpu_ms,
                 bvh.trace_gpu_ms - bvh_before.trace_gpu_ms,
                 bvh.grouping_cpu_ms - bvh_before.grouping_cpu_ms,
                 delta(tiles.installations, tiles_before.installations),
                 delta(tiles.evictions, tiles_before.evictions),
+                delta(tiles.mipmap_generations, tiles_before.mipmap_generations),
                 double(tiles.bytes_loaded_with_metal_io - tiles_before.bytes_loaded_with_metal_io) /
                     1048576.0,
                 tiles.resident_tiles,

@@ -34,6 +34,61 @@ void require(bool condition, const char *message) {
     throw std::runtime_error(message);
 }
 
+void check_ownership_progress() {
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  NSError *error = nil;
+  auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:@PANORAMA_TEST_HELPERS_PATH]
+                                     error:&error];
+  require(library != nil, "Could not load BVH helper tests");
+  auto pipeline = [device
+      newComputePipelineStateWithFunction:[library newFunctionWithName:@"check_ownership_progress"]
+                                    error:&error];
+  require(pipeline != nil, "Could not compile ownership progress test");
+  const std::array<std::array<float, 4>, 9> rays = {{
+      {40000, -30000, 0.70710677F, -0.70710677F},
+      {-40000, 30000, -0.70710677F, 0.70710677F},
+      {600000, 0, 1, 0},
+      {0, -600000, 0, -1},
+      {50000, -30000, 1e-6F, 1},
+      {0, 0, 1, 0},
+      {40000, 30000, -1, 0},
+      {40000, 30000, 1, 0},
+      {0, 0, 1, 0},
+  }};
+  const std::array<float, 9> distances = {0.1F, 0.1F, 0.1F, 0.1F, 0.1F, 100.0F, 40000.0F, 0, 0};
+  auto input = [device newBufferWithBytes:rays.data()
+                                   length:sizeof(rays)
+                                  options:MTLResourceStorageModeShared];
+  auto parameters = [device newBufferWithBytes:distances.data()
+                                        length:sizeof(distances)
+                                       options:MTLResourceStorageModeShared];
+  auto output = [device newBufferWithLength:sizeof(rays) options:MTLResourceStorageModeShared];
+  auto queue = [device newCommandQueue];
+  auto command = [queue commandBuffer];
+  auto encoder = [command computeCommandEncoder];
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:input offset:0 atIndex:0];
+  [encoder setBuffer:parameters offset:0 atIndex:1];
+  [encoder setBuffer:output offset:0 atIndex:2];
+  [encoder dispatchThreads:MTLSizeMake(rays.size(), 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(rays.size(), 1, 1)];
+  [encoder endEncoding];
+  [command commit];
+  [command waitUntilCompleted];
+  require(command.status == MTLCommandBufferStatusCompleted, "Ownership progress GPU test failed");
+  const auto *result = static_cast<const std::array<float, 4> *>(output.contents);
+  for (size_t i = 0; i < rays.size(); ++i) {
+    require(
+        std::isfinite(result[i][0]) && result[i][0] > distances[i],
+        "Ownership did not advance"
+    );
+    require(result[i][1] == 1 && result[i][2] == 1, "Ownership skipped a representable ray point");
+    if (i < 5)
+      require(result[i][3] == 0, "Fixture did not reproduce unchanged shadow coordinates");
+  }
+  std::puts("Ownership continuation advances to the first distinct world point.");
+}
+
 // Match the viewer's default camera and output requirements, excluding image
 // generation, lighting and display. Run each backend in a separate process.
 void benchmark(int argc, const char *argv[]) {
@@ -1973,8 +2028,28 @@ void check_producer(
         true,
         timer
     );
+    const auto repair_before = trace.bvh_statistics();
+    const auto mipmaps_before = trace.tile_statistics().mipmap_generations;
     const auto timing =
         render_terrain_frame(trace, appearance_only ? nullptr : &field, actual, settings, {});
+    if (frame < 10)
+      require(trace.tile_statistics().mipmap_generations == 0, "BVH tracing generated mipmaps");
+    if (frame == 10)
+      require(
+          trace.tile_statistics().mipmap_generations > 0,
+          "Software switch missed lazy mipmaps"
+      );
+    if (frame > 10)
+      require(trace.tile_statistics().mipmap_generations == mipmaps_before, "BVH rebuilt mipmaps");
+    if (partial && frame == 1) {
+      const auto after = trace.bvh_statistics();
+      const uint64_t passes = after.scene_repair_passes - repair_before.scene_repair_passes;
+      const uint64_t rays = after.scene_repair_rays - repair_before.scene_repair_rays;
+      require(
+          passes > 0 && rays > 0 && rays < passes * pixel_count(field.image),
+          "Scene repair did not compact unresolved rays"
+      );
+    }
     if (pinhole && frame > 0 && frame < 7 && !partial) {
       require(trace.camera_statistics().plan_updates == 1, "Unchanged camera rebuilt GPU LOD plan");
       require(
@@ -2548,6 +2623,7 @@ int main(int argc, const char *argv[]) {
         } else if (coverage_junctions) {
           check_coverage_junctions(root);
         } else if (mixed_coverage) {
+          check_ownership_progress();
           check_misaligned_coverage(root);
         } else if (streaming) {
           check_streaming(root / "quantized");
