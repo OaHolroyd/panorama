@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 /// Letterbox the render view at its current output aspect ratio without
 /// imposing a fitting size on its parent. The parent can therefore resize
@@ -290,6 +291,10 @@ static NSView *makeOverlayPanel(NSView *contentView) {
   }];
 }
 
+- (bool)isInspectorEnabled {
+  return _inspectorVisible;
+}
+
 - (void)toggleDebugOverlay:(id)sender {
   (void)sender;
   _debugVisible = !_debugVisible;
@@ -297,6 +302,17 @@ static NSView *makeOverlayPanel(NSView *contentView) {
     context.duration = 0.25;
     _debugView.animator.frame = [self debugFrameForVisible:_debugVisible];
   }];
+
+  if ([sender isKindOfClass:NSToolbarItem.class]) {
+    NSToolbarItem *item = sender;
+    if (@available(macOS 26.0, *)) {
+      item.style = _debugVisible ? NSToolbarItemStyleProminent : NSToolbarItemStylePlain;
+    }
+  }
+}
+
+- (bool)isDebugInfoEnabled {
+  return _debugVisible;
 }
 
 - (void)setMapAndPointInfoVisible:(bool)visible {

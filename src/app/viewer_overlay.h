@@ -32,6 +32,8 @@
                     debugSize:(NSSize)debugSize
                  mapPanelView:(MiniMapPanelView *)mapPanelView;
 - (void)toggleInspector:(id)sender;
+- (bool)isInspectorEnabled;
 - (void)toggleDebugOverlay:(id)sender;
+- (bool)isDebugInfoEnabled;
 - (void)setMapAndPointInfoVisible:(bool)visible;
 @end

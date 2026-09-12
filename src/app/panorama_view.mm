@@ -122,42 +122,44 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
         withAttributes:textAttributes];
   };
 
-  // The pitch ladder is expressed in world elevation angles. It moves behind
-  // the fixed boresight and rotates with the apparent horizon as the aircraft
-  // banks. Clipping keeps the overlay useful without obscuring much terrain.
-  [NSGraphicsContext saveGraphicsState];
-  [NSBezierPath clipRect:NSMakeRect(centre.x - 135.0, centre.y - 82.0, 270.0, 164.0)];
-  for (int pitchDegrees = -60; pitchDegrees <= 60; pitchDegrees += 10) {
-    const double pitchRadians =
-        static_cast<double>(pitchDegrees) * panorama::app::kDegreesToRadians;
-    const double y = std::tan(pitchRadians - _pitch) * focalLength;
-    if (std::abs(y) > 100.0) {
-      continue;
-    }
-
-    const bool horizon = pitchDegrees == 0;
-    const double halfWidth = horizon ? 112.0 : (pitchDegrees % 20 == 0 ? 43.0 : 34.0);
-    const double centreGap = horizon ? 20.0 : 9.0;
-    NSBezierPath *line = [NSBezierPath bezierPath];
-    [line moveToPoint:attitudePoint(-halfWidth, y)];
-    [line lineToPoint:attitudePoint(-centreGap, y)];
-    [line moveToPoint:attitudePoint(centreGap, y)];
-    [line lineToPoint:attitudePoint(halfWidth, y)];
-    if (pitchDegrees < 0) {
-      const CGFloat dash[] = {4.0, 3.0};
-      [line setLineDash:dash count:2 phase:0.0];
-    }
-    stroke_hud_path(line, horizon ? 1.6 : 1.0);
-
-    if (!horizon) {
-      NSString *label = [NSString stringWithFormat:@"%d", std::abs(pitchDegrees)];
-      drawCentredText(label, attitudePoint(-halfWidth - 13.0, y));
-      drawCentredText(label, attitudePoint(halfWidth + 13.0, y));
-    }
-  }
-  [NSGraphicsContext restoreGraphicsState];
-
   if (_aircraftMode) {
+
+    // The pitch ladder is expressed in world elevation angles. It moves behind
+    // the fixed boresight and rotates with the apparent horizon as the aircraft
+    // banks. Clipping keeps the overlay useful without obscuring much terrain.
+    [NSGraphicsContext saveGraphicsState];
+    [NSBezierPath clipRect:NSMakeRect(centre.x - 135.0, centre.y - 82.0, 270.0, 164.0)];
+    for (int pitchDegrees = -60; pitchDegrees <= 60; pitchDegrees += 10) {
+      const double pitchRadians =
+          static_cast<double>(pitchDegrees) * panorama::app::kDegreesToRadians;
+      const double y = std::tan(pitchRadians - _pitch) * focalLength;
+      if (std::abs(y) > 100.0) {
+        continue;
+      }
+
+      const bool horizon = pitchDegrees == 0;
+      const double halfWidth = horizon ? 112.0 : (pitchDegrees % 20 == 0 ? 43.0 : 34.0);
+      const double centreGap = horizon ? 20.0 : 9.0;
+      NSBezierPath *line = [NSBezierPath bezierPath];
+      [line moveToPoint:attitudePoint(-halfWidth, y)];
+      [line lineToPoint:attitudePoint(-centreGap, y)];
+      [line moveToPoint:attitudePoint(centreGap, y)];
+      [line lineToPoint:attitudePoint(halfWidth, y)];
+      if (pitchDegrees < 0) {
+        const CGFloat dash[] = {4.0, 3.0};
+        [line setLineDash:dash count:2 phase:0.0];
+      }
+      stroke_hud_path(line, horizon ? 1.6 : 1.0);
+
+      if (!horizon) {
+        NSString *label = [NSString stringWithFormat:@"%d", std::abs(pitchDegrees)];
+        drawCentredText(label, attitudePoint(-halfWidth - 13.0, y));
+        drawCentredText(label, attitudePoint(halfWidth + 13.0, y));
+      }
+    }
+    [NSGraphicsContext restoreGraphicsState];
+
+    // Show bank arc
     constexpr double kBankRadius = 70.0;
     NSBezierPath *bankArc = [NSBezierPath bezierPath];
     [bankArc appendBezierPathWithArcWithCenter:centre
@@ -177,7 +179,6 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
                            )];
     }
     stroke_hud_path(bankArc, 1.0);
-
     const double indicatedBank = std::clamp(
         bank,
         -60.0 * panorama::app::kDegreesToRadians,
@@ -206,48 +207,49 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
     [bankPointer stroke];
     [NSColor.whiteColor setFill];
     [bankPointer fill];
-  }
 
-  // A short compass ribbon makes heading readable without moving the user's
-  // attention to a corner of the view.
-  const double headingDegrees = std::remainder(_heading * panorama::app::kRadiansToDegrees, 360.0);
-  constexpr double kHeadingPixelsPerDegree = 2.35;
-  const double tapeY = centre.y + 108.0;
-  [NSGraphicsContext saveGraphicsState];
-  [NSBezierPath clipRect:NSMakeRect(centre.x - 108.0, tapeY - 4.0, 216.0, 35.0)];
-  NSBezierPath *headingTape = [NSBezierPath bezierPath];
-  [headingTape moveToPoint:NSMakePoint(centre.x - 108.0, tapeY)];
-  [headingTape lineToPoint:NSMakePoint(centre.x + 108.0, tapeY)];
-  const int firstTick = static_cast<int>(std::floor((headingDegrees - 50.0) / 10.0)) * 10;
-  for (int tick = firstTick; tick <= headingDegrees + 50.0; tick += 10) {
-    const double x =
-        centre.x + (static_cast<double>(tick) - headingDegrees) * kHeadingPixelsPerDegree;
-    const int normalisedTick = (tick % 360 + 360) % 360;
-    const bool labelled = normalisedTick % 30 == 0;
-    [headingTape moveToPoint:NSMakePoint(x, tapeY)];
-    [headingTape lineToPoint:NSMakePoint(x, tapeY + (labelled ? 9.0 : 5.0))];
-    if (labelled) {
-      drawCentredText(heading_label(tick), NSMakePoint(x, tapeY + 18.0));
+    // A short compass ribbon makes heading readable without moving the user's
+    // attention to a corner of the view.
+    const double headingDegrees =
+        std::remainder(_heading * panorama::app::kRadiansToDegrees, 360.0);
+    constexpr double kHeadingPixelsPerDegree = 2.35;
+    const double tapeY = centre.y + 108.0;
+    [NSGraphicsContext saveGraphicsState];
+    [NSBezierPath clipRect:NSMakeRect(centre.x - 108.0, tapeY - 4.0, 216.0, 35.0)];
+    NSBezierPath *headingTape = [NSBezierPath bezierPath];
+    [headingTape moveToPoint:NSMakePoint(centre.x - 108.0, tapeY)];
+    [headingTape lineToPoint:NSMakePoint(centre.x + 108.0, tapeY)];
+    const int firstTick = static_cast<int>(std::floor((headingDegrees - 50.0) / 10.0)) * 10;
+    for (int tick = firstTick; tick <= headingDegrees + 50.0; tick += 10) {
+      const double x =
+          centre.x + (static_cast<double>(tick) - headingDegrees) * kHeadingPixelsPerDegree;
+      const int normalisedTick = (tick % 360 + 360) % 360;
+      const bool labelled = normalisedTick % 30 == 0;
+      [headingTape moveToPoint:NSMakePoint(x, tapeY)];
+      [headingTape lineToPoint:NSMakePoint(x, tapeY + (labelled ? 9.0 : 5.0))];
+      if (labelled) {
+        drawCentredText(heading_label(tick), NSMakePoint(x, tapeY + 18.0));
+      }
     }
-  }
-  stroke_hud_path(headingTape, 1.0);
-  [NSGraphicsContext restoreGraphicsState];
+    stroke_hud_path(headingTape, 1.0);
+    [NSGraphicsContext restoreGraphicsState];
 
-  NSBezierPath *headingPointer = [NSBezierPath bezierPath];
-  [headingPointer moveToPoint:NSMakePoint(centre.x, tapeY - 1.0)];
-  [headingPointer lineToPoint:NSMakePoint(centre.x - 4.0, tapeY - 7.0)];
-  [headingPointer lineToPoint:NSMakePoint(centre.x + 4.0, tapeY - 7.0)];
-  [headingPointer closePath];
-  [NSColor.blackColor setStroke];
-  headingPointer.lineWidth = 3.0;
-  [headingPointer stroke];
-  [NSColor.whiteColor setFill];
-  [headingPointer fill];
-  const int displayedHeading = (static_cast<int>(std::lround(headingDegrees)) % 360 + 360) % 360;
-  drawCentredText(
-      [NSString stringWithFormat:@"%03d°", displayedHeading],
-      NSMakePoint(centre.x, tapeY - 17.0)
-  );
+    NSBezierPath *headingPointer = [NSBezierPath bezierPath];
+    [headingPointer moveToPoint:NSMakePoint(centre.x, tapeY - 1.0)];
+    [headingPointer lineToPoint:NSMakePoint(centre.x - 4.0, tapeY - 7.0)];
+    [headingPointer lineToPoint:NSMakePoint(centre.x + 4.0, tapeY - 7.0)];
+    [headingPointer closePath];
+    [NSColor.blackColor setStroke];
+    headingPointer.lineWidth = 3.0;
+    [headingPointer stroke];
+    [NSColor.whiteColor setFill];
+    [headingPointer fill];
+    const int displayedHeading = (static_cast<int>(std::lround(headingDegrees)) % 360 + 360) % 360;
+    drawCentredText(
+        [NSString stringWithFormat:@"%03d°", displayedHeading],
+        NSMakePoint(centre.x, tapeY - 17.0)
+    );
+  }
 
   // Draw the boresight last so it remains the dominant, fixed steering datum.
   NSBezierPath *boresight = [NSBezierPath bezierPath];

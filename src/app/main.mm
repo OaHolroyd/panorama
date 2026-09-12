@@ -42,8 +42,8 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
   (void)toolbar;
   return @[
-    NSToolbarFlexibleSpaceItemIdentifier,
     kMapToolbarItemIdentifier,
+    NSToolbarFlexibleSpaceItemIdentifier,
     kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
   ];
@@ -93,6 +93,10 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
     item.image = [NSImage imageWithSystemSymbolName:@"info.circle"
                            accessibilityDescription:@"Toggle Debug Info"];
     item.action = @selector(toggleDebugOverlay:);
+    if (@available(macOS 26.0, *)) {
+      item.style =
+          [_overlayView isDebugInfoEnabled] ? NSToolbarItemStyleProminent : NSToolbarItemStylePlain;
+    }
   } else if (isMap) {
     item.target = _controller;
     item.label = @"Map & Inspect";
