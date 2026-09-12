@@ -194,6 +194,72 @@ inline bool bvh_polygon_interval(
   return false;
 }
 
+inline float bvh_coverage_tolerance(float progress) {
+  return max(1e-3F, 8.0F * FLT_EPSILON * max(1.0F, progress));
+}
+
+// Retain a bounded set of connected intervals while scanning a fragmented
+// source. The old ordered merge can revisit the same source dozens of times
+// when a later polygon joins components that were encountered earlier.
+// Use the coverage walk's existing distance tolerance at component joins.
+// Larger gaps remain separate, exactly as in the outer continuity walk.
+__attribute__((noinline)) static bool bvh_connected_coverage_interval(
+    BvhCoveragePolygon footprint,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
+    float2 origin,
+    float2 direction,
+    thread float &entry,
+    thread float &exit
+) {
+  float2 intervals[8];
+  uint count = 0U;
+  for (uint index = 0U; index < footprint.coverage_count; ++index) {
+    const auto polygon = polygons[footprint.coverage_offset + index];
+    if (polygon.skip_count != 0U) {
+      if (!bvh_polygon_bounds(polygon, origin, direction, entry, exit))
+        index += polygon.skip_count;
+      continue;
+    }
+    float start = entry, end = exit;
+    if (!bvh_polygon_interval(polygon, vertices, origin, direction, start, end))
+      continue;
+    for (uint part = 0U; part < count;) {
+      const float2 existing = intervals[part];
+      if (start <= existing.y + bvh_coverage_tolerance(existing.y) &&
+          existing.x <= end + bvh_coverage_tolerance(end)) {
+        start = min(start, existing.x);
+        end = max(end, existing.y);
+        intervals[part] = intervals[--count];
+        part = 0U; // The enlarged interval may reach another stored component.
+      } else {
+        ++part;
+      }
+    }
+    if (count == 8U) {
+      uint farthest = 0U;
+      for (uint part = 1U; part < count; ++part)
+        if (intervals[part].x > intervals[farthest].x)
+          farthest = part;
+      // Retain the nearest components. Dropping a farther component can only
+      // shorten this certified prefix; the next query recomputes the remainder.
+      if (start >= intervals[farthest].x)
+        continue;
+      intervals[farthest] = intervals[--count];
+    }
+    intervals[count++] = float2(start, end);
+  }
+  if (count == 0U)
+    return false;
+  uint nearest = 0U;
+  for (uint part = 1U; part < count; ++part)
+    if (intervals[part].x < intervals[nearest].x)
+      nearest = part;
+  entry = intervals[nearest].x;
+  exit = intervals[nearest].y;
+  return true;
+}
+
 inline bool bvh_source_interval(
     BvhCoveragePolygon footprint,
     device const BvhCoveragePolygon *polygons,
@@ -204,6 +270,16 @@ inline bool bvh_source_interval(
     thread float &entry,
     thread float &exit
 ) {
+  if (!ownership_only && footprint.coverage_count > 128U)
+    return bvh_connected_coverage_interval(
+        footprint,
+        polygons,
+        vertices,
+        origin,
+        direction,
+        entry,
+        exit
+    );
   const uint offset = ownership_only ? footprint.ownership_offset : footprint.coverage_offset;
   const uint count = ownership_only ? footprint.ownership_count : footprint.coverage_count;
   const float limit = exit;
@@ -370,7 +446,7 @@ inline float transformed_coverage_limit(
         false,
         catalogue_offset
     );
-    const float tolerance = max(1e-3F, 8.0F * FLT_EPSILON * max(1.0F, progress));
+    const float tolerance = bvh_coverage_tolerance(progress);
     if (selected.source == 0xffffffffU || selected.entry > progress + tolerance)
       return progress;
     if (selected.exit >= limit)

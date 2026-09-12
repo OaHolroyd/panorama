@@ -182,7 +182,7 @@ clean:
 # between debug and release object directories.
 FORCE:
 
-$(OBJ_DIR)/metal-bvh-helpers.air: tests/metal_bvh_helpers.metal $(wildcard $(RAYTRACE_SRC_DIR)/*.metalh) | $(OBJ_DIR)/raytracing
+$(OBJ_DIR)/metal-bvh-helpers.air: tests/metal_bvh_helpers.metal tests/coverage_reference.metalh $(wildcard $(RAYTRACE_SRC_DIR)/*.metalh) | $(OBJ_DIR)/raytracing
 	$(METAL) -c -o $@ $<
 
 $(OBJ_DIR)/metal-bvh-helpers.metallib: $(OBJ_DIR)/metal-bvh-helpers.air

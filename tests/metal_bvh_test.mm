@@ -92,7 +92,7 @@ void check_ownership_progress() {
 }
 
 void check_coverage_index() {
-  std::vector<BvhCoveragePolygon> polygons(3);
+  std::vector<BvhCoveragePolygon> polygons(5);
   std::vector<BvhCoverageVertex> vertices;
   const auto rectangle = [&](float x, float y, float width, bool concave) {
     BvhCoveragePolygon polygon = {};
@@ -125,8 +125,66 @@ void check_coverage_index() {
     for (uint32_t column = 0; column < 32U; column += 5U)
       rectangle(40002 + float(column * 10U), -30000 + float(row * 10U), 3, false);
   polygons[0].blocker_count = uint32_t(polygons.size()) - polygons[0].blocker_offset;
+  // Long, nearly straight shared sides reproduce the shape of the projected
+  // coverage perimeters involved in the Matterhorn grazing-ray stall. Include
+  // short edges that collapse under distant Float32 rebasing and repeated
+  // vertices: interval reuse must preserve the exhaustive boundary predicate.
+  polygons[2].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t row = 0; row < 16U; ++row) {
+    BvhCoveragePolygon polygon = {};
+    polygon.vertex_offset = uint32_t(vertices.size());
+    polygon.minimum_x = polygon.minimum_y = INFINITY;
+    polygon.maximum_x = polygon.maximum_y = -INFINITY;
+    for (uint32_t side = 0; side < 4U; ++side)
+      for (uint32_t step = 0; step < 54U; ++step) {
+        const float t = float(step) / 54;
+        const float wave = 0.12F * std::sin(t * (row == 3U ? 48 : 16) * float(std::numbers::pi));
+        const float x = 40000 + (side == 0   ? 320 * t
+                                 : side == 1 ? 320
+                                 : side == 2 ? 320 * (1 - t)
+                                             : 0);
+        const float y = -30000 + float(row) * 20 +
+                        (side == 0   ? wave
+                         : side == 1 ? 10 * t
+                         : side == 2 ? 10 + wave
+                                     : 10 * (1 - t));
+        vertices.push_back({x, y});
+        if (row == 1U && step == 4U)
+          vertices.push_back({x, y});
+        if (row == 2U && step == 4U)
+          vertices.push_back({x + 0.00390625F, y});
+        polygon.minimum_x = std::min(polygon.minimum_x, vertices.back().x);
+        polygon.minimum_y = std::min(polygon.minimum_y, y);
+        polygon.maximum_x = std::max(polygon.maximum_x, vertices.back().x);
+        polygon.maximum_y = std::max(polygon.maximum_y, y);
+      }
+    polygon.vertex_count = uint32_t(vertices.size()) - polygon.vertex_offset;
+    polygons.push_back(polygon);
+  }
+  polygons[2].coverage_count = uint32_t(polygons.size()) - polygons[2].coverage_offset;
+  polygons[2].ownership_offset = polygons[2].coverage_offset;
+  polygons[2].ownership_count = polygons[2].coverage_count;
+  polygons[1].blocker_offset = polygons[2].coverage_offset;
+  polygons[1].blocker_count = polygons[2].coverage_count;
+  // A distant source split into many strips reproduces repeated continuity
+  // queries at Float32-scale boundary gaps. Leave a real missing strip too.
+  polygons[3].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t column = 160U; column-- > 0U;)
+    if (column != 96U)
+      rectangle(180000 + float(column) * 32, -5, 31.96875F, false);
+  polygons[3].coverage_count = uint32_t(polygons.size()) - polygons[3].coverage_offset;
+  polygons[3].ownership_offset = polygons[3].coverage_offset;
+  polygons[3].ownership_count = polygons[3].coverage_count;
+  // More disjoint components than the cache can retain, encountered farthest
+  // first. The nearest valid interval must survive discarding farther entries.
+  polygons[4].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t column = 160U; column-- > 0U;)
+    rectangle(180000 + float(column) * 32, 25, 8, false);
+  polygons[4].coverage_count = uint32_t(polygons.size()) - polygons[4].coverage_offset;
+  polygons[4].ownership_offset = polygons[4].coverage_offset;
+  polygons[4].ownership_count = polygons[4].coverage_count;
   auto indexed = polygons;
-  bvh_resources::index_coverage_polygons(indexed, 3);
+  bvh_resources::index_coverage_polygons(indexed, 5);
   require(indexed.size() > polygons.size(), "Coverage fixture did not build an index");
   require(
       indexed[0].coverage_offset == indexed[0].ownership_offset,
@@ -151,6 +209,37 @@ void check_coverage_index() {
       queries.push_back({start, start + lengths[(i / 128U) % 4U], float(i % 3U), float(i % 2U)});
     }
   }
+  for (uint32_t p = polygons[2].coverage_offset;
+       p < polygons[2].coverage_offset + polygons[2].coverage_count;
+       ++p) {
+    const auto polygon = polygons[p];
+    for (uint32_t edge = 0; edge < polygon.vertex_count; ++edge) {
+      const auto a = vertices[polygon.vertex_offset + edge];
+      const auto b = vertices[polygon.vertex_offset + (edge + 1) % polygon.vertex_count];
+      const float length = std::hypot(b.x - a.x, b.y - a.y);
+      if (length == 0)
+        continue;
+      const float dx = (b.x - a.x) / length, dy = (b.y - a.y) / length;
+      for (float distance : {0.0F, 1000.0F, 500000.0F})
+        for (float offset : {-0.05F, 0.0F, 0.05F}) {
+          queries.push_back(
+              {a.x - distance * dx - offset * dy, a.y - distance * dy + offset * dx, dx, dy}
+          );
+          queries.push_back(
+              {distance, distance + std::max(0.125F, 2 * length), 2, float(edge % 2)}
+          );
+        }
+    }
+  }
+  // Oscillating perimeters exercise repeated boundary crossings.
+  for (float y : {-29940.05F, -29940.0F, -29939.95F}) {
+    queries.push_back({39990, y, 1, 0});
+    queries.push_back({0, 600000, 2, 0});
+  }
+  queries.push_back({0, 30, 1, 0});
+  queries.push_back({180000, 190000, 4, 0});
+  queries.push_back({0, 0, 1, 0});
+  queries.push_back({180000, 190000, 3, 0});
   id<MTLDevice> device = MTLCreateSystemDefaultDevice();
   NSError *error = nil;
   auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:@PANORAMA_TEST_HELPERS_PATH]
@@ -159,6 +248,10 @@ void check_coverage_index() {
       newComputePipelineStateWithFunction:[library newFunctionWithName:@"check_coverage_index"]
                                     error:&error];
   require(pipeline != nil, "Could not compile coverage index test");
+  auto walk_pipeline = [device
+      newComputePipelineStateWithFunction:[library newFunctionWithName:@"check_coverage_walk"]
+                                    error:&error];
+  require(walk_pipeline != nil, "Could not compile coverage walk test");
   const auto upload = [&](const auto &values) {
     return [device newBufferWithBytes:values.data()
                                length:values.size() * sizeof(values.front())
@@ -169,28 +262,107 @@ void check_coverage_index() {
   const size_t count = queries.size() / 2U;
   auto output = [device newBufferWithLength:count * sizeof(std::array<uint32_t, 4>)
                                     options:MTLResourceStorageModeShared];
-  auto command = [[device newCommandQueue] commandBuffer];
-  auto encoder = [command computeCommandEncoder];
-  [encoder setComputePipelineState:pipeline];
-  [encoder setBuffer:plain_buffer offset:0 atIndex:0];
-  [encoder setBuffer:indexed_buffer offset:0 atIndex:1];
-  [encoder setBuffer:vertex_buffer offset:0 atIndex:2];
-  [encoder setBuffer:query_buffer offset:0 atIndex:3];
-  [encoder setBuffer:output offset:0 atIndex:4];
-  [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-  [encoder endEncoding];
-  [command commit];
-  [command waitUntilCompleted];
-  require(command.status == MTLCommandBufferStatusCompleted, "Coverage index GPU test failed");
-  const auto *result = static_cast<const std::array<uint32_t, 4> *>(output.contents);
-  size_t hits = 0U, blocked = 0U;
-  for (size_t i = 0; i < count; ++i) {
-    require(result[i][0] && result[i][1], "Coverage index changed an interval or ownership");
-    hits += result[i][2];
-    blocked += !result[i][3];
+  const auto original_polygons = polygons, original_indexed = indexed;
+  const auto original_vertices = vertices;
+  const auto original_queries = queries;
+  for (const float shift : {0.0F, 40000.125F, -600000.0F}) {
+    vertices = original_vertices;
+    queries = original_queries;
+    polygons = original_polygons;
+    indexed = original_indexed;
+    for (auto &v : vertices) {
+      v.x -= shift;
+      v.y -= shift;
+    }
+    for (size_t i = 0; i < queries.size(); i += 2) {
+      queries[i][0] -= shift;
+      queries[i][1] -= shift;
+    }
+    for (auto *list : {&polygons, &indexed})
+      for (auto &p : *list) {
+        p.minimum_x -= shift;
+        p.maximum_x -= shift;
+        p.minimum_y -= shift;
+        p.maximum_y -= shift;
+      }
+    std::memcpy(plain_buffer.contents, polygons.data(), plain_buffer.length);
+    std::memcpy(indexed_buffer.contents, indexed.data(), indexed_buffer.length);
+    std::memcpy(vertex_buffer.contents, vertices.data(), vertex_buffer.length);
+    std::memcpy(query_buffer.contents, queries.data(), query_buffer.length);
+    auto command = [[device newCommandQueue] commandBuffer];
+    auto encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:plain_buffer offset:0 atIndex:0];
+    [encoder setBuffer:indexed_buffer offset:0 atIndex:1];
+    [encoder setBuffer:vertex_buffer offset:0 atIndex:2];
+    [encoder setBuffer:query_buffer offset:0 atIndex:3];
+    [encoder setBuffer:output offset:0 atIndex:4];
+
+    [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    require(command.status == MTLCommandBufferStatusCompleted, "Coverage index GPU test failed");
+    const auto *result = static_cast<const std::array<uint32_t, 4> *>(output.contents);
+    size_t hits = 0U, blocked = 0U;
+    for (size_t i = 0; i < count; ++i) {
+      if (!(result[i][0] && result[i][1])) {
+        const auto ray = queries[2 * i], interval = queries[2 * i + 1];
+        std::printf(
+            "Coverage mismatch query=%zu ray=%.9g,%.9g / %.9g,%.9g interval=%.9g,%.9g source=%.0f "
+            "owned=%.0f\n",
+            i,
+            ray[0],
+            ray[1],
+            ray[2],
+            ray[3],
+            interval[0],
+            interval[1],
+            interval[2],
+            interval[3]
+        );
+        require(false, "Coverage index changed an interval or ownership");
+      }
+      hits += result[i][2];
+      blocked += !result[i][3];
+    }
+    require(hits > 0U && hits < count && blocked > 0U, "Coverage index fixture missed edge cases");
+    std::printf(
+        "Coverage cache matches exhaustive coverage and ownership for %zu rays (shift %.3f).\n",
+        count,
+        shift
+    );
+    command = [[device newCommandQueue] commandBuffer];
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:walk_pipeline];
+    [encoder setBuffer:plain_buffer offset:0 atIndex:0];
+    [encoder setBuffer:indexed_buffer offset:0 atIndex:1];
+    [encoder setBuffer:vertex_buffer offset:0 atIndex:2];
+    [encoder setBuffer:query_buffer
+                offset:(queries.size() - 2) * sizeof(queries.front())
+               atIndex:3];
+    [encoder setBuffer:output offset:0 atIndex:4];
+
+    [encoder dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [encoder endEncoding];
+    bvh_resources::complete(command);
+    const auto *walk = static_cast<const float *>(output.contents);
+    require(
+        walk[0] == walk[1] && walk[0] > 183000.0F && walk[0] < 183104.0F,
+        "Cached continuity crossed a real missing coverage strip"
+    );
+    if (shift == 0.0F)
+      require(
+          walk[2] > 64 && walk[3] <= 4,
+          "Fragmented source regressed to repeated complete coverage walks"
+      );
+    std::printf(
+        "Coverage walk: %.0f -> %.0f queries, same gap at %.6f m.\n",
+        walk[2],
+        walk[3],
+        walk[0]
+    );
   }
-  require(hits > 0U && hits < count && blocked > 0U, "Coverage index fixture missed edge cases");
-  std::printf("Coverage index matches exhaustive intervals and ownership for %zu rays.\n", count);
 }
 
 // Match the viewer's default camera and output requirements, excluding image
