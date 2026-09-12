@@ -19,6 +19,7 @@
 #include <numbers>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace panorama::app {
 
@@ -47,6 +48,7 @@ inline constexpr float kDefaultDiffusivity = 1.0F;
 
 struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
+  std::vector<TerrainDatasetConfig> terrain_datasets;
   std::filesystem::path peak_gazetteer = "data/gazetteers/peaks.csv";
   uint64_t tile_cache_size_bytes = 2048ULL * kBytesPerMiB;
   uint32_t workers = 8U;
@@ -56,7 +58,8 @@ struct ViewerSettings {
   uint32_t bvh_block_cells = 4U;
   uint64_t bvh_cache_size_bytes = 2048ULL * kBytesPerMiB;
   bool discard_quantized = false;
-  bool trace_diagnostics = false;
+  // Temporarily enabled while diagnosing intermittent mixed-dataset stalls.
+  bool trace_diagnostics = true;
   bool bilinear_collisions = false;
   bool c1_normals = true;
   ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};

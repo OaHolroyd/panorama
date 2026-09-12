@@ -12,6 +12,58 @@ uint32_t checked_count(uint64_t count) {
     throw std::overflow_error("Metal BVH count exceeds uint32");
   return static_cast<uint32_t>(count);
 }
+
+void index_coverage_polygons(std::vector<BvhCoveragePolygon> &polygons, uint32_t source_count) {
+  std::vector<BvhCoveragePolygon> indexed(polygons.begin(), polygons.begin() + source_count);
+  indexed.reserve(polygons.size() + polygons.size() / 4U);
+  const auto append = [&](auto &&self, uint32_t offset, uint32_t count) -> void {
+    if (count <= 8U) {
+      indexed.insert(indexed.end(), polygons.begin() + offset, polygons.begin() + offset + count);
+      return;
+    }
+    const size_t parent = indexed.size();
+    indexed.push_back({});
+    const uint32_t half = count / 2U;
+    self(self, offset, half);
+    self(self, offset + half, count - half);
+    BvhCoveragePolygon bounds = {};
+    bounds.skip_count = checked_count(indexed.size() - parent - 1U);
+    bounds.minimum_x = bounds.minimum_y = std::numeric_limits<float>::infinity();
+    bounds.maximum_x = bounds.maximum_y = -std::numeric_limits<float>::infinity();
+    // Visit immediate children only: each child's box already includes its descendants.
+    for (size_t child = parent + 1U; child < indexed.size();) {
+      const auto &box = indexed[child];
+      bounds.minimum_x = std::min(bounds.minimum_x, box.minimum_x);
+      bounds.minimum_y = std::min(bounds.minimum_y, box.minimum_y);
+      bounds.maximum_x = std::max(bounds.maximum_x, box.maximum_x);
+      bounds.maximum_y = std::max(bounds.maximum_y, box.maximum_y);
+      child += 1U + box.skip_count;
+    }
+    indexed[parent] = bounds;
+  };
+  const auto append_range = [&](uint32_t &offset, uint32_t &count) {
+    const uint32_t start = checked_count(indexed.size());
+    append(append, offset, count);
+    offset = start;
+    count = checked_count(indexed.size()) - start;
+  };
+  for (uint32_t source = 0U; source < source_count; ++source) {
+    auto footprint = polygons[source];
+    const bool shared = footprint.ownership_offset == footprint.coverage_offset &&
+                        footprint.ownership_count == footprint.coverage_count;
+    append_range(footprint.coverage_offset, footprint.coverage_count);
+    if (shared) {
+      footprint.ownership_offset = footprint.coverage_offset;
+      footprint.ownership_count = footprint.coverage_count;
+    } else {
+      append_range(footprint.ownership_offset, footprint.ownership_count);
+    }
+    append_range(footprint.blocker_offset, footprint.blocker_count);
+    indexed[source] = footprint;
+  }
+  polygons = std::move(indexed);
+}
+
 id<MTLBuffer> buffer(
     id<MTLDevice> device,
     uint64_t count,
@@ -58,7 +110,9 @@ BvhPipeline make_bvh_pipeline(
     NSString *kernel_name,
     NSString *intersection_name,
     MTLFunctionConstantValues *constants,
-    bool scene_mode
+    bool scene_mode,
+    NSString *missing_intersection_name,
+    NSString *coverage_intersection_name
 ) {
   NSError *error = nil;
   id<MTLFunction> kernel = constants == nil ? [gpu.library() newFunctionWithName:kernel_name]
@@ -77,12 +131,30 @@ BvhPipeline make_bvh_pipeline(
   descriptor.linkedFunctions = [[MTLLinkedFunctions alloc] init];
   descriptor.linkedFunctions.functions = @[ intersection ];
   id<MTLFunction> missing = nil;
+  id<MTLFunction> coverage = nil;
   if (scene_mode) {
-    missing = [gpu.library() newFunctionWithName:@"terrain_tile_intersection"];
+    missing = [gpu.library() newFunctionWithName:missing_intersection_name == nil
+                                                     ? @"terrain_tile_intersection"
+                                                     : missing_intersection_name];
     if (missing == nil)
       throw std::runtime_error("Could not load scene missing-tile intersection function");
-    descriptor.linkedFunctions.functions = @[ intersection, missing ];
   }
+  coverage = scene_mode && coverage_intersection_name == nil
+                 ? missing
+                 : [gpu.library() newFunctionWithName:coverage_intersection_name == nil
+                                                          ? @"terrain_tile_intersection"
+                                                          : coverage_intersection_name];
+  if (coverage == nil)
+    throw std::runtime_error("Could not load terrain coverage intersection function");
+  if ([coverage.name isEqualToString:intersection.name])
+    coverage = intersection;
+  auto *linked = [NSMutableArray arrayWithObject:intersection];
+  if (missing != nil && missing != intersection)
+    [linked addObject:missing];
+  if (coverage != intersection && coverage != missing)
+    [linked addObject:coverage];
+  descriptor.linkedFunctions.functions = linked;
+
   BvhPipeline result;
   result.state = [gpu.device() newComputePipelineStateWithDescriptor:descriptor
                                                              options:MTLPipelineOptionNone
@@ -97,6 +169,11 @@ BvhPipeline make_bvh_pipeline(
   if (result.table == nil || handle == nil)
     throw std::runtime_error("Could not create BVH intersection table");
   [result.table setFunction:handle atIndex:0];
+  result.coverage_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
+  auto coverage_handle = [result.state functionHandleWithFunction:coverage];
+  if (result.coverage_table == nil || coverage_handle == nil)
+    throw std::runtime_error("Could not create terrain coverage intersection table");
+  [result.coverage_table setFunction:coverage_handle atIndex:0];
   if (scene_mode) {
     result.missing_table = [result.state newIntersectionFunctionTableWithDescriptor:table];
     auto missing_handle = [result.state functionHandleWithFunction:missing];
@@ -104,6 +181,7 @@ BvhPipeline make_bvh_pipeline(
       throw std::runtime_error("Could not create scene missing-tile intersection table");
     [result.missing_table setFunction:missing_handle atIndex:0];
   }
+
   return result;
 }
 

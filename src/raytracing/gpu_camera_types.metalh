@@ -19,12 +19,14 @@ struct Camera {
 };
 
 struct Source {
-  float x, y;
+  float minimum_x, minimum_y;
+  float maximum_x, maximum_y;
+  float cell_size;
   uint32_t lod_count;
 };
 
 struct Lod {
-  float observer_x, observer_y, tile_width, cell_size, scale;
+  float observer_x, observer_y, scale;
   uint32_t count;
 };
 } // namespace panorama::camera_gpu

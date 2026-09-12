@@ -12,8 +12,7 @@ Building the project produces three executables:
 
 - `panorama-tile-gen` prepares aligned DTM GeoTIFF, raw SRTM HGT, and Arc/Info
   ASC inputs for tracing. ASC files may be loose or retained in ZIP archives.
-  It can write conventional rechunked GeoTIFFs or compact, optionally compressed
-  Metal tiles intended for fast GPU loading.
+  It writes compact uint16 Metal tiles with optional compression for GPU loading.
 - `panorama` is the batch renderer. It traces an angular panorama or a pinhole
   camera view and writes diagnostic PNGs and, optionally, a shaded synthetic
   terrain image.
@@ -53,26 +52,26 @@ For SRTM, place the raw `.hgt` files below one input directory; nested
 directories are supported. The filename supplies each tile's one-degree WGS 84
 bounds, while its 3601- or 1201-sample side selects one- or three-arcsecond
 spacing. HGT elevations are decoded as signed, big-endian 16-bit metres and the
-standard `-32768` void value is treated as no-data. The current renderer still
-requires one of its supported projected CRSs; accepting native geographic
-tiles there is part of the planned multi-source ray-tracing work.
+standard `-32768` void value is treated as no-data. Native geographic SRTM tiles
+can be combined with projected terrain through the Metal BVH raytracer.
 
 ### Prepare tracing tiles
 
-Metal tiles with quantized decimetre elevations without compression provide a
-compact, fast-loading representation. First inspect the proposed operation,
-then generate the tiles:
+The generator writes uint16 Metal tiles with quantized decimetre elevations.
+Uncompressed tiles provide a compact, fast-loading representation. Existing
+Float32 `.ptile` files must be regenerated from their source rasters. Generate
+the tiles with:
 
 ```sh
 ./panorama-tile-gen \
   --input downloads/swissalti3d \
   --output data/swissalti3d-2m-metal \
-  --format metal --sample-type uint16 --compression none
+  --compression none
 ```
 
 Use the directory containing the Terrain 50 ZIP or extracted ASC packages as
 the input directory to prepare OS data in the same way. Run
-`./panorama-tile-gen --help` for GeoTIFF output, chunk-size, grid-origin, and
+`./panorama-tile-gen --help` for chunk-size, grid-origin, compression, and
 overwrite options.
 
 Observer eastings and northings are always expressed in the prepared dataset's
@@ -155,6 +154,13 @@ presentations. `idle` means that path is outside its instrumented callback, not
 necessarily that the whole UI is responsive. Keep capturing for about ten seconds
 after the slowdown begins before closing the app.
 
+Primary scene repair retains completed pixels and compacts unresolved rays into
+a GPU work list. Newly loaded tiles retry only that list, retaining the previous
+closest-hit bound. `Frame work` reports repair passes/rays and generated mipmaps.
+BVH admission loads vertices and builds acceleration structures without generating
+maximum mipmaps. The software renderer and software shadow fallback generate any
+missing mipmaps on demand, reusing them until their atlas slot is overwritten.
+
 The minimap retains the camera cone and visible-terrain coverage. Coverage uses a
 compute-generated bitmap displayed by MapKit, with no separate transparent Metal
 view. Map panning and zooming reuse the latest collision snapshot. Updates are
@@ -199,22 +205,34 @@ candidate tiles; Mipmap then traverses each selected tile's maximum hierarchy,
 while BVH uses its detailed surface acceleration. The shared catalogue survives
 camera turns, image resizing, and backend switches, and rebuilds after XY or LOD
 changes. Mipmap retains grid selection on devices without Metal ray-tracing
-support. Coverage gaps still terminate rays. Sharing the catalogue alone did not
+support. Rays cross coverage gaps as empty space. Sharing the catalogue alone did not
 improve Mipmap timings in the tested M2 view; performance depends on the camera
 and device.
 
 Metal BVH streams full-resolution tiles on demand; LOD is optional. Detailed tile
 BVHs and their immutable vertices are cached by tile and LOD. Rays retain their
 progress across batches, including when a frame's terrain exceeds the cache. Tiles are scheduled in outward grid shells to avoid
-rebuilding the same tile for successive groups of rays within a frame.
+rebuilding the same tile for successive groups of rays within a frame. Streaming
+selection and CPU grouping use only unfinished rays, preserving completed pixels
+when a sparse remainder needs more terrain.
+
+Primary repair requests missing terrain before proving coverage continuity to a
+provisional height-discontinuity hit. Unverified steps cannot shorten later rays;
+completed hits retain the same gap checks. Coverage, ownership and blocker lists
+use nested XY bounds to skip unreachable polygons while preserving their order
+and exact boundary tests. Tile bounds generation and BVH construction share one
+GPU submission; compaction still waits for the resulting size.
 
 `--bvh-cache-mib` bounds the requested Metal storage for detailed BVHs, owned
 vertices, block metadata, bounds, and peak build/compaction workspace. It is
 **additional to** `--tile-cache-mib`; ray/output buffers, the small catalogue
 BVH, batch instance structures (at most 64 tiles), and driver allocation overhead
 are separate. A cache must fit at least one tile plus its build workspace;
-otherwise the error reports the required bytes. LRU eviction occurs only after
-GPU work completes. Statistics report resident bytes, peak reservation, builds,
+otherwise the error reports the required bytes. Eviction occurs only after GPU
+work completes, discarding obsolete LODs first and then the least recently used
+tiles. Primary hits and shadow occluders refresh usage; repair protects these
+tiles and newly admitted terrain while allowing unrelated cached tiles to leave.
+Statistics report resident bytes, peak reservation, builds,
 cache hits, and evictions. A small cache increases construction costs, particularly
 between viewer frames.
 
@@ -237,10 +255,10 @@ For a headless shadow-cache check with the viewer's 600 km range and 1.5 LOD,
 run `obj/release/metal-bvh-test --benchmark-camera TILE_DIR gpu-shadows`.
 This logs caster loads, repair passes and terrain I/O through warm pans, movement
 and zoom. `make check-bvh` also checks shadow reuse and bounded-cache fallback
-against software visibility, using float/quantized terrain and both collision modes.
+against software visibility, using retained/expanded uint16 terrain and both collision modes.
 
 `make check-bvh` runs Metal API validation and software/BVH comparisons on
-generated terrain, including retained and expanded uint16, float samples,
+generated terrain, including retained and expanded uint16, directories without manifests,
 partial blocks, coverage gaps, range clipping, resizing, relocation, backend
 switching, cold and resident shadows, producer fallback, and forced cache eviction.
 `make check-camera` checks projection/reprojection, angular pixel centres, inverse
@@ -280,13 +298,28 @@ solver's cell-edge tolerance; away from those edges, the comparison allows only
 half-precision rounding. BVH step diagnostics count procedural candidates;
 evaluation diagnostics count precise cell tests.
 
-`panorama-tile-gen` now writes version-2 `panorama-terrain-manifest.bin` entries
-with minimum and maximum elevations enclosing **all stored LODs**, including
-quantization and finite no-data fill values. Re-running the original generation
-command without `--overwrite` upgrades an old manifest by scanning existing tile
-payloads; it does not regenerate those tiles. Existing version-2 entries are
-reused for skipped files. Version-1 or absent manifests remain readable with
-conservative culling where bounds are unavailable.
+`panorama-tile-gen` writes version-5 uint16 tiles. Encoded zero denotes a missing
+sample; codes 1–65535 represent valid heights, including actual zero and negative
+elevations. The decimetre lattice is unchanged, with a maximum per-LOD height
+span of 6553.4 m. A terrain cell is usable only when all four corner samples are
+valid, for both triangle and bilinear interpolation.
+
+Usable-cell rectangles are stored after each tile's LOD table and in its
+version-3 `panorama-terrain-manifest.bin`. The catalogue reads this metadata
+without loading heights, allowing later `--terrain` sources to fill missing
+coverage in earlier sources. Cells crossing a priority boundary remain
+candidates; priority is checked at the actual collision position. Partial tiles
+stay at native resolution, and missing neighbours are excluded from normal
+reconstruction. Primary and shadow rays cross gaps in the combined coverage as
+empty space, continuing to known terrain beyond them up to the configured range.
+Known terrain that is not resident still loads before its visibility is resolved.
+
+Manifest elevation bounds enclose all stored LODs and ignore missing samples.
+Re-running generation without `--overwrite` repairs absent or older manifests
+from existing tiles. Legacy version-4 uint16 files remain readable with their
+original all-codes-valid interpretation. Recovering coverage from their padded
+zeros requires regenerating them from the original rasters with `--overwrite`
+or into a new directory; a manifest upgrade alone cannot recover that mask.
 
 Build the project, then launch the interactive viewer with:
 

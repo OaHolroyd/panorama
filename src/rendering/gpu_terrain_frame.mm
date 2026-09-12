@@ -10,7 +10,8 @@ GpuTerrainFrameTiming render_terrain_frame(
     const RayFieldRequest *field,
     GpuImageRenderer &image,
     const TerrainPresentationSettings &settings,
-    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent
+    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent,
+    float lod_footprint_scale
 ) {
   const auto started = std::chrono::steady_clock::now();
   GpuTerrainFrameTiming timing;
@@ -35,7 +36,7 @@ GpuTerrainFrameTiming render_terrain_frame(
   bool encoded_primary;
   {
     trace_activity::Scope activity("primary preparation", &timing.preparation_milliseconds);
-    encoded_primary = field != nullptr && trace.encode_trace(command, *field);
+    encoded_primary = field != nullptr && trace.encode_trace(command, *field, lod_footprint_scale);
   }
   if (field != nullptr && !encoded_primary) {
     repair();

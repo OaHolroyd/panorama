@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -27,6 +28,7 @@ constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 /// Runtime-selectable settings for one panorama invocation.
 struct EntrypointSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
+  std::vector<panorama::TerrainDatasetConfig> terrain_datasets;
   uint64_t tile_cache_size_bytes = 128ULL * kBytesPerMiB;
   uint32_t max_tile_preparation_workers = 8U;
   uint32_t max_tile_count = 0U;
@@ -193,6 +195,7 @@ void print_usage(const char *program) {
       "  --bvh-cache-mib N    BVH cache and build budget (default: 512)\n"
       "  --tile-dir DIR        prepared level-0 tile directory\n"
       "                        (default: data/swissalti3d-10-level-0-metal-u16-none-lod-point)\n"
+      "  --terrain DIR         add a prepared dataset in priority order; repeat for fallback\n"
       "  --tile-cache-mib N    resident terrain-cache budget in MiB (default: 128)\n"
       "  --workers N           preparation workers; 0 uses all hardware threads (default: 8)\n"
       "  --max-tiles N         limit available source tiles; 0 is unlimited (default: 0)\n"
@@ -304,6 +307,9 @@ void print_usage(const char *program) {
     const std::string_view value = panorama::arguments::option_value(argc, argv, index, option);
     if (option == "--tile-dir") {
       settings.tile_dir = value;
+      settings.terrain_datasets.clear();
+    } else if (option == "--terrain") {
+      settings.terrain_datasets.push_back({std::filesystem::path(value), 0.0});
     } else if (option == "--raytracer") {
       settings.raytracer = panorama::arguments::parse_raytracer(value);
     } else if (option == "--bvh-block-cells") {
@@ -444,6 +450,8 @@ int main(int argc, const char *argv[]) {
         settings.raytracer,
         settings.bvh_block_cells,
         settings.bvh_cache_size_bytes,
+        true,
+        settings.terrain_datasets,
     };
     const panorama::RayFieldRequest rays = settings.projection.make_request();
     const panorama::ScalarColourRange colour_range = scalar_colour_range(settings);
@@ -457,8 +465,8 @@ int main(int argc, const char *argv[]) {
         colour_range,
     };
     std::printf(
-        "Tracing terrain in %s from projected coordinate (%.3f, %.3f, %.1f).\n",
-        settings.tile_dir.c_str(),
+        "Tracing %zu terrain dataset(s) from projected coordinate (%.3f, %.3f, %.1f).\n",
+        settings.terrain_datasets.empty() ? size_t(1) : settings.terrain_datasets.size(),
         settings.easting,
         settings.northing,
         settings.elevation

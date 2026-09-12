@@ -182,8 +182,14 @@ clean:
 # between debug and release object directories.
 FORCE:
 
-$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB)
-	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) -framework MetalFX $(LDLIBS)
+$(OBJ_DIR)/metal-bvh-helpers.air: tests/metal_bvh_helpers.metal tests/coverage_reference.metalh $(wildcard $(RAYTRACE_SRC_DIR)/*.metalh) | $(OBJ_DIR)/raytracing
+	$(METAL) -c -o $@ $<
+
+$(OBJ_DIR)/metal-bvh-helpers.metallib: $(OBJ_DIR)/metal-bvh-helpers.air
+	$(METALLIB) -o $@ $^
+
+$(OBJ_DIR)/metal-bvh-test: tests/metal_bvh_test.mm $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(METAL_LIB) $(OBJ_DIR)/metal-bvh-helpers.metallib
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) -DPANORAMA_TEST_HELPERS_PATH=\"$(OBJ_DIR)/metal-bvh-helpers.metallib\" $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $< $(OBJ_DIR)/app/metalfx_upscaler.o $(RAYTRACE_OBJ) $(RENDERING_OBJ) $(SHARED_OBJ) $(FRAMEWORKS) -framework MetalFX $(LDLIBS)
 
 .PHONY: check-bvh
 check-bvh: $(OBJ_DIR)/metal-bvh-test
@@ -191,8 +197,14 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --edge-cases
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --mixed-coverage
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --coverage-junctions
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-quantized
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-expanded
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --valid-quantized
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --valid-expanded
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --producer
-	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-float
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-expanded
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --shadow-reuse-quantized
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --tile-selection
 
@@ -222,7 +234,7 @@ $(OBJ_DIR)/peak-catalogue-test: tests/peak_catalogue_test.mm $(OBJ_DIR)/app/peak
 check-labels: $(OBJ_DIR)/peak-catalogue-test
 	$(OBJ_DIR)/peak-catalogue-test
 
-$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(OBJ_DIR)/tile-gen/geotiff_writer.o $(SHARED_OBJ)
+$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(SHARED_OBJ)
 	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
 
 .PHONY: check-manifest

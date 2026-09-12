@@ -1,9 +1,13 @@
 #include "arguments.h"
 #include "gpu_terrain_frame.h"
+#include "metal_bvh_resources.h"
+#include "metal_bvh_types.metalh"
 #include "metal_tile.h"
 #include "metalfx_upscaler.h"
 #include "terrain_manifest.h"
+#include "terrain_tile_bvh.h"
 #include "terrain_trace_session.h"
+#include "terrain_transform.h"
 #include "timer.h"
 
 #include <algorithm>
@@ -30,6 +34,335 @@ RayFieldRequest camera_field(ImageSize image, Projection projection) { return {i
 void require(bool condition, const char *message) {
   if (!condition)
     throw std::runtime_error(message);
+}
+
+void check_ownership_progress() {
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  NSError *error = nil;
+  auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:@PANORAMA_TEST_HELPERS_PATH]
+                                     error:&error];
+  require(library != nil, "Could not load BVH helper tests");
+  auto pipeline = [device
+      newComputePipelineStateWithFunction:[library newFunctionWithName:@"check_ownership_progress"]
+                                    error:&error];
+  require(pipeline != nil, "Could not compile ownership progress test");
+  const std::array<std::array<float, 4>, 9> rays = {{
+      {40000, -30000, 0.70710677F, -0.70710677F},
+      {-40000, 30000, -0.70710677F, 0.70710677F},
+      {600000, 0, 1, 0},
+      {0, -600000, 0, -1},
+      {50000, -30000, 1e-6F, 1},
+      {0, 0, 1, 0},
+      {40000, 30000, -1, 0},
+      {40000, 30000, 1, 0},
+      {0, 0, 1, 0},
+  }};
+  const std::array<float, 9> distances = {0.1F, 0.1F, 0.1F, 0.1F, 0.1F, 100.0F, 40000.0F, 0, 0};
+  auto input = [device newBufferWithBytes:rays.data()
+                                   length:sizeof(rays)
+                                  options:MTLResourceStorageModeShared];
+  auto parameters = [device newBufferWithBytes:distances.data()
+                                        length:sizeof(distances)
+                                       options:MTLResourceStorageModeShared];
+  auto output = [device newBufferWithLength:sizeof(rays) options:MTLResourceStorageModeShared];
+  auto queue = [device newCommandQueue];
+  auto command = [queue commandBuffer];
+  auto encoder = [command computeCommandEncoder];
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:input offset:0 atIndex:0];
+  [encoder setBuffer:parameters offset:0 atIndex:1];
+  [encoder setBuffer:output offset:0 atIndex:2];
+  [encoder dispatchThreads:MTLSizeMake(rays.size(), 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(rays.size(), 1, 1)];
+  [encoder endEncoding];
+  [command commit];
+  [command waitUntilCompleted];
+  require(command.status == MTLCommandBufferStatusCompleted, "Ownership progress GPU test failed");
+  const auto *result = static_cast<const std::array<float, 4> *>(output.contents);
+  for (size_t i = 0; i < rays.size(); ++i) {
+    require(
+        std::isfinite(result[i][0]) && result[i][0] > distances[i],
+        "Ownership did not advance"
+    );
+    require(result[i][1] == 1 && result[i][2] == 1, "Ownership skipped a representable ray point");
+    if (i < 5)
+      require(result[i][3] == 0, "Fixture did not reproduce unchanged shadow coordinates");
+  }
+  std::puts("Ownership continuation advances to the first distinct world point.");
+}
+
+void check_coverage_index() {
+  std::vector<BvhCoveragePolygon> polygons(5);
+  std::vector<BvhCoverageVertex> vertices;
+  const auto rectangle = [&](float x, float y, float width, bool concave) {
+    BvhCoveragePolygon polygon = {};
+    polygon.vertex_offset = uint32_t(vertices.size());
+    vertices.insert(vertices.end(), {{x, y}, {x + width, y}, {x + width, y + 10}});
+    if (concave)
+      vertices.push_back({x + 0.5F * width, y + 5});
+    vertices.push_back({x, y + 10});
+    polygon.vertex_count = uint32_t(vertices.size()) - polygon.vertex_offset;
+    polygon.minimum_x = x;
+    polygon.minimum_y = y;
+    polygon.maximum_x = x + width;
+    polygon.maximum_y = y + 10;
+    polygons.push_back(polygon);
+  };
+  polygons[0].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t row = 0; row < 32U; ++row)
+    for (uint32_t column = 0; column < 32U; ++column)
+      if ((row + column) % 11U != 0U)
+        rectangle(40000 + float(column * 10U), -30000 + float(row * 10U), 10, column % 9U == 0U);
+  polygons[0].coverage_count = uint32_t(polygons.size()) - polygons[0].coverage_offset;
+  polygons[0].ownership_offset = polygons[0].coverage_offset;
+  polygons[0].ownership_count = polygons[0].coverage_count;
+  polygons[1] = polygons[0];
+  // A different ownership range exercises remapping without sharing coverage.
+  polygons[1].ownership_offset += 7U;
+  polygons[1].ownership_count -= 15U;
+  polygons[0].blocker_offset = uint32_t(polygons.size());
+  for (uint32_t row = 0; row < 32U; ++row)
+    for (uint32_t column = 0; column < 32U; column += 5U)
+      rectangle(40002 + float(column * 10U), -30000 + float(row * 10U), 3, false);
+  polygons[0].blocker_count = uint32_t(polygons.size()) - polygons[0].blocker_offset;
+  // Long, nearly straight shared sides reproduce the shape of the projected
+  // coverage perimeters involved in the Matterhorn grazing-ray stall. Include
+  // short edges that collapse under distant Float32 rebasing and repeated
+  // vertices: interval reuse must preserve the exhaustive boundary predicate.
+  polygons[2].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t row = 0; row < 16U; ++row) {
+    BvhCoveragePolygon polygon = {};
+    polygon.vertex_offset = uint32_t(vertices.size());
+    polygon.minimum_x = polygon.minimum_y = INFINITY;
+    polygon.maximum_x = polygon.maximum_y = -INFINITY;
+    for (uint32_t side = 0; side < 4U; ++side)
+      for (uint32_t step = 0; step < 54U; ++step) {
+        const float t = float(step) / 54;
+        const float wave = 0.12F * std::sin(t * (row == 3U ? 48 : 16) * float(std::numbers::pi));
+        const float x = 40000 + (side == 0   ? 320 * t
+                                 : side == 1 ? 320
+                                 : side == 2 ? 320 * (1 - t)
+                                             : 0);
+        const float y = -30000 + float(row) * 20 +
+                        (side == 0   ? wave
+                         : side == 1 ? 10 * t
+                         : side == 2 ? 10 + wave
+                                     : 10 * (1 - t));
+        vertices.push_back({x, y});
+        if (row == 1U && step == 4U)
+          vertices.push_back({x, y});
+        if (row == 2U && step == 4U)
+          vertices.push_back({x + 0.00390625F, y});
+        polygon.minimum_x = std::min(polygon.minimum_x, vertices.back().x);
+        polygon.minimum_y = std::min(polygon.minimum_y, y);
+        polygon.maximum_x = std::max(polygon.maximum_x, vertices.back().x);
+        polygon.maximum_y = std::max(polygon.maximum_y, y);
+      }
+    polygon.vertex_count = uint32_t(vertices.size()) - polygon.vertex_offset;
+    polygons.push_back(polygon);
+  }
+  polygons[2].coverage_count = uint32_t(polygons.size()) - polygons[2].coverage_offset;
+  polygons[2].ownership_offset = polygons[2].coverage_offset;
+  polygons[2].ownership_count = polygons[2].coverage_count;
+  polygons[1].blocker_offset = polygons[2].coverage_offset;
+  polygons[1].blocker_count = polygons[2].coverage_count;
+  // A distant source split into many strips reproduces repeated continuity
+  // queries at Float32-scale boundary gaps. Leave a real missing strip too.
+  polygons[3].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t column = 160U; column-- > 0U;)
+    if (column != 96U)
+      rectangle(180000 + float(column) * 32, -5, 31.96875F, false);
+  polygons[3].coverage_count = uint32_t(polygons.size()) - polygons[3].coverage_offset;
+  polygons[3].ownership_offset = polygons[3].coverage_offset;
+  polygons[3].ownership_count = polygons[3].coverage_count;
+  // More disjoint components than the cache can retain, encountered farthest
+  // first. The nearest valid interval must survive discarding farther entries.
+  polygons[4].coverage_offset = uint32_t(polygons.size());
+  for (uint32_t column = 160U; column-- > 0U;)
+    rectangle(180000 + float(column) * 32, 25, 8, false);
+  polygons[4].coverage_count = uint32_t(polygons.size()) - polygons[4].coverage_offset;
+  polygons[4].ownership_offset = polygons[4].coverage_offset;
+  polygons[4].ownership_count = polygons[4].coverage_count;
+  auto indexed = polygons;
+  bvh_resources::index_coverage_polygons(indexed, 5);
+  require(indexed.size() > polygons.size(), "Coverage fixture did not build an index");
+  require(
+      indexed[0].coverage_offset == indexed[0].ownership_offset,
+      "Coverage index duplicated shared ownership"
+  );
+
+  std::vector<std::array<float, 4>> queries;
+  for (uint32_t i = 0; i < 4096U; ++i) {
+    const float y = -30000 + float(i % 128U) * 2.5F;
+    // Include shared edges, concave perimeters, holes, parallel/tangent rays,
+    // distant primary origins, and very short shadow distances at large XY.
+    const std::array<std::array<float, 4>, 4> rays = {{
+        {39990, y, 1, (float(i / 128U) - 16) * 0.01F},
+        {40002 + float(i % 32U) * 10, y, 1, 0},
+        {40160, -30010, i % 2U == 0U ? 0.0F : 1e-6F, 1},
+        {0, 0, 0.8F, -0.6F + float(i % 32U) * 1e-5F},
+    }};
+    for (const auto &ray : rays) {
+      const float start = i % 3U == 0U ? 0.1F : 0.0F;
+      const float lengths[] = {0.125F, 10.0F, 100.0F, 600000.0F};
+      queries.push_back(ray);
+      queries.push_back({start, start + lengths[(i / 128U) % 4U], float(i % 3U), float(i % 2U)});
+    }
+  }
+  for (uint32_t p = polygons[2].coverage_offset;
+       p < polygons[2].coverage_offset + polygons[2].coverage_count;
+       ++p) {
+    const auto polygon = polygons[p];
+    for (uint32_t edge = 0; edge < polygon.vertex_count; ++edge) {
+      const auto a = vertices[polygon.vertex_offset + edge];
+      const auto b = vertices[polygon.vertex_offset + (edge + 1) % polygon.vertex_count];
+      const float length = std::hypot(b.x - a.x, b.y - a.y);
+      if (length == 0)
+        continue;
+      const float dx = (b.x - a.x) / length, dy = (b.y - a.y) / length;
+      for (float distance : {0.0F, 1000.0F, 500000.0F})
+        for (float offset : {-0.05F, 0.0F, 0.05F}) {
+          queries.push_back(
+              {a.x - distance * dx - offset * dy, a.y - distance * dy + offset * dx, dx, dy}
+          );
+          queries.push_back(
+              {distance, distance + std::max(0.125F, 2 * length), 2, float(edge % 2)}
+          );
+        }
+    }
+  }
+  // Oscillating perimeters exercise repeated boundary crossings.
+  for (float y : {-29940.05F, -29940.0F, -29939.95F}) {
+    queries.push_back({39990, y, 1, 0});
+    queries.push_back({0, 600000, 2, 0});
+  }
+  queries.push_back({0, 30, 1, 0});
+  queries.push_back({180000, 190000, 4, 0});
+  queries.push_back({0, 0, 1, 0});
+  queries.push_back({180000, 190000, 3, 0});
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  NSError *error = nil;
+  auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:@PANORAMA_TEST_HELPERS_PATH]
+                                     error:&error];
+  auto pipeline = [device
+      newComputePipelineStateWithFunction:[library newFunctionWithName:@"check_coverage_index"]
+                                    error:&error];
+  require(pipeline != nil, "Could not compile coverage index test");
+  auto walk_pipeline = [device
+      newComputePipelineStateWithFunction:[library newFunctionWithName:@"check_coverage_walk"]
+                                    error:&error];
+  require(walk_pipeline != nil, "Could not compile coverage walk test");
+  const auto upload = [&](const auto &values) {
+    return [device newBufferWithBytes:values.data()
+                               length:values.size() * sizeof(values.front())
+                              options:MTLResourceStorageModeShared];
+  };
+  auto plain_buffer = upload(polygons), indexed_buffer = upload(indexed);
+  auto vertex_buffer = upload(vertices), query_buffer = upload(queries);
+  const size_t count = queries.size() / 2U;
+  auto output = [device newBufferWithLength:count * sizeof(std::array<uint32_t, 4>)
+                                    options:MTLResourceStorageModeShared];
+  const auto original_polygons = polygons, original_indexed = indexed;
+  const auto original_vertices = vertices;
+  const auto original_queries = queries;
+  for (const float shift : {0.0F, 40000.125F, -600000.0F}) {
+    vertices = original_vertices;
+    queries = original_queries;
+    polygons = original_polygons;
+    indexed = original_indexed;
+    for (auto &v : vertices) {
+      v.x -= shift;
+      v.y -= shift;
+    }
+    for (size_t i = 0; i < queries.size(); i += 2) {
+      queries[i][0] -= shift;
+      queries[i][1] -= shift;
+    }
+    for (auto *list : {&polygons, &indexed})
+      for (auto &p : *list) {
+        p.minimum_x -= shift;
+        p.maximum_x -= shift;
+        p.minimum_y -= shift;
+        p.maximum_y -= shift;
+      }
+    std::memcpy(plain_buffer.contents, polygons.data(), plain_buffer.length);
+    std::memcpy(indexed_buffer.contents, indexed.data(), indexed_buffer.length);
+    std::memcpy(vertex_buffer.contents, vertices.data(), vertex_buffer.length);
+    std::memcpy(query_buffer.contents, queries.data(), query_buffer.length);
+    auto command = [[device newCommandQueue] commandBuffer];
+    auto encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:plain_buffer offset:0 atIndex:0];
+    [encoder setBuffer:indexed_buffer offset:0 atIndex:1];
+    [encoder setBuffer:vertex_buffer offset:0 atIndex:2];
+    [encoder setBuffer:query_buffer offset:0 atIndex:3];
+    [encoder setBuffer:output offset:0 atIndex:4];
+
+    [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    require(command.status == MTLCommandBufferStatusCompleted, "Coverage index GPU test failed");
+    const auto *result = static_cast<const std::array<uint32_t, 4> *>(output.contents);
+    size_t hits = 0U, blocked = 0U;
+    for (size_t i = 0; i < count; ++i) {
+      if (!(result[i][0] && result[i][1])) {
+        const auto ray = queries[2 * i], interval = queries[2 * i + 1];
+        std::printf(
+            "Coverage mismatch query=%zu ray=%.9g,%.9g / %.9g,%.9g interval=%.9g,%.9g source=%.0f "
+            "owned=%.0f\n",
+            i,
+            ray[0],
+            ray[1],
+            ray[2],
+            ray[3],
+            interval[0],
+            interval[1],
+            interval[2],
+            interval[3]
+        );
+        require(false, "Coverage index changed an interval or ownership");
+      }
+      hits += result[i][2];
+      blocked += !result[i][3];
+    }
+    require(hits > 0U && hits < count && blocked > 0U, "Coverage index fixture missed edge cases");
+    std::printf(
+        "Coverage cache matches exhaustive coverage and ownership for %zu rays (shift %.3f).\n",
+        count,
+        shift
+    );
+    command = [[device newCommandQueue] commandBuffer];
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:walk_pipeline];
+    [encoder setBuffer:plain_buffer offset:0 atIndex:0];
+    [encoder setBuffer:indexed_buffer offset:0 atIndex:1];
+    [encoder setBuffer:vertex_buffer offset:0 atIndex:2];
+    [encoder setBuffer:query_buffer
+                offset:(queries.size() - 2) * sizeof(queries.front())
+               atIndex:3];
+    [encoder setBuffer:output offset:0 atIndex:4];
+
+    [encoder dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [encoder endEncoding];
+    bvh_resources::complete(command);
+    const auto *walk = static_cast<const float *>(output.contents);
+    require(
+        walk[0] == walk[1] && walk[0] > 183000.0F && walk[0] < 183104.0F,
+        "Cached continuity crossed a real missing coverage strip"
+    );
+    if (shift == 0.0F)
+      require(
+          walk[2] > 64 && walk[3] <= 4,
+          "Fragmented source regressed to repeated complete coverage walks"
+      );
+    std::printf(
+        "Coverage walk: %.0f -> %.0f queries, same gap at %.6f m.\n",
+        walk[2],
+        walk[3],
+        walk[0]
+    );
+  }
 }
 
 // Match the viewer's default camera and output requirements, excluding image
@@ -93,9 +426,9 @@ void benchmark(int argc, const char *argv[]) {
 
 // Includes GPU projection/LOD preparation and the complete producer.
 void benchmark_camera(int argc, const char *argv[]) {
-  if (argc != 4)
+  if (argc != 4 && argc != 5)
     throw std::invalid_argument(
-        "usage: metal-bvh-test --benchmark-camera TILE_DIR gpu|gpu-shadows"
+        "usage: metal-bvh-test --benchmark-camera TILE_DIR gpu|gpu-shadows [FALLBACK_TILE_DIR]"
     );
   const bool shadows = std::string_view(argv[3]) == "gpu-shadows";
   require(shadows || std::string_view(argv[3]) == "gpu", "Choose gpu or gpu-shadows");
@@ -111,6 +444,12 @@ void benchmark_camera(int argc, const char *argv[]) {
   config.lod_scale = 1.5F;
   config.raytracer = Raytracer::MetalBvh;
   config.bvh_cache_size_bytes = 2048ULL * 1048576;
+  if (argc == 5) {
+    config.terrain_datasets = {
+        TerrainDatasetConfig{argv[2], 0.0},
+        TerrainDatasetConfig{argv[4], 0.0},
+    };
+  }
   if (shadows)
     config.max_distance = 600000;
   const ImageSize image{1600, 900};
@@ -197,14 +536,22 @@ void benchmark_camera(int argc, const char *argv[]) {
   );
 }
 
-void write_fixture(const std::filesystem::path &directory, bool quantized, double spacing) {
+void write_fixture(
+    const std::filesystem::path &directory,
+    bool with_manifest,
+    double spacing,
+    uint32_t epsg = 2056U,
+    double origin_x = 2600000.0,
+    double origin_y = 1200000.0,
+    double elevation_offset = 0.0
+) {
   std::filesystem::create_directories(directory);
   constexpr uint32_t cells = 16U;
   constexpr uint32_t levels = 4U;
   std::vector<TerrainManifestEntry> manifest;
   for (int row = -1; row <= 1; ++row) {
     for (int column = -1; column <= 2; ++column) {
-      // A missing column followed by terrain tests termination at coverage gaps.
+      // A missing column followed by terrain tests continuation across empty tiles.
       if (column == 1)
         continue;
       std::vector<MetalTileLod> lods;
@@ -220,20 +567,21 @@ void write_fixture(const std::filesystem::path &directory, bool quantized, doubl
             heights.push_back(
                 float(
                     std::round(
-                        10.0 * (1000.0 + 70.0 * std::sin(east * 0.17) * std::cos(north * 0.11))
+                        10.0 * (1000.0 + elevation_offset +
+                                70.0 * std::sin(east * 0.17) * std::cos(north * 0.11))
                     ) *
                     0.1
                 )
             );
           }
         }
-        const uint64_t bytes = heights.size() * (quantized ? sizeof(uint16_t) : sizeof(float));
+        const uint64_t bytes = heights.size() * sizeof(uint16_t);
         const float maximum = *std::max_element(heights.begin(), heights.end());
         lods.push_back(
             {lod,
              side - 1U,
              uint32_t(std::countr_zero(side - 1U)) + 1U,
-             quantized ? 9000 : 0,
+             9000,
              maximum,
              0U,
              offset,
@@ -241,32 +589,28 @@ void write_fixture(const std::filesystem::path &directory, bool quantized, doubl
         );
         const size_t start = payload.size();
         payload.resize(start + bytes);
-        if (quantized) {
-          for (size_t i = 0; i < heights.size(); ++i) {
-            const uint16_t value = static_cast<uint16_t>(std::lround(heights[i] * 10.0F) - 9000);
-            std::memcpy(payload.data() + start + i * sizeof(value), &value, sizeof(value));
-          }
-        } else
-          std::memcpy(payload.data() + start, heights.data(), bytes);
+        for (size_t i = 0; i < heights.size(); ++i) {
+          const uint16_t value = static_cast<uint16_t>(std::lround(heights[i] * 10.0F) - 9000);
+          std::memcpy(payload.data() + start + i * sizeof(value), &value, sizeof(value));
+        }
         offset += bytes;
       }
       const auto &base = lods.front();
-      MetalTileHeader header = {kMetalTileLodMagic,
-                                kMetalTileLodVersion,
+      MetalTileHeader header = {kLegacyMetalTileLodMagic,
+                                4U,
                                 kMetalTileLodHeaderSize,
                                 MetalTileCompression::None,
-                                2056U,
+                                epsg,
                                 cells,
                                 5U,
                                 base.maximum_elevation,
-                                quantized ? MetalTileSampleType::Uint16Decimeters
-                                          : MetalTileSampleType::Float32,
+                                MetalTileSampleType::Uint16Decimeters,
                                 base.elevation_base_decimeters,
                                 0U,
                                 row,
                                 column,
-                                2600000.0 + double(column) * cells * spacing,
-                                1200000.0 - double(row + 1) * cells * spacing,
+                                origin_x + double(column) * cells * spacing,
+                                origin_y - double(row + 1) * cells * spacing,
                                 spacing,
                                 base.vertex_offset,
                                 base.vertex_byte_count,
@@ -277,12 +621,327 @@ void write_fixture(const std::filesystem::path &directory, bool quantized, doubl
       const auto path =
           directory / ("test_r" + std::to_string(row) + "_c" + std::to_string(column) + ".ptile");
       write_metal_tile_lods(path, header, lods, payload);
-      manifest.push_back({row, column, 1071.0F, 929.0F});
+      manifest.push_back(
+          {row, column, float(1071.0 + elevation_offset), float(929.0 + elevation_offset)}
+      );
     }
   }
-  // Leave float fixtures without a sidecar to retain legacy/no-manifest coverage.
-  if (quantized)
+  // Exercise both indexed and legacy/no-manifest uint16 directories.
+  if (with_manifest)
     write_terrain_manifest(terrain_manifest_path(directory), manifest);
+}
+
+void check_dataset_foundation(const std::filesystem::path &root) {
+  const auto geographic = root / "geographic";
+  write_fixture(geographic, true, 1.0 / 3600.0, 4326U, 7.0, 46.0);
+  const std::array<TerrainDatasetConfig, 2> configs = {
+      TerrainDatasetConfig{root / "quantized", 0.0},
+      TerrainDatasetConfig{geographic, -2.5},
+  };
+  const auto datasets = discover_terrain_datasets(configs);
+  require(datasets.size() == 2, "Dataset stack lost a configured dataset");
+  require(datasets[0].epsg_code == 2056U, "Navigation dataset CRS changed");
+  require(datasets[1].epsg_code == 4326U, "Fallback dataset CRS changed");
+  require(datasets[1].config.vertical_offset_metres == -2.5, "Vertical offset changed");
+  require(
+      datasets[0].cell_count == datasets[1].cell_count &&
+          datasets[0].lod_count == datasets[1].lod_count &&
+          datasets[0].sample_type == datasets[1].sample_type,
+      "Compatible dataset payloads were not retained"
+  );
+  require(
+      datasets[0].sources.front().dataset_index == 0U &&
+          datasets[1].sources.front().dataset_index == 1U,
+      "Dataset-local tile keys did not receive distinct source identities"
+  );
+  const TerrainRenderFrame fixed = select_terrain_render_frame(
+      std::span<const TerrainDataset>(datasets).first(1),
+      {2600000, 1200000}
+  );
+  require(
+      fixed.kind == TerrainRenderFrame::Kind::FixedEpsg && fixed.fixed_epsg == 2056U,
+      "One projected-metre dataset did not retain its native render frame"
+  );
+
+  const MetalTileHeader header = read_metal_tile_header(datasets[1].sources.front().path);
+  const TerrainRenderFrame frame = select_terrain_render_frame(datasets, {2600000.0, 1200000.0});
+  require(
+      frame.kind == TerrainRenderFrame::Kind::LocalAzimuthalEquidistant,
+      "Mixed datasets did not select a local metric frame"
+  );
+  const std::array<Coord, 1> observer = {{{2600000.0, 1200000.0}}};
+  const Coord local_observer = frame.project(2056U, observer).front();
+  const Coord recovered_observer = frame.unproject(2056U, std::span(&local_observer, 1)).front();
+  std::printf(
+      "Local-frame centre residual: %.9f, round-trip residual: %.9f m.\n",
+      std::hypot(local_observer.x, local_observer.y),
+      std::hypot(recovered_observer.x - observer[0].x, recovered_observer.y - observer[0].y)
+  );
+  require(
+      std::hypot(local_observer.x, local_observer.y) < 1e-3 &&
+          std::hypot(recovered_observer.x - observer[0].x, recovered_observer.y - observer[0].y) <
+              0.01,
+      "Local render frame is not centred on or reversible at the observer"
+  );
+  const TerrainTileTransform transform = make_terrain_tile_transform(header, frame);
+  const auto patches = make_terrain_transform_patches(header, frame);
+  const Coord logical{5.25, 8.75};
+  const Coord projected = transform.apply(logical.x, logical.y);
+  const Coord recovered = transform.inverse(projected);
+  require(
+      std::hypot(recovered.x - logical.x, recovered.y - logical.y) < 1e-8,
+      "Tile transform inverse changed logical coordinates"
+  );
+  require(
+      transform.maximum_cell_size_metres() > 15.0 && transform.maximum_cell_size_metres() < 40.0 &&
+          std::isfinite(transform.maximum_residual_metres),
+      "Geographic terrain transform has implausible metre geometry"
+  );
+  require(
+      std::all_of(
+          patches.begin(),
+          patches.end(),
+          [](const auto &patch) { return patch.transform.maximum_residual_metres <= 1.0; }
+      ),
+      "Adaptive terrain transform exceeded its residual bound"
+  );
+  const std::array<TerrainTransformPatch, 2> split_ownership = {
+      TerrainTransformPatch{0U, 0U, 256U, 512U, {}},
+      TerrainTransformPatch{256U, 0U, 256U, 512U, {}},
+  };
+  const auto coverage = make_terrain_coverage_polygons(header, frame, split_ownership, 256U);
+  require(
+      coverage.size() == 2U && coverage[0].vertices.size() == 6U &&
+          coverage[1].vertices.size() == 6U,
+      "Coverage tessellation did not respect the shared grid"
+  );
+  const auto same_point = [](Coord left, Coord right) {
+    return std::hypot(left.x - right.x, left.y - right.y) < 1e-9;
+  };
+  const auto shared_edge_count =
+      [&same_point](const TerrainCoveragePolygon &left, const TerrainCoveragePolygon &right) {
+        uint32_t count = 0U;
+        for (size_t left_index = 0; left_index < left.vertices.size(); ++left_index) {
+          const Coord left_start = left.vertices[left_index];
+          const Coord left_end = left.vertices[(left_index + 1U) % left.vertices.size()];
+          for (size_t right_index = 0; right_index < right.vertices.size(); ++right_index) {
+            const Coord right_start = right.vertices[right_index];
+            const Coord right_end = right.vertices[(right_index + 1U) % right.vertices.size()];
+            if ((same_point(left_start, right_start) && same_point(left_end, right_end)) ||
+                (same_point(left_start, right_end) && same_point(left_end, right_start)))
+              ++count;
+          }
+        }
+        return count;
+      };
+  require(
+      shared_edge_count(coverage[0], coverage[1]) == 2U,
+      "Coverage ownership regions did not share identical projected edges"
+  );
+  std::printf(
+      "Dataset foundation: %zu + %zu sources, EPSG:%u -> local AEQD anchored from EPSG:%u, "
+      "%.3f m/cell, "
+      "%.6f m whole-tile residual.\n",
+      datasets[0].sources.size(),
+      datasets[1].sources.size(),
+      datasets[1].epsg_code,
+      datasets[0].epsg_code,
+      transform.maximum_cell_size_metres(),
+      transform.maximum_residual_metres
+  );
+
+  const TerrainCatalogue combined =
+      TerrainCatalogue::discover(configs, {2600000.0, 1200000.0, 1000.0}, 200000.0F, 0U);
+  require(combined.datasets().size() == 2U, "Combined catalogue lost dataset metadata");
+  const auto &footprints = combined.coverage().datasets;
+  require(footprints.size() == 2U, "Minimap coverage lost a configured dataset");
+  require(
+      footprints[0].epsg_code == 2056U && footprints[1].epsg_code == 4326U &&
+          std::abs(footprints[0].grid.width - 160.0) < 1e-8 &&
+          std::abs(footprints[1].grid.width - 16.0 / 3600.0) < 1e-8,
+      "Minimap coverage combined incompatible native grids or coordinate systems"
+  );
+  const TerrainCatalogue limited =
+      TerrainCatalogue::discover(configs, {2600045.0, 1199945.0, 1120.0}, 1.0F, 1U);
+  require(limited.sources().size() == 1U, "Coverage fixture did not limit the trace catalogue");
+  for (size_t index = 0; index < footprints.size(); ++index) {
+    require(
+        footprints[index].tiles.size() == 9U &&
+            limited.coverage().datasets[index].tiles == footprints[index].tiles,
+        "Minimap coverage omitted available tiles outside the trace radius"
+    );
+  }
+  const TerrainCatalogue single =
+      TerrainCatalogue::discover(root / "quantized", {2600045.0, 1199945.0, 1120.0}, 1.0F, 1U);
+  require(
+      single.coverage().datasets.size() == 1U &&
+          single.coverage().datasets.front().epsg_code == 2056U &&
+          single.coverage().datasets.front().tiles == footprints.front().tiles,
+      "Single-dataset minimap coverage changed"
+  );
+  require(
+      combined.render_frame().kind == TerrainRenderFrame::Kind::LocalAzimuthalEquidistant,
+      "Combined mixed catalogue did not retain its local render frame"
+  );
+  const TileKey duplicate_key = datasets[0].sources.front().key;
+  require(
+      combined.find_source(0U, duplicate_key).has_value() &&
+          combined.find_source(1U, duplicate_key).has_value() &&
+          combined.find_source(0U, duplicate_key) != combined.find_source(1U, duplicate_key),
+      "Dataset-local duplicate tile keys did not remain distinct"
+  );
+  for (const TerrainSource &source : combined.sources()) {
+    require(!source.transform_patches.empty(), "Combined source has no render transform");
+    require(!source.coverage_polygons.empty(), "Combined source has no coverage tessellation");
+    require(
+        std::all_of(
+            source.transform_patches.begin(),
+            source.transform_patches.end(),
+            [](const auto &patch) {
+              return std::isfinite(patch.transform.maximum_residual_metres) &&
+                     patch.transform.maximum_residual_metres <= 0.25;
+            }
+        ),
+        "Combined source geometry transform exceeded its seam bound"
+    );
+  }
+
+  const std::array<TerrainDatasetConfig, 2> overlapping = {
+      TerrainDatasetConfig{root / "quantized", 0.0},
+      TerrainDatasetConfig{root / "overlap", 0.0},
+  };
+  const TerrainCatalogue owned =
+      TerrainCatalogue::discover(overlapping, {2600045.0, 1199945.0, 1120.0}, 1000.0F, 0U);
+  require(
+      std::none_of(
+          owned.sources().begin(),
+          owned.sources().end(),
+          [](const TerrainSource &source) { return source.dataset_index == 1U; }
+      ),
+      "Fully covered lower-priority sources retained GPU ownership"
+  );
+  require(
+      owned.coverage().datasets.size() == 2U && owned.coverage().datasets[1].tiles.size() == 9U,
+      "Minimap coverage hid an available dataset because another source owns its terrain"
+  );
+}
+
+// Moving the hardware broad phase must not accumulate Float32 translations
+// in the exact callback metadata. Compare rebasing with fresh construction.
+void check_catalogue_relocation(const std::filesystem::path &root) {
+  RaytraceConfig
+      config{root / "quantized", {2600045, 1199945, 1120}, 600000, 0, 16384, 2, true, true, false};
+  config.terrain_datasets = {{root / "quantized", 0}, {root / "distant", 0}};
+  TileManager tiles(config);
+  GpuRaytraceResources gpu(1, tiles.sources(), true, true, false, {false, false, false});
+  TerrainTileBvh catalogue(gpu);
+  RaytraceParameters parameters = {};
+  parameters.max_distance = config.max_distance;
+  parameters.curvature_coefficient = 6.8e-8F;
+  require(catalogue.prepare(tiles, config.observer, parameters), "Initial catalogue was not built");
+  const std::array<Coord, 5> moves = {
+      {{0.0001, 0}, {30000, -10000}, {30001, -10000}, {40000, -10000}, {0, 0}}};
+  for (size_t i = 0; i < moves.size(); ++i) {
+    auto observer = config.observer;
+    observer.easting += moves[i].x;
+    observer.northing += moves[i].y;
+    auto coverage = catalogue.acceleration(), candidates = catalogue.candidate_acceleration();
+    const uint64_t generation = catalogue.generation();
+    const bool rebuilt = catalogue.prepare(tiles, observer, parameters);
+    require(rebuilt == (i >= 3), "Catalogue did not retain its bounded anchor across movement");
+    require(
+        catalogue.generation() == generation + uint64_t(rebuilt),
+        "Catalogue generation changed"
+    );
+    if (!rebuilt)
+      require(
+          catalogue.acceleration() == coverage && catalogue.candidate_acceleration() == candidates,
+          "Movement replaced anchored acceleration structures"
+      );
+    TerrainTileBvh reference(gpu);
+    require(reference.prepare(tiles, observer, parameters), "Fresh catalogue was not built");
+    for (const auto &pair :
+         {std::pair{catalogue.tiles(), reference.tiles()},
+          std::pair{catalogue.coverage_polygons(), reference.coverage_polygons()},
+          std::pair{catalogue.coverage_vertices(), reference.coverage_vertices()},
+          std::pair{catalogue.candidate_patches(), reference.candidate_patches()}})
+      if (pair.first.length != pair.second.length ||
+          std::memcmp(pair.first.contents, pair.second.contents, pair.first.length) != 0) {
+        const auto *a = static_cast<const uint32_t *>(pair.first.contents);
+        const auto *b = static_cast<const uint32_t *>(pair.second.contents);
+        for (size_t word = 0; word < std::min(pair.first.length, pair.second.length) / 4; ++word)
+          if (a[word] != b[word]) {
+            std::printf(
+                "Catalogue mismatch move=%zu buffer=%s word=%zu: %.9g vs %.9g\n",
+                i,
+                pair.first.label.UTF8String,
+                word,
+                std::bit_cast<float>(a[word]),
+                std::bit_cast<float>(b[word])
+            );
+            break;
+          }
+        require(false, "Anchored catalogue changed observer-relative exact metadata");
+      }
+  }
+  parameters.curvature_coefficient *= 0.5F;
+  require(
+      catalogue.prepare(tiles, config.observer, parameters),
+      "Changed curvature reused stale bounds"
+  );
+  parameters.max_distance *= 2;
+  require(
+      catalogue.prepare(tiles, config.observer, parameters),
+      "Increased range reused stale guards"
+  );
+  parameters.max_distance *= 0.5F;
+  require(
+      !catalogue.prepare(tiles, config.observer, parameters),
+      "Reduced range rebuilt safe bounds"
+  );
+  std::puts(
+      "Catalogue movement preserves exact metadata, reanchors at range, and refreshes curvature."
+  );
+}
+
+void check_prepared_dataset_stack(
+    const std::filesystem::path &primary,
+    const std::filesystem::path &fallback
+) {
+  const std::array<TerrainDatasetConfig, 2> configs = {
+      TerrainDatasetConfig{primary, 0.0},
+      TerrainDatasetConfig{fallback, 0.0},
+  };
+  const auto datasets = discover_terrain_datasets(configs);
+  const TerrainRenderFrame frame = select_terrain_render_frame(datasets, {2623452.4, 1100502.2});
+  const MetalTileHeader header = read_metal_tile_header(datasets[1].sources.front().path);
+  const TerrainTileTransform transform = make_terrain_tile_transform(header, frame);
+  const auto patches = make_terrain_transform_patches(header, frame);
+  const auto started = std::chrono::steady_clock::now();
+  const TerrainCatalogue combined =
+      TerrainCatalogue::discover(configs, {2623452.4, 1100502.2, 3415.0}, 600000.0F, 0U);
+  size_t combined_patches = 0U;
+  for (const TerrainSource &source : combined.sources())
+    combined_patches += source.transform_patches.size();
+  const double catalogue_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+  std::printf(
+      "Prepared stack: %zu EPSG:%u tiles over %zu EPSG:%u tiles; fallback %.3f m/cell, "
+      "%.3f m representative affine residual, %zu patches at <= 1 m.\n",
+      datasets[0].sources.size(),
+      datasets[0].epsg_code,
+      datasets[1].sources.size(),
+      datasets[1].epsg_code,
+      transform.maximum_cell_size_metres(),
+      transform.maximum_residual_metres,
+      patches.size()
+  );
+  std::printf(
+      "Combined catalogue: %zu retained sources, %zu transform patches in %.1f ms.\n",
+      combined.sources().size(),
+      combined_patches,
+      catalogue_ms
+  );
 }
 
 void compare(
@@ -391,6 +1050,730 @@ void compare(
   require(mismatches == 0, "BVH/software parity failed");
 }
 
+void check_mixed_priority(const std::filesystem::path &root) {
+  const auto field = angular_field({129, 65}, {0.0, 2 * std::numbers::pi, -1.3, 0.1});
+  RaytraceConfig reference{root / "quantized",
+                           {2600045.0, 1199945.0, 1120.0},
+                           480.0F,
+                           0U,
+                           16384U,
+                           2U,
+                           true,
+                           true,
+                           false};
+  TerrainTraceSession software(reference, field, {true, true, true});
+  RaytraceConfig mixed = reference;
+  mixed.raytracer = Raytracer::MetalBvh;
+  mixed.terrain_datasets = {
+      {root / "quantized", 0.0},
+      {root / "overlap", 0.0},
+  };
+  const TerrainCatalogue owned = TerrainCatalogue::discover(
+      mixed.terrain_datasets,
+      mixed.observer,
+      mixed.max_distance,
+      mixed.max_tile_count
+  );
+  require(
+      std::none_of(
+          owned.sources().begin(),
+          owned.sources().end(),
+          [](const TerrainSource &source) { return source.dataset_index == 1U; }
+      ),
+      "Fully covered lower-priority sources were retained"
+  );
+  const std::array<TerrainDatasetConfig, 2> partial_configs = {
+      TerrainDatasetConfig{root / "quantized", 0.0},
+      TerrainDatasetConfig{root / "partial-overlap", 0.0},
+  };
+  const TerrainCatalogue partial =
+      TerrainCatalogue::discover(partial_configs, {2600045.0, 1199945.0, 1120.0}, 1000.0F, 0U);
+  const auto primary_location = partial.locate_source({2600100.0, 1199945.0});
+  const auto fallback_location = partial.locate_source({2600200.0, 1199945.0});
+  require(
+      primary_location.has_value() &&
+          partial.sources()[primary_location->source_index].dataset_index == 0U,
+      "Higher-priority ownership was not retained in an overlap"
+  );
+  require(
+      fallback_location.has_value() &&
+          partial.sources()[fallback_location->source_index].dataset_index == 1U,
+      "Lower-priority terrain did not fill a higher-priority coverage gap"
+  );
+  TerrainTraceSession hardware(mixed, field, {true, true, true});
+  const MetalTileHeader grid = read_metal_tile_header(owned.origin().path);
+  compare(software, hardware, field, 0.1F, &grid);
+  std::puts("Mixed ownership: higher-priority surface matched with a closer fallback underneath.");
+}
+
+void write_flat_coverage_fixture(
+    const std::filesystem::path &directory,
+    double x_min,
+    double spacing,
+    float elevation
+) {
+  std::filesystem::create_directories(directory);
+  constexpr uint32_t cells = 16U;
+  const std::vector<uint16_t> heights(17U * 17U, uint16_t(std::lround(elevation * 10.0F) - 9000));
+  const MetalTileLod lod = {1U,
+                            cells,
+                            5U,
+                            9000,
+                            elevation,
+                            0U,
+                            kMetalTileLodHeaderSize + sizeof(MetalTileLod),
+                            heights.size() * sizeof(uint16_t)};
+  const MetalTileHeader header = {kLegacyMetalTileLodMagic,
+                                  4U,
+                                  kMetalTileLodHeaderSize,
+                                  MetalTileCompression::None,
+                                  2056U,
+                                  cells,
+                                  5U,
+                                  elevation,
+                                  MetalTileSampleType::Uint16Decimeters,
+                                  9000,
+                                  0U,
+                                  0,
+                                  0,
+                                  x_min,
+                                  1199840.0,
+                                  spacing,
+                                  lod.vertex_offset,
+                                  lod.vertex_byte_count,
+                                  1U,
+                                  uint32_t(sizeof(MetalTileLod)),
+                                  kMetalTileLodHeaderSize,
+                                  sizeof(MetalTileLod)};
+  std::vector<std::byte> payload(lod.vertex_byte_count);
+  std::memcpy(payload.data(), heights.data(), payload.size());
+  const std::array<MetalTileLod, 1> lods = {lod};
+  const std::array<TerrainManifestEntry, 1> manifest = {
+      TerrainManifestEntry{0, 0, elevation, elevation}};
+  write_metal_tile_lods(directory / "flat_r0_c0.ptile", header, lods, payload);
+  write_terrain_manifest(terrain_manifest_path(directory), manifest);
+}
+
+void write_masked_fixture(
+    const std::filesystem::path &directory,
+    bool hole,
+    float height,
+    double x_min,
+    double spacing,
+    MetalTileCompression compression
+) {
+  write_flat_coverage_fixture(directory, x_min, spacing, 1000.0F);
+  const auto old_path = directory / "flat_r0_c0.ptile";
+  auto header = read_metal_tile_header(old_path);
+  auto lod = read_metal_tile_lods(old_path, header).front();
+  std::vector<uint16_t> samples(17U * 17U, 1U);
+  if (hole)
+    for (uint32_t y = 0; y < 17; ++y)
+      samples[y * 17 + 7] = samples[y * 17 + 8] = 0;
+  std::vector<uint8_t> usable(16U * 16U);
+  for (uint32_t y = 0; y < 16; ++y)
+    for (uint32_t x = 0; x < 16; ++x)
+      usable[y * 16 + x] = samples[y * 17 + x] && samples[y * 17 + x + 1] &&
+                           samples[(y + 1) * 17 + x] && samples[(y + 1) * 17 + x + 1];
+  const auto coverage = make_cell_coverage(16, usable);
+  const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
+  const uint64_t bytes = count * sizeof(TerrainCoverageRect);
+  header.magic = kMetalTileLodMagic;
+  header.version = kMetalTileLodVersion;
+  header.compression = compression;
+  header.reserved = count;
+  header.elevation_base_decimeters = lod.elevation_base_decimeters =
+      int(std::lround(height * 10)) - 1;
+  header.maximum_elevation = lod.maximum_elevation = height;
+  header.vertex_offset = lod.vertex_offset += bytes;
+  std::vector<std::byte> payload(bytes + samples.size() * sizeof(uint16_t));
+  if (bytes)
+    std::memcpy(payload.data(), coverage.rectangles.data(), bytes);
+  std::memcpy(payload.data() + bytes, samples.data(), samples.size() * sizeof(uint16_t));
+  std::filesystem::remove(old_path);
+  write_metal_tile_lods(
+      directory / (std::string("flat_r0_c0") + metal_tile_suffix(compression)),
+      header,
+      std::span(&lod, 1),
+      payload
+  );
+  const std::array<TerrainManifestEntry, 1> entries = {{{0, 0, height, height, coverage}}};
+  write_terrain_manifest(terrain_manifest_path(directory), entries);
+}
+
+// A void at the west side changes coverage rectangles across the entire tile.
+// Rays at the east side must cross their projected T-junction without a gap.
+void write_geographic_junction_fixture(
+    const std::filesystem::path &directory,
+    bool hole,
+    bool across_tiles
+) {
+  constexpr double spacing = 64.0 / 3600.0;
+  write_flat_coverage_fixture(directory, 7.4, spacing, 1000.0F);
+  const auto path = directory / "flat_r0_c0.ptile";
+  const auto original = read_metal_tile_header(path);
+  const auto original_lod = read_metal_tile_lods(path, original).front();
+  std::vector<TerrainManifestEntry> entries;
+  for (int64_t row = 0; row <= int64_t(across_tiles); ++row) {
+    auto header = original;
+    auto lod = original_lod;
+    std::vector<uint16_t> vertices(17U * 17U, 1000U);
+    if (hole && row == int64_t(across_tiles))
+      vertices[(across_tiles ? 16U : 11U) * 17U + 2U] = 0;
+    std::vector<uint8_t> usable(16U * 16U);
+    for (uint32_t y = 0; y < 16; ++y)
+      for (uint32_t x = 0; x < 16; ++x)
+        usable[y * 16 + x] = vertices[y * 17 + x] && vertices[y * 17 + x + 1] &&
+                             vertices[(y + 1) * 17 + x] && vertices[(y + 1) * 17 + x + 1];
+    const auto coverage = make_cell_coverage(16, usable);
+    const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
+    const size_t bytes = size_t(count) * sizeof(TerrainCoverageRect);
+    header.magic = kMetalTileLodMagic;
+    header.version = kMetalTileLodVersion;
+    header.epsg_code = 4326;
+    header.row = row;
+    header.lower_left_y = 45.7 - double(row) * 16 * spacing;
+    header.reserved = count;
+    header.vertex_offset = lod.vertex_offset += bytes;
+    std::vector<std::byte> payload(bytes + vertices.size() * sizeof(uint16_t));
+    if (bytes)
+      std::memcpy(payload.data(), coverage.rectangles.data(), bytes);
+    std::memcpy(payload.data() + bytes, vertices.data(), vertices.size() * sizeof(uint16_t));
+    write_metal_tile_lods(
+        directory / ("flat_r" + std::to_string(row) + "_c0.ptile"),
+        header,
+        std::span(&lod, 1),
+        payload
+    );
+    entries.push_back({row, 0, 1000, 1000, coverage});
+  }
+  write_terrain_manifest(terrain_manifest_path(directory), entries);
+}
+
+void check_coverage_junctions(const std::filesystem::path &root) {
+  const auto projected = root / "junction-navigation";
+  write_flat_coverage_fixture(projected, 2600000, 10, 1000);
+  for (bool across_tiles : {false, true}) {
+    @autoreleasepool {
+      const auto reference =
+          root / (across_tiles ? "junction-reference-two" : "junction-reference-one");
+      const auto masked = root / (across_tiles ? "junction-masked-two" : "junction-masked-one");
+      write_geographic_junction_fixture(reference, false, across_tiles);
+      write_geographic_junction_fixture(masked, true, across_tiles);
+      const auto navigation = Crs::from_epsg(2056).from_lat_lon(
+          {45.7 + 15.5 * 64.0 / 3600.0, 7.4 + 14.5 * 64.0 / 3600.0}
+      );
+      RaytraceConfig config{projected,
+                            {navigation.x, navigation.y, 2000},
+                            80000,
+                            0,
+                            16384,
+                            2,
+                            true,
+                            true,
+                            false};
+      config.raytracer = Raytracer::MetalBvh;
+      config.terrain_datasets = {{projected, 0}, {reference, 0}};
+      const auto field = angular_field(
+          {65, 9},
+          {3.12,
+           3.16,
+           std::atan(across_tiles ? -0.030 : -0.12),
+           std::atan(across_tiles ? -0.026 : -0.08)}
+      );
+      TerrainTraceSession expected(config, field, {true, true, true});
+      expected.trace(field);
+      const auto *distances = static_cast<const float *>(expected.distances().contents);
+      require(
+          std::all_of(
+              distances,
+              distances + pixel_count(field.image),
+              [](float t) { return t > 0; }
+          ),
+          "Coverage junction reference did not hit flat terrain"
+      );
+      config.terrain_datasets.back().directory = masked;
+      TerrainTraceSession actual(config, field, {true, true, true});
+      compare(expected, actual, field, 0.02F);
+      auto relocated = config.observer;
+      relocated.easting -= 50;
+      require(
+          expected.relocate_observer(relocated) && actual.relocate_observer(relocated),
+          "Coverage junction rebase failed"
+      );
+      compare(expected, actual, field, 0.02F);
+    }
+  }
+  std::puts(
+      "Coverage junctions: internal and adjacent-tile seams retain all terrain hits after "
+      "projection and rebasing."
+  );
+}
+
+// Flat ground, an empty region, then a rising surface. A downward camera ray
+// hits before the hole, while a low sun must load and hit the caster beyond it.
+void write_empty_gap_fixture(const std::filesystem::path &directory, bool whole_tile) {
+  write_masked_fixture(directory, !whole_tile, 1000, 2600000, 10, MetalTileCompression::None);
+  const auto first = directory / "flat_r0_c0.ptile";
+  auto header = read_metal_tile_header(first);
+  auto lod = read_metal_tile_lods(first, header).front();
+  const auto coverage = *read_metal_tile_coverage(first, header);
+  const size_t coverage_bytes = header.reserved * sizeof(TerrainCoverageRect);
+  std::vector<uint16_t> samples(17U * 17U, 1U);
+  for (uint32_t y = 0; y < 17; ++y)
+    for (uint32_t x = 0; x < 17; ++x)
+      samples[y * 17 + x] = !whole_tile && (x == 7 || x == 8)
+                                ? 0U
+                                : uint16_t(1U + 100U * (whole_tile ? x : (x > 9 ? x - 9 : 0)));
+  const float maximum = whole_tile ? 1160.0F : 1070.0F;
+  header.maximum_elevation = lod.maximum_elevation = maximum;
+  if (whole_tile) {
+    header.column = 2;
+    header.lower_left_x += 320;
+  }
+  std::vector<std::byte> payload(coverage_bytes + samples.size() * sizeof(uint16_t));
+  if (coverage_bytes)
+    std::memcpy(payload.data(), coverage.rectangles.data(), coverage_bytes);
+  std::memcpy(payload.data() + coverage_bytes, samples.data(), samples.size() * sizeof(uint16_t));
+  write_metal_tile_lods(
+      directory / (whole_tile ? "flat_r0_c2.ptile" : "flat_r0_c0.ptile"),
+      header,
+      std::span(&lod, 1),
+      payload
+  );
+  std::vector<TerrainManifestEntry> entries = {{0, whole_tile ? 2 : 0, maximum, 1000, coverage}};
+  if (whole_tile)
+    entries.push_back({0, 0, 1000, 1000, coverage});
+  write_terrain_manifest(terrain_manifest_path(directory), entries);
+}
+
+void check_empty_gaps(const std::filesystem::path &root, bool retained) {
+  const auto dummy = root / "empty-gap-navigation";
+  write_flat_coverage_fixture(dummy, 2601000, 10, 1000);
+  const auto near_field =
+      angular_field({9, 3}, {1.5707, 1.5709, std::atan(-2.01), std::atan(-1.99)});
+  const auto far_field =
+      angular_field({9, 3}, {1.5707, 1.5709, std::atan(-0.02), std::atan(-0.01)});
+  for (bool whole_tile : {false, true}) {
+    const auto directory = root / (whole_tile ? "empty-tile" : "empty-cells");
+    write_empty_gap_fixture(directory, whole_tile);
+    // Grid mipmap, BVH-selected mipmap, resident BVH, and transformed BVH with
+    // a one-tile cache exercise every continuation and shadow-loading path.
+    for (uint32_t mode = 0; mode < 4; ++mode) {
+      @autoreleasepool {
+        RaytraceConfig
+            config{directory, {2600045, 1199945, 1020}, 500, 0, 16384, 2, retained, true, false};
+        config.raytracer = mode < 2 ? Raytracer::Software : Raytracer::MetalBvh;
+        config.use_tile_bvh = mode != 0;
+        config.bvh_cache_size_bytes = mode == 3 ? (retained ? 14200U : 14800U) : 1048576U;
+        if (mode == 3)
+          config.terrain_datasets = {{directory, 0}, {dummy, 0}};
+        TerrainTraceSession session(config, near_field, {true, true, true});
+        for (bool bilinear : {false, true}) {
+          session.set_collision_options(bilinear, true);
+          session.trace(near_field);
+          const auto *distances = static_cast<const float *>(session.distances().contents);
+          const auto *elevations = static_cast<const float *>(session.elevations().contents);
+          for (size_t i = 0; i < pixel_count(near_field.image); ++i)
+            require(
+                distances[i] > 9 && distances[i] < 11 && std::abs(elevations[i] - 1000) < 0.01F,
+                "Empty-gap fixture did not hit the near ground"
+            );
+          session.trace_shadows(std::numbers::pi / 2, std::atan(0.1));
+          const auto *visibility =
+              static_cast<const uint8_t *>(session.shadow_visibility().contents);
+          require(
+              std::all_of(
+                  visibility,
+                  visibility + pixel_count(near_field.image),
+                  [](uint8_t v) { return v == 0; }
+              ),
+              "Empty gap hid a known shadow caster"
+          );
+          if (whole_tile && mode >= 2 && !bilinear)
+            require(
+                session.bvh_statistics().shadow_tiles_built > 0,
+                "Gap shadow test did not load the initially absent caster"
+            );
+          session.trace_shadows(std::numbers::pi / 2, std::atan(2.0));
+          require(
+              std::all_of(
+                  visibility,
+                  visibility + pixel_count(near_field.image),
+                  [](uint8_t v) { return v != 0; }
+              ),
+              "An empty gap cast a shadow toward the high sun"
+          );
+          session.trace(far_field);
+          distances = static_cast<const float *>(session.distances().contents);
+          elevations = static_cast<const float *>(session.elevations().contents);
+          for (size_t i = 0; i < pixel_count(far_field.image); ++i)
+            require(
+                distances[i] > (whole_tile ? 275 : 45) && distances[i] < (whole_tile ? 300 : 70) &&
+                    elevations[i] > 1000,
+                "Camera ray did not cross empty space to the far surface"
+            );
+        }
+        if (whole_tile && mode == 3)
+          require(
+              session.bvh_statistics().evictions > 0,
+              "Empty-gap fixture did not exercise bounded streaming"
+          );
+        // Place the near hit just inside a tile edge, so the shadow bias puts
+        // its origin in the missing tile. It must still find the far caster.
+        if (whole_tile) {
+          require(
+              session.relocate_observer({2600149.8, 1199945, 1020}),
+              "Empty-gap observer relocation failed"
+          );
+          session.trace(near_field);
+          session.trace_shadows(std::numbers::pi / 2, std::atan(0.1));
+          const auto *visibility =
+              static_cast<const uint8_t *>(session.shadow_visibility().contents);
+          require(
+              std::all_of(
+                  visibility,
+                  visibility + pixel_count(near_field.image),
+                  [](uint8_t v) { return v == 0; }
+              ),
+              "Shadow origin inside an empty tile lost its far caster"
+          );
+        }
+        const auto below_field =
+            angular_field({9, 3}, {1.5707, 1.5709, std::atan(-1.01), std::atan(-0.99)});
+        session.trace(below_field);
+        const auto *below = static_cast<const float *>(session.distances().contents);
+        require(
+            std::none_of(
+                below,
+                below + pixel_count(below_field.image),
+                [](float t) { return t > 0; }
+            ),
+            "Ray below the far surface hit an artificial wall after an empty gap"
+        );
+      }
+    }
+    // A range ending inside the hole must miss even after passing below the
+    // near ground's elevation: missing vertices do not become a false floor.
+    for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
+      @autoreleasepool {
+        RaytraceConfig config{directory,
+                              {whole_tile ? 2600145.0 : 2600045.0, 1199945, 1020},
+                              40,
+                              0,
+                              16384,
+                              2,
+                              retained,
+                              true,
+                              false};
+        config.raytracer = backend;
+        config.use_tile_bvh = false;
+        const auto hole_field =
+            angular_field({9, 3}, {1.5707, 1.5709, std::atan(-1.01), std::atan(-0.99)});
+        TerrainTraceSession session(config, hole_field, {true, true, true});
+        session.trace(hole_field);
+        const auto *distances = static_cast<const float *>(session.distances().contents);
+        require(
+            std::none_of(
+                distances,
+                distances + pixel_count(hole_field.image),
+                [](float t) { return t > 0; }
+            ),
+            "Range-limited ray hit an artificial floor in an empty gap"
+        );
+      }
+    }
+  }
+  std::printf(
+      "Empty gaps: primary and shadow rays, cold casters, streaming, range clipping (%s).\n",
+      retained ? "uint16" : "expanded"
+  );
+}
+
+void check_valid_coverage(const std::filesystem::path &root, bool retained) {
+  const auto primary = root / "masked-primary";
+  const auto fallback = root / "masked-fallback";
+  const auto compression = retained ? MetalTileCompression::Lz4 : MetalTileCompression::None;
+  write_masked_fixture(primary, true, 0.0F, 2600000.0, 10.0, compression);
+  write_masked_fixture(fallback, false, 10.0F, 2600003.0, 20.0, compression);
+  RaytraceConfig config{primary, {2600045, 1199945, 20}, 500, 0, 16384, 2, retained, true, false};
+  config.raytracer = Raytracer::MetalBvh;
+  config.terrain_datasets = {{primary, 0}, {fallback, 0}};
+  const auto catalogue =
+      TerrainCatalogue::discover(config.terrain_datasets, config.observer, 500, 0);
+  const auto hole = catalogue.locate_source({2600075, 1199945});
+  const auto filled = catalogue.locate_source({2600095, 1199945});
+  require(
+      hole && filled && catalogue.sources()[hole->source_index].dataset_index == 1 &&
+          catalogue.sources()[filled->source_index].dataset_index == 0,
+      "Masked catalogue priority is wrong"
+  );
+  require(
+      catalogue.sources()[*catalogue.find_source(0, {0, 0})].lod_count == 1,
+      "Partial source allowed coarse LODs across a hole"
+  );
+  const auto gap_field = angular_field({9, 3}, {1.56, 1.58, std::atan(-0.34), std::atan(-0.32)});
+  const auto filled_field = angular_field({9, 3}, {1.56, 1.58, std::atan(-0.21), std::atan(-0.19)});
+  const auto edge_field = angular_field({9, 3}, {1.56, 1.58, std::atan(-2.05), std::atan(-2.0)});
+  for (bool bounded : {false, true}) {
+    @autoreleasepool {
+      config.bvh_cache_size_bytes = bounded ? (retained ? 14200U : 14800U) : 1048576U;
+      TerrainTraceSession session(config, gap_field, {true, true, true});
+      require(
+          std::abs(*session.sample_terrain(2600075, 1199945) - 10.0F) < 0.001F &&
+              std::abs(*session.sample_terrain(2600095, 1199945)) < 0.001F,
+          "CPU sampling did not fall back through missing samples"
+      );
+      for (bool bilinear : {false, true}) {
+        session.set_collision_options(bilinear, true);
+        for (const auto &[field, height] : std::array<std::pair<RayFieldRequest, float>, 3>{
+                 {{gap_field, 10.0F}, {filled_field, 0.0F}, {edge_field, 0.0F}}}) {
+          session.trace(field);
+          const auto *distances = static_cast<const float *>(session.distances().contents);
+          const auto *elevations = static_cast<const float *>(session.elevations().contents);
+          const auto *gradients =
+              static_cast<const uint32_t *>(session.surface_gradients().contents);
+          for (uint32_t i = 0; i < pixel_count(field.image); ++i) {
+            if (!(distances[i] > 0 && std::abs(elevations[i] - height) < 0.01F))
+              std::fprintf(
+                  stderr,
+                  "Masked hit retained=%d bounded=%d bilinear=%d pixel=%u t=%g z=%g expected=%g\n",
+                  retained,
+                  bounded,
+                  bilinear,
+                  i,
+                  distances[i],
+                  elevations[i],
+                  height
+              );
+            require(
+                distances[i] > 0 && std::abs(elevations[i] - height) < 0.01F,
+                "GPU hit did not respect valid coverage priority"
+            );
+            require(gradients[i] == 0U, "Missing sample contaminated flat terrain normals");
+          }
+          session.trace_shadows(1.57, 0.6);
+          const auto *visibility =
+              static_cast<const uint8_t *>(session.shadow_visibility().contents);
+          for (uint32_t i = 0; i < pixel_count(field.image); ++i) {
+            if (height == 10.0F)
+              require(visibility[i] != 0, "Flat fallback incorrectly shadowed itself");
+            if (distances[i] < 11.0F) {
+              if (visibility[i] != 0)
+                std::fprintf(
+                    stderr,
+                    "Shadow failed retained=%d bounded=%d bilinear=%d pixel=%u t=%g z=%g "
+                    "fallbacks=%llu\n",
+                    retained,
+                    bounded,
+                    bilinear,
+                    i,
+                    distances[i],
+                    elevations[i],
+                    (unsigned long long)session.bvh_statistics().shadow_cache_fallbacks
+                );
+              require(visibility[i] == 0, "Fallback in the hole did not cast a shadow");
+            }
+          }
+        }
+      }
+      // Both sides of a priority handoff are known terrain, so a height
+      // discontinuity there still occludes. Empty gaps do not enable this.
+      const auto cliff_field =
+          angular_field({9, 3}, {1.5707, 1.5709, std::atan(-0.101), std::atan(-0.099)});
+      for (bool bilinear : {false, true}) {
+        session.set_collision_options(bilinear, true);
+        session.trace(cliff_field);
+        const auto *distances = static_cast<const float *>(session.distances().contents);
+        require(
+            std::all_of(
+                distances,
+                distances + pixel_count(cliff_field.image),
+                [](float t) { return std::abs(t - 115.0F) < 0.1F; }
+            ),
+            "Priority clipping lost the step between known surfaces"
+        );
+      }
+      if (bounded)
+        require(session.bvh_statistics().evictions > 0, "Masked test did not exercise streaming");
+      require(
+          session.relocate_observer({2600046, 1199946, 20}),
+          "Masked observer relocation failed"
+      );
+      session.trace(gap_field);
+    }
+  }
+  // Without fallback, rays cross the hole and hit the valid island beyond it.
+  config.terrain_datasets.clear();
+  for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
+    @autoreleasepool {
+      config.raytracer = backend;
+      TerrainTraceSession session(config, filled_field, {true, true, true});
+      session.trace(filled_field);
+      const auto *distances = static_cast<const float *>(session.distances().contents);
+      require(
+          std::all_of(
+              distances,
+              distances + pixel_count(filled_field.image),
+              [](float t) { return t > 0; }
+          ),
+          "Single-source trace stopped at an empty internal coverage gap"
+      );
+    }
+  }
+  // Legacy code zero remains real terrain in either GPU representation.
+  const auto legacy = root / "legacy-zero";
+  write_flat_coverage_fixture(legacy, 2600000.0, 10.0, 900.0F);
+  config.tile_dir = legacy;
+  config.observer.elevation = 920;
+  config.raytracer = Raytracer::MetalBvh;
+  {
+    TerrainTraceSession session(config, edge_field, {true, true, true});
+    session.trace(edge_field);
+    const auto *distances = static_cast<const float *>(session.distances().contents);
+    require(
+        std::all_of(
+            distances,
+            distances + pixel_count(edge_field.image),
+            [](float t) { return t > 0; }
+        ),
+        "Legacy code zero was mistaken for no-data"
+    );
+  }
+
+  // Reach the masked tile through a full legacy predecessor. Source-level
+  // height rejection and exact traversal must both reach the island beyond it.
+  auto predecessor = read_metal_tile_header(legacy / "flat_r0_c0.ptile");
+  auto predecessor_lod = read_metal_tile_lods(legacy / "flat_r0_c0.ptile", predecessor).front();
+  predecessor.lower_left_x -= 160;
+  predecessor.column = -1;
+  predecessor.compression = compression;
+  predecessor.maximum_elevation = predecessor_lod.maximum_elevation = 0;
+  predecessor.elevation_base_decimeters = predecessor_lod.elevation_base_decimeters = 0;
+  std::vector<std::byte> zero_samples(predecessor.vertex_byte_count, std::byte{0});
+  write_metal_tile_lods(
+      primary / (std::string("flat_r0_c-1") + metal_tile_suffix(compression)),
+      predecessor,
+      std::span(&predecessor_lod, 1),
+      zero_samples
+  );
+  config.tile_dir = primary;
+  config.observer = {2599885, 1199945, 20};
+  const auto beyond_gap = angular_field({9, 3}, {1.56, 1.58, std::atan(-0.084), std::atan(-0.083)});
+  for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
+    @autoreleasepool {
+      config.raytracer = backend;
+      TerrainTraceSession session(config, beyond_gap, {true, true, true});
+      session.trace(beyond_gap);
+      const auto *distances = static_cast<const float *>(session.distances().contents);
+      require(
+          std::all_of(
+              distances,
+              distances + pixel_count(beyond_gap.image),
+              [](float t) { return t > 0; }
+          ),
+          "Tile-level culling stopped at an empty internal coverage gap"
+      );
+    }
+  }
+  // Starting on geographic fallback must retain the projected navigation CRS.
+  config.tile_dir = root / "quantized";
+  config.terrain_datasets = {{config.tile_dir, 0}, {root / "geographic", 0}};
+  const std::array<Coord, 1> geographic_observer = {{{7.0 + 4.5 / 3600, 46.0 - 5.5 / 3600}}};
+  const Coord navigation = transform_coordinates(4326, 2056, geographic_observer).front();
+  config.observer = {navigation.x, navigation.y, 1120};
+  config.max_distance = 1000;
+  config.bvh_cache_size_bytes = 1048576;
+  config.raytracer = Raytracer::MetalBvh;
+  {
+    TerrainTraceSession session(config, edge_field, {true, true, true});
+    require(session.crs().epsg_code() == 2056, "Geographic fallback changed the navigation CRS");
+    require(
+        session.sample_terrain(navigation.x, navigation.y).has_value(),
+        "Fallback observer lost its terrain"
+    );
+    session.trace(edge_field);
+    const auto *distances = static_cast<const float *>(session.distances().contents);
+    require(
+        std::all_of(
+            distances,
+            distances + pixel_count(edge_field.image),
+            [](float t) { return t > 0; }
+        ),
+        "Geographic fallback observer did not render terrain"
+    );
+  }
+  std::puts(
+      "Valid coverage: no-data, zero elevations, exact priority, normals, streaming and real gaps "
+      "passed."
+  );
+}
+
+void check_misaligned_coverage(const std::filesystem::path &root) {
+  // The primary ends at x=160. Fallback cell centres at x=153 and x=173
+  // round the ownership handoff to x=163, leaving a 3 m ownership sliver
+  // even though the two physical datasets overlap by 77 m.
+  const auto primary = root / "coverage-primary";
+  const auto fallback = root / "coverage-fallback";
+  const auto gap = root / "coverage-gap";
+  const auto raised = root / "coverage-raised";
+  const auto reference = root / "coverage-reference";
+  write_flat_coverage_fixture(primary, 2600000.0, 10.0, 1000.0F);
+  write_flat_coverage_fixture(fallback, 2600083.0, 20.0, 1000.0F);
+  write_flat_coverage_fixture(gap, 2600183.0, 20.0, 1000.0F);
+  write_flat_coverage_fixture(raised, 2600083.0, 20.0, 1010.0F);
+  write_flat_coverage_fixture(reference, 2600000.0, 40.0, 1000.0F);
+  const auto far_field = angular_field({9, 3}, {1.5, 1.6, std::atan(-0.11), std::atan(-0.09)});
+  const auto near_field = angular_field({9, 3}, {1.5, 1.6, std::atan(-0.21), std::atan(-0.19)});
+  RaytraceConfig config{reference, {2600045, 1199945, 1020}, 500, 0, 16384, 2, true, true, false};
+  TerrainTraceSession expected(config, far_field, {true, true, true});
+  expected.trace(far_field);
+  const auto *distances = static_cast<const float *>(expected.distances().contents);
+  require(
+      std::all_of(
+          distances,
+          distances + pixel_count(far_field.image),
+          [](float t) { return t > 180.0F && t < 225.0F; }
+      ),
+      "Coverage regression reference did not hit terrain beyond the ownership sliver"
+  );
+  config.tile_dir = primary;
+  config.raytracer = Raytracer::MetalBvh;
+  auto *geometry = [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+  geometry.boundingBoxCount = 16;
+  geometry.boundingBoxStride = 24;
+  geometry.opaque = NO;
+  geometry.allowDuplicateIntersectionFunctionInvocation = NO;
+  auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+  descriptor.geometryDescriptors = @[ geometry ];
+  const auto sizes = [expected.device() accelerationStructureSizesWithDescriptor:descriptor];
+  const uint64_t one_tile_budget = 17U * 17U * 2U + 16U * (sizeof(BvhBlock) + sizeof(BvhBounds)) +
+                                   sizeof(BvhAffinePatch) + sizeof(BvhTile) + sizeof(uint64_t) +
+                                   2U * sizes.accelerationStructureSize +
+                                   sizes.buildScratchBufferSize;
+  for (bool bounded : {false, true}) {
+    for (bool bilinear : {false, true}) {
+      @autoreleasepool {
+        config.bvh_cache_size_bytes = bounded ? one_tile_budget + 256U : 1048576U;
+        config.bilinear_collisions = bilinear;
+        config.terrain_datasets = {{primary, 0.0}, {fallback, 0.0}};
+        TerrainTraceSession mixed(config, far_field, {true, true, true});
+        compare(expected, mixed, far_field, 0.01F);
+        compare(expected, mixed, far_field, 0.01F);
+        if (bounded)
+          require(mixed.bvh_statistics().evictions > 0, "Coverage fixture did not force streaming");
+        config.terrain_datasets = {{primary, 0.0}, {gap, 0.0}};
+        TerrainTraceSession missing(config, far_field, {true, true, true});
+        compare(expected, missing, far_field, 0.01F);
+        config.terrain_datasets = {{primary, 0.0}, {raised, 0.0}};
+        TerrainTraceSession priority(config, near_field, {true, true, true});
+        compare(expected, priority, near_field, 0.01F);
+      }
+    }
+  }
+  std::puts("Mixed coverage: crossed grid-rounding slivers and empty gaps, retained priority.");
+}
+
 void check_tile_selection(const std::filesystem::path &directory, bool retain, double spacing) {
   RaytraceConfig config{directory,
                         {2600000.0 + 4.5 * spacing, 1200000.0 - 5.5 * spacing, 1120.0},
@@ -488,13 +1871,15 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
   software.set_collision_options(false, true);
   hardware.set_collision_options(false, true);
   compare(software, hardware, next, spacing > 10 ? 0.25F : 0.01F);
-  // A changed view may need new tiles and temporary streaming batches, but
-  // it must begin by reusing the existing resident scene.
+  // A changed view begins with the existing scene. Direct repair may then
+  // admit newly requested tiles and publish an updated scene immediately.
+  const auto changed = hardware.bvh_statistics();
   require(
-      hardware.bvh_statistics().scene_builds == repeated.scene_builds,
-      "Camera, resolution or normal changes rebuilt the resident scene"
+      (changed.builds == repeated.builds && changed.scene_builds == repeated.scene_builds) ||
+          (changed.builds > repeated.builds && changed.scene_builds > repeated.scene_builds),
+      "Camera change rebuilt the scene without admitting detailed terrain"
   );
-  const uint64_t builds_before_move = hardware.bvh_statistics().builds;
+  const uint64_t builds_before_move = changed.builds;
   ObserverLocation moved = config.observer;
   moved.easting -= 8 * spacing;
   moved.northing += 3 * spacing;
@@ -620,21 +2005,31 @@ void check_scene_misses(const std::filesystem::path &directory) {
   compare(software, hardware, wide, 0.01F);
   const auto after = hardware.bvh_statistics();
   require(
-      after.scene_passes == before.scene_passes + 1U &&
+      after.scene_passes > before.scene_passes + 1U &&
           after.scene_fallback_rays > before.scene_fallback_rays &&
           after.scene_fallback_rays - before.scene_fallback_rays < pixel_count(wide.image) &&
-          after.builds > before.builds,
-      "Partial scene did not stream only unresolved rays"
+          after.builds > before.builds && after.streaming_rays == before.streaming_rays,
+      "Partial scene did not repair requested sources directly"
+  );
+  require(
+      after.tile_build_batches - before.tile_build_batches < after.builds - before.builds,
+      "Scene repair submitted separate build/compaction commands for every tile"
+  );
+  require(
+      after.peak_bytes <= after.budget_bytes && after.resident_bytes <= after.budget_bytes,
+      "Batched scene repair exceeded its cache budget"
   );
   compare(software, hardware, wide, 0.01F);
-  const auto rebuilt = hardware.bvh_statistics();
+  const auto reused = hardware.bvh_statistics();
   require(
-      rebuilt.scene_builds > after.scene_builds,
-      "Newly resident tiles did not update the scene"
+      reused.scene_builds == after.scene_builds &&
+          reused.scene_fallback_rays == after.scene_fallback_rays &&
+          reused.submissions == after.submissions + 1U,
+      "Repaired scene was not immediately reusable"
   );
   compare(software, hardware, wide, 0.01F);
   require(
-      hardware.bvh_statistics().submissions == rebuilt.submissions + 1U,
+      hardware.bvh_statistics().submissions == reused.submissions + 1U,
       "Updated scene did not reuse one GPU traversal"
   );
 }
@@ -1025,8 +2420,28 @@ void check_producer(
         true,
         timer
     );
+    const auto repair_before = trace.bvh_statistics();
+    const auto mipmaps_before = trace.tile_statistics().mipmap_generations;
     const auto timing =
         render_terrain_frame(trace, appearance_only ? nullptr : &field, actual, settings, {});
+    if (frame < 10)
+      require(trace.tile_statistics().mipmap_generations == 0, "BVH tracing generated mipmaps");
+    if (frame == 10)
+      require(
+          trace.tile_statistics().mipmap_generations > 0,
+          "Software switch missed lazy mipmaps"
+      );
+    if (frame > 10)
+      require(trace.tile_statistics().mipmap_generations == mipmaps_before, "BVH rebuilt mipmaps");
+    if (partial && frame == 1) {
+      const auto after = trace.bvh_statistics();
+      const uint64_t passes = after.scene_repair_passes - repair_before.scene_repair_passes;
+      const uint64_t rays = after.scene_repair_rays - repair_before.scene_repair_rays;
+      require(
+          passes > 0 && rays > 0 && rays < passes * pixel_count(field.image),
+          "Scene repair did not compact unresolved rays"
+      );
+    }
     if (pinhole && frame > 0 && frame < 7 && !partial) {
       require(trace.camera_statistics().plan_updates == 1, "Unchanged camera rebuilt GPU LOD plan");
       require(
@@ -1121,6 +2536,7 @@ void check_producer(
 void check_metalfx_producer(const std::filesystem::path &directory) {
   using namespace panorama::app;
   RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, true, false};
+  config.lod_scale = 1.5F;
   auto output = camera_request({257, 129}, false);
   TerrainTraceSession reference(config, output, {true, true, true});
   config.raytracer = Raytracer::MetalBvh;
@@ -1192,6 +2608,7 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
                                    MetalFxPreset::Performance,
                                    MetalFxPreset::Performance,
                                    MetalFxPreset::Performance};
+  uint64_t stable_lod_plan_changes = 0U;
   for (size_t frame = 0; frame < std::size(presets); ++frame) {
     settings.appearance.raytraced_shadows = frame != 0;
     settings.appearance.feature_outlines = frame == 3;
@@ -1217,6 +2634,7 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
       expected_scaler.begin_frame();
     }
     const bool appearance_only = frame == 7;
+    const float lod_footprint_scale = float(field.image.height) / float(output.image.height);
     uint32_t callbacks = 0;
     id<MTLTexture> pending = resolution.enabled ? scaler.texture() : nil;
     const auto timing = render_terrain_frame(
@@ -1230,7 +2648,8 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
             scaler.encode(command, actual.texture());
             require(scaler.texture() == pending, "Terrain repair rotated MetalFX output");
           }
-        }
+        },
+        lod_footprint_scale
     );
     require(callbacks == timing.producer_submissions, "Missing MetalFX repair encode");
     (void)render_terrain_frame(
@@ -1241,8 +2660,19 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
         [&](id<MTLCommandBuffer> command) {
           if (resolution.enabled)
             expected_scaler.encode(command, expected.texture());
-        }
+        },
+        lod_footprint_scale
     );
+    if (!appearance_only) {
+      const uint64_t changes = trace.bvh_statistics().lod_plan_changes;
+      if (frame == 0)
+        stable_lod_plan_changes = changes;
+      else
+        require(
+            changes == stable_lod_plan_changes,
+            "MetalFX internal resolution changed the terrain LOD plan"
+        );
+    }
     if (published != nil)
       require(read(published) == published_bytes, "Producer overwrote the displayed frame");
     published = resolution.enabled ? scaler.texture() : actual.texture();
@@ -1274,9 +2704,14 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
   }
 }
 
-void check_shadow_reuse(const std::filesystem::path &directory, bool bilinear, bool bounded) {
+void check_shadow_reuse(
+    const std::filesystem::path &directory,
+    bool bilinear,
+    bool bounded,
+    bool retain
+) {
   RaytraceConfig
-      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
+      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, retain, bilinear, false};
   auto camera = camera_request({129, 65});
   auto field = camera_field(camera.image, camera.projection);
   TerrainTraceSession reference(config, field, {true, true, true});
@@ -1290,16 +2725,10 @@ void check_shadow_reuse(const std::filesystem::path &directory, bool bilinear, b
     auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
     descriptor.geometryDescriptors = @[ geometry ];
     const auto sizes = [reference.device() accelerationStructureSizesWithDescriptor:descriptor];
-    const bool quantized =
-        read_metal_tile_header(
-            TerrainCatalogue::discover(directory, config.observer, config.max_distance, 0)
-                .origin()
-                .path
-        )
-            .sample_type == MetalTileSampleType::Uint16Decimeters;
-    config.bvh_cache_size_bytes = 17U * 17U * (quantized ? 2U : 4U) + 16U * (20U + 24U) + 48U + 8U +
-                                  2U * sizes.accelerationStructureSize +
-                                  sizes.buildScratchBufferSize;
+    config.bvh_cache_size_bytes =
+        17U * 17U * (retain ? 2U : 4U) + 16U * (sizeof(BvhBlock) + sizeof(BvhBounds)) +
+        sizeof(BvhAffinePatch) + sizeof(BvhTile) + sizeof(uint64_t) +
+        2U * sizes.accelerationStructureSize + sizes.buildScratchBufferSize;
   }
   TerrainTraceSession trace(config, camera, {true, true, true});
   GpuImageRenderer image(
@@ -1400,7 +2829,8 @@ void check_streaming(const std::filesystem::path &directory) {
   auto *descriptor = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
   descriptor.geometryDescriptors = @[ geometry ];
   const auto sizes = [software.device() accelerationStructureSizesWithDescriptor:descriptor];
-  config.bvh_cache_size_bytes = 17U * 17U * 2U + 16U * (20U + 24U) + 48U + 8U +
+  config.bvh_cache_size_bytes = 17U * 17U * 2U + 16U * (sizeof(BvhBlock) + sizeof(BvhBounds)) +
+                                sizeof(BvhAffinePatch) + sizeof(BvhTile) + sizeof(uint64_t) +
                                 2U * sizes.accelerationStructureSize + sizes.buildScratchBufferSize;
   TerrainTraceSession hardware(config, field, {true, true, true});
   compare(software, hardware, field);
@@ -1421,6 +2851,22 @@ void check_streaming(const std::filesystem::path &directory) {
       stats.peak_bytes <= stats.budget_bytes && stats.resident_bytes <= stats.budget_bytes,
       "BVH cache exceeded its budget"
   );
+  require(
+      stats.selection_rays < stats.selection_passes * pixel_count(field.image),
+      "Streaming selection kept dispatching the complete image after rays finished"
+  );
+  // Turn through the full horizon with a cache that cannot retain the view.
+  // Completed/provisional hits and exact continuation must survive eviction.
+  for (uint32_t turn = 0U; turn < 8U; ++turn) {
+    const double heading = double(turn) * std::numbers::pi / 4.0;
+    const auto view = angular_field({129, 65}, {heading, heading + 1.2, -1.3, 0.1});
+    compare(software, hardware, view);
+    const auto turned = hardware.bvh_statistics();
+    require(
+        turned.peak_bytes <= turned.budget_bytes && turned.resident_bytes <= turned.budget_bytes,
+        "Panning exceeded the bounded BVH cache"
+    );
+  }
 }
 } // namespace
 
@@ -1437,17 +2883,31 @@ int main(int argc, const char *argv[]) {
         benchmark(argc, argv);
         return EXIT_SUCCESS;
       }
+      if (argc == 4 && std::string_view(argv[1]) == "--datasets") {
+        check_prepared_dataset_stack(argv[2], argv[3]);
+        return EXIT_SUCCESS;
+      }
       const bool tile_selection = argc == 2 && std::string_view(argv[1]) == "--tile-selection";
       const bool camera = argc == 2 && std::string_view(argv[1]) == "--camera";
       const bool metalfx = argc == 2 && std::string_view(argv[1]) == "--metalfx";
       const bool producer = argc == 2 && std::string_view(argv[1]) == "--producer";
-      const bool shadow_float = argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-float";
+      const bool shadow_expanded =
+          argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-expanded";
       const bool shadow_quantized =
           argc == 2 && std::string_view(argv[1]) == "--shadow-reuse-quantized";
       const bool edge_cases = argc == 2 && std::string_view(argv[1]) == "--edge-cases";
       const bool streaming = argc == 2 && std::string_view(argv[1]) == "--streaming";
+      const bool valid_quantized = argc == 2 && std::string_view(argv[1]) == "--valid-quantized";
+      const bool valid_expanded = argc == 2 && std::string_view(argv[1]) == "--valid-expanded";
+      const bool empty_quantized = argc == 2 && std::string_view(argv[1]) == "--empty-quantized";
+      const bool empty_expanded = argc == 2 && std::string_view(argv[1]) == "--empty-expanded";
+      const bool coverage_junctions =
+          argc == 2 && std::string_view(argv[1]) == "--coverage-junctions";
+      const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
-          !shadow_float && !shadow_quantized && !metalfx) {
+          !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage &&
+          !valid_quantized && !valid_expanded && !coverage_junctions && !empty_quantized &&
+          !empty_expanded) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -1502,17 +2962,21 @@ int main(int argc, const char *argv[]) {
         require(created != nullptr, "Could not create fixture directory");
         const std::filesystem::path root(created);
         std::printf("Test fixtures: %s\n", created);
-        write_fixture(root / "float", false, 10.0);
+        write_fixture(root / "unindexed", false, 10.0);
         write_fixture(root / "quantized", true, 10.0);
+        write_fixture(root / "overlap", true, 10.0, 2056U, 2600000.0, 1200000.0, 100.0);
+        write_fixture(root / "partial-overlap", true, 10.0, 2056U, 2600080.0, 1200000.0, 100.0);
         write_fixture(root / "distant", true, 1000.0);
-        if (shadow_float || shadow_quantized) {
+        check_dataset_foundation(root);
+        if (shadow_expanded || shadow_quantized) {
           for (bool bilinear : {false, true}) {
             for (bool bounded : {false, true}) {
               @autoreleasepool {
                 check_shadow_reuse(
-                    root / (shadow_float ? "float" : "quantized"),
+                    root / (shadow_expanded ? "unindexed" : "quantized"),
                     bilinear,
-                    bounded
+                    bounded,
+                    !shadow_expanded
                 );
               }
             }
@@ -1538,7 +3002,7 @@ int main(int argc, const char *argv[]) {
           }
         } else if (tile_selection) {
           @autoreleasepool {
-            check_tile_selection(root / "float", false, 10.0);
+            check_tile_selection(root / "unindexed", false, 10.0);
           }
           @autoreleasepool {
             check_tile_selection(root / "quantized", true, 10.0);
@@ -1560,6 +3024,17 @@ int main(int argc, const char *argv[]) {
           @autoreleasepool {
             check_producer(root / "quantized", true, true);
           }
+        } else if (valid_quantized || valid_expanded) {
+          check_valid_coverage(root, valid_quantized);
+        } else if (empty_quantized || empty_expanded) {
+          check_empty_gaps(root, empty_quantized);
+        } else if (coverage_junctions) {
+          check_coverage_junctions(root);
+        } else if (mixed_coverage) {
+          check_ownership_progress();
+          check_coverage_index();
+          check_catalogue_relocation(root);
+          check_misaligned_coverage(root);
         } else if (streaming) {
           check_streaming(root / "quantized");
         } else if (edge_cases) {
@@ -1576,9 +3051,10 @@ int main(int argc, const char *argv[]) {
             exercise(root / "distant", true, 1000.0, 4U);
           }
         } else {
+          check_mixed_priority(root);
           for (uint32_t block : {1U, 4U, 7U}) {
             @autoreleasepool {
-              exercise(root / "float", false, 10.0, block);
+              exercise(root / "unindexed", false, 10.0, block);
             }
             @autoreleasepool {
               exercise(root / "quantized", true, 10.0, block);

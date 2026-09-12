@@ -1,5 +1,6 @@
 #pragma once
 
+#include "terrain_cell_coverage.h"
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -18,6 +19,8 @@ struct TerrainManifestEntry {
   float maximum_elevation;
   /// Absent in version-1 manifests. Bounds include every stored LOD.
   std::optional<float> minimum_elevation = std::nullopt;
+  /// Present for version-5 tiles; absent for legacy files with no validity mask.
+  std::optional<TerrainCellCoverage> coverage = std::nullopt;
 };
 
 /// Return the manifest sidecar belonging to a prepared-terrain directory.

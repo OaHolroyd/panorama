@@ -1,5 +1,6 @@
 #include "terrain_manifest.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -15,7 +16,7 @@ namespace {
 
 inline constexpr std::array<char, 8> kTerrainManifestMagic =
     {'P', 'N', 'M', 'A', 'N', '0', '0', '1'};
-inline constexpr uint32_t kTerrainManifestVersion = 2U;
+inline constexpr uint32_t kTerrainManifestVersion = 3U;
 
 struct TerrainManifestHeader {
   std::array<char, 8> magic;
@@ -32,6 +33,14 @@ struct TerrainManifestDiskEntry {
   // Version 1 used these four bytes as a zero reserved word.
   float minimum_elevation;
 };
+
+struct TerrainManifestCoverageEntry {
+  TerrainManifestDiskEntry elevation;
+  uint32_t cell_count;      // Zero denotes a legacy tile without validity metadata.
+  uint32_t rectangle_count; // Zero denotes full coverage for a nonzero cell count.
+  uint64_t coverage_offset;
+};
+static_assert(sizeof(TerrainManifestCoverageEntry) == 40U);
 
 static_assert(std::endian::native == std::endian::little);
 static_assert(std::is_trivially_copyable_v<TerrainManifestHeader>);
@@ -65,21 +74,23 @@ std::vector<TerrainManifestEntry> read_terrain_manifest(const std::filesystem::p
   TerrainManifestHeader header = {};
   if (!stream.read(reinterpret_cast<char *>(&header), sizeof(header)) ||
       header.magic != kTerrainManifestMagic ||
-      (header.version != 1U && header.version != kTerrainManifestVersion) ||
+      (header.version < 1U || header.version > kTerrainManifestVersion) ||
       header.header_size != sizeof(TerrainManifestHeader) ||
-      header.entry_size != sizeof(TerrainManifestDiskEntry)) {
+      header.entry_size != (header.version < 3U ? sizeof(TerrainManifestDiskEntry)
+                                                : sizeof(TerrainManifestCoverageEntry))) {
     throw std::runtime_error("Terrain manifest has an unsupported header: " + path.string());
   }
-  const uintmax_t expected_size =
-      sizeof(TerrainManifestHeader) +
-      static_cast<uintmax_t>(header.entry_count) * sizeof(TerrainManifestDiskEntry);
-  if (std::filesystem::file_size(path) != expected_size) {
+  uintmax_t expected_size = sizeof(TerrainManifestHeader) +
+                            static_cast<uintmax_t>(header.entry_count) * header.entry_size;
+  const auto file_size = std::filesystem::file_size(path);
+  if (file_size < expected_size) {
     throw std::runtime_error("Terrain manifest has an invalid size: " + path.string());
   }
 
   std::vector<TerrainManifestEntry> entries;
   entries.reserve(header.entry_count);
   for (uint32_t index = 0U; index < header.entry_count; index++) {
+    stream.seekg(sizeof(TerrainManifestHeader) + uint64_t(index) * header.entry_size);
     TerrainManifestDiskEntry disk = {};
     if (!stream.read(reinterpret_cast<char *>(&disk), sizeof(disk)) ||
         !std::isfinite(disk.maximum_elevation) ||
@@ -94,7 +105,37 @@ std::vector<TerrainManifestEntry> read_terrain_manifest(const std::filesystem::p
          disk.maximum_elevation,
          header.version == 1U ? std::nullopt : std::optional<float>(disk.minimum_elevation)}
     );
+    if (header.version == 3U) {
+      uint32_t cells = 0, count = 0;
+      uint64_t offset = 0;
+      stream.read(reinterpret_cast<char *>(&cells), sizeof(cells));
+      stream.read(reinterpret_cast<char *>(&count), sizeof(count));
+      stream.read(reinterpret_cast<char *>(&offset), sizeof(offset));
+      const uint64_t bytes = uint64_t(count) * sizeof(TerrainCoverageRect);
+      if (!stream || offset != expected_size || bytes > file_size - expected_size ||
+          (cells == 0U && count != 0U) || (cells && count > uint64_t(cells) * cells))
+        throw std::runtime_error("Terrain manifest has invalid coverage offsets");
+      expected_size += bytes;
+      if (cells) {
+        TerrainCellCoverage coverage{cells, {}};
+        if (count == 0U)
+          coverage.rectangles.push_back({0, 0, cells, cells});
+        else {
+          coverage.rectangles.resize(count);
+          stream.seekg(static_cast<std::streamoff>(offset));
+          if (!stream.read(
+                  reinterpret_cast<char *>(coverage.rectangles.data()),
+                  static_cast<std::streamsize>(bytes)
+              ))
+            throw std::runtime_error("Could not read manifest coverage");
+        }
+        coverage.validate();
+        entries.back().coverage = std::move(coverage);
+      }
+    }
   }
+  if (file_size != expected_size)
+    throw std::runtime_error("Terrain manifest has an invalid size: " + path.string());
   return entries;
 }
 
@@ -105,13 +146,26 @@ void write_terrain_manifest(
   if (entries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     throw std::overflow_error("Terrain manifest contains too many entries");
   }
+  const bool with_coverage = std::any_of(entries.begin(), entries.end(), [](const auto &entry) {
+    return entry.coverage.has_value();
+  });
+  const uint32_t entry_size =
+      with_coverage ? sizeof(TerrainManifestCoverageEntry) : sizeof(TerrainManifestDiskEntry);
+  uint64_t coverage_offset = sizeof(TerrainManifestHeader) + uint64_t(entries.size()) * entry_size;
+  for (const auto &entry : entries) {
+    if (entry.coverage) {
+      entry.coverage->validate();
+      if (entry.coverage->rectangles.empty())
+        throw std::invalid_argument("Empty terrain tiles must not be published");
+    }
+  }
   const std::filesystem::path temporary = path.string() + ".tmp";
   std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
   const TerrainManifestHeader header = {
       kTerrainManifestMagic,
-      kTerrainManifestVersion,
+      with_coverage ? kTerrainManifestVersion : 2U,
       sizeof(TerrainManifestHeader),
-      sizeof(TerrainManifestDiskEntry),
+      entry_size,
       static_cast<uint32_t>(entries.size()),
   };
   stream.write(reinterpret_cast<const char *>(&header), sizeof(header));
@@ -132,7 +186,26 @@ void write_terrain_manifest(
         *entry.minimum_elevation,
     };
     stream.write(reinterpret_cast<const char *>(&disk), sizeof(disk));
+    if (with_coverage) {
+      const uint32_t cells = entry.coverage ? entry.coverage->cell_count : 0U;
+      const uint32_t count = entry.coverage && !entry.coverage->full()
+                                 ? static_cast<uint32_t>(entry.coverage->rectangles.size())
+                                 : 0U;
+      stream.write(reinterpret_cast<const char *>(&cells), sizeof(cells));
+      stream.write(reinterpret_cast<const char *>(&count), sizeof(count));
+      stream.write(reinterpret_cast<const char *>(&coverage_offset), sizeof(coverage_offset));
+      coverage_offset += uint64_t(count) * sizeof(TerrainCoverageRect);
+    }
   }
+  if (with_coverage)
+    for (const auto &entry : entries)
+      if (entry.coverage && !entry.coverage->full())
+        stream.write(
+            reinterpret_cast<const char *>(entry.coverage->rectangles.data()),
+            static_cast<std::streamsize>(
+                entry.coverage->rectangles.size() * sizeof(TerrainCoverageRect)
+            )
+        );
   if (!stream) {
     stream.close();
     std::filesystem::remove(temporary);

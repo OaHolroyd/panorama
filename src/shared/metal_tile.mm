@@ -255,11 +255,13 @@ QuantizedMetalTileRecordLayout quantized_metal_tile_record_layout(const MetalTil
     throw std::invalid_argument("Quantized record layout requires uint16 terrain");
   }
   const uint64_t maximum_stride = std::numeric_limits<uint32_t>::max();
-  if (header.vertex_offset > maximum_stride ||
-      header.vertex_byte_count > maximum_stride - header.vertex_offset) {
+  // Resident records contain only a small header area and the selected grid;
+  // coverage metadata stays in the catalogue and must not enlarge every slot.
+  constexpr uint32_t resident_vertex_offset = kMetalTileLodHeaderSize;
+  if (header.vertex_byte_count > maximum_stride - resident_vertex_offset) {
     throw std::overflow_error("Metal tile logical record exceeds Metal uint indexing");
   }
-  const uint64_t logical_size = header.vertex_offset + header.vertex_byte_count;
+  const uint64_t logical_size = resident_vertex_offset + header.vertex_byte_count;
   const uint64_t stride = (logical_size + 3U) & ~uint64_t{3U};
   if (stride > maximum_stride) {
     throw std::overflow_error("Metal tile logical record exceeds Metal uint indexing");
@@ -267,8 +269,9 @@ QuantizedMetalTileRecordLayout quantized_metal_tile_record_layout(const MetalTil
   return {
       static_cast<uint32_t>(logical_size),
       static_cast<uint32_t>(stride),
-      static_cast<uint32_t>(header.vertex_offset),
+      resident_vertex_offset,
       static_cast<uint32_t>(offsetof(MetalTileHeader, elevation_base_decimeters)),
+      static_cast<uint32_t>(offsetof(MetalTileHeader, reserved)),
   };
 }
 
@@ -276,11 +279,15 @@ void validate_metal_tile_header(
     const MetalTileHeader &header,
     MetalTileCompression expected_compression
 ) {
-  if (header.magic != kMetalTileLodMagic || header.version != kMetalTileLodVersion ||
-      header.header_size != kMetalTileLodHeaderSize ||
-      (header.sample_type != MetalTileSampleType::Float32 &&
-       header.sample_type != MetalTileSampleType::Uint16Decimeters)) {
+  const bool legacy = header.version == 4U && header.magic == kLegacyMetalTileLodMagic;
+  if ((!legacy && (header.magic != kMetalTileLodMagic || header.version != kMetalTileLodVersion)) ||
+      header.header_size != kMetalTileLodHeaderSize) {
     throw std::runtime_error("Metal tile has an unsupported header or version");
+  }
+  if (header.sample_type != MetalTileSampleType::Uint16Decimeters) {
+    throw std::runtime_error(
+        "Metal tiles require uint16 samples; regenerate this tile from its source data"
+    );
   }
   if (header.compression != expected_compression || header.epsg_code == 0U ||
       !std::has_single_bit(header.cell_count) || header.cell_count == 0U ||
@@ -292,8 +299,7 @@ void validate_metal_tile_header(
   }
 
   const uint64_t vertex_side = static_cast<uint64_t>(header.cell_count) + 1U;
-  const uint64_t sample_bytes =
-      header.sample_type == MetalTileSampleType::Float32 ? sizeof(float) : sizeof(uint16_t);
+  constexpr uint64_t sample_bytes = sizeof(uint16_t);
   if (vertex_side > std::numeric_limits<uint64_t>::max() / vertex_side ||
       vertex_side * vertex_side > std::numeric_limits<uint64_t>::max() / sample_bytes) {
     throw std::runtime_error("Metal tile payload dimensions overflow its byte count");
@@ -304,20 +310,19 @@ void validate_metal_tile_header(
       header.lod_table_offset != header.header_size ||
       header.lod_table_byte_count !=
           static_cast<uint64_t>(header.lod_count) * sizeof(MetalTileLod) ||
-      header.vertex_offset < header.lod_table_offset + header.lod_table_byte_count ||
+      header.vertex_offset <
+          header.lod_table_offset + header.lod_table_byte_count +
+              (legacy ? 0U : uint64_t(header.reserved) * sizeof(TerrainCoverageRect)) ||
       header.vertex_byte_count != vertex_bytes) {
     throw std::runtime_error("Metal tile payload layout does not match its dimensions");
   }
 
-  if (header.sample_type == MetalTileSampleType::Uint16Decimeters) {
-    const double minimum_elevation = static_cast<double>(header.elevation_base_decimeters) / 10.0;
-    const double maximum_representable =
-        static_cast<double>(header.elevation_base_decimeters) / 10.0 +
-        static_cast<double>(std::numeric_limits<uint16_t>::max()) / 10.0;
-    const double maximum = static_cast<double>(header.maximum_elevation);
-    if (maximum < minimum_elevation - 0.1 || maximum > maximum_representable + 0.1) {
-      throw std::runtime_error("Metal tile maximum elevation is outside its fixed-point range");
-    }
+  const double minimum_elevation = static_cast<double>(header.elevation_base_decimeters) / 10.0;
+  const double maximum_representable =
+      minimum_elevation + static_cast<double>(std::numeric_limits<uint16_t>::max()) / 10.0;
+  const double maximum = static_cast<double>(header.maximum_elevation);
+  if (maximum < minimum_elevation - 0.1 || maximum > maximum_representable + 0.1) {
+    throw std::runtime_error("Metal tile maximum elevation is outside its fixed-point range");
   }
 }
 
@@ -361,9 +366,7 @@ read_metal_tile_lods(const std::filesystem::path &path, const MetalTileHeader &h
     const MetalTileLod &lod = lods[index];
     const uint32_t expected_cell_count = header.cell_count >> index;
     const uint64_t side = static_cast<uint64_t>(expected_cell_count) + 1U;
-    const uint64_t bytes =
-        side * side *
-        (header.sample_type == MetalTileSampleType::Float32 ? sizeof(float) : sizeof(uint16_t));
+    const uint64_t bytes = side * side * sizeof(uint16_t);
     if (lod.lod != index + 1U || lod.cell_count != expected_cell_count ||
         lod.level_count != std::countr_zero(expected_cell_count) + 1U ||
         !std::isfinite(lod.maximum_elevation) || lod.vertex_byte_count != bytes ||
@@ -385,6 +388,43 @@ read_metal_tile_lods(const std::filesystem::path &path, const MetalTileHeader &h
   return lods;
 }
 
+std::optional<TerrainCellCoverage>
+read_metal_tile_coverage(const std::filesystem::path &path, const MetalTileHeader &header) {
+  validate_metal_tile_header(header, metal_tile_compression(path));
+  if (header.version == 4U)
+    return std::nullopt;
+  TerrainCellCoverage result{header.cell_count, {}};
+  if (header.reserved == 0U) {
+    result.rectangles.push_back({0, 0, header.cell_count, header.cell_count});
+    return result;
+  }
+  if (uint64_t(header.reserved) > uint64_t(header.cell_count) * header.cell_count)
+    throw std::runtime_error("Too many terrain coverage rectangles");
+  const uint64_t offset = header.lod_table_offset + header.lod_table_byte_count;
+  const size_t bytes = size_t(header.reserved) * sizeof(TerrainCoverageRect);
+  result.rectangles.resize(header.reserved);
+  if (header.compression == MetalTileCompression::None) {
+    std::ifstream stream(path, std::ios::binary);
+    stream.seekg(static_cast<std::streamoff>(offset));
+    if (!stream.read(
+            reinterpret_cast<char *>(result.rectangles.data()),
+            static_cast<std::streamsize>(bytes)
+        ))
+      throw std::runtime_error("Could not read terrain coverage " + path.string());
+  } else {
+    const std::scoped_lock lock(compressed_metadata_io_mutex);
+    const auto &io = compressed_metadata_io();
+    auto file = open_metal_file(io.device, path, header.compression);
+    std::vector<std::byte> prefix(offset + bytes);
+    auto command = [io.queue commandBuffer];
+    [command loadBytes:prefix.data() size:prefix.size() sourceHandle:file sourceHandleOffset:0];
+    complete_io(command, path);
+    std::memcpy(result.rectangles.data(), prefix.data() + offset, bytes);
+  }
+  result.validate();
+  return result;
+}
+
 void write_metal_tile_lods(
     const std::filesystem::path &path,
     const MetalTileHeader &header,
@@ -392,7 +432,7 @@ void write_metal_tile_lods(
     std::span<const std::byte> payload
 ) {
   validate_metal_tile_header(header, header.compression);
-  if (header.version != kMetalTileLodVersion || lods.size() != header.lod_count) {
+  if (lods.size() != header.lod_count) {
     throw std::invalid_argument("Metal LOD tile header does not match its LOD table");
   }
   uint64_t expected_payload_size = 0U;

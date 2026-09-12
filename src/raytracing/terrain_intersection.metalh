@@ -67,6 +67,8 @@ struct ResidentTile {
   long row;
   /// Global west-to-east grid column used for successor lookup.
   long column;
+  /// Nonzero when encoded zero denotes a missing sample.
+  uint no_data;
 };
 
 /// One immutable catalogue key, manifest maximum, and host source index.
@@ -140,6 +142,7 @@ struct QuantizedTerrainLayout {
   uint vertex_offset;
   /// Byte offset from a record to its signed decimetre elevation base.
   uint elevation_base_offset;
+  uint no_data_offset;
 };
 
 /// Mix one unsigned 64-bit value for the catalogue tile lookup table.
@@ -159,7 +162,7 @@ inline uint tile_key_hash(long row, long column, uint mask) {
   return uint(mix_tile_hash(mixed_row ^ (mixed_column + 0x9e3779b97f4a7c15UL))) & mask;
 }
 
-/// Return catalogue metadata for a key, or null when terrain coverage ends.
+/// Return catalogue metadata for a key, or null when that grid tile is empty.
 inline device const CatalogueTileHashEntry *lookup_catalogue_tile(
     device const CatalogueTileHashEntry *entries,
     uint capacity,
@@ -187,6 +190,8 @@ struct Collision {
   bool hit;
   /// Horizontal distance from the ray origin to that root.
   float distance;
+  /// True only for an underground recovery at a potentially discontinuous join.
+  bool covered_step;
 };
 
 /// Return a root in the current DDA interval, allowing a small tolerance at a
@@ -213,6 +218,27 @@ inline bool valid_root(
 }
 
 /// Decode one stored terrain sample. Float32 specialization is an identity.
+inline bool valid_sample(float sample, bool) { return isfinite(sample); }
+inline bool valid_sample(ushort sample, bool no_data) { return !no_data || sample != 0U; }
+
+template <typename Sample>
+inline bool valid_cell(device const Sample *vertices, uint side, uint x, uint y, bool no_data) {
+  const uint i = y * side + x;
+  return valid_sample(vertices[i], no_data) && valid_sample(vertices[i + 1U], no_data) &&
+         valid_sample(vertices[i + side], no_data) &&
+         valid_sample(vertices[i + side + 1U], no_data);
+}
+
+template <typename Sample>
+inline bool
+valid_normal_stencil(device const Sample *vertices, uint side, uint x, uint y, bool no_data) {
+  for (uint row = y - 1U; row <= y + 2U; ++row)
+    for (uint column = x - 1U; column <= x + 2U; ++column)
+      if (!valid_sample(vertices[row * side + column], no_data))
+        return false;
+  return true;
+}
+
 inline float sample_elevation(float sample, int) { return sample; }
 
 inline float sample_elevation(ushort sample, int base_decimeters) {
@@ -317,7 +343,9 @@ inline Collision triangle_collision(
     float2 direction,
     float slope,
     float curvature,
-    float t_entry
+    float t_entry,
+    float2 horizontal_origin = float2(0.0F),
+    bool covered_step = false
 ) {
   const uint lower_left = i * vertex_count + j;
 
@@ -346,7 +374,7 @@ inline Collision triangle_collision(
 
   // Evaluate ray properties once
   const float z = observer_elevation + slope * t_entry + curvature * (t_entry * t_entry);
-  const float3 origin = float3(direction.x * t_entry, direction.y * t_entry, z);
+  const float3 origin = float3(horizontal_origin + direction * t_entry, z);
   const float3 direction3 = float3(direction.x, direction.y, slope);
 
   // Perform intersection of both triangles at once
@@ -360,10 +388,21 @@ inline Collision triangle_collision(
     return {true, t_entry + t_hit};
   }
 
-  // Sub-surface fallback check to catch any misses
-  float min_z = min(min(z00, z01), min(z10, z11));
-  if (z < min_z) {
-    return {true, t_entry};
+  // Only recover a numerical miss at the surface. Rays can legitimately be
+  // below a patch after crossing empty space; that alone is not a surface hit.
+  const float min_z = min(min(z00, z01), min(z10, z11));
+  const float cell_speed = max(abs(direction.x), abs(direction.y)) / delta;
+  const float coordinate_error =
+      max(5e-5F, max(128.0F * FLT_EPSILON * abs(t_entry) * cell_speed, 0.05F / delta));
+  const float gradient_bound =
+      max(abs(z01 - z00), abs(z11 - z10)) + max(abs(z10 - z00), abs(z11 - z01));
+  const float height_error =
+      16.0F * FLT_EPSILON *
+          (abs(observer_elevation) + abs(slope * t_entry) + abs(curvature * t_entry * t_entry) +
+           max(max(abs(z00), abs(z01)), max(abs(z10), abs(z11)))) +
+      0.001F + coordinate_error * gradient_bound;
+  if (z < min_z && (covered_step || min_z - z <= height_error)) {
+    return {true, t_entry, min_z - z > height_error};
   }
 
   return {false, 0.0F};
@@ -385,7 +424,8 @@ inline uint triangle_packed_surface_gradients(
     uint i,
     uint j,
     float2 direction,
-    float distance
+    float distance,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   const uint lower_left = i * vertex_count + j;
   const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
@@ -394,8 +434,10 @@ inline uint triangle_packed_surface_gradients(
   const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
 
   // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
-  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
-  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+  const float sx =
+      clamp((horizontal_origin.x + distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy =
+      clamp((horizontal_origin.y + distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
 
   // Re-evaluate the data-dependent split rule
   bool split = fabs(z00 - z11) < fabs(z01 - z10);
@@ -424,18 +466,22 @@ inline uint triangle_packed_surface_gradients(
   return as_type<uint>(half2(east_gradient, north_gradient));
 }
 
-/// Recover a near-boundary hit when DDA rounding assigns the root to an
-/// adjacent cell even though the ray ends below this patch's lowest vertex.
+/// Recover a numerical near-boundary miss only when the ray actually starts
+/// at the surface. Being underground after an empty gap is not an intersection.
 inline Collision conservative_boundary_collision(
     float observer_elevation,
     float slope,
     float curvature,
     float t_entry,
     float t_exit,
-    float minimum_vertex
+    float minimum_vertex,
+    float entry_clearance,
+    float height_error,
+    bool covered_step
 ) {
-  if (curved_ray_elevation(observer_elevation, slope, curvature, t_exit) <= minimum_vertex) {
-    return {true, t_entry};
+  if ((covered_step || abs(entry_clearance) <= height_error) &&
+      curved_ray_elevation(observer_elevation, slope, curvature, t_exit) <= minimum_vertex) {
+    return {true, t_entry, abs(entry_clearance) > height_error};
   }
   return {false, 0.0F};
 }
@@ -457,14 +503,16 @@ inline Collision bilinear_collision(
     float slope,
     float curvature,
     float t_entry,
-    float t_exit
+    float t_exit,
+    float2 horizontal_origin = float2(0.0F),
+    bool covered_step = false
 ) {
   constexpr float kPolynomialEpsilon = 1e-12F;
   const uint lower_left = i * vertex_count + j;
   const float interval_length = t_exit - t_entry;
 
-  const float sx0 = (t_entry * direction.x - cell_x) * inverse_delta;
-  const float sy0 = (t_entry * direction.y - cell_y) * inverse_delta;
+  const float sx0 = (horizontal_origin.x + t_entry * direction.x - cell_x) * inverse_delta;
+  const float sy0 = (horizontal_origin.y + t_entry * direction.y - cell_y) * inverse_delta;
   const float sx1 = direction.x * inverse_delta;
   const float sy1 = direction.y * inverse_delta;
 
@@ -475,6 +523,8 @@ inline Collision bilinear_collision(
   float b;
   float c;
   float minimum_vertex;
+  float height_error;
+  float gradient_bound;
   {
     const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
     const float z01 = sample_elevation(vertices[lower_left + 1U], base_decimeters);
@@ -490,6 +540,12 @@ inline Collision bilinear_collision(
     c = curved_ray_elevation(observer_elevation, slope, curvature, t_entry) - z00 - dzdx * sx0 -
         dzdy * sy0 - twist * sx0 * sy0;
     minimum_vertex = min(min(z00, z01), min(z10, z11));
+    gradient_bound = max(abs(z01 - z00), abs(z11 - z10)) + max(abs(z10 - z00), abs(z11 - z01));
+    height_error =
+        16.0F * FLT_EPSILON *
+            (abs(observer_elevation) + abs(slope * t_entry) + abs(curvature * t_entry * t_entry) +
+             max(max(abs(z00), abs(z01)), max(abs(z10), abs(z11)))) +
+        0.001F;
   }
 
   const float cell_speed = max(max(fabs(sx1), fabs(sy1)), 1e-12F);
@@ -497,10 +553,11 @@ inline Collision bilinear_collision(
   const float coordinate_tolerance =
       max(5e-5F, max(128.0F * direction_error, 0.05F * inverse_delta));
   const float t_tolerance = coordinate_tolerance / cell_speed;
+  // Apply the same coordinate uncertainty to the surface height at a seam.
+  height_error += coordinate_tolerance * (1.0F + 2.0F * coordinate_tolerance) * gradient_bound;
 
-  // A near-corner DDA transition can leave the root in an adjacent cell. If
-  // the ray is below all four vertices by this interval's end, recover the
-  // intersection on the near boundary as in the Python reference.
+  // A near-corner DDA transition can leave the root in an adjacent cell.
+  // Recover only roundoff-sized surface crossings on the near boundary.
   float local_t = 0.0F;
   if (fabs(a) < kPolynomialEpsilon) {
     if (fabs(b) < kPolynomialEpsilon) {
@@ -510,7 +567,10 @@ inline Collision bilinear_collision(
           curvature,
           t_entry,
           t_exit,
-          minimum_vertex
+          minimum_vertex,
+          c,
+          height_error,
+          covered_step
       );
     }
     local_t = -c / b;
@@ -533,7 +593,10 @@ inline Collision bilinear_collision(
         curvature,
         t_entry,
         t_exit,
-        minimum_vertex
+        minimum_vertex,
+        c,
+        height_error,
+        covered_step
     );
   }
 
@@ -548,7 +611,10 @@ inline Collision bilinear_collision(
           curvature,
           t_entry,
           t_exit,
-          minimum_vertex
+          minimum_vertex,
+          c,
+          height_error,
+          covered_step
       );
     }
   }
@@ -605,7 +671,10 @@ inline Collision bilinear_collision(
       curvature,
       t_entry,
       t_exit,
-      minimum_vertex
+      minimum_vertex,
+      c,
+      height_error,
+      covered_step
   );
 }
 
@@ -625,7 +694,8 @@ inline uint bilinear_packed_surface_gradients(
     uint i,
     uint j,
     float2 direction,
-    float distance
+    float distance,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   const uint lower_left = i * vertex_count + j;
   const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
@@ -633,8 +703,10 @@ inline uint bilinear_packed_surface_gradients(
   const float z10 = sample_elevation(vertices[lower_left + vertex_count], base_decimeters);
   const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
   const float twist = z11 - z10 - z01 + z00;
-  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
-  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+  const float sx =
+      clamp((horizontal_origin.x + distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy =
+      clamp((horizontal_origin.y + distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
   constexpr float kMaximumHalf = 65504.0F;
   const float east_gradient =
       clamp((z01 - z00 + twist * sy) * inverse_delta, -kMaximumHalf, kMaximumHalf);
@@ -698,7 +770,8 @@ inline uint interpolated_packed_surface_gradients(
     uint i,
     uint j,
     float2 direction,
-    float distance
+    float distance,
+    float2 horizontal_origin = float2(0.0F)
 ) {
   const uint lower_left = i * vertex_count + j;
   const float z00 = sample_elevation(vertices[lower_left], base_decimeters);
@@ -707,8 +780,10 @@ inline uint interpolated_packed_surface_gradients(
   const float z11 = sample_elevation(vertices[lower_left + vertex_count + 1U], base_decimeters);
 
   // Calculate normalized local cell coordinates [0.0, 1.0] for the hit point
-  const float sx = clamp((distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
-  const float sy = clamp((distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
+  const float sx =
+      clamp((horizontal_origin.x + distance * direction.x - cell_x) * inverse_delta, 0.0F, 1.0F);
+  const float sy =
+      clamp((horizontal_origin.y + distance * direction.y - cell_y) * inverse_delta, 0.0F, 1.0F);
 
   // Fetch surrounding 1-ring neighbor elevations required for central differences
   const float z_w0 = sample_elevation(vertices[lower_left - 1U], base_decimeters);

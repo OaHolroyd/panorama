@@ -368,7 +368,7 @@ struct VisibilityMaskRequest {
   id<MKOverlay> _fieldOfViewOverlay;
   id<MKOverlay> _headingOverlay;
   MKTileOverlay *_tileOverlay;
-  MKMultiPolygon *_coverageOverlay;
+  NSArray<MKMultiPolygon *> *_coverageOverlays;
   double _observerEasting;
   double _observerNorthing;
   double _maxDistance;
@@ -567,28 +567,38 @@ struct VisibilityMaskRequest {
   _observerAnnotation.coordinate = observerCoordinate;
   [_mapView addAnnotation:_observerAnnotation];
 
-  NSMutableArray<MKPolygon *> *coveragePolygons =
-      [NSMutableArray arrayWithCapacity:coverage.tiles.size()];
-  for (const panorama::TileKey key : coverage.tiles) {
-    const double xMinimum =
-        coverage.grid.origin_x + static_cast<double>(key.column) * coverage.grid.width;
-    const double yMaximum =
-        coverage.grid.origin_y - static_cast<double>(key.row) * coverage.grid.width;
-    const double xMaximum = xMinimum + coverage.grid.width;
-    const double yMinimum = yMaximum - coverage.grid.width;
-    const auto mapCoordinate = [&](double x, double y) {
-      const panorama::LatLon point = terrainCrs.to_lat_lon({x, y});
-      return CLLocationCoordinate2DMake(point.lat, point.lon);
-    };
-    CLLocationCoordinate2D corners[4] = {
-        mapCoordinate(xMinimum, yMinimum),
-        mapCoordinate(xMinimum, yMaximum),
-        mapCoordinate(xMaximum, yMaximum),
-        mapCoordinate(xMaximum, yMinimum),
-    };
-    [coveragePolygons addObject:[MKPolygon polygonWithCoordinates:corners count:4U]];
+  NSMutableArray<MKMultiPolygon *> *coverageOverlays =
+      [NSMutableArray arrayWithCapacity:coverage.datasets.size()];
+  for (const panorama::TerrainDatasetCoverage &dataset : coverage.datasets) {
+    // Each source has its own grid and CRS. Batch the corner projection so
+    // showing additional datasets does not create a transform for every point.
+    std::vector<panorama::Coord> native;
+    native.reserve(dataset.tiles.size() * 4U);
+    for (const panorama::TileKey key : dataset.tiles) {
+      const double xMinimum =
+          dataset.grid.origin_x + static_cast<double>(key.column) * dataset.grid.width;
+      const double yMaximum =
+          dataset.grid.origin_y - static_cast<double>(key.row) * dataset.grid.width;
+      const double xMaximum = xMinimum + dataset.grid.width;
+      const double yMinimum = yMaximum - dataset.grid.width;
+      native.insert(
+          native.end(),
+          {{xMinimum, yMinimum}, {xMinimum, yMaximum}, {xMaximum, yMaximum}, {xMaximum, yMinimum}}
+      );
+    }
+    const auto geographic = panorama::transform_coordinates(dataset.epsg_code, 4326U, native);
+    NSMutableArray<MKPolygon *> *polygons = [NSMutableArray arrayWithCapacity:dataset.tiles.size()];
+    for (size_t first = 0; first < geographic.size(); first += 4U) {
+      CLLocationCoordinate2D corners[4];
+      for (size_t corner = 0; corner < 4U; ++corner)
+        corners[corner] =
+            CLLocationCoordinate2DMake(geographic[first + corner].y, geographic[first + corner].x);
+      [polygons addObject:[MKPolygon polygonWithCoordinates:corners count:4U]];
+    }
+    // Separate overlays let overlapping datasets retain their own footprints.
+    [coverageOverlays addObject:[[MKMultiPolygon alloc] initWithPolygons:polygons]];
   }
-  _coverageOverlay = [[MKMultiPolygon alloc] initWithPolygons:coveragePolygons];
+  _coverageOverlays = [coverageOverlays copy];
   [self mapStyleChanged:_mapStyleControl];
 
   _contentVisible = false;
@@ -598,7 +608,8 @@ struct VisibilityMaskRequest {
   _largeMap = false;
 
   if (_coverageVisible) {
-    [_mapView insertOverlay:_coverageOverlay belowOverlay:_visibilityOverlay];
+    for (MKMultiPolygon *overlay in _coverageOverlays)
+      [_mapView insertOverlay:overlay belowOverlay:_visibilityOverlay];
   }
   [self updateCoverageControl];
   [self updateMapFocusControl];
@@ -622,9 +633,10 @@ struct VisibilityMaskRequest {
   (void)sender;
   _coverageVisible = !_coverageVisible;
   if (_coverageVisible) {
-    [_mapView insertOverlay:_coverageOverlay belowOverlay:_visibilityOverlay];
+    for (MKMultiPolygon *overlay in _coverageOverlays)
+      [_mapView insertOverlay:overlay belowOverlay:_visibilityOverlay];
   } else {
-    [_mapView removeOverlay:_coverageOverlay];
+    [_mapView removeOverlays:_coverageOverlays];
   }
   [self updateCoverageControl];
 }
@@ -1114,9 +1126,10 @@ struct VisibilityMaskRequest {
   (void)mapView;
   if (overlay == _visibilityOverlay)
     return _visibilityRenderer;
-  if (overlay == _coverageOverlay) {
+  if ([overlay isKindOfClass:MKMultiPolygon.class] &&
+      [_coverageOverlays containsObject:(MKMultiPolygon *)overlay]) {
     MKMultiPolygonRenderer *renderer =
-        [[MKMultiPolygonRenderer alloc] initWithMultiPolygon:_coverageOverlay];
+        [[MKMultiPolygonRenderer alloc] initWithMultiPolygon:(MKMultiPolygon *)overlay];
     renderer.fillColor = [NSColor.systemRedColor colorWithAlphaComponent:0.22];
     renderer.strokeColor = NSColor.clearColor;
     renderer.lineWidth = 0.0;

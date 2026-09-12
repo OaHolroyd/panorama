@@ -24,12 +24,22 @@
     const panorama::TerrainCoverage &coverage,
     panorama::Coord coordinate
 ) {
-  try {
-    const panorama::TileKey key = panorama::tile_key_at(coverage.grid, coordinate.x, coordinate.y);
-    return std::binary_search(coverage.tiles.begin(), coverage.tiles.end(), key);
-  } catch (const std::out_of_range &) {
-    return false;
+  for (const auto &dataset : coverage.datasets) {
+    try {
+      const auto native = panorama::transform_coordinates(
+                              coverage.datasets.front().epsg_code,
+                              dataset.epsg_code,
+                              std::span(&coordinate, 1U)
+      )
+                              .front();
+      const panorama::TileKey key = panorama::tile_key_at(dataset.grid, native.x, native.y);
+      if (std::binary_search(dataset.tiles.begin(), dataset.tiles.end(), key))
+        return true;
+    } catch (const std::out_of_range &) {
+      // Try the remaining datasets when this point is outside a native grid.
+    }
   }
+  return false;
 }
 
 /// Keep the compact point footer readable without sacrificing useful precision

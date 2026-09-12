@@ -12,17 +12,32 @@ struct MetalBvhStatistics {
   uint64_t peak_bytes = 0U;
   uint64_t budget_bytes = 0U;
   uint64_t builds = 0U;
+  /// Batches share one build submission and one compaction submission.
+  uint64_t tile_build_batches = 0U;
   uint64_t cache_hits = 0U;
   uint64_t evictions = 0U;
   uint64_t catalogue_bytes = 0U;
   uint64_t catalogue_builds = 0U;
   uint64_t instance_builds = 0U;
   uint64_t selection_passes = 0U;
+  uint64_t selection_rays = 0U;
   uint64_t trace_passes = 0U;
   uint64_t submissions = 0U;
   uint64_t scene_builds = 0U;
   uint64_t scene_passes = 0U;
   uint64_t scene_fallback_rays = 0U;
+  // Compacted primary repair dispatches, excluding the initial image pass.
+  uint64_t scene_repair_passes = 0U;
+  uint64_t scene_repair_rays = 0U;
+  uint64_t streaming_rounds = 0U;
+  uint64_t streaming_groups = 0U;
+  uint64_t streaming_rays = 0U;
+  uint64_t lod_plan_changes = 0U;
+  uint64_t lod_sources_changed = 0U;
+  uint64_t scene_catalogue_invalidations = 0U;
+  uint64_t scene_lod_invalidations = 0U;
+  uint64_t scene_admission_invalidations = 0U;
+  uint64_t scene_eviction_invalidations = 0U;
   // Small scene metadata/TLAS overhead, separate from detailed tile storage.
   uint64_t scene_bytes = 0U;
   uint64_t cached_tiles = 0U;
@@ -62,7 +77,8 @@ public:
       Timer &timer
   );
   /// Trace primary rays into the session's ordinary distance/gradient buffers.
-  void trace(const RaytraceParameters &parameters, Timer &timer);
+  /// Resume only after scene_complete() reported missing terrain for this input.
+  void trace(const RaytraceParameters &parameters, Timer &timer, bool resume = false);
   [[nodiscard]] MetalBvhStatistics statistics() const;
 
   /// Encode a resident primary pass without committing or waiting. False
@@ -77,12 +93,14 @@ public:
   bool encode_shadows(id<MTLCommandBuffer> command, double azimuth, double elevation);
   bool shadows_complete();
   /// Load GPU-requested shadow casters into the ordinary BVH cache and retry.
-  /// False means the working set cannot fit; use exact software streaming.
+  /// Transformed/masked sources stream through the BVH if the full set cannot fit.
+  /// False requests the legacy single-grid software fallback.
   /// Primary outputs must be complete and no command may be in flight.
   bool trace_shadows(double azimuth, double elevation, Timer &timer);
   id<MTLBuffer> shadow_visibility() const;
 
 private:
+  bool stream_shadows(double azimuth, double elevation, Timer &timer);
   struct State;
   std::unique_ptr<State> state_;
 };

@@ -1,0 +1,201 @@
+// Frozen exhaustive coverage predicates from 0c759c4. Keep independent of the
+// indexed solver: differential tests must catch changes in Float32 boundaries,
+// crossing coalescing, interval merging, and source ownership.
+inline bool reference_bvh_point_in_polygon(
+    BvhCoveragePolygon polygon,
+    device const BvhCoverageVertex *vertices,
+    float2 point,
+    float coordinate_error
+) {
+  bool inside = false;
+  for (uint index = 0U; index < polygon.vertex_count; ++index) {
+    const BvhCoverageVertex a = vertices[polygon.vertex_offset + index];
+    const BvhCoverageVertex b =
+        vertices[polygon.vertex_offset + ((index + 1U) % polygon.vertex_count)];
+    const float2 start = float2(a.x, a.y);
+    const float2 edge = float2(b.x - a.x, b.y - a.y);
+    const float edge_scale = max(1.0F, max(abs(edge.x), abs(edge.y)));
+    const float along = dot(point - start, edge);
+    if (abs(bvh_cross(edge, point - start)) <= coordinate_error * edge_scale && along >= 0.0F &&
+        along <= dot(edge, edge))
+      return true;
+    const bool straddles = (a.y > point.y) != (b.y > point.y);
+    if (straddles) {
+      const float x = a.x + (point.y - a.y) * edge.x / (b.y - a.y);
+      if (point.x < x)
+        inside = !inside;
+    }
+  }
+  return inside;
+}
+
+inline bool reference_bvh_polygon_bounds(
+    BvhCoveragePolygon polygon,
+    float2 origin,
+    float2 direction,
+    float entry,
+    float exit
+) {
+  return bvh_slab(origin.x, direction.x, polygon.minimum_x, polygon.maximum_x, entry, exit) &&
+         bvh_slab(origin.y, direction.y, polygon.minimum_y, polygon.maximum_y, entry, exit);
+}
+
+/// Find the first horizontal-ray interval inside a coverage polygon. The
+/// perimeter can be slightly non-convex after projection, so this evaluates
+/// its even-odd interior instead of relying on convex half-plane clipping.
+/// The small outward edge tolerance absorbs Float32 arithmetic at long range
+/// but does not bridge a missing source tile.
+inline bool reference_bvh_polygon_interval(
+    BvhCoveragePolygon polygon,
+    device const BvhCoverageVertex *vertices,
+    float2 origin,
+    float2 direction,
+    thread float &entry,
+    thread float &exit
+) {
+  if (polygon.vertex_count < 3U)
+    return false;
+  if (!reference_bvh_polygon_bounds(polygon, origin, direction, entry, exit))
+    return false;
+  const float coordinate_scale =
+      max(max(1.0F, max(abs(origin.x), abs(origin.y))),
+          max(max(abs(polygon.minimum_x), abs(polygon.maximum_x)),
+              max(abs(polygon.minimum_y), abs(polygon.maximum_y))));
+  const float coordinate_error = 8.0F * FLT_EPSILON * coordinate_scale + 1e-4F;
+  // Coalesce crossings at the current position, independently of the query's
+  // far limit. A distant maximum must not erase a short valid near interval.
+  const float distance_error = max(1e-4F, 4.0F * FLT_EPSILON * max(1.0F, abs(entry)));
+  float cursor = entry;
+  for (uint interval = 0U; interval <= polygon.vertex_count; ++interval) {
+    float next = exit;
+    for (uint index = 0U; index < polygon.vertex_count; ++index) {
+      const BvhCoverageVertex a = vertices[polygon.vertex_offset + index];
+      const BvhCoverageVertex b =
+          vertices[polygon.vertex_offset + ((index + 1U) % polygon.vertex_count)];
+      const float2 start = float2(a.x, a.y);
+      const float2 edge = float2(b.x - a.x, b.y - a.y);
+      const float determinant = bvh_cross(direction, edge);
+      if (abs(determinant) <= FLT_MIN)
+        continue;
+      const float2 relative = start - origin;
+      const float distance = bvh_cross(relative, edge) / determinant;
+      const float edge_fraction = bvh_cross(relative, direction) / determinant;
+      if (distance > cursor + distance_error && distance < next && edge_fraction >= 0.0F &&
+          edge_fraction <= 1.0F)
+        next = distance;
+    }
+    if (next > cursor && reference_bvh_point_in_polygon(
+                             polygon,
+                             vertices,
+                             origin + 0.5F * (cursor + next) * direction,
+                             coordinate_error
+                         )) {
+      entry = cursor;
+      exit = next;
+      return true;
+    }
+    if (!(next < exit))
+      return false;
+    cursor = next;
+  }
+  return false;
+}
+
+inline bool reference_bvh_source_interval(
+    BvhCoveragePolygon footprint,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
+    bool ownership_only,
+    float2 origin,
+    float2 direction,
+    thread float &entry,
+    thread float &exit
+) {
+  const uint offset = ownership_only ? footprint.ownership_offset : footprint.coverage_offset;
+  const uint count = ownership_only ? footprint.ownership_count : footprint.coverage_count;
+  const float limit = exit;
+  float cursor = entry;
+  while (cursor < limit) {
+    bool found = false;
+    float nearest = limit, farthest = cursor;
+    for (uint index = 0U; index < count; ++index) {
+      const auto polygon = polygons[offset + index];
+      if (polygon.skip_count != 0U) {
+        if (!reference_bvh_polygon_bounds(polygon, origin, direction, cursor, limit))
+          index += polygon.skip_count;
+        continue;
+      }
+      float start = cursor, end = limit;
+      if (!reference_bvh_polygon_interval(polygon, vertices, origin, direction, start, end))
+        continue;
+      // Merge connected intervals so a tessellated tile does not require a
+      // fresh hardware query at every internal region edge. Disjoint intervals
+      // remain separate so an empty region never acquires a surface.
+      if (found && start <= farthest && end >= nearest) {
+        nearest = min(nearest, start);
+        farthest = max(farthest, end);
+      } else if (!found || start < nearest) {
+        nearest = start;
+        farthest = end;
+      }
+      found = true;
+    }
+    if (!found)
+      return false;
+    if (!ownership_only || footprint.blocker_count == 0U) {
+      entry = nearest;
+      exit = farthest;
+      return true;
+    }
+    // Subtract higher-priority coverage before scheduling a fallback segment.
+    // Otherwise that segment could jump over an untraced primary island.
+    float blocked_until = nearest, first_blocker = farthest;
+    for (uint index = 0; index < footprint.blocker_count; ++index) {
+      const auto polygon = polygons[footprint.blocker_offset + index];
+      if (polygon.skip_count != 0U) {
+        if (!reference_bvh_polygon_bounds(polygon, origin, direction, nearest, farthest))
+          index += polygon.skip_count;
+        continue;
+      }
+      float start = nearest, end = farthest;
+      if (!reference_bvh_polygon_interval(polygon, vertices, origin, direction, start, end))
+        continue;
+      if (start <= nearest)
+        blocked_until = max(blocked_until, end);
+      else
+        first_blocker = min(first_blocker, start);
+    }
+    if (blocked_until > nearest) {
+      if (!(blocked_until > cursor))
+        return false;
+      cursor = blocked_until;
+      continue;
+    }
+    entry = nearest;
+    exit = first_blocker;
+    return exit > entry;
+  }
+  return false;
+}
+
+inline bool reference_bvh_owned_hit(
+    uint source,
+    device const BvhCoveragePolygon *polygons,
+    device const BvhCoverageVertex *vertices,
+    float2 point
+) {
+  const BvhCoveragePolygon footprint = polygons[source];
+  for (uint index = 0; index < footprint.blocker_count; ++index) {
+    const auto blocker = polygons[footprint.blocker_offset + index];
+    if (point.x < blocker.minimum_x || point.x > blocker.maximum_x || point.y < blocker.minimum_y ||
+        point.y > blocker.maximum_y) {
+      index += blocker.skip_count;
+      continue;
+    }
+    if (blocker.skip_count != 0U)
+      continue;
+    if (reference_bvh_point_in_polygon(blocker, vertices, point, 0.0F))
+      return false;
+  }
+  return true;
+}

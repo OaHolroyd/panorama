@@ -2,6 +2,7 @@
 
 #include <ogr_spatialref.h>
 
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,19 @@ constexpr uint32_t kWgs84Epsg = 4326;
   // GDAL 3 honours authority-defined axis order by default. This application
   // uses the conventional GIS order: (longitude, latitude) and (easting,
   // northing), so make it explicit at the GDAL boundary.
+  reference.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+  return reference;
+}
+
+[[nodiscard]] OGRSpatialReference local_aeqd_reference(LatLon anchor) {
+  if (!std::isfinite(anchor.lat) || !std::isfinite(anchor.lon) || anchor.lat < -90.0 ||
+      anchor.lat > 90.0)
+    throw std::invalid_argument("Azimuthal-equidistant anchor is invalid");
+  OGRSpatialReference reference;
+  if (reference.SetWellKnownGeogCS("WGS84") != OGRERR_NONE ||
+      reference.SetAE(anchor.lat, anchor.lon, 0.0, 0.0) != OGRERR_NONE ||
+      reference.SetLinearUnits("metre", 1.0) != OGRERR_NONE)
+    throw std::runtime_error("Could not initialise local azimuthal-equidistant CRS");
   reference.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
   return reference;
 }
@@ -48,7 +62,111 @@ make_transformation(uint32_t source_epsg, uint32_t destination_epsg) {
   return std::unique_ptr<OGRCoordinateTransformation, CoordinateTransformationDeleter>(raw);
 }
 
+[[nodiscard]] std::unique_ptr<OGRCoordinateTransformation, CoordinateTransformationDeleter>
+make_transformation(OGRSpatialReference source, OGRSpatialReference destination) {
+  OGRCoordinateTransformation *raw = OGRCreateCoordinateTransformation(&source, &destination);
+  if (raw == nullptr) {
+    throw std::runtime_error("Could not create coordinate transformation");
+  }
+  return std::unique_ptr<OGRCoordinateTransformation, CoordinateTransformationDeleter>(raw);
+}
+
+[[nodiscard]] std::vector<Coord> transform(
+    OGRCoordinateTransformation &transformation,
+    std::span<const Coord> coordinates,
+    const char *failure
+) {
+  if (coordinates.empty())
+    return {};
+  std::vector<double> xs, ys;
+  xs.reserve(coordinates.size());
+  ys.reserve(coordinates.size());
+  for (const Coord coordinate : coordinates) {
+    xs.push_back(coordinate.x);
+    ys.push_back(coordinate.y);
+  }
+  if (!transformation.Transform(coordinates.size(), xs.data(), ys.data(), nullptr, nullptr))
+    throw std::runtime_error(failure);
+  std::vector<Coord> result;
+  result.reserve(coordinates.size());
+  for (size_t index = 0; index < coordinates.size(); ++index)
+    result.push_back({xs[index], ys[index]});
+  return result;
+}
+
 } // namespace
+
+struct CoordinateTransform::State {
+  std::unique_ptr<OGRCoordinateTransformation, CoordinateTransformationDeleter> transformation;
+};
+
+CoordinateTransform::CoordinateTransform(uint32_t source_epsg, uint32_t destination_epsg)
+    : state_(std::make_unique<State>()) {
+  state_->transformation =
+      make_transformation(spatial_reference(source_epsg), spatial_reference(destination_epsg));
+}
+
+CoordinateTransform::CoordinateTransform(uint32_t source_epsg, LatLon local_aeqd_anchor)
+    : state_(std::make_unique<State>()) {
+  state_->transformation =
+      make_transformation(spatial_reference(source_epsg), local_aeqd_reference(local_aeqd_anchor));
+}
+
+CoordinateTransform::CoordinateTransform(LatLon local_aeqd_anchor, uint32_t destination_epsg)
+    : state_(std::make_unique<State>()) {
+  state_->transformation = make_transformation(
+      local_aeqd_reference(local_aeqd_anchor),
+      spatial_reference(destination_epsg)
+  );
+}
+
+CoordinateTransform::~CoordinateTransform() = default;
+CoordinateTransform::CoordinateTransform(CoordinateTransform &&) noexcept = default;
+CoordinateTransform &CoordinateTransform::operator=(CoordinateTransform &&) noexcept = default;
+
+std::vector<Coord> CoordinateTransform::apply(std::span<const Coord> coordinates) const {
+  if (state_ == nullptr || state_->transformation == nullptr)
+    throw std::logic_error("Coordinate transform has been moved from");
+  return transform(*state_->transformation, coordinates, "Could not transform coordinates");
+}
+
+std::vector<Coord> transform_coordinates(
+    uint32_t source_epsg,
+    uint32_t destination_epsg,
+    std::span<const Coord> coordinates
+) {
+  if (coordinates.empty())
+    return {};
+  if (source_epsg == destination_epsg)
+    return {coordinates.begin(), coordinates.end()};
+  CoordinateTransform transformation(source_epsg, destination_epsg);
+  return transformation.apply(coordinates);
+}
+
+std::vector<Coord> transform_coordinates_to_local_aeqd(
+    uint32_t source_epsg,
+    LatLon anchor,
+    std::span<const Coord> coordinates
+) {
+  CoordinateTransform transformation(source_epsg, anchor);
+  return transformation.apply(coordinates);
+}
+
+std::vector<Coord> transform_coordinates_from_local_aeqd(
+    uint32_t destination_epsg,
+    LatLon anchor,
+    std::span<const Coord> coordinates
+) {
+  CoordinateTransform transformation(anchor, destination_epsg);
+  return transformation.apply(coordinates);
+}
+
+bool epsg_uses_projected_metres(uint32_t epsg_code) {
+  OGRSpatialReference reference = spatial_reference(epsg_code);
+  const char *unit_name = nullptr;
+  const double units = reference.GetLinearUnits(&unit_name);
+  return reference.IsProjected() && std::isfinite(units) && std::abs(units - 1.0) < 1e-12;
+}
 
 // Crs is intentionally a tiny value type. The potentially expensive GDAL
 // transformation is created only for the conversion currently being requested.

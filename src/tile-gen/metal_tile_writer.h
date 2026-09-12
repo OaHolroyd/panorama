@@ -11,7 +11,10 @@ namespace panorama::terrain {
 struct TerrainElevationRange {
   float minimum;
   float maximum;
+  std::optional<TerrainCellCoverage> coverage = std::nullopt;
 };
+
+[[nodiscard]] TerrainCellCoverage terrain_chunk_coverage(const TerrainChunk &chunk);
 
 /// Scan existing payloads when upgrading an old manifest. The caller reuses
 /// one I/O queue across files; no source rasters need to be regenerated.
@@ -30,7 +33,7 @@ struct TerrainElevationRange {
     MetalTileCompression compression
 );
 
-/// Convert one level-0 chunk into a Float32 or fixed-point Metal terrain tile.
+/// Convert one level-0 chunk into a uint16 fixed-point Metal terrain tile.
 ///
 /// The source chunk is north-to-south for conventional GIS writers. This
 /// writer flips it once into atlas order. Uint16 output quantizes onto a global
@@ -44,8 +47,7 @@ struct TerrainElevationRange {
     const DestinationGrid &grid,
     ChunkKey key,
     const SourceGrid &source_grid,
-    MetalTileCompression compression,
-    MetalTileSampleType sample_type
+    MetalTileCompression compression
 );
 
 } // namespace panorama::terrain

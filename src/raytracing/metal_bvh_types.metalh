@@ -25,6 +25,41 @@ struct BvhTile {
   BvhUint lod;
   BvhLong row;
   BvhLong column;
+  BvhUint no_data;
+};
+
+/// Logical-cell affine patch used by transformed catalogue and detail BVHs.
+struct BvhAffinePatch {
+  float origin_x, origin_y;
+  float column_x, column_y;
+  float row_x, row_y;
+  float inverse_xx, inverse_xy;
+  float inverse_yx, inverse_yy;
+  BvhUint minimum_column, minimum_row;
+  BvhUint maximum_column, maximum_row;
+  BvhUint source;
+  float coverage_guard;
+};
+
+/// Vertex range for a transformed source footprint or an owned region.
+/// Perimeters use shared vertices instead of independently fitted affine edges.
+struct BvhCoveragePolygon {
+  BvhUint vertex_offset;
+  BvhUint vertex_count;
+  BvhUint source;
+  /// A bounds-only record skips this many following records on a miss.
+  /// Leaf polygons have zero descendants; list order is preserved.
+  BvhUint skip_count;
+  /// Full footprints reference their owned regions in the same polygon buffer.
+  BvhUint ownership_offset;
+  BvhUint ownership_count;
+  BvhUint coverage_offset, coverage_count;
+  BvhUint blocker_offset, blocker_count;
+  float minimum_x, minimum_y, maximum_x, maximum_y;
+};
+
+struct BvhCoverageVertex {
+  float x, y;
 };
 
 struct BvhBlock {
@@ -33,6 +68,7 @@ struct BvhBlock {
   BvhUint y;
   BvhUint width;
   BvhUint height;
+  BvhUint transform;
 };
 
 struct BvhBounds {
@@ -48,14 +84,20 @@ struct BvhParameters {
   BvhUint source_count;
   BvhUint hash_capacity;
   BvhUint work_count;
+  BvhUint transformed_catalogue;
+  BvhUint coverage_step_limit;
+  BvhUint scene_resume;
+  float catalogue_x, catalogue_y;
 };
 
 /// CPU/GPU continuations. Progress advances to a tile's far XY edge only
 /// after that tile has been traced; cache eviction cannot erase this progress.
 struct BvhRayState {
   float progress;
+  // Streaming tile exit, or provisional closest-hit bound during scene repair.
   float exit;
   BvhUint source;
+  BvhUint primitive;
   BvhUint done;
 };
 
@@ -65,13 +107,17 @@ struct BvhChunk {
   device const uchar *vertices;
   device const BvhBlock *blocks;
   device const BvhBounds *bounds;
+  device const BvhAffinePatch *transforms;
 #else
   BvhUlong vertices;
   BvhUlong blocks;
   BvhUlong bounds;
+  BvhUlong transforms;
 #endif
   BvhTile tile;
   BvhUint source;
+  float vertical_offset;
+  BvhUint transformed;
   BvhUint padding;
 };
 

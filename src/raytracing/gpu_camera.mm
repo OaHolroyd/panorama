@@ -12,8 +12,8 @@
 
 namespace panorama {
 static_assert(sizeof(camera_gpu::Camera) == 100);
-static_assert(sizeof(camera_gpu::Source) == 12);
-static_assert(sizeof(camera_gpu::Lod) == 24);
+static_assert(sizeof(camera_gpu::Source) == 24);
+static_assert(sizeof(camera_gpu::Lod) == 16);
 static_assert(sizeof(RayDirection) == 20);
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -86,6 +86,26 @@ bool same_projection(const RayFieldRequest &a, const RayFieldRequest &b) {
   std::fill_n(x.up, 3, 0);
   std::fill_n(y.up, 3, 0);
   return std::memcmp(&x, &y, sizeof(x)) == 0;
+}
+
+void apply_render_basis(
+    camera_gpu::Camera &camera,
+    const TerrainCatalogue &catalogue,
+    ObserverLocation observer
+) {
+  const auto basis = catalogue.render_basis({observer.easting, observer.northing});
+  if (camera.angular) {
+    camera.forward[0] = checked_float(basis[1].x);
+    camera.forward[1] = checked_float(basis[1].y);
+    camera.right[0] = checked_float(basis[0].x);
+    camera.right[1] = checked_float(basis[0].y);
+    return;
+  }
+  for (float *axis : {camera.forward, camera.right, camera.up}) {
+    const double x = axis[0], y = axis[1];
+    axis[0] = checked_float(basis[0].x * x + basis[1].x * y);
+    axis[1] = checked_float(basis[0].y * x + basis[1].y * y);
+  }
 }
 } // namespace
 
@@ -191,22 +211,49 @@ GpuCamera::GpuCamera(
   s.footprint = pipeline(@"camera_pixel_footprint");
   s.reduce = pipeline(@"reduce_camera_footprint");
   s.lod = pipeline(@"select_camera_lods");
-  const auto &grid = tiles.catalogue().grid();
+  const auto &catalogue = tiles.catalogue();
+  const auto &grid = catalogue.grid();
   const auto origin = tiles.sources().front().key;
-  s.anchor_x = grid.origin_x + double(origin.column) * grid.width;
-  s.anchor_y = grid.origin_y - (double(origin.row) + 1) * grid.width;
-  s.settings = {0,
-                0,
-                checked_float(grid.width),
-                checked_float(tiles.origin_geometry().cell_size),
-                0,
-                static_cast<uint32_t>(tiles.sources().size())};
+  if (catalogue.datasets().empty()) {
+    s.anchor_x = grid.origin_x + double(origin.column) * grid.width;
+    s.anchor_y = grid.origin_y - (double(origin.row) + 1) * grid.width;
+  } else {
+    const Coord rendered =
+        catalogue.render_coordinate({catalogue.observer().easting, catalogue.observer().northing});
+    s.anchor_x = rendered.x;
+    s.anchor_y = rendered.y;
+  }
+  s.settings = {0, 0, 0, static_cast<uint32_t>(tiles.sources().size())};
   s.sources = s.buffer(tiles.sources().size() * sizeof(camera_gpu::Source), @"GPU LOD sources");
   auto *sources = static_cast<camera_gpu::Source *>(s.sources.contents);
   for (size_t i = 0; i < tiles.sources().size(); ++i) {
     const auto &source = tiles.sources()[i];
-    sources[i] = {checked_float((double(source.key.column) - double(origin.column)) * grid.width),
-                  checked_float((double(origin.row) - double(source.key.row)) * grid.width),
+    if (source.transform_patches.empty()) {
+      const double x = grid.origin_x + double(source.key.column) * grid.width;
+      const double y = grid.origin_y - (double(source.key.row) + 1) * grid.width;
+      sources[i] = {checked_float(x - s.anchor_x),
+                    checked_float(y - s.anchor_y),
+                    checked_float(x + grid.width - s.anchor_x),
+                    checked_float(y + grid.width - s.anchor_y),
+                    checked_float(tiles.origin_geometry().cell_size),
+                    source.lod_count};
+      continue;
+    }
+    double minimum_x = std::numeric_limits<double>::infinity();
+    double minimum_y = std::numeric_limits<double>::infinity();
+    double maximum_x = -std::numeric_limits<double>::infinity();
+    double maximum_y = -std::numeric_limits<double>::infinity();
+    for (const auto &patch : source.transform_patches) {
+      minimum_x = std::min(minimum_x, patch.transform.bounds[0]);
+      minimum_y = std::min(minimum_y, patch.transform.bounds[1]);
+      maximum_x = std::max(maximum_x, patch.transform.bounds[2]);
+      maximum_y = std::max(maximum_y, patch.transform.bounds[3]);
+    }
+    sources[i] = {checked_float(minimum_x - s.anchor_x),
+                  checked_float(minimum_y - s.anchor_y),
+                  checked_float(maximum_x - s.anchor_x),
+                  checked_float(maximum_y - s.anchor_y),
+                  checked_float(source.effective_cell_size_metres),
                   source.lod_count};
   }
   s.angle = s.buffer(sizeof(float), @"GPU pixel footprint");
@@ -228,6 +275,7 @@ void GpuCamera::prepare(
   if (&tiles != s.owner || !std::isfinite(scale) || scale < 0)
     throw std::invalid_argument("GPU LOD plan belongs to a different catalogue or invalid scale");
   s.camera = uniforms(camera);
+  apply_render_basis(s.camera, tiles.catalogue(), observer);
   const bool footprint_changed = !s.footprint_valid || !same_projection(camera, s.cached);
   const bool plan_changed = footprint_changed || !s.plan_valid || scale != s.cached_scale ||
                             observer.easting != s.cached_observer.easting ||
@@ -237,8 +285,11 @@ void GpuCamera::prepare(
     s.plan_valid = false;
     if (footprint_changed)
       s.footprint_valid = false;
-    s.settings.observer_x = checked_float(observer.easting - s.anchor_x);
-    s.settings.observer_y = checked_float(observer.northing - s.anchor_y);
+    Coord rendered{observer.easting, observer.northing};
+    if (!tiles.catalogue().datasets().empty())
+      rendered = tiles.catalogue().render_coordinate(rendered);
+    s.settings.observer_x = checked_float(rendered.x - s.anchor_x);
+    s.settings.observer_y = checked_float(rendered.y - s.anchor_y);
     s.settings.scale = scale;
     auto command = [s.queue commandBuffer];
     if (command == nil)

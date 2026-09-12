@@ -1,4 +1,3 @@
-#include "geotiff_writer.h"
 #include "metal_tile_writer.h"
 #include "rechunker.h"
 #include "source_catalogue.h"
@@ -27,12 +26,6 @@
 namespace panorama::terrain {
 namespace {
 
-/// File representation selected for prepared terrain chunks.
-enum class OutputFormat {
-  GeoTiff,
-  MetalTile,
-};
-
 /// Fully parsed command-line configuration for one terrain-preparation run.
 struct Options {
   std::filesystem::path input_directory;
@@ -50,12 +43,8 @@ struct Options {
   uint32_t max_tiles = 0U;
   bool overwrite = false;
   bool dry_run = false;
-  OutputFormat format = OutputFormat::GeoTiff;
   MetalTileCompression compression = MetalTileCompression::Lz4;
-  MetalTileSampleType sample_type = MetalTileSampleType::Float32;
   LodSampling lod_sampling = LodSampling::None;
-  bool explicit_compression = false;
-  bool explicit_sample_type = false;
 };
 
 /// Print the stable command-line contract without constructing any GDAL state.
@@ -65,7 +54,7 @@ void print_usage(const char *program) {
       "\n"
       "Prepare DTM rasters for GPU terrain tracing. The input directory is scanned\n"
       "recursively for GeoTIFF, raw SRTM HGT, Arc/Info ASC, and ZIP-contained ASC\n"
-      "files, then rechunked into aligned GeoTIFF or Metal tiles without reprojection\n"
+      "files, then rechunked into aligned uint16 Metal tiles without reprojection\n"
       "or resampling. ZIP archives are read directly without extraction.\n"
       "\n"
       "All inputs must share one projected or geographic CRS, resolution, pixel\n"
@@ -79,34 +68,21 @@ void print_usage(const char *program) {
       "  --output DIR        output directory (default: below data/)\n"
       "  --name NAME         output filename prefix (default: input directory name)\n"
       "  --power N           2^N cells per tile (default: 10)\n"
-      "  --tile-cells N      arbitrary positive cell count instead of --power\n"
-      "  --layout NAME       level-0 or level-1 (default: level-0)\n"
+      "  --tile-cells N      power-of-two cell count instead of --power\n"
+      "  --layout NAME       level-0 (the supported tile layout)\n"
       "  --origin-x X        destination grid western origin (default: 0)\n"
       "  --origin-y Y        destination grid northern origin (default: 0)\n"
       "  --resolution R      output spacing (default: source resolution)\n"
-      "  --nodata VALUE      output no-data value, including nan (default: 0)\n"
-      "  --format NAME       geotiff or metal (default: geotiff)\n"
-      "  --sample-type NAME  float32 or uint16 (Metal tiles; default: float32)\n"
-      "  --lod NAME          none, point, mean, or max (Metal tiles; default: none)\n"
+      "  --nodata VALUE      finite output no-data fill value (default: 0)\n"
+      "  --lod NAME          none, point, mean, or max (default: none)\n"
       "  --compression NAME  none, zlib, lz4, lzma, or lzbitmap\n"
-      "                      (Metal tiles only; default: lz4)\n"
+      "                      (default: lz4)\n"
       "  --max-tiles N       stop after N output chunks; zero is unlimited\n"
       "  --overwrite         replace existing output chunks\n"
       "  --dry-run           inspect metadata and report the plan without writing\n"
       "  --help              show this help\n",
       program
   );
-}
-
-/// Parse the scalar representation stored in a Metal tile payload.
-[[nodiscard]] MetalTileSampleType parse_sample_type(std::string_view text) {
-  if (text == "float32") {
-    return MetalTileSampleType::Float32;
-  }
-  if (text == "uint16") {
-    return MetalTileSampleType::Uint16Decimeters;
-  }
-  throw std::invalid_argument("Sample type must be float32 or uint16");
 }
 
 /// Parse one codec supported by Metal's compressed-file I/O implementation.
@@ -142,11 +118,6 @@ void print_usage(const char *program) {
   throw std::invalid_argument("LOD method must be none, point, mean, or max");
 }
 
-/// Return the human-readable output representation used in progress reports.
-[[nodiscard]] const char *format_name(OutputFormat format) {
-  return format == OutputFormat::GeoTiff ? "GeoTIFF" : "Metal tile";
-}
-
 /// Return the command-line spelling used in default output directory names.
 [[nodiscard]] const char *compression_name(MetalTileCompression compression) {
   switch (compression) {
@@ -179,13 +150,13 @@ void print_usage(const char *program) {
   throw std::logic_error("Unknown LOD sampling method");
 }
 
-/// Parse a Float32 output sentinel, allowing NaN for collision-free no-data.
-[[nodiscard]] float parse_float_or_nan(std::string_view text, const char *name) {
+/// Parse a finite output fill value before quantization.
+[[nodiscard]] float parse_finite_float(std::string_view text, const char *name) {
   const std::string owned(text);
   char *end = nullptr;
   errno = 0;
   const float value = std::strtof(owned.c_str(), &end);
-  if (errno != 0 || end == owned.c_str() || *end != '\0' || std::isinf(value)) {
+  if (errno != 0 || end == owned.c_str() || *end != '\0' || !std::isfinite(value)) {
     throw std::invalid_argument(std::string("Invalid ") + name + ": " + owned);
   }
   return value;
@@ -254,22 +225,9 @@ void validate_dataset_name(const std::string &name) {
       );
     } else if (option == "--nodata") {
       options.no_data =
-          parse_float_or_nan(arguments::option_value(argc, argv, index, option), "no-data value");
-    } else if (option == "--format") {
-      const std::string_view format = arguments::option_value(argc, argv, index, option);
-      if (format == "geotiff") {
-        options.format = OutputFormat::GeoTiff;
-      } else if (format == "metal") {
-        options.format = OutputFormat::MetalTile;
-      } else {
-        throw std::invalid_argument("Format must be geotiff or metal");
-      }
+          parse_finite_float(arguments::option_value(argc, argv, index, option), "no-data value");
     } else if (option == "--compression") {
       options.compression = parse_compression(arguments::option_value(argc, argv, index, option));
-      options.explicit_compression = true;
-    } else if (option == "--sample-type") {
-      options.sample_type = parse_sample_type(arguments::option_value(argc, argv, index, option));
-      options.explicit_sample_type = true;
     } else if (option == "--lod") {
       options.lod_sampling = parse_lod_sampling(arguments::option_value(argc, argv, index, option));
     } else if (option == "--max-tiles") {
@@ -305,23 +263,11 @@ void validate_dataset_name(const std::string &name) {
   if (options.resolution < 0.0) {
     throw std::invalid_argument("Resolution must be positive");
   }
-  if (options.format == OutputFormat::GeoTiff && options.explicit_compression) {
-    throw std::invalid_argument("--compression applies only to --format metal");
-  }
-  if (options.format == OutputFormat::GeoTiff && options.explicit_sample_type) {
-    throw std::invalid_argument("--sample-type applies only to --format metal");
-  }
-  if (options.format == OutputFormat::GeoTiff && options.lod_sampling != LodSampling::None) {
-    throw std::invalid_argument("--lod applies only to --format metal");
-  }
-  if (options.format == OutputFormat::MetalTile && options.layout != RasterLayout::Level0) {
+  if (options.layout != RasterLayout::Level0) {
     throw std::invalid_argument("Metal tiles currently support only --layout level-0");
   }
-  if (options.format == OutputFormat::MetalTile && !std::has_single_bit(options.tile_cell_count)) {
+  if (!std::has_single_bit(options.tile_cell_count)) {
     throw std::invalid_argument("Metal tiles require a power-of-two cell count");
-  }
-  if (options.format == OutputFormat::MetalTile && !std::isfinite(options.no_data)) {
-    throw std::invalid_argument("Metal tiles require a finite --nodata value");
   }
   return options;
 }
@@ -360,15 +306,11 @@ int main(int argc, const char *argv[]) {
     if (options.output_directory.empty()) {
       std::string directory_name = options.dataset_name + "-" + directory_size_name(options) + "-" +
                                    layout_name(options.layout);
-      if (options.format == OutputFormat::MetalTile) {
-        directory_name += options.sample_type == panorama::MetalTileSampleType::Float32
-                              ? "-metal-"
-                              : "-metal-u16-";
-        directory_name += compression_name(options.compression);
-        if (options.lod_sampling != LodSampling::None) {
-          directory_name += "-lod-";
-          directory_name += lod_sampling_name(options.lod_sampling);
-        }
+      directory_name += "-metal-u16-";
+      directory_name += compression_name(options.compression);
+      if (options.lod_sampling != LodSampling::None) {
+        directory_name += "-lod-";
+        directory_name += lod_sampling_name(options.lod_sampling);
       }
       options.output_directory = std::filesystem::path("data") / directory_name;
     }
@@ -397,7 +339,7 @@ int main(int argc, const char *argv[]) {
         "Discovered %zu DEM rasters below %s.\n"
         "  CRS        : %s\n"
         "  Resolution : %.12g\n"
-        "  Output     : %u cells, %u samples (%s, %s%s%s)\n"
+        "  Output     : %u cells, %u samples (%s, uint16 Metal tile%s%s)\n"
         "  Directory  : %s\n"
         "  Candidates : %zu chunks\n",
         catalogue.sources().size(),
@@ -407,7 +349,6 @@ int main(int argc, const char *argv[]) {
         destination.tile_cell_count,
         sample_side(destination),
         layout_name(destination.layout),
-        format_name(options.format),
         options.lod_sampling == LodSampling::None ? "" : ", LOD ",
         options.lod_sampling == LodSampling::None ? "" : lod_sampling_name(options.lod_sampling),
         options.output_directory.c_str(),
@@ -423,7 +364,7 @@ int main(int argc, const char *argv[]) {
     id<MTLIOCommandQueue> manifest_queue = nil;
     const std::filesystem::path manifest =
         panorama::terrain_manifest_path(options.output_directory);
-    if (options.format == OutputFormat::MetalTile && std::filesystem::exists(manifest)) {
+    if (std::filesystem::exists(manifest)) {
       for (const panorama::TerrainManifestEntry &entry :
            panorama::read_terrain_manifest(manifest)) {
         if (!previous_maximum_by_key.emplace(ChunkKey{entry.row, entry.column}, entry).second) {
@@ -434,44 +375,40 @@ int main(int argc, const char *argv[]) {
 
     // The manifest is acceleration metadata: an interrupted update must leave
     // it absent, never silently stale relative to an already replaced tile.
-    if (options.format == OutputFormat::MetalTile) {
-      std::filesystem::remove(manifest);
-    }
+    std::filesystem::remove(manifest);
     std::vector<panorama::TerrainManifestEntry> manifest_entries;
     uint32_t written = 0U;
     uint32_t skipped = 0U;
     uint32_t partial = 0U;
     uint32_t empty = 0U;
     for (const auto &[key, contributors] : plan.contributors) {
-      const std::filesystem::path output =
-          options.format == OutputFormat::GeoTiff
-              ? geotiff_chunk_path(options.output_directory, options.dataset_name, destination, key)
-              : metal_tile_chunk_path(
-                    options.output_directory,
-                    options.dataset_name,
-                    destination,
-                    key,
-                    options.compression
-                );
+      const std::filesystem::path output = metal_tile_chunk_path(
+          options.output_directory,
+          options.dataset_name,
+          destination,
+          key,
+          options.compression
+      );
       if (std::filesystem::exists(output) && !options.overwrite) {
         if (options.max_tiles != 0U && written + skipped >= options.max_tiles) {
           break;
         }
-        if (options.format == OutputFormat::MetalTile) {
-          const auto previous = previous_maximum_by_key.find(key);
-          if (previous != previous_maximum_by_key.end() &&
-              previous->second.minimum_elevation.has_value()) {
-            manifest_entries.push_back(previous->second);
-          } else {
-            if (manifest_device == nil) {
-              manifest_device = MTLCreateSystemDefaultDevice();
-              manifest_queue = panorama::make_metal_io_queue(manifest_device);
-            }
-            @autoreleasepool {
-              const auto range =
-                  read_metal_tile_elevation_range(output, manifest_device, manifest_queue);
-              manifest_entries.push_back({key.row, key.column, range.maximum, range.minimum});
-            }
+        const auto previous = previous_maximum_by_key.find(key);
+        if (previous != previous_maximum_by_key.end() &&
+            previous->second.minimum_elevation.has_value() &&
+            previous->second.coverage.has_value()) {
+          manifest_entries.push_back(previous->second);
+        } else {
+          if (manifest_device == nil) {
+            manifest_device = MTLCreateSystemDefaultDevice();
+            manifest_queue = panorama::make_metal_io_queue(manifest_device);
+          }
+          @autoreleasepool {
+            const auto range =
+                read_metal_tile_elevation_range(output, manifest_device, manifest_queue);
+            manifest_entries.push_back(
+                {key.row, key.column, range.maximum, range.minimum, range.coverage}
+            );
           }
         }
         skipped++;
@@ -480,11 +417,10 @@ int main(int argc, const char *argv[]) {
 
       const TerrainChunk chunk =
           build_chunk(catalogue, plan, key, contributors, options.lod_sampling);
-      const bool has_coverage =
-          std::any_of(chunk.covered.begin(), chunk.covered.end(), [](uint8_t value) {
-            return value != 0U;
-          });
+      const bool has_coverage = !terrain_chunk_coverage(chunk).rectangles.empty();
       if (!has_coverage) {
+        if (options.overwrite)
+          std::filesystem::remove(output);
         empty++;
         continue;
       }
@@ -499,29 +435,22 @@ int main(int argc, const char *argv[]) {
         partial++;
       }
 
-      // Phase three consumes the same format-neutral chunk. GeoTIFF preserves
-      // conventional GIS row order; the Metal writer converts once into the
-      // exact atlas representation used by the renderer.
-      if (options.format == OutputFormat::GeoTiff) {
-        write_geotiff_chunk(output, chunk, destination, key, catalogue.grid());
-      } else {
-        const auto range = write_metal_tile_chunk(
-            output,
-            chunk,
-            destination,
-            key,
-            catalogue.grid(),
-            options.compression,
-            options.sample_type
-        );
-        manifest_entries.push_back({key.row, key.column, range.maximum, range.minimum});
-      }
+      // Phase three converts the source row order into the atlas representation.
+      const auto range = write_metal_tile_chunk(
+          output,
+          chunk,
+          destination,
+          key,
+          catalogue.grid(),
+          options.compression
+      );
+      manifest_entries.push_back(
+          {key.row, key.column, range.maximum, range.minimum, range.coverage}
+      );
       written++;
     }
 
-    if (options.format == OutputFormat::MetalTile) {
-      panorama::write_terrain_manifest(manifest, manifest_entries);
-    }
+    panorama::write_terrain_manifest(manifest, manifest_entries);
 
     std::printf(
         "Finished: %u written, %u already present, %u partial chunks, %u empty chunks skipped.\n",

@@ -13,6 +13,8 @@ kernel void convert_quantized_vertices(
     constant uint &elevation_base_offset [[buffer(5)]],
     constant uint &vertex_count [[buffer(6)]],
     constant uint &tile_count [[buffer(7)]],
+    constant uint &no_data_offset [[buffer(8)]],
+    constant uint &destination_stride [[buffer(9)]],
     uint2 output_index [[thread_position_in_grid]]
 ) {
   if (output_index.x >= vertex_count || output_index.y >= tile_count) {
@@ -23,8 +25,11 @@ kernel void convert_quantized_vertices(
   device const int *base = reinterpret_cast<device const int *>(record + elevation_base_offset);
   device const ushort *vertices = reinterpret_cast<device const ushort *>(record + vertex_offset);
   const uint slot = destination_slots[output_index.y];
-  destination[slot * vertex_count + output_index.x] =
-      (float(*base) + float(vertices[output_index.x])) * 0.1F;
+  destination[slot * destination_stride + output_index.x] =
+      (*reinterpret_cast<device const uint *>(record + no_data_offset) &&
+       vertices[output_index.x] == 0U)
+          ? NAN
+          : (float(*base) + float(vertices[output_index.x])) * 0.1F;
 }
 
 /// Shared traversal specialized at compile time for Float32 or uint16 terrain.
@@ -210,8 +215,10 @@ inline float trace_tile_frontier_impl(
     const uint cell_index =
         offset + (uint(i) >> (level - 1U)) * level_side + (uint(j) >> (level - 1U));
 
-    // Collision check
-    if (z <= sample_elevation(mipmap[cell_index], base_decimeters)) {
+    // Missing cells contain no terrain; advance the DDA through them normally.
+    if (z <= sample_elevation(mipmap[cell_index], base_decimeters) &&
+        (level != 1U ||
+         valid_cell(vertices, vertex_count, uint(j), uint(i), resident_tile.no_data))) {
       if (level == 1) {
         // Finest level collision check. Restrict the bilinear root search to this cell's
         // actual DDA interval, including its near boundary.
@@ -257,8 +264,12 @@ inline float trace_tile_frontier_impl(
           num_evaluations[output_index] += 1.0F;
         }
 
-        // Exit only after the exact patch test confirms a hit.
-        if (collision.hit) {
+        // The triangle solver is not given the far interval boundary. Reject
+        // roots beyond this cell or the configured range, matching BVH queries.
+        const float range_guard = 8.0F * FLT_EPSILON * max(1.0F, interval_end);
+        if (collision.hit && collision.distance >= interval_start - range_guard &&
+            collision.distance <= interval_end + range_guard) {
+          collision.distance = clamp(collision.distance, interval_start, interval_end);
           if (shadow_trace) {
             visibility[output_index] = 0U;
           } else {
@@ -269,7 +280,14 @@ inline float trace_tile_frontier_impl(
                 curved_ray_elevation(observer_elevation, dz, curvature, collision.distance);
           }
           if (!shadow_trace && compute_surface_gradients) {
-            if (use_c1_normals && (i >= 1 && j >= 1 && i < n - 1 && j < n - 1)) {
+            if (use_c1_normals && (i >= 1 && j >= 1 && i < n - 1 && j < n - 1) &&
+                valid_normal_stencil(
+                    vertices,
+                    vertex_count,
+                    uint(j),
+                    uint(i),
+                    resident_tile.no_data
+                )) {
               surface_gradients[output_index] = interpolated_packed_surface_gradients(
                   vertices,
                   vertex_count,
@@ -382,7 +400,7 @@ inline float trace_tile_frontier_impl(
     }
 
     // Go up to a coarser level whenever possible
-    if (level < params.num_levels) {
+    if (level < num_levels) {
       if (ty < tx) {
         if (at_level_boundary(i, stepy, scale)) {
           // Crossing a Y boundary joins two vertically adjacent blocks. The
@@ -553,16 +571,40 @@ kernel void initialise_shadow_rays(
   const float z = elevations[ray_index] + horizontal_bias * sun.slope + vertical_bias;
   shadow_rays[ray_index].origin = float4(x, y, z, 0.0F);
 
-  const long column = long(floor((x - params.grid_x_min) / params.tile_width));
-  const long row = long(floor((params.grid_y_max - y) / params.tile_width));
-  device const CatalogueTileHashEntry *source =
-      lookup_catalogue_tile(catalogue_hash, params.catalogue_hash_capacity, row, column);
-  if (source == nullptr) {
-    return;
-  }
-  const uint output = atomic_fetch_add_explicit(deferred_count, 1U, memory_order_relaxed);
-  if (output < params.trace.ray_count) {
-    deferred_items[output] = {ray_index, source->source_index, 0.0F};
+  long column = long(floor((x - params.grid_x_min) / params.tile_width));
+  long row = long(floor((params.grid_y_max - y) / params.tile_width));
+  float entry = 0.0F;
+  while (entry < params.trace.max_distance) {
+    device const CatalogueTileHashEntry *source =
+        lookup_catalogue_tile(catalogue_hash, params.catalogue_hash_capacity, row, column);
+    if (source != nullptr) {
+      const uint output = atomic_fetch_add_explicit(deferred_count, 1U, memory_order_relaxed);
+      if (output < params.trace.ray_count)
+        deferred_items[output] = {ray_index, source->source_index, entry};
+      return;
+    }
+    // The self-shadow bias can place the origin in an empty neighbouring tile.
+    // Find the next known source rather than declaring the entire ray clear.
+    const float tile_x = params.grid_x_min + float(column) * params.tile_width;
+    const float tile_y = params.grid_y_max - float(row + 1L) * params.tile_width;
+    const float next = tile_exit_distance(
+        tile_x - x,
+        tile_y - y,
+        params.tile_width,
+        1U,
+        float4(sun.x, sun.y, sun.inverse_x, sun.inverse_y),
+        entry
+    );
+    if (!isfinite(next) || !(next > entry) || next >= params.trace.max_distance)
+      return;
+    const float nudge =
+        max(1e-3F * params.trace.cell_size,
+            8.0F * FLT_EPSILON * max(1.0F, max(abs(x), abs(y)) + next));
+    const float next_x = x + next * sun.x + (sun.x == 0 ? 0 : copysign(nudge, sun.x));
+    const float next_y = y + next * sun.y + (sun.y == 0 ? 0 : copysign(nudge, sun.y));
+    column = long(floor((next_x - params.grid_x_min) / params.tile_width));
+    row = long(floor((params.grid_y_max - next_y) / params.tile_width));
+    entry = next;
   }
 }
 
@@ -722,9 +764,6 @@ kernel void emit_tile_frontier(
 
     device const CatalogueTileHashEntry *source =
         lookup_catalogue_tile(catalogue_hash, catalogue_hash_capacity, tile_row, tile_column);
-    if (source == nullptr) {
-      break;
-    }
     const float elevation_at_entry = curved_ray_elevation(
         params.observer_elevation,
         ray.slope,
@@ -747,6 +786,15 @@ kernel void emit_tile_frontier(
         float4(ray.x, ray.y, ray.inverse_x, ray.inverse_y),
         entry_distance
     );
+    // No catalogue entry means confirmed empty space, not a loading request.
+    // Keep walking the grid until known terrain or the configured range.
+    if (source == nullptr) {
+      if (!isfinite(exit_distance) || !(exit_distance > entry_distance) ||
+          exit_distance >= params.max_distance)
+        break;
+      entry_distance = exit_distance;
+      continue;
+    }
     const float stationary_distance = params.curvature_coefficient > 0.0F
                                           ? -ray.slope / (2.0F * params.curvature_coefficient)
                                           : (ray.slope >= 0.0F ? -INFINITY : INFINITY);
@@ -843,9 +891,6 @@ kernel void emit_shadow_tile_frontier(
         tile_row,
         tile_column
     );
-    if (source == nullptr) {
-      break;
-    }
     const float elevation_at_entry =
         curved_ray_elevation(origin.z, ray.slope, params.curvature_coefficient, entry_distance);
     const float elevation_derivative =
@@ -863,6 +908,15 @@ kernel void emit_shadow_tile_frontier(
         float4(ray.x, ray.y, ray.inverse_x, ray.inverse_y),
         entry_distance
     );
+    // No catalogue entry means confirmed empty space, not a loading request.
+    // Keep walking the grid until known terrain or the configured range.
+    if (source == nullptr) {
+      if (!isfinite(exit_distance) || !(exit_distance > entry_distance) ||
+          exit_distance >= params.max_distance)
+        break;
+      entry_distance = exit_distance;
+      continue;
+    }
     const float stationary_distance = params.curvature_coefficient > 0.0F
                                           ? -ray.slope / (2.0F * params.curvature_coefficient)
                                           : (ray.slope >= 0.0F ? -INFINITY : INFINITY);

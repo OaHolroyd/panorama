@@ -3,6 +3,8 @@
 // Metal Shading Language provides GPU-specific types and functions in this
 // namespace, including `uint`, `device`, and the `kernel` entry-point keyword.
 using namespace metal;
+inline float mipmap_sample(float value) { return isfinite(value) ? value : -INFINITY; }
+inline ushort mipmap_sample(ushort value) { return value; }
 
 /// Build four adjacent level-1 cells and their level-2 parent from one 3×3
 /// vertex patch.
@@ -34,15 +36,15 @@ inline void build_initial_maximum_mipmap_levels_impl(
   const uint row_0 = source_y * source_side + source_x;
   const uint row_1 = row_0 + source_side;
   const uint row_2 = row_1 + source_side;
-  const Sample value_00 = source[row_0];
-  const Sample value_01 = source[row_0 + 1U];
-  const Sample value_02 = source[row_0 + 2U];
-  const Sample value_10 = source[row_1];
-  const Sample value_11 = source[row_1 + 1U];
-  const Sample value_12 = source[row_1 + 2U];
-  const Sample value_20 = source[row_2];
-  const Sample value_21 = source[row_2 + 1U];
-  const Sample value_22 = source[row_2 + 2U];
+  const Sample value_00 = mipmap_sample(source[row_0]);
+  const Sample value_01 = mipmap_sample(source[row_0 + 1U]);
+  const Sample value_02 = mipmap_sample(source[row_0 + 2U]);
+  const Sample value_10 = mipmap_sample(source[row_1]);
+  const Sample value_11 = mipmap_sample(source[row_1 + 1U]);
+  const Sample value_12 = mipmap_sample(source[row_1 + 2U]);
+  const Sample value_20 = mipmap_sample(source[row_2]);
+  const Sample value_21 = mipmap_sample(source[row_2 + 1U]);
+  const Sample value_22 = mipmap_sample(source[row_2 + 2U]);
 
   const Sample maximum_00 = max(max(value_00, value_01), max(value_10, value_11));
   const Sample maximum_01 = max(max(value_01, value_02), max(value_11, value_12));

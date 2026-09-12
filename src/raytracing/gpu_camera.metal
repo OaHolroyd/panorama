@@ -64,7 +64,10 @@ kernel void generate_camera_rays(
   if (camera.angular) {
     const float azimuth = camera.azimuth_start + pixel.x * camera.azimuth_step;
     const float elevation = camera.elevation_start + pixel.y * camera.elevation_step;
-    const float x = sin(azimuth), y = cos(azimuth), slope = tan(elevation);
+    const float2 east(camera.right[0], camera.right[1]);
+    const float2 north(camera.forward[0], camera.forward[1]);
+    const float2 horizontal = sin(azimuth) * east + cos(azimuth) * north;
+    const float x = horizontal.x, y = horizontal.y, slope = tan(elevation);
     if (!isfinite(slope))
       atomic_fetch_or_explicit(invalid, 1U, memory_order_relaxed);
     rays[index] = {x,
@@ -182,10 +185,13 @@ kernel void select_camera_lods(
   if (index >= settings.count)
     return;
   const Source source = sources[index];
-  const float2 origin =
-      float2(source.x, source.y) - float2(settings.observer_x, settings.observer_y);
-  const float2 nearest = clamp(float2(0), origin, origin + settings.tile_width);
-  const float ratio = settings.scale * length(nearest) * angle[0] / settings.cell_size;
+  const float2 observer(settings.observer_x, settings.observer_y);
+  const float2 nearest = clamp(
+      observer,
+      float2(source.minimum_x, source.minimum_y),
+      float2(source.maximum_x, source.maximum_y)
+  );
+  const float ratio = settings.scale * distance(nearest, observer) * angle[0] / source.cell_size;
   uint lod = 1;
   // Comparing powers of two avoids log2 rounding up just below a threshold.
   float spacing = 2;

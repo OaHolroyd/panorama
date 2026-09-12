@@ -30,6 +30,7 @@ GpuTerrainFrameTiming render_terrain_frame(
     const RayFieldRequest *field,
     GpuImageRenderer &image,
     const TerrainPresentationSettings &settings,
-    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent = {}
+    const std::function<void(id<MTLCommandBuffer>)> &encode_dependent = {},
+    float lod_footprint_scale = 1.0F
 );
 } // namespace panorama
