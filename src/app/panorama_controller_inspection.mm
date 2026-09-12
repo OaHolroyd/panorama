@@ -522,22 +522,51 @@
 /// Compact projected coordinates are more useful here than place names: they
 /// update immediately during movement and match the terrain dataset's grid.
 - (void)updateMiniMapTelemetry {
+  // find heading and cardinal direction
+  double heading = std::fmod(_orientation.heading * panorama::app::kRadiansToDegrees, 360.0);
+  if (heading < 0.0) {
+    heading += 360.0;
+  }
+  static const char *directions[] = {
+      "N",
+      "NNE",
+      "NE",
+      "ENE",
+      "E",
+      "ESE",
+      "SE",
+      "SSE",
+      "S",
+      "SSW",
+      "SW",
+      "WSW",
+      "W",
+      "WNW",
+      "NW",
+      "NNW",
+  };
+  const char *direction = directions[(int)((heading + 11.25) / 22.5) % 16];
+
   if (!_pointInspectionEnabled || _observerInfoLabel == nil) {
     return;
   }
   _observerInfoLabel.stringValue =
-      [NSString stringWithFormat:@"Observer  E %.0f • N %.0f\n%.1f m AGL • %.0f m AMSL",
+      [NSString stringWithFormat:@"Observer  E %.0f • N %.0f • %s %.0f°\n%.1f m AGL • %.0f m AMSL",
                                  _observer.easting,
                                  _observer.northing,
+                                 direction,
+                                 heading,
                                  _groundClearance,
                                  _observer.elevation];
-  _observerInfoLabel.toolTip =
-      [NSString stringWithFormat:@"Observer: easting %.1f m, northing %.1f m, %.1f m above ground, "
-                                  "%.1f m above mean sea level",
-                                 _observer.easting,
-                                 _observer.northing,
-                                 _groundClearance,
-                                 _observer.elevation];
+  _observerInfoLabel.toolTip = [NSString
+      stringWithFormat:
+          @"Observer: easting %.1f m, northing %.1f m, heading %.1f°, %.1f m above ground, "
+           "%.1f m above mean sea level",
+          _observer.easting,
+          _observer.northing,
+          heading,
+          _groundClearance,
+          _observer.elevation];
 
   const BOOL roaming = [self isRoamingEnabled];
   const BOOL cruising = [self isCruisingEnabled];
@@ -546,10 +575,6 @@
   _movementInfoLabel.hidden = movementHidden;
   if (roaming || cruising) {
     const BOOL aircraft = [self isAircraftDynamicsEnabled];
-    double heading = std::fmod(_orientation.heading * panorama::app::kRadiansToDegrees, 360.0);
-    if (heading < 0.0) {
-      heading += 360.0;
-    }
     NSString *mode = _roamAltitudeModeControl.selectedSegment == 0
                          ? @"Terrain"
                          : (cruising ? @"Flight" : @"Altitude");
