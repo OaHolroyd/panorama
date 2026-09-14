@@ -393,6 +393,12 @@ changes map size; the grid button overlays the complete prepared-tile coverage.
 If the requested startup observer is outside that coverage, the viewer opens on
 a central available tile with the coverage overlay already enabled.
 
+Peak labels are optional. Supply a local UTF-8 CSV with the header
+`Lat,Lon,Elevation,Prom,Name` through `--peak-gazetteer`, or put it at
+`data/gazetteers/peaks.csv`. Gazetteers are deliberately ignored by Git, so a
+local comprehensive catalogue remains private and survives normal repository
+updates.
+
 Collapse or reveal the inspector with the `sidebar.right` toolbar button. Run
 `./panorama-app --help` for observer, image-size, and field-of-view options.
 The Viewfinder colourmap reproduces the indexed distance palette published by
