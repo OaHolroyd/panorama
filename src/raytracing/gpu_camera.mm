@@ -22,8 +22,9 @@ double elapsed(Clock::time_point start) {
 }
 float checked_float(double value) {
   const float result = static_cast<float>(value);
-  if (!std::isfinite(result))
+  if (!std::isfinite(result)) {
     throw std::invalid_argument("GPU camera parameters exceed finite Float32 range");
+  }
   return result;
 }
 camera_gpu::Camera uniforms(const RayFieldRequest &request) {
@@ -111,37 +112,44 @@ void apply_render_basis(
 
 uint32_t validate_camera_request(const RayFieldRequest &camera) {
   const uint64_t count = uint64_t(camera.image.width) * camera.image.height;
-  if (count == 0 || count > std::numeric_limits<uint32_t>::max())
+  if (count == 0 || count > std::numeric_limits<uint32_t>::max()) {
     throw std::invalid_argument("GPU camera has invalid image dimensions");
+  }
   if (const auto *angular = std::get_if<AngularProjection>(&camera.projection)) {
     for (double value : {angular->azimuth_start,
                          angular->azimuth_end,
                          angular->elevation_start,
-                         angular->elevation_end})
+                         angular->elevation_end}) {
       (void)checked_float(value);
+    }
     const float dx =
         checked_float((angular->azimuth_end - angular->azimuth_start) / camera.image.width);
     const float dy =
         checked_float((angular->elevation_end - angular->elevation_start) / camera.image.height);
-    if (dx == 0 || dy == 0)
+    if (dx == 0 || dy == 0) {
       throw std::invalid_argument("Angular projection requires a positive pixel footprint");
+    }
     return static_cast<uint32_t>(count);
   }
   const auto &p = std::get<CameraProjection>(camera.projection);
-  if (const auto *d = std::get_if<BrownConradyDistortion>(&p.distortion))
-    for (double value : {d->radial_1, d->radial_2, d->radial_3, d->tangential_1, d->tangential_2})
+  if (const auto *d = std::get_if<BrownConradyDistortion>(&p.distortion)) {
+    for (double value : {d->radial_1, d->radial_2, d->radial_3, d->tangential_1, d->tangential_2}) {
       (void)checked_float(value);
+    }
+  }
   for (double value : {p.orientation.heading,
                        p.orientation.pitch,
                        p.orientation.roll,
                        p.intrinsics.focal_x,
                        p.intrinsics.focal_y,
                        p.intrinsics.principal_x,
-                       p.intrinsics.principal_y})
+                       p.intrinsics.principal_y}) {
     (void)checked_float(value);
+  }
   const float fx = float(p.intrinsics.focal_x), fy = float(p.intrinsics.focal_y);
-  if (!(fx > 0) || !(fy > 0) || !std::isfinite(1 / fx) || !std::isfinite(1 / fy))
+  if (!(fx > 0) || !(fy > 0) || !std::isfinite(1 / fx) || !std::isfinite(1 / fy)) {
     throw std::invalid_argument("GPU camera requires finite positive focal lengths");
+  }
   // Keep all shader projection arithmetic finite, including adjacent-angle products.
   const double extent = std::max(
       {std::abs(p.intrinsics.principal_x / fx),
@@ -149,8 +157,9 @@ uint32_t validate_camera_request(const RayFieldRequest &camera) {
        std::abs(p.intrinsics.principal_y / fy),
        std::abs((double(camera.image.height) - p.intrinsics.principal_y) / fy)}
   );
-  if (extent > 1e12)
+  if (extent > 1e12) {
     throw std::invalid_argument("GPU camera projection is outside the supported numeric range");
+  }
   return static_cast<uint32_t>(count);
 }
 
@@ -171,16 +180,18 @@ struct GpuCamera::State {
 
   id<MTLBuffer> buffer(NSUInteger length, NSString *label) {
     auto result = [device newBufferWithLength:length options:MTLResourceStorageModeShared];
-    if (result == nil)
+    if (result == nil) {
       throw std::runtime_error("Could not allocate GPU camera buffer");
+    }
     result.label = label;
     return result;
   }
   id<MTLComputeCommandEncoder>
   encoder(id<MTLCommandBuffer> command, id<MTLComputePipelineState> pipeline) {
     auto result = [command computeCommandEncoder];
-    if (result == nil)
+    if (result == nil) {
       throw std::runtime_error("Could not create GPU camera encoder");
+    }
     [result setComputePipelineState:pipeline];
     return result;
   }
@@ -201,10 +212,11 @@ GpuCamera::GpuCamera(
     auto function = [library newFunctionWithName:name];
     NSError *error = nil;
     auto result = [device newComputePipelineStateWithFunction:function error:&error];
-    if (result == nil || result.maxTotalThreadsPerThreadgroup < 256)
+    if (result == nil || result.maxTotalThreadsPerThreadgroup < 256) {
       throw std::runtime_error(
           "Could not create GPU camera pipeline: " + std::string(name.UTF8String)
       );
+    }
     return result;
   };
   s.rays = pipeline(@"generate_camera_rays");
@@ -271,8 +283,9 @@ void GpuCamera::prepare(
   trace_activity::Scope activity("GPU camera/LOD preparation");
   const auto started = Clock::now();
   s.stats.preparation_gpu_ms = 0;
-  if (&tiles != s.owner || !std::isfinite(scale) || scale < 0)
+  if (&tiles != s.owner || !std::isfinite(scale) || scale < 0) {
     throw std::invalid_argument("GPU LOD plan belongs to a different catalogue or invalid scale");
+  }
   s.camera = uniforms(camera);
   apply_render_basis(s.camera, tiles.catalogue(), observer);
   const bool footprint_changed = !s.footprint_valid || !same_projection(camera, s.cached);
@@ -281,16 +294,18 @@ void GpuCamera::prepare(
   if (plan_changed) {
     // A failed preparation must never leave a stale cache key usable.
     s.plan_valid = false;
-    if (footprint_changed)
+    if (footprint_changed) {
       s.footprint_valid = false;
+    }
     Coord rendered = tiles.catalogue().render_coordinate(observer.position);
 
     s.settings.observer_x = checked_float(rendered.x - s.anchor_x);
     s.settings.observer_y = checked_float(rendered.y - s.anchor_y);
     s.settings.scale = scale;
     auto command = [s.queue commandBuffer];
-    if (command == nil)
+    if (command == nil) {
       throw std::runtime_error("Could not create camera preparation command");
+    }
     command.label = @"GPU camera footprint and LOD";
     if (footprint_changed) {
       const uint32_t group_columns =
@@ -298,8 +313,9 @@ void GpuCamera::prepare(
       const uint32_t group_rows =
           (camera.image.height + threadgroups::spatial.height - 1U) / threadgroups::spatial.height;
       const uint32_t groups = group_columns * group_rows;
-      if (s.partial == nil || s.partial.length < size_t(groups) * sizeof(float))
+      if (s.partial == nil || s.partial.length < size_t(groups) * sizeof(float)) {
         s.partial = s.buffer(size_t(groups) * sizeof(float), @"GPU footprint partials");
+      }
       auto encoder = s.encoder(command, s.footprint);
       [encoder setBytes:&s.camera length:sizeof(s.camera) atIndex:0];
       [encoder setBuffer:s.partial offset:0 atIndex:1];
@@ -325,8 +341,9 @@ void GpuCamera::prepare(
     [encoder endEncoding];
     [command commit];
     [command waitUntilCompleted];
-    if (command.status != MTLCommandBufferStatusCompleted)
+    if (command.status != MTLCommandBufferStatusCompleted) {
       throw std::runtime_error("GPU camera LOD preparation failed");
+    }
     if (trace_activity::current != nullptr) {
       const auto *levels = static_cast<const uint32_t *>(s.levels.contents);
       uint32_t finer = 0, coarser = 0, finest = 0;
@@ -359,11 +376,13 @@ void GpuCamera::prepare(
 void GpuCamera::encode_rays(id<MTLCommandBuffer> command, id<MTLBuffer> destination) {
   auto &s = *state_;
   if (command == nil ||
-      destination.length < uint64_t(s.camera.width) * s.camera.height * sizeof(RayDirection))
+      destination.length < uint64_t(s.camera.width) * s.camera.height * sizeof(RayDirection)) {
     throw std::invalid_argument("GPU camera ray destination has invalid dimensions");
+  }
   auto clear = [command blitCommandEncoder];
-  if (clear == nil)
+  if (clear == nil) {
     throw std::runtime_error("Could not clear GPU camera status");
+  }
   [clear fillBuffer:s.invalid range:NSMakeRange(0, sizeof(uint32_t)) value:0];
   [clear endEncoding];
   auto encoder = s.encoder(command, s.rays);
@@ -375,8 +394,9 @@ void GpuCamera::encode_rays(id<MTLCommandBuffer> command, id<MTLBuffer> destinat
   [encoder endEncoding];
 }
 void GpuCamera::validate_completed_rays() const {
-  if (*static_cast<const uint32_t *>(state_->invalid.contents) != 0)
+  if (*static_cast<const uint32_t *>(state_->invalid.contents) != 0) {
     throw std::runtime_error("Camera projection produced a vertical or non-finite terrain ray");
+  }
 }
 GpuCameraStatistics GpuCamera::statistics() const { return state_->stats; }
 id<MTLBuffer> GpuCamera::pixel_angle() const { return state_->angle; }

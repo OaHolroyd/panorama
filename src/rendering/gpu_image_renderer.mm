@@ -229,8 +229,9 @@ void GpuImageRenderer::begin_frame() {
     descriptor.storageMode = MTLStorageModePrivate;
     descriptor.usage = state.output_texture_usage;
     state.spare_output = [state.device newTextureWithDescriptor:descriptor];
-    if (state.spare_output == nil)
+    if (state.spare_output == nil) {
       throw std::runtime_error("Could not allocate producer image target");
+    }
   }
   std::swap(state.output, state.spare_output);
 }
@@ -335,8 +336,9 @@ void GpuImageRenderer::render_synthetic(
     if (state.dummy_visibility == nil) {
       state.dummy_visibility = [state.device newBufferWithLength:4
                                                          options:MTLResourceStorageModeShared];
-      if (state.dummy_visibility == nil)
+      if (state.dummy_visibility == nil) {
         throw std::runtime_error("Could not allocate unused shadow visibility");
+      }
     }
     shadow_visibility = state.dummy_visibility;
   }
@@ -360,8 +362,9 @@ void GpuImageRenderer::render_synthetic(
   if (command == nil) {
     throw std::runtime_error("Could not create synthetic presentation command");
   }
-  if (submit)
+  if (submit) {
     command.label = @"Present synthetic terrain";
+  }
 
   if (options.feature_outlines) {
     if (state.feature_outlines == nil || state.feature_outline_mask == nil) {
@@ -416,13 +419,14 @@ void GpuImageRenderer::render_synthetic(
   [encoder setTexture:state.feature_outline_mask atIndex:1];
   dispatch_image(encoder, pipeline, state.image);
   [encoder endEncoding];
-  if (submit)
+  if (submit) {
     complete_timed_command(
         command,
         timer,
         "Pixel conversion",
         @"GPU synthetic presentation failed"
     );
+  }
 }
 
 id<MTLTexture> GpuImageRenderer::texture() const { return state_->output; }

@@ -113,29 +113,32 @@ std::vector<TerrainManifestEntry> read_terrain_manifest(const std::filesystem::p
       stream.read(reinterpret_cast<char *>(&offset), sizeof(offset));
       const uint64_t bytes = uint64_t(count) * sizeof(TerrainCoverageRect);
       if (!stream || offset != expected_size || bytes > file_size - expected_size ||
-          (cells == 0U && count != 0U) || (cells && count > uint64_t(cells) * cells))
+          (cells == 0U && count != 0U) || (cells && count > uint64_t(cells) * cells)) {
         throw std::runtime_error("Terrain manifest has invalid coverage offsets");
+      }
       expected_size += bytes;
       if (cells) {
         TerrainCellCoverage coverage{cells, {}};
-        if (count == 0U)
+        if (count == 0U) {
           coverage.rectangles.push_back({0, 0, cells, cells});
-        else {
+        } else {
           coverage.rectangles.resize(count);
           stream.seekg(static_cast<std::streamoff>(offset));
           if (!stream.read(
                   reinterpret_cast<char *>(coverage.rectangles.data()),
                   static_cast<std::streamsize>(bytes)
-              ))
+              )) {
             throw std::runtime_error("Could not read manifest coverage");
+          }
         }
         coverage.validate();
         entries.back().coverage = std::move(coverage);
       }
     }
   }
-  if (file_size != expected_size)
+  if (file_size != expected_size) {
     throw std::runtime_error("Terrain manifest has an invalid size: " + path.string());
+  }
   return entries;
 }
 
@@ -155,8 +158,9 @@ void write_terrain_manifest(
   for (const auto &entry : entries) {
     if (entry.coverage) {
       entry.coverage->validate();
-      if (entry.coverage->rectangles.empty())
+      if (entry.coverage->rectangles.empty()) {
         throw std::invalid_argument("Empty terrain tiles must not be published");
+      }
     }
   }
   const std::filesystem::path temporary = path.string() + ".tmp";
@@ -197,15 +201,18 @@ void write_terrain_manifest(
       coverage_offset += uint64_t(count) * sizeof(TerrainCoverageRect);
     }
   }
-  if (with_coverage)
-    for (const auto &entry : entries)
-      if (entry.coverage && !entry.coverage->full())
+  if (with_coverage) {
+    for (const auto &entry : entries) {
+      if (entry.coverage && !entry.coverage->full()) {
         stream.write(
             reinterpret_cast<const char *>(entry.coverage->rectangles.data()),
             static_cast<std::streamsize>(
                 entry.coverage->rectangles.size() * sizeof(TerrainCoverageRect)
             )
         );
+      }
+    }
+  }
   if (!stream) {
     stream.close();
     std::filesystem::remove(temporary);

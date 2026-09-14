@@ -69,8 +69,9 @@ std::filesystem::path metal_tile_chunk_path(
     ChunkKey key,
     MetalTileCompression compression
 ) {
-  if (grid.layout != RasterLayout::Level0 || !std::has_single_bit(grid.tile_cell_count))
+  if (grid.layout != RasterLayout::Level0 || !std::has_single_bit(grid.tile_cell_count)) {
     throw std::invalid_argument("Metal tiles require a power-of-two level-0 destination grid");
+  }
   return output_directory /
          (dataset_name + "_level-0_p" + std::to_string(std::countr_zero(grid.tile_cell_count)) +
           "_r" + std::to_string(key.row) + "_c" + std::to_string(key.column) +
@@ -80,18 +81,21 @@ std::filesystem::path metal_tile_chunk_path(
 TerrainCellCoverage terrain_chunk_coverage(const TerrainChunk &chunk) {
   const uint32_t side = chunk.sample_side;
   if (side < 2 || chunk.covered.size() != uint64_t(side) * side ||
-      chunk.elevations.size() != chunk.covered.size())
+      chunk.elevations.size() != chunk.covered.size()) {
     throw std::invalid_argument("Terrain chunk validity mask has the wrong size");
+  }
   const uint32_t cells = side - 1U;
-  if (std::all_of(chunk.covered.begin(), chunk.covered.end(), [](uint8_t v) { return v != 0; }))
+  if (std::all_of(chunk.covered.begin(), chunk.covered.end(), [](uint8_t v) { return v != 0; })) {
     return {cells, {{0, 0, cells, cells}}};
+  }
   std::vector<uint8_t> usable(size_t(cells) * cells);
-  for (uint32_t y = 0; y < cells; ++y)
+  for (uint32_t y = 0; y < cells; ++y) {
     for (uint32_t x = 0; x < cells; ++x) {
       const size_t i = size_t(cells - y - 1U) * side + x;
       usable[size_t(y) * cells + x] = chunk.covered[i] && chunk.covered[i + 1] &&
                                       chunk.covered[i + side] && chunk.covered[i + side + 1];
     }
+  }
   return make_cell_coverage(cells, usable);
 }
 
@@ -109,8 +113,9 @@ TerrainElevationRange write_metal_tile_chunk(
   }
 
   const TerrainCellCoverage coverage = terrain_chunk_coverage(chunk);
-  if (coverage.rectangles.empty())
+  if (coverage.rectangles.empty()) {
     throw std::invalid_argument("Cannot write terrain without a usable cell");
+  }
   struct VariantVertices {
     uint32_t cell_count;
     std::vector<float> values;
@@ -118,24 +123,28 @@ TerrainElevationRange write_metal_tile_chunk(
   };
   std::vector<VariantVertices> variants;
   const auto append_variant = [&](uint32_t side, const auto &heights, const auto &covered) {
-    if (heights.size() != uint64_t(side) * side || covered.size() != heights.size())
+    if (heights.size() != uint64_t(side) * side || covered.size() != heights.size()) {
       throw std::invalid_argument("Terrain LOD validity mask has the wrong size");
+    }
     VariantVertices variant{side - 1U,
                             std::vector<float>(heights.size()),
                             std::vector<uint8_t>(covered.size())};
-    for (uint32_t y = 0; y < side; ++y)
+    for (uint32_t y = 0; y < side; ++y) {
       for (uint32_t x = 0; x < side; ++x) {
         const size_t from = size_t(y) * side + x, to = size_t(side - 1U - y) * side + x;
-        if (covered[from] && !std::isfinite(heights[from]))
+        if (covered[from] && !std::isfinite(heights[from])) {
           throw std::invalid_argument("Covered terrain elevation must be finite");
+        }
         variant.values[to] = heights[from];
         variant.covered[to] = covered[from];
       }
+    }
     variants.push_back(std::move(variant));
   };
   append_variant(chunk.sample_side, chunk.elevations, chunk.covered);
-  for (const auto &variant : chunk.lod_variants)
+  for (const auto &variant : chunk.lod_variants) {
     append_variant(variant.sample_side, variant.elevations, variant.covered);
+  }
   const uint32_t coverage_count =
       coverage.full() ? 0U : static_cast<uint32_t>(coverage.rectangles.size());
   const uint64_t coverage_bytes = uint64_t(coverage_count) * sizeof(TerrainCoverageRect);
@@ -149,8 +158,9 @@ TerrainElevationRange write_metal_tile_chunk(
   std::vector<MetalTileLod> lods;
   lods.reserve(variants.size());
   std::vector<std::byte> payload(static_cast<size_t>(first_payload - metadata_bytes));
-  if (coverage_bytes)
+  if (coverage_bytes) {
     std::memcpy(payload.data(), coverage.rectangles.data(), coverage_bytes);
+  }
   uint64_t offset = first_payload;
   TerrainElevationRange range{std::numeric_limits<float>::infinity(),
                               -std::numeric_limits<float>::infinity()};
@@ -159,13 +169,14 @@ TerrainElevationRange write_metal_tile_chunk(
     int32_t minimum = std::numeric_limits<int32_t>::max(),
             maximum = std::numeric_limits<int32_t>::min();
     bool any = false;
-    for (size_t i = 0; i < variant.values.size(); ++i)
+    for (size_t i = 0; i < variant.values.size(); ++i) {
       if (variant.covered[i]) {
         const int32_t height = elevation_decimeters(variant.values[i]);
         minimum = std::min(minimum, height);
         maximum = std::max(maximum, height);
         any = true;
       }
+    }
     if (any &&
         (minimum == std::numeric_limits<int32_t>::min() || int64_t(maximum) - minimum > 65534)) {
       throw std::runtime_error(
@@ -256,23 +267,27 @@ TerrainElevationRange read_metal_tile_elevation_range(
   id<MTLIOFileHandle> file = open_metal_tile_file(device, path);
   for (const auto &lod : lods) {
     @autoreleasepool {
-      if (lod.vertex_byte_count > device.maxBufferLength)
+      if (lod.vertex_byte_count > device.maxBufferLength) {
         throw std::runtime_error("Tile payload exceeds Metal device limit");
+      }
       id<MTLBuffer> data = [device newBufferWithLength:lod.vertex_byte_count
                                                options:MTLResourceStorageModeShared];
-      if (data == nil)
+      if (data == nil) {
         throw std::runtime_error("Could not allocate manifest scan buffer");
+      }
       const MetalTileBufferLoad load{path, 0U, file, lod.vertex_offset, lod.vertex_byte_count};
       load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
       const uint64_t count = (uint64_t(lod.cell_count) + 1U) * (uint64_t(lod.cell_count) + 1U);
       for (uint64_t i = 0; i < count; ++i) {
-        if (header.version >= 5U && static_cast<const uint16_t *>(data.contents)[i] == 0U)
+        if (header.version >= 5U && static_cast<const uint16_t *>(data.contents)[i] == 0U) {
           continue;
+        }
         const float value = (float(lod.elevation_base_decimeters) +
                              float(static_cast<const uint16_t *>(data.contents)[i])) *
                             0.1F;
-        if (!std::isfinite(value))
+        if (!std::isfinite(value)) {
           throw std::runtime_error("Non-finite terrain sample in manifest scan");
+        }
         range.minimum = std::min(range.minimum, value);
         range.maximum = std::max(range.maximum, value);
       }

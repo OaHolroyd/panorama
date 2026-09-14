@@ -16,8 +16,9 @@ using namespace panorama;
 using namespace panorama::terrain;
 namespace {
 void require(bool value, const char *message) {
-  if (!value)
+  if (!value) {
     throw std::runtime_error(message);
+  }
 }
 void write_bytes(const std::filesystem::path &path, const std::vector<char> &bytes) {
   std::ofstream out(path, std::ios::binary);
@@ -91,15 +92,17 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
       @"--compression",
       @"none"
     ] mutableCopy];
-    if (!default_output)
+    if (!default_output) {
       [arguments addObjectsFromArray:@[ @"--output", @(output.c_str()) ]];
+    }
     [arguments addObjectsFromArray:extra];
     task.arguments = arguments;
     NSError *error = nil;
-    if (![task launchAndReturnError:&error])
+    if (![task launchAndReturnError:&error]) {
       throw std::runtime_error(
           "Could not launch tile generator: " + std::string(error.localizedDescription.UTF8String)
       );
+    }
     [task waitUntilExit];
     return task.terminationStatus;
   };
@@ -127,22 +130,24 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
   }
   require(timestamps.size() == original.size(), "Generator omitted a tile's bounds");
   auto old_entries = original;
-  for (auto &entry : old_entries)
+  for (auto &entry : old_entries) {
     entry.coverage.reset();
+  }
   write_terrain_manifest(path, old_entries);
   std::ifstream stream(path, std::ios::binary);
   std::vector<char> bytes((std::istreambuf_iterator<char>(stream)), {});
   const uint32_t one = 1, zero = 0;
   std::memcpy(bytes.data() + 8, &one, sizeof(one));
-  for (size_t offset = 44; offset < bytes.size(); offset += 24)
+  for (size_t offset = 44; offset < bytes.size(); offset += 24) {
     std::memcpy(bytes.data() + offset, &zero, sizeof(zero));
+  }
   write_bytes(path, bytes);
   // First run scans payloads to upgrade v1; the next reuses complete v2 entries.
   for (int repetition = 0; repetition < 2; ++repetition) {
     require(run() == 0, "Uint16 tile generation failed");
     const auto upgraded = read_terrain_manifest(path);
     require(upgraded.size() == original.size(), "Upgrade omitted manifest entries");
-    for (size_t i = 0; i < original.size(); ++i)
+    for (size_t i = 0; i < original.size(); ++i) {
       require(
           upgraded[i].row == original[i].row && upgraded[i].column == original[i].column &&
               upgraded[i].minimum_elevation.has_value() &&
@@ -151,11 +156,13 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
               upgraded[i].coverage == original[i].coverage,
           "Generator upgrade changed tile elevation bounds"
       );
-    for (const auto &[tile, timestamp] : timestamps)
+    }
+    for (const auto &[tile, timestamp] : timestamps) {
       require(
           std::filesystem::last_write_time(tile) == timestamp,
           "Manifest upgrade rewrote an existing tile"
       );
+    }
   }
   require(run(@[ @"--format", @"metal" ]) != 0, "Generator accepted removed --format option");
   require(run(@[ @"--format", @"geotiff" ]) != 0, "Generator accepted removed GeoTIFF output");
@@ -221,7 +228,7 @@ void check_uint16_range(
     const MetalTileBufferLoad load{path, 0U, nil, header.vertex_offset, header.vertex_byte_count};
     load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
     const auto *encoded = static_cast<const uint16_t *>(data.contents);
-    for (uint32_t y = 0; y < 3; ++y)
+    for (uint32_t y = 0; y < 3; ++y) {
       for (uint32_t x = 0; x < 3; ++x) {
         const float height = float(header.elevation_base_decimeters + encoded[y * 3 + x]) / 10.0F;
         require(
@@ -229,6 +236,7 @@ void check_uint16_range(
             "Uint16 generation changed elevation values or row order"
         );
       }
+    }
     require(
         encoded[6] == 1U && encoded[8] == 65535U,
         "Uint16 range endpoints are no longer valid elevations"
@@ -317,8 +325,9 @@ void check_srtm_voids(
   std::filesystem::create_directory(input);
   constexpr uint32_t raster_side = 1201, side = 9;
   std::vector<char> bytes(size_t(raster_side) * raster_side * 2U);
-  for (size_t i = 0; i < bytes.size(); i += 2U)
+  for (size_t i = 0; i < bytes.size(); i += 2U) {
     bytes[i] = static_cast<char>(0x80); // Standard -32768 outside the fixture patch.
+  }
   std::array<int16_t, side * side> heights;
   heights.fill(100);
   heights[0] = -32768;
@@ -331,13 +340,14 @@ void check_srtm_voids(
   heights[8U * side + 2U] = -430;
   heights[8U * side + 4U] = 0;
   heights[8U * side + 6U] = 4800;
-  for (uint32_t y = 0; y < side; ++y)
+  for (uint32_t y = 0; y < side; ++y) {
     for (uint32_t x = 0; x < side; ++x) {
       const auto value = static_cast<uint16_t>(heights[y * side + x]);
       const size_t offset = (size_t(y) * raster_side + x) * 2U;
       bytes[offset] = static_cast<char>(value >> 8U);
       bytes[offset + 1U] = static_cast<char>(value & 0xffU);
     }
+  }
   write_bytes(input / "N00E000.hgt", bytes);
   const auto catalogue = SourceCatalogue::discover(input, root / "unused-output");
   const DestinationGrid grid{0,
@@ -353,8 +363,9 @@ void check_srtm_voids(
     for (size_t i = 0; i < heights.size(); ++i) {
       const bool valid = heights[i] >= -1000;
       require(bool(chunk.covered[i]) == valid, "SRTM corrupt void remained covered");
-      if (valid)
+      if (valid) {
         require(chunk.elevations[i] == heights[i], "SRTM valid zero/negative height changed");
+      }
     }
     require(chunk.lod_variants.size() == 3U, "SRTM fixture omitted coarse LODs");
     require(!chunk.lod_variants[0].covered[2U * 5U + 2U], "Interior void filled at LOD 2");
@@ -398,18 +409,20 @@ void check_srtm_voids(
       load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
       const auto *encoded = static_cast<const uint16_t *>(data.contents);
       const uint32_t lod_side = lod.cell_count + 1U;
-      for (uint32_t y = 0; y < lod_side; ++y)
+      for (uint32_t y = 0; y < lod_side; ++y) {
         for (uint32_t x = 0; x < lod_side; ++x) {
           const size_t from = size_t(y) * lod_side + x;
           const auto code = encoded[size_t(lod_side - 1U - y) * lod_side + x];
           require((code != 0) == bool(valid[from]), "SRTM no-data code lost at encoded LOD");
-          if (code)
+          if (code) {
             require(
                 std::abs(float(lod.elevation_base_decimeters + code) / 10.0F - values[from]) <
                     0.051F,
                 "SRTM valid elevation failed to round-trip"
             );
+          }
         }
+      }
     }
     const auto manifest = root / "srtm-voids-manifest.bin";
     const std::array<TerrainManifestEntry, 1> entries = {
@@ -424,12 +437,13 @@ void check_srtm_voids(
   // Rejected high-priority samples must leave room for an overlapping source.
   const auto fallback = input / "fallback";
   std::filesystem::create_directory(fallback);
-  for (uint32_t y = 0; y < side; ++y)
+  for (uint32_t y = 0; y < side; ++y) {
     for (uint32_t x = 0; x < side; ++x) {
       const size_t offset = (size_t(y) * raster_side + x) * 2U;
       bytes[offset] = 0;
       bytes[offset + 1U] = 50;
     }
+  }
   write_bytes(fallback / "N00E000.hgt", bytes);
   const auto mosaic_catalogue = SourceCatalogue::discover(input, root / "unused-output");
   const auto mosaic_plan = make_rechunk_plan(mosaic_catalogue, grid);
@@ -441,11 +455,12 @@ void check_srtm_voids(
       LodSampling::Point
   );
   require(terrain_chunk_coverage(mosaic).full(), "Rejected SRTM void blocked fallback coverage");
-  for (size_t i = 0; i < heights.size(); ++i)
+  for (size_t i = 0; i < heights.size(); ++i) {
     require(
         mosaic.elevations[i] == (heights[i] < -1000 ? 50 : heights[i]),
         "SRTM fallback failed to fill a void or replaced valid terrain"
     );
+  }
 }
 } // namespace
 int main(int argc, const char *argv[]) {
@@ -532,8 +547,9 @@ int main(int argc, const char *argv[]) {
           );
         }
       }
-      if (argc == 2)
+      if (argc == 2) {
         check_generator(std::filesystem::absolute(argv[1]), root);
+      }
     }
     std::puts("Terrain manifest tests passed.");
     return 0;

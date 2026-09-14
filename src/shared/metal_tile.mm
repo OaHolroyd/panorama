@@ -391,15 +391,17 @@ read_metal_tile_lods(const std::filesystem::path &path, const MetalTileHeader &h
 std::optional<TerrainCellCoverage>
 read_metal_tile_coverage(const std::filesystem::path &path, const MetalTileHeader &header) {
   validate_metal_tile_header(header, metal_tile_compression(path));
-  if (header.version == 4U)
+  if (header.version == 4U) {
     return std::nullopt;
+  }
   TerrainCellCoverage result{header.cell_count, {}};
   if (header.reserved == 0U) {
     result.rectangles.push_back({0, 0, header.cell_count, header.cell_count});
     return result;
   }
-  if (uint64_t(header.reserved) > uint64_t(header.cell_count) * header.cell_count)
+  if (uint64_t(header.reserved) > uint64_t(header.cell_count) * header.cell_count) {
     throw std::runtime_error("Too many terrain coverage rectangles");
+  }
   const uint64_t offset = header.lod_table_offset + header.lod_table_byte_count;
   const size_t bytes = size_t(header.reserved) * sizeof(TerrainCoverageRect);
   result.rectangles.resize(header.reserved);
@@ -409,8 +411,9 @@ read_metal_tile_coverage(const std::filesystem::path &path, const MetalTileHeade
     if (!stream.read(
             reinterpret_cast<char *>(result.rectangles.data()),
             static_cast<std::streamsize>(bytes)
-        ))
+        )) {
       throw std::runtime_error("Could not read terrain coverage " + path.string());
+    }
   } else {
     const std::scoped_lock lock(compressed_metadata_io_mutex);
     const auto &io = compressed_metadata_io();

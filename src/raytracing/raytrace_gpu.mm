@@ -354,22 +354,25 @@ GpuRaytraceResources::GpuRaytraceResources(
 }
 
 void GpuRaytraceResources::resize_rays(uint32_t ray_count) {
-  if (ray_count != state_->frontier_capacity)
+  if (ray_count != state_->frontier_capacity) {
     state_->replace_ray_buffers(ray_count);
+  }
 }
 
 void GpuRaytraceResources::encode_clear_outputs(id<MTLCommandBuffer> command) {
   auto encoder = [command blitCommandEncoder];
-  if (encoder == nil)
+  if (encoder == nil) {
     throw std::runtime_error("Could not encode ray output initialization");
+  }
   for (id<MTLBuffer> output in @[
          state_->distance_output,
          state_->elevation_output,
          state_->surface_gradient_output,
          state_->num_steps_output,
          state_->num_evaluations_output
-       ])
+       ]) {
     [encoder fillBuffer:output range:NSMakeRange(0, output.length) value:0];
+  }
   [encoder endEncoding];
 }
 
@@ -398,8 +401,9 @@ id<MTLDevice> GpuRaytraceResources::device() const { return state_->device; }
 id<MTLCommandQueue> GpuRaytraceResources::command_queue() const { return state_->queue; }
 
 TerrainTileBvh &GpuRaytraceResources::tile_bvh() {
-  if (!state_->tile_bvh)
+  if (!state_->tile_bvh) {
     state_->tile_bvh = std::make_unique<TerrainTileBvh>(*this);
+  }
   return *state_->tile_bvh;
 }
 
@@ -412,17 +416,20 @@ void GpuRaytraceResources::prepare_tile_selection(
 ) {
   State &state = *state_;
   state.use_tile_bvh = enabled && state.device.supportsRaytracing;
-  if (!state.use_tile_bvh)
+  if (!state.use_tile_bvh) {
     return;
+  }
   const auto started = std::chrono::steady_clock::now();
-  if (state.bvh_emit.state == nil)
+  if (state.bvh_emit.state == nil) {
     state.bvh_emit = bvh_resources::make_bvh_pipeline(
         *this,
         @"emit_bvh_tile_frontier",
         @"terrain_tile_intersection"
     );
-  if (tile_bvh().prepare(tiles, observer, parameters))
+  }
+  if (tile_bvh().prepare(tiles, observer, parameters)) {
     timer.add_work("Shared tile BVH setup", std::chrono::steady_clock::now() - started);
+  }
 }
 
 id<MTLLibrary> GpuRaytraceResources::library() const { return state_->library; }

@@ -12,8 +12,9 @@ using namespace panorama;
 using namespace panorama::app;
 namespace {
 void require(bool condition, const char *message) {
-  if (!condition)
+  if (!condition) {
     throw std::runtime_error(message);
+  }
 }
 void check_position(LatLon a, LatLon b, double tolerance) {
   const auto delta = geographic_offset(a, b);

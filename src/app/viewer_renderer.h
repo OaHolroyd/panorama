@@ -59,8 +59,7 @@ struct ViewerSettings {
   uint32_t bvh_block_cells = 4U;
   uint64_t bvh_cache_size_bytes = 8ULL * kBytesPerGiB;
   bool discard_quantized = false;
-  // Temporarily enabled while diagnosing intermittent mixed-dataset stalls.
-  bool trace_diagnostics = true;
+  bool trace_diagnostics = false;
   bool bilinear_collisions = false;
   bool c1_normals = true;
   ObserverLocation observer = {{46.1012605320838, 7.71604367731172}, 4515.0};

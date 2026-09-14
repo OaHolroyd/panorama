@@ -56,9 +56,10 @@ struct TerrainTileBvh::State {
     // Subtract in double before converting to float, exactly as construction
     // does. Repeatedly translating float vertices would move shared boundaries.
     auto *vertices = static_cast<BvhCoverageVertex *>(coverage_vertices.contents);
-    for (size_t i = 0; i < vertex_coordinates.size(); ++i)
+    for (size_t i = 0; i < vertex_coordinates.size(); ++i) {
       vertices[i] = {float(vertex_coordinates[i].x - position.x),
                      float(vertex_coordinates[i].y - position.y)};
+    }
     auto *patches = static_cast<BvhAffinePatch *>(candidate_patches.contents);
     for (size_t i = 0; i < candidate_origins.size(); ++i) {
       patches[i].origin_x = float(candidate_origins[i].x - position.x);
@@ -107,11 +108,12 @@ struct TerrainTileBvh::State {
     for (size_t i = 0; i < sources.size(); ++i) {
       const auto &source = sources[i];
       const bool transformed = !source.transform_patches.empty();
-      if (anchored)
+      if (anchored) {
         tile_origins.push_back(
             {source.transform_patches.front().transform.bounds[0],
              source.transform_patches.front().transform.bounds[1]}
         );
+      }
       const float x =
           transformed
               ? static_cast<float>(
@@ -150,8 +152,9 @@ struct TerrainTileBvh::State {
         const double ox = transform.origin.x - render_observer.x;
         const double oy = transform.origin.y - render_observer.y;
         const double determinant = transform.determinant();
-        if (anchored)
+        if (anchored) {
           candidate_origins.push_back(transform.origin);
+        }
         candidate_patch_metadata.push_back(
             {float(ox),
              float(oy),
@@ -280,8 +283,9 @@ struct TerrainTileBvh::State {
         if (!source.ownership_polygons.empty()) {
           footprint.ownership_offset = checked_count(coverage_metadata.size());
           footprint.ownership_count = checked_count(source.ownership_polygons.size());
-          for (const TerrainCoveragePolygon &polygon : source.ownership_polygons)
+          for (const TerrainCoveragePolygon &polygon : source.ownership_polygons) {
             coverage_metadata.push_back(append_vertices(polygon).first);
+          }
         }
         footprint.minimum_x = footprint_bounds.min_x;
         footprint.minimum_y = footprint_bounds.min_y;
@@ -329,28 +333,34 @@ struct TerrainTileBvh::State {
       // World coordinates keep this list independent of the chosen anchor;
       // update_blockers restores the exact strict overlap for each observer.
       double scale = 1 + anchor_radius + parameters.max_distance;
-      for (const double value : a)
+      for (const double value : a) {
         scale = std::max(scale, 1 + anchor_radius + parameters.max_distance + std::abs(value));
-      for (const double value : b)
+      }
+      for (const double value : b) {
         scale = std::max(scale, 1 + anchor_radius + parameters.max_distance + std::abs(value));
+      }
       const double guard = 32 * std::numeric_limits<float>::epsilon() * scale;
       return a[0] < b[2] + guard && a[2] > b[0] - guard && a[1] < b[3] + guard &&
              a[3] > b[1] - guard;
     };
     for (size_t i = 0; i < sources.size(); ++i) {
-      if (sources[i].transform_patches.empty())
+      if (sources[i].transform_patches.empty()) {
         continue;
+      }
       const uint32_t offset = checked_count(coverage_metadata.size());
       for (size_t j = 0; j < sources.size(); ++j) {
-        if (sources[j].dataset_index >= sources[i].dataset_index)
+        if (sources[j].dataset_index >= sources[i].dataset_index) {
           continue;
+        }
         const auto higher = coverage_metadata[j];
-        if (!overlaps(i, j))
+        if (!overlaps(i, j)) {
           continue;
+        }
         for (uint32_t r = 0; r < higher.coverage_count; ++r) {
           const uint32_t region = higher.coverage_offset + r;
-          if (overlaps(i, region))
+          if (overlaps(i, region)) {
             coverage_metadata.push_back(coverage_metadata[region]);
+          }
         }
       }
       coverage_metadata[i].blocker_offset = offset;
@@ -363,8 +373,9 @@ struct TerrainTileBvh::State {
            j < footprint.blocker_offset + footprint.blocker_count;
            ++j) {
         const auto &polygon = coverage_metadata[j];
-        if (polygon.skip_count == 0U)
+        if (polygon.skip_count == 0U) {
           blockers.push_back({j, checked_count(i), polygon.vertex_count});
+        }
       }
     }
     if (anchored) {
@@ -384,8 +395,9 @@ struct TerrainTileBvh::State {
         auto box = empty;
         if (polygon.skip_count) {
           for (size_t child = i + 1; child <= i + polygon.skip_count;
-               child += 1U + coverage_metadata[child].skip_count)
+               child += 1U + coverage_metadata[child].skip_count) {
             include(box, polygon_coordinates[child]);
+          }
         } else {
           for (uint32_t j = 0; j < polygon.vertex_count; ++j) {
             const Coord point = vertex_coordinates[polygon.vertex_offset + j];
@@ -399,8 +411,9 @@ struct TerrainTileBvh::State {
         const auto &source = coverage_metadata[i];
         for (size_t child = source.coverage_offset;
              child < size_t(source.coverage_offset) + source.coverage_count;
-             child += 1U + coverage_metadata[child].skip_count)
+             child += 1U + coverage_metadata[child].skip_count) {
           include(box, polygon_coordinates[child]);
+        }
         polygon_coordinates[i] = box;
         // Broad phase only: exact callback polygons keep their original edges.
         const double scale = 1 +
@@ -465,8 +478,9 @@ struct TerrainTileBvh::State {
     auto next = [gpu.device() newAccelerationStructureWithSize:sizes.accelerationStructureSize];
     auto next_candidates =
         [gpu.device() newAccelerationStructureWithSize:candidate_sizes.accelerationStructureSize];
-    if (next == nil || next_candidates == nil)
+    if (next == nil || next_candidates == nil) {
       throw std::runtime_error("Could not allocate catalogue BVH");
+    }
     next.label = @"Shared terrain catalogue BVH";
     next_candidates.label = @"Shared terrain candidate BVH";
     auto scratch = buffer(
@@ -479,8 +493,9 @@ struct TerrainTileBvh::State {
     auto command = [gpu.command_queue() commandBuffer];
     command.label = @"Shared terrain catalogue build";
     auto encoder = [command accelerationStructureCommandEncoder];
-    if (encoder == nil)
+    if (encoder == nil) {
       throw std::runtime_error("Could not encode catalogue BVH build");
+    }
     [encoder buildAccelerationStructure:next
                              descriptor:descriptor
                           scratchBuffer:scratch
@@ -514,8 +529,9 @@ bool TerrainTileBvh::prepare(
   State &state = *state_;
   if (state.catalogue != nil && state.observer.position == observer.position &&
       state.curvature == parameters.curvature_coefficient &&
-      state.maximum_distance >= parameters.max_distance)
+      state.maximum_distance >= parameters.max_distance) {
     return false;
+  }
   const Coord position = manager.catalogue().render_coordinate(observer.position);
   if (state.catalogue != nil && state.anchored &&
       state.curvature == parameters.curvature_coefficient &&

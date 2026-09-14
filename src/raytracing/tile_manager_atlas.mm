@@ -966,8 +966,9 @@ std::optional<float> TileManager::State::sample_terrain(LatLon position) {
     if (expanded_vertices) {
       return static_cast<double>(static_cast<const float *>(values)[index]);
     }
-    if (source.valid_cells && static_cast<const uint16_t *>(values)[index] == 0U)
+    if (source.valid_cells && static_cast<const uint16_t *>(values)[index] == 0U) {
       return std::numeric_limits<double>::quiet_NaN();
+    }
     return static_cast<double>(elevation_base) / 10.0 +
            static_cast<double>(static_cast<const uint16_t *>(values)[index]) / 10.0;
   };
@@ -982,8 +983,9 @@ void TileManager::ensure_mipmaps(Timer &timer) {
   State &state = *state_;
   std::map<uint32_t, std::vector<uint32_t>> slots_by_lod;
   for (uint32_t slot = 0; slot < state.slot_capacity; ++slot) {
-    if (state.variant_by_slot[slot] && !state.mipmaps_ready[slot])
+    if (state.variant_by_slot[slot] && !state.mipmaps_ready[slot]) {
       slots_by_lod[state.variant_by_slot[slot]->lod].push_back(slot);
+    }
   }
   for (const auto &[lod, slots] : slots_by_lod) {
     state.generate_mipmaps(
@@ -992,8 +994,9 @@ void TileManager::ensure_mipmaps(Timer &timer) {
         state.header_template.level_count - (lod - 1U),
         timer
     );
-    for (uint32_t slot : slots)
+    for (uint32_t slot : slots) {
       state.mipmaps_ready[slot] = 1U;
+    }
     state.mipmap_generations += slots.size();
   }
 }

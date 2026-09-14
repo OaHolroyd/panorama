@@ -107,14 +107,18 @@ void print_usage(const char *program) {
 
 /// Parse the construction method for independently loadable terrain LODs.
 [[nodiscard]] LodSampling parse_lod_sampling(std::string_view text) {
-  if (text == "none")
+  if (text == "none") {
     return LodSampling::None;
-  if (text == "point")
+  }
+  if (text == "point") {
     return LodSampling::Point;
-  if (text == "mean")
+  }
+  if (text == "mean") {
     return LodSampling::Mean;
-  if (text == "max")
+  }
+  if (text == "max") {
     return LodSampling::Maximum;
+  }
   throw std::invalid_argument("LOD method must be none, point, mean, or max");
 }
 
@@ -419,8 +423,9 @@ int main(int argc, const char *argv[]) {
           build_chunk(catalogue, plan, key, contributors, options.lod_sampling);
       const bool has_coverage = !terrain_chunk_coverage(chunk).rectangles.empty();
       if (!has_coverage) {
-        if (options.overwrite)
+        if (options.overwrite) {
           std::filesystem::remove(output);
+        }
         empty++;
         continue;
       }

@@ -6,6 +6,8 @@ IndentWidth: 2
 ContinuationIndentWidth: 4
 ColumnLimit: 100
 
+InsertBraces: true
+
 BinPackParameters: OnePerLine
 AllowAllParametersOfDeclarationOnNextLine: false
 BreakAfterOpenBracketFunction: true

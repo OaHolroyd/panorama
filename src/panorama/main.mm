@@ -316,8 +316,9 @@ void print_usage(const char *program) {
       settings.bvh_block_cells = panorama::arguments::parse_uint32(value, option, false);
     } else if (option == "--bvh-cache-mib") {
       const uint64_t size = panorama::arguments::parse_uint64(value, option);
-      if (size == 0U || size > std::numeric_limits<uint64_t>::max() / kBytesPerMiB)
+      if (size == 0U || size > std::numeric_limits<uint64_t>::max() / kBytesPerMiB) {
         throw std::out_of_range("BVH cache is outside the supported byte range");
+      }
       settings.bvh_cache_size_bytes = size * kBytesPerMiB;
     } else if (option == "--tile-cache-mib") {
       const uint64_t mebibytes = panorama::arguments::parse_uint64(value, option);
@@ -425,10 +426,11 @@ void print_usage(const char *program) {
   }
   settings.projection.validate();
   validate_output_settings(settings);
-  if (!panorama::valid_lat_lon({settings.latitude, settings.longitude}))
+  if (!panorama::valid_lat_lon({settings.latitude, settings.longitude})) {
     throw std::invalid_argument(
         "Observer latitude must be in [-90, 90] and longitude in [-180, 180]"
     );
+  }
   return settings;
 }
 

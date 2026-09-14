@@ -17,6 +17,7 @@
 *.gml
 *.prj
 *.xml
+*.csv
 
 # Image data
 *.png

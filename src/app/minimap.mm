@@ -179,14 +179,16 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
   MKMapRect dirty = rect;
   {
     std::lock_guard<std::mutex> lock(_imageMutex);
-    if (_image != nullptr)
+    if (_image != nullptr) {
       dirty = MKMapRectUnion(dirty, _imageRect);
+    }
     CGImageRelease(_image);
     _image = CGImageRetain(image);
     _imageRect = rect;
   }
-  if (!MKMapRectIsNull(dirty))
+  if (!MKMapRectIsNull(dirty)) {
     [self setNeedsDisplayInMapRect:dirty];
+  }
 }
 - (void)drawMapRect:(MKMapRect)mapRect
           zoomScale:(MKZoomScale)zoomScale
@@ -201,8 +203,9 @@ static const std::array<std::pair<NSString *const, NSString *const>, 2> kTileOve
     image = CGImageRetain(_image);
     imageRect = _imageRect;
   }
-  if (image == nullptr)
+  if (image == nullptr) {
     return;
+  }
   if (MKMapRectIntersectsRect(mapRect, imageRect)) {
     const CGRect rect = [self rectForMapRect:imageRect];
     CGContextSaveGState(context);
@@ -583,9 +586,10 @@ struct VisibilityMaskRequest {
     NSMutableArray<MKPolygon *> *polygons = [NSMutableArray arrayWithCapacity:dataset.tiles.size()];
     for (size_t first = 0; first < geographic.size(); first += 4U) {
       CLLocationCoordinate2D corners[4];
-      for (size_t corner = 0; corner < 4U; ++corner)
+      for (size_t corner = 0; corner < 4U; ++corner) {
         corners[corner] =
             CLLocationCoordinate2DMake(geographic[first + corner].y, geographic[first + corner].x);
+      }
       [polygons addObject:[MKPolygon polygonWithCoordinates:corners count:4U]];
     }
     // Separate overlays let overlapping datasets retain their own footprints.
@@ -601,8 +605,9 @@ struct VisibilityMaskRequest {
   _largeMap = false;
 
   if (_coverageVisible) {
-    for (MKMultiPolygon *overlay in _coverageOverlays)
+    for (MKMultiPolygon *overlay in _coverageOverlays) {
       [_mapView insertOverlay:overlay belowOverlay:_visibilityOverlay];
+    }
   }
   [self updateCoverageControl];
   [self updateMapFocusControl];
@@ -626,8 +631,9 @@ struct VisibilityMaskRequest {
   (void)sender;
   _coverageVisible = !_coverageVisible;
   if (_coverageVisible) {
-    for (MKMultiPolygon *overlay in _coverageOverlays)
+    for (MKMultiPolygon *overlay in _coverageOverlays) {
       [_mapView insertOverlay:overlay belowOverlay:_visibilityOverlay];
+    }
   } else {
     [_mapView removeOverlays:_coverageOverlays];
   }
@@ -664,8 +670,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)setMapAndPointInfoVisible:(bool)visible {
-  if (_contentVisible == visible)
+  if (_contentVisible == visible) {
     return;
+  }
   _contentVisible = visible;
   ++_visibilityGeneration;
   _pendingMask.reset();
@@ -695,8 +702,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)informationFooterContentDidChange {
-  if (!_contentVisible)
+  if (!_contentVisible) {
     return;
+  }
   [_pointInfoView layoutSubtreeIfNeeded];
   const CGFloat nextHeight =
       std::max(kMinimumPointSectionHeight, _pointInfoView.fittingSize.height);
@@ -788,8 +796,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)mapViewDidChangeVisibleRegion:(MKMapView *)mapView {
-  if (!_contentVisible)
+  if (!_contentVisible) {
     return;
+  }
   [_scaleView updateForMapView:mapView];
   [self updateVisibilityTransform];
 }
@@ -797,12 +806,14 @@ struct VisibilityMaskRequest {
 /// Capture geometry on AppKit; CRS grid construction happens on the worker.
 /// The image retains its geographical rectangle while a newer job is pending.
 - (void)updateVisibilityTransform {
-  if (!_contentVisible || _visibilityPoints == nil)
+  if (!_contentVisible || _visibilityPoints == nil) {
     return;
+  }
   const NSSize size = [_mapView convertRectToBacking:_mapView.bounds].size;
   const MKMapRect rect = _mapView.visibleMapRect;
-  if (size.width <= 0 || size.height <= 0 || rect.size.width <= 0 || rect.size.height <= 0)
+  if (size.width <= 0 || size.height <= 0 || rect.size.width <= 0 || rect.size.height <= 0) {
     return;
+  }
   const uint32_t width = uint32_t(std::clamp(std::ceil(size.width), 1.0, 4096.0));
   const uint32_t height = uint32_t(std::clamp(std::ceil(size.height), 1.0, 4096.0));
   const panorama::app::VisibilityMaskParameters parameters = {
@@ -827,8 +838,9 @@ struct VisibilityMaskRequest {
   };
   if (_lastMask && _lastMask->points == _visibilityPoints && _lastMask->region == region &&
       MKMapRectEqualToRect(_lastMask->rect, rect) &&
-      std::memcmp(&_lastMask->parameters, &parameters, sizeof(parameters)) == 0)
+      std::memcmp(&_lastMask->parameters, &parameters, sizeof(parameters)) == 0) {
     return;
+  }
   _pendingMask = VisibilityMaskRequest{_visibilityPoints,
                                        parameters,
                                        rect,
@@ -840,8 +852,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)startPendingMask {
-  if (_maskActive || !_contentVisible || !_pendingMask)
+  if (_maskActive || !_contentVisible || !_pendingMask) {
     return;
+  }
   const VisibilityMaskRequest request = *_pendingMask;
   _pendingMask.reset();
   _maskActive = true;
@@ -877,8 +890,9 @@ struct VisibilityMaskRequest {
           } else if (panorama::app::diagnostics::enabled) {
             ++panorama::app::diagnostics::minimap.stale;
           }
-          if (!panel->_contentVisible)
+          if (!panel->_contentVisible) {
             mask->clear();
+          }
           [panel startPendingMask];
         }
         CGImageRelease(image);
@@ -892,8 +906,9 @@ struct VisibilityMaskRequest {
                        image:(panorama::ImageSize)image {
   if (_cameraOrientation.heading == orientation.heading &&
       _cameraFieldOfView == verticalFieldOfView && _cameraImage.width == image.width &&
-      _cameraImage.height == image.height)
+      _cameraImage.height == image.height) {
     return;
+  }
   _cameraOrientation = orientation;
   _cameraFieldOfView = verticalFieldOfView;
   _cameraImage = image;
@@ -902,8 +917,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)updateCameraGraphics {
-  if (!_contentVisible || !_cameraDirty)
+  if (!_contentVisible || !_cameraDirty) {
     return;
+  }
   const auto orientation = _cameraOrientation;
   const auto image = _cameraImage;
   const double verticalFieldOfView = _cameraFieldOfView;
@@ -949,10 +965,12 @@ struct VisibilityMaskRequest {
   MKPolyline *nextHeading = [MKPolyline polylineWithCoordinates:headingLine count:2];
   [_mapView insertOverlay:nextFieldOfView belowOverlay:_visibilityOverlay];
   [_mapView addOverlay:nextHeading level:MKOverlayLevelAboveLabels];
-  if (_fieldOfViewOverlay != nil)
+  if (_fieldOfViewOverlay != nil) {
     [_mapView removeOverlay:_fieldOfViewOverlay];
-  if (_headingOverlay != nil)
+  }
+  if (_headingOverlay != nil) {
     [_mapView removeOverlay:_headingOverlay];
+  }
   _fieldOfViewOverlay = nextFieldOfView;
   _headingOverlay = nextHeading;
 }
@@ -967,8 +985,9 @@ struct VisibilityMaskRequest {
   }
   _renderFrame = frame;
   _visibilityObserver = observer;
-  if (!_contentVisible)
+  if (!_contentVisible) {
     return;
+  }
   const uint64_t count = uint64_t(image.width) * image.height;
   if (points == nil || count == 0 || count > UINT32_MAX || points.length < count * 8) {
     if (_visibilityPoints != nil) {
@@ -1042,8 +1061,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)setObserverLatitude:(double)latitude longitude:(double)longitude {
-  if (_observerLatitude == latitude && _observerLongitude == longitude)
+  if (_observerLatitude == latitude && _observerLongitude == longitude) {
     return;
+  }
   _observerLatitude = latitude;
   _observerLongitude = longitude;
   _observerDirty = true;
@@ -1061,8 +1081,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)updateObserverGraphics {
-  if (!_contentVisible || !_observerDirty)
+  if (!_contentVisible || !_observerDirty) {
     return;
+  }
   _observerDirty = false;
   const double latitude = _observerLatitude, longitude = _observerLongitude;
   const panorama::LatLon observer{latitude, longitude};
@@ -1073,8 +1094,9 @@ struct VisibilityMaskRequest {
 }
 
 - (void)setInspectedPointLatitude:(double)latitude longitude:(double)longitude locked:(bool)locked {
-  if (!_contentVisible)
+  if (!_contentVisible) {
     return;
+  }
   const panorama::LatLon geographic = panorama::LatLon{latitude, longitude};
   const CLLocationCoordinate2D coordinate =
       CLLocationCoordinate2DMake(geographic.lat, geographic.lon);
@@ -1123,8 +1145,9 @@ struct VisibilityMaskRequest {
 
 - (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {
   (void)mapView;
-  if (overlay == _visibilityOverlay)
+  if (overlay == _visibilityOverlay) {
     return _visibilityRenderer;
+  }
   if ([overlay isKindOfClass:MKMultiPolygon.class] &&
       [_coverageOverlays containsObject:(MKMultiPolygon *)overlay]) {
     MKMultiPolygonRenderer *renderer =

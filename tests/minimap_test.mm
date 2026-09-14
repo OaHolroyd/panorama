@@ -18,8 +18,9 @@ using panorama::app::VisibilityMaskParameters;
 using MaskPoint = std::array<float, 2>;
 
 static void require(bool condition, const char *message) {
-  if (!condition)
+  if (!condition) {
     throw std::runtime_error(message);
+  }
 }
 
 // Independent CPU coverage oracle: test the distance of pixel centres to each
@@ -229,8 +230,9 @@ int main() {
       };
       std::mt19937 random(123);
       std::uniform_real_distribution<float> coordinate(-40, 40);
-      for (size_t i = 0; i < 300; ++i)
+      for (size_t i = 0; i < 300; ++i) {
         points.push_back({coordinate(random), coordinate(random)});
+      }
       id<MTLBuffer> buffer = [device newBufferWithBytes:points.data()
                                                  length:points.size() * sizeof(MaskPoint)
                                                 options:MTLResourceStorageModeShared];
@@ -295,11 +297,12 @@ int main() {
           std::abs(hits[0][0] - 6) < 1e-5 && std::abs(hits[0][1] - 8) < 1e-5,
           "Collision snapshot used a 3D distance or slope"
       );
-      for (size_t i = 1; i < count; ++i)
+      for (size_t i = 1; i < count; ++i) {
         require(
             !std::isfinite(hits[i][0]) && !std::isfinite(hits[i][1]),
             "Invalid distance produced a visible point"
         );
+      }
       // Full panorama density in one pixel is the worst contention/overdraw
       // case. Check constant coverage and expose its cost in the test output.
       std::vector<MaskPoint> dense(1600 * 900, {16, 9});

@@ -27,8 +27,9 @@ GpuTerrainFrameTiming render_terrain_frame(
   const bool shadows = settings.use_surface_normals && settings.appearance.raytraced_shadows;
   const auto make_command = [&] {
     auto command = [trace.command_queue() commandBuffer];
-    if (command == nil)
+    if (command == nil) {
       throw std::runtime_error("Could not allocate terrain producer");
+    }
     command.label = @"Terrain frame producer";
     return command;
   };
@@ -46,7 +47,7 @@ GpuTerrainFrameTiming render_terrain_frame(
     trace_activity::Scope activity("producer wait", &timing.producer_wait_milliseconds);
     [producer commit];
     [producer waitUntilCompleted];
-    if (producer.status != MTLCommandBufferStatusCompleted)
+    if (producer.status != MTLCommandBufferStatusCompleted) {
       throw std::runtime_error(
           "Terrain producer failed: " + std::string(
                                             producer.error == nil
@@ -54,6 +55,7 @@ GpuTerrainFrameTiming render_terrain_frame(
                                                 : producer.error.localizedDescription.UTF8String
                                         )
       );
+    }
     timing.gpu_milliseconds += 1000.0 * (producer.GPUEndTime - producer.GPUStartTime);
     ++timing.producer_submissions;
   };
@@ -67,8 +69,9 @@ GpuTerrainFrameTiming render_terrain_frame(
     // resident shadow outputs, finish its primary work before CPU scheduling.
     if (encoded_primary) {
       finish(command);
-      if (!trace.complete_encoded_trace(command))
+      if (!trace.complete_encoded_trace(command)) {
         repair();
+      }
       encoded_primary = false;
       command = make_command();
     }
@@ -113,8 +116,9 @@ GpuTerrainFrameTiming render_terrain_frame(
           timer,
           producer
       );
-      if (encode_dependent)
+      if (encode_dependent) {
         encode_dependent(producer);
+      }
     };
     encode_image(command);
     finish(command);
@@ -122,10 +126,12 @@ GpuTerrainFrameTiming render_terrain_frame(
     const bool shadows_complete = !encoded_shadows || trace.complete_encoded_shadows(command);
     if (!primary_complete || !shadows_complete) {
       timing.streamed = true;
-      if (!primary_complete)
+      if (!primary_complete) {
         repair();
-      if (shadows)
+      }
+      if (shadows) {
         repair_shadows();
+      }
       command = make_command();
       encode_image(command);
       finish(command);

@@ -12,6 +12,15 @@
 }
 @end
 
+namespace {
+struct PeakLabelLayout {
+  NSPoint anchor;
+  NSPoint leader_end;
+  NSRect box;
+  NSString *__strong label;
+};
+} // namespace
+
 @implementation PeakLabelOverlayView
 
 - (BOOL)isOpaque {
@@ -38,8 +47,9 @@
   (void)dirtyRect;
   if (_mode == panorama::app::PeakLabelMode::Off || _frame.output_image.width == 0 ||
       _frame.output_image.height == 0 ||
-      (_mode == panorama::app::PeakLabelMode::NearPointer && !_pointer.has_value()))
+      (_mode == panorama::app::PeakLabelMode::NearPointer && !_pointer.has_value())) {
     return;
+  }
   constexpr CGFloat kPointerRadius = 140.0;
   const NSUInteger limit = _mode == panorama::app::PeakLabelMode::NearPointer ? 12 : 30;
   NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
@@ -50,6 +60,7 @@
     NSParagraphStyleAttributeName : paragraph,
   };
   std::vector<NSRect> occupied;
+  std::vector<PeakLabelLayout> layouts;
   NSUInteger displayed = 0;
   for (const auto &peak : _frame.peaks) {
     const NSPoint anchor = NSMakePoint(
@@ -58,10 +69,11 @@
             peak.pixel_y / _frame.output_image.height * self.bounds.size.height
     );
     if (_mode == panorama::app::PeakLabelMode::NearPointer &&
-        std::hypot(anchor.x - _pointer->x, anchor.y - _pointer->y) > kPointerRadius)
+        std::hypot(anchor.x - _pointer->x, anchor.y - _pointer->y) > kPointerRadius) {
       continue;
+    }
     NSString *name = [NSString stringWithUTF8String:peak.name.c_str()];
-    NSString *label = [NSString stringWithFormat:@"%@ · %.0f m", name, peak.elevation];
+    NSString *label = [NSString stringWithFormat:@"%@ · %.1f km", name, peak.distance / 1000.0];
     NSSize size = [label sizeWithAttributes:attributes];
     size.width += 12.0;
     size.height += 6.0;
@@ -80,38 +92,50 @@
     std::optional<NSRect> placement;
     for (const NSPoint origin : origins) {
       const NSRect candidate = NSMakeRect(origin.x, origin.y, size.width, size.height);
-      if (!NSContainsRect(NSInsetRect(self.bounds, 4.0, 4.0), candidate))
+      if (!NSContainsRect(NSInsetRect(self.bounds, 4.0, 4.0), candidate)) {
         continue;
+      }
       bool overlaps = false;
-      for (NSRect other : occupied)
+      for (NSRect other : occupied) {
         overlaps = overlaps || NSIntersectsRect(NSInsetRect(candidate, -3.0, -3.0), other);
+      }
       if (!overlaps) {
         placement = candidate;
         break;
       }
     }
-    if (!placement.has_value())
+    if (!placement.has_value()) {
       continue;
+    }
     const NSRect box = *placement;
     occupied.push_back(box);
     const NSPoint leaderEnd = NSMakePoint(
         std::clamp(anchor.x, NSMinX(box), NSMaxX(box)),
         std::clamp(anchor.y, NSMinY(box), NSMaxY(box))
     );
+    layouts.push_back({anchor, leaderEnd, box, label});
+    if (++displayed >= limit) {
+      break;
+    }
+  }
+
+  for (auto layout = layouts.rbegin(); layout != layouts.rend(); ++layout) {
     [[NSColor colorWithWhite:1.0 alpha:0.72] setStroke];
     NSBezierPath *leader = [NSBezierPath bezierPath];
     leader.lineWidth = 1.0;
-    [leader moveToPoint:anchor];
-    [leader lineToPoint:leaderEnd];
+    [leader moveToPoint:layout->anchor];
+    [leader lineToPoint:layout->leader_end];
     [leader stroke];
     [[NSColor colorWithWhite:0.05 alpha:0.72] setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:box xRadius:5.0 yRadius:5.0] fill];
+    [[NSBezierPath bezierPathWithRoundedRect:layout->box xRadius:5.0 yRadius:5.0] fill];
     [NSColor.whiteColor setFill];
-    [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(anchor.x - 2.5, anchor.y - 2.5, 5.0, 5.0)]
-        fill];
-    [label drawInRect:NSInsetRect(box, 6.0, 3.0) withAttributes:attributes];
-    if (++displayed >= limit)
-      break;
+    [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(
+                                                layout->anchor.x - 2.5,
+                                                layout->anchor.y - 2.5,
+                                                5.0,
+                                                5.0
+                                            )] fill];
+    [layout->label drawInRect:NSInsetRect(layout->box, 6.0, 3.0) withAttributes:attributes];
   }
 }
 

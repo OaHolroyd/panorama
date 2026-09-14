@@ -11,8 +11,9 @@ using panorama::ImageSize;
 using namespace panorama::app;
 
 static void require(bool value, const char *message) {
-  if (!value)
+  if (!value) {
     throw std::runtime_error(message);
+  }
 }
 
 static void check_inspection_coordinates() {
@@ -56,11 +57,12 @@ static void check_inspection_coordinates() {
            {0.5, 1.1},
            {std::numeric_limits<double>::quiet_NaN(), 0.5},
            {0.5, std::numeric_limits<double>::infinity()},
-       }})
+       }}) {
     require(
         !inspection_pixel(location, {800, 450}),
         "Invalid cursor locations must clear inspection without throwing"
     );
+  }
   std::puts("MetalFX inspection coordinate regression tests passed.");
 }
 
@@ -111,12 +113,12 @@ static void check_projection_scaling() {
     );
   }
   for (auto activation :
-       {MetalFxActivation::Disabled, MetalFxActivation::PanMoveOnly, MetalFxActivation::Always})
+       {MetalFxActivation::Disabled, MetalFxActivation::PanMoveOnly, MetalFxActivation::Always}) {
     for (auto preset : {MetalFxPreset::Off,
                         MetalFxPreset::Quality,
                         MetalFxPreset::Balanced,
-                        MetalFxPreset::Performance})
-      for (bool supported : {false, true})
+                        MetalFxPreset::Performance}) {
+      for (bool supported : {false, true}) {
         for (bool interacting : {false, true}) {
           const auto resolution =
               metalfx_resolution(output.image, {activation, preset, interacting}, supported);
@@ -124,13 +126,17 @@ static void check_projection_scaling() {
                                (activation == MetalFxActivation::Always ||
                                 (activation == MetalFxActivation::PanMoveOnly && interacting));
           require(resolution.enabled == enabled, "MetalFX activation/preset policy mismatch");
-          if (!enabled)
+          if (!enabled) {
             require(
                 resolution.trace.width == output.image.width &&
                     resolution.trace.height == output.image.height,
                 "Disabled or unsupported MetalFX must trace natively"
             );
+          }
         }
+      }
+    }
+  }
   bool rejected = false;
   try {
     (void)metalfx_resolution(
@@ -258,14 +264,16 @@ int main() {
           require(copy.status == MTLCommandBufferStatusCompleted, "Output readback failed");
           std::array<uint8_t, 8 * 6 * 4> result;
           const auto *bytes = static_cast<const uint8_t *>(readback.contents);
-          for (size_t row = 0; row < 6; ++row)
+          for (size_t row = 0; row < 6; ++row) {
             std::copy_n(bytes + row * row_bytes, 8 * 4, result.data() + row * 8 * 4);
+          }
           return result;
         };
         const auto published_pixels = read_output(published);
         std::array<uint8_t, 4 * 3 * 4> changed_pixels = pixels;
-        for (size_t i = 0; i < changed_pixels.size(); i += 4)
+        for (size_t i = 0; i < changed_pixels.size(); i += 4) {
           changed_pixels[i] = 220;
+        }
         [input replaceRegion:MTLRegionMake2D(0, 0, 4, 3)
                  mipmapLevel:0
                    withBytes:changed_pixels.data()

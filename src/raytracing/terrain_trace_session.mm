@@ -26,8 +26,9 @@ void validate_configuration(const RaytraceConfig &config) {
   if (config.bvh_block_cells == 0U) {
     throw std::invalid_argument("BVH block cell count must be positive");
   }
-  if (config.bvh_cache_size_bytes == 0U)
+  if (config.bvh_cache_size_bytes == 0U) {
     throw std::invalid_argument("BVH cache size must be positive");
+  }
   if (config.raytracer != Raytracer::Software && config.raytracer != Raytracer::MetalBvh) {
     throw std::invalid_argument("Unknown terrain raytracer");
   }
@@ -35,8 +36,9 @@ void validate_configuration(const RaytraceConfig &config) {
   if (config.tile_cache_size_bytes == 0U || datasets.empty()) {
     throw std::invalid_argument("Terrain trace session requires a tile directory and cache");
   }
-  if (datasets.size() > 1U && config.raytracer != Raytracer::MetalBvh)
+  if (datasets.size() > 1U && config.raytracer != Raytracer::MetalBvh) {
     throw std::invalid_argument("Multiple terrain datasets require the Metal BVH raytracer");
+  }
   if (!valid_lat_lon(config.observer.position) || !std::isfinite(config.observer.elevation) ||
       !std::isfinite(config.max_distance) || config.max_distance <= 0.0F ||
       !std::isfinite(config.lod_scale) || config.lod_scale < 0.0F) {
@@ -114,13 +116,15 @@ struct TerrainTraceSession::State {
 
   void prepare_camera(const RayFieldRequest &request, float lod_footprint_scale = 1.0F) {
     const uint32_t count = validate_camera_request(request);
-    if (!(lod_footprint_scale > 0.0F) || !std::isfinite(lod_footprint_scale))
+    if (!(lod_footprint_scale > 0.0F) || !std::isfinite(lod_footprint_scale)) {
       throw std::invalid_argument("LOD footprint scale must be finite and positive");
+    }
     camera_rays_ready = false;
     primary_repair_pending = false;
-    if (!camera)
+    if (!camera) {
       camera =
           std::make_unique<GpuCamera>(gpu->device(), gpu->command_queue(), gpu->library(), *tiles);
+    }
     gpu->resize_rays(count);
     image = request.image;
     ray_count = parameters.ray_count = count;
@@ -156,8 +160,9 @@ struct TerrainTraceSession::State {
     config.observer = tiles->catalogue().observer();
     if (config.raytracer == Raytracer::Software &&
         tiles->catalogue().render_frame().kind ==
-            TerrainRenderFrame::Kind::LocalAzimuthalEquidistant)
+            TerrainRenderFrame::Kind::LocalAzimuthalEquidistant) {
       throw std::invalid_argument("Geographic terrain requires --raytracer metal-bvh");
+    }
     parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), image);
 
     gpu = std::make_unique<GpuRaytraceResources>(
@@ -210,11 +215,13 @@ void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
   if (raytracer != Raytracer::Software && raytracer != Raytracer::MetalBvh) {
     throw std::invalid_argument("Unknown terrain raytracer");
   }
-  if (state.config.raytracer == raytracer)
+  if (state.config.raytracer == raytracer) {
     return;
+  }
   if (raytracer == Raytracer::Software && state.tiles->catalogue().render_frame().kind ==
-                                              TerrainRenderFrame::Kind::LocalAzimuthalEquidistant)
+                                              TerrainRenderFrame::Kind::LocalAzimuthalEquidistant) {
     throw std::invalid_argument("Geographic and mixed terrain require the Metal BVH raytracer");
+  }
   if (raytracer == Raytracer::MetalBvh && !state.bvh) {
     state.bvh = std::make_unique<MetalBvhTrace>(
         *state.gpu,
@@ -297,16 +304,19 @@ void TerrainTraceSession::trace_prepared() {
   state.frame_passes = 0U;
   if (!state.camera_rays_ready) {
     auto command = [state.gpu->command_queue() commandBuffer];
-    if (command == nil)
+    if (command == nil) {
       throw std::runtime_error("Could not create camera ray command");
+    }
     command.label = @"GPU camera rays for synchronous trace";
     state.camera->encode_rays(command, state.gpu->ray_directions());
-    if (state.config.raytracer == Raytracer::Software)
+    if (state.config.raytracer == Raytracer::Software) {
       state.gpu->encode_clear_outputs(command);
+    }
     [command commit];
     [command waitUntilCompleted];
-    if (command.status != MTLCommandBufferStatusCompleted)
+    if (command.status != MTLCommandBufferStatusCompleted) {
       throw std::runtime_error("GPU camera ray generation failed");
+    }
     state.complete_camera();
   }
   if (state.config.raytracer == Raytracer::MetalBvh) {
@@ -444,22 +454,26 @@ bool TerrainTraceSession::encode_trace(
 ) {
   State &state = *state_;
   state.prepare_camera(camera, lod_footprint_scale);
-  if (command == nil || state.config.raytracer != Raytracer::MetalBvh)
+  if (command == nil || state.config.raytracer != Raytracer::MetalBvh) {
     return false;
+  }
   state.bvh->prepare(*state.tiles, state.config.observer, state.parameters, state.timer);
-  if (!state.bvh->prepare_scene(state.timer))
+  if (!state.bvh->prepare_scene(state.timer)) {
     return false;
+  }
   state.camera->encode_rays(command, state.gpu->ray_directions());
   return state.bvh->encode_scene(command, state.timer);
 }
 
 bool TerrainTraceSession::complete_encoded_trace(id<MTLCommandBuffer> command) {
-  if (command.status != MTLCommandBufferStatusCompleted)
+  if (command.status != MTLCommandBufferStatusCompleted) {
     throw std::logic_error("Primary producer has not completed successfully");
+  }
   state_->complete_camera();
   state_->primary_repair_pending = !state_->bvh->scene_complete();
-  if (state_->primary_repair_pending)
+  if (state_->primary_repair_pending) {
     return false;
+  }
   ++state_->frames;
   ++state_->trace_revision;
   return true;
@@ -471,13 +485,16 @@ bool TerrainTraceSession::encode_shadows(
     double elevation
 ) {
   State &state = *state_;
-  if (!std::isfinite(azimuth) || !std::isfinite(elevation))
+  if (!std::isfinite(azimuth) || !std::isfinite(elevation)) {
     throw std::invalid_argument("Sun direction must be finite");
+  }
   if (state.config.raytracer != Raytracer::MetalBvh || !state.outputs.elevations ||
-      !state.outputs.surface_gradients)
+      !state.outputs.surface_gradients) {
     return false;
-  if (!state.bvh->encode_shadows(command, azimuth, elevation))
+  }
+  if (!state.bvh->encode_shadows(command, azimuth, elevation)) {
     return false;
+  }
   state.bvh_shadow_active = true;
   state.shadow_azimuth = azimuth;
   state.shadow_elevation = elevation;
@@ -485,8 +502,9 @@ bool TerrainTraceSession::encode_shadows(
 }
 
 bool TerrainTraceSession::complete_encoded_shadows(id<MTLCommandBuffer> command) {
-  if (command.status != MTLCommandBufferStatusCompleted)
+  if (command.status != MTLCommandBufferStatusCompleted) {
     throw std::logic_error("Shadow producer has not completed successfully");
+  }
   if (!state_->bvh->shadows_complete()) {
     state_->bvh_shadow_active = false;
     state_->shadow_revision = std::numeric_limits<uint64_t>::max();
@@ -691,8 +709,9 @@ id<MTLBuffer> TerrainTraceSession::num_evaluations() const {
 }
 
 id<MTLBuffer> TerrainTraceSession::shadow_visibility() const {
-  if (state_->bvh_shadow_active)
+  if (state_->bvh_shadow_active) {
     return state_->bvh->shadow_visibility();
+  }
   if (state_->shadows == nullptr || state_->shadow_revision != state_->trace_revision) {
     throw std::logic_error("Shadows have not been traced for the current terrain view");
   }

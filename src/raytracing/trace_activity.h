@@ -30,8 +30,9 @@ class Scope {
 public:
   explicit Scope(const char *name, double *milliseconds = nullptr)
       : activity_(current), name_(name), milliseconds_(milliseconds) {
-    if (activity_ == nullptr && milliseconds_ == nullptr)
+    if (activity_ == nullptr && milliseconds_ == nullptr) {
       return;
+    }
     started_ = seconds();
     if (activity_ != nullptr) {
       previous_ = activity_->stage.load(std::memory_order_relaxed);
@@ -41,15 +42,18 @@ public:
     }
   }
   ~Scope() {
-    if (activity_ == nullptr && milliseconds_ == nullptr)
+    if (activity_ == nullptr && milliseconds_ == nullptr) {
       return;
+    }
     const double elapsed = 1000.0 * (seconds() - started_);
-    if (milliseconds_ != nullptr)
+    if (milliseconds_ != nullptr) {
       *milliseconds_ += elapsed;
+    }
     if (activity_ != nullptr) {
       // Inclusive timings: nested slow stages must not be added together.
-      if (elapsed >= 100.0)
+      if (elapsed >= 100.0) {
         std::printf("Slow stage: %s wall %.3f ms (inclusive)\n", name_, elapsed);
+      }
       activity_->since.store(previous_since_, std::memory_order_relaxed);
       activity_->stage.store(previous_, std::memory_order_relaxed);
     }

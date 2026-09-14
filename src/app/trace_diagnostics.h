@@ -43,8 +43,9 @@ inline trace_activity::Activity terrain;
 struct Scope {
   Activity &activity;
   explicit Scope(Activity &value) : activity(value) {
-    if (enabled)
+    if (enabled) {
       ++activity.calls;
+    }
     activity.mark("begin");
   }
   ~Scope() { activity.mark("idle"); }
@@ -52,8 +53,9 @@ struct Scope {
 
 inline void
 track_submission(Activity &activity, id<MTLCommandBuffer> command, id<CAMetalDrawable> drawable) {
-  if (!enabled)
+  if (!enabled) {
     return;
+  }
   // Capture only the process-lifetime counters, never the drawable or command.
   Activity *counters = &activity;
   ++activity.submitted;
@@ -70,8 +72,9 @@ track_submission(Activity &activity, id<MTLCommandBuffer> command, id<CAMetalDra
 class Monitor {
 public:
   explicit Monitor(id<MTLDevice> device) {
-    if (!enabled)
+    if (!enabled) {
       return;
+    }
     thread_ = std::thread([this, device] {
       std::unique_lock lock(mutex_);
       while (!changed_.wait_for(lock, std::chrono::seconds(1), [this] { return stopping_; })) {
@@ -118,8 +121,9 @@ public:
       stopping_ = true;
     }
     changed_.notify_one();
-    if (thread_.joinable())
+    if (thread_.joinable()) {
       thread_.join();
+    }
   }
 
 private:

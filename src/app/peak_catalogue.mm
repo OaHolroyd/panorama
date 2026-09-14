@@ -45,8 +45,9 @@ namespace {
           break;
         }
       }
-      if (!closed || (offset < line.size() && line[offset] != ','))
+      if (!closed || (offset < line.size() && line[offset] != ',')) {
         throw std::runtime_error("Malformed peak gazetteer line " + std::to_string(line_number));
+      }
     } else {
       const size_t end = line.find(',', offset);
       field.assign(
@@ -55,8 +56,9 @@ namespace {
       offset = end == std::string_view::npos ? line.size() : end;
     }
     fields.push_back(std::move(field));
-    if (offset == line.size())
+    if (offset == line.size()) {
       break;
+    }
     ++offset;
   }
   return fields;
@@ -68,40 +70,46 @@ PeakCatalogue PeakCatalogue::load(const std::filesystem::path &path) {
   NSString *file = [NSString stringWithUTF8String:path.c_str()];
   NSError *error = nil;
   NSString *contents = [NSString stringWithContentsOfFile:file
-                                                 encoding:NSWindowsCP1252StringEncoding
+                                                 encoding:NSUTF8StringEncoding
                                                     error:&error];
-  if (contents == nil)
+  if (contents == nil) {
     throw std::runtime_error(
         "Could not read peak gazetteer: " + std::string(error.localizedDescription.UTF8String)
     );
+  }
   NSArray<NSString *> *lines =
       [contents componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
-  if (lines.count == 0 ||
-      ![lines[0] isEqualToString:@"Lat,Long,Elevation,Prom,Name,Lat_dec,Long_dec,Icon"])
+  if (lines.count == 0 || ![lines[0] isEqualToString:@"Lat,Lon,Elevation,Prom,Name"]) {
     throw std::runtime_error("Peak gazetteer has an unexpected header");
+  }
 
   PeakCatalogue result;
   result.peaks_.reserve(lines.count - 1);
   for (NSUInteger index = 1; index < lines.count; ++index) {
     NSString *line = lines[index];
-    if (line.length == 0)
+    if (line.length == 0) {
       continue;
+    }
     const char *utf8 = line.UTF8String;
-    if (utf8 == nullptr)
+    if (utf8 == nullptr) {
       throw std::runtime_error("Peak gazetteer contains undecodable text");
+    }
     const std::vector<std::string> columns = parse_csv_line(utf8, index + 1);
-    if (columns.size() != 8U)
+    if (columns.size() != 5U) {
       throw std::runtime_error("Malformed peak gazetteer line " + std::to_string(index + 1));
-    const double latitude = parse_number(columns[5], index + 1, "latitude");
-    const double longitude = parse_number(columns[6], index + 1, "longitude");
+    }
+    const double latitude = parse_number(columns[0], index + 1, "latitude");
+    const double longitude = parse_number(columns[1], index + 1, "longitude");
     const double elevation = parse_number(columns[2], index + 1, "elevation");
     const double prominence = parse_number(columns[3], index + 1, "prominence");
-    if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0)
+    if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
       throw std::runtime_error(
           "Invalid coordinate on peak gazetteer line " + std::to_string(index + 1)
       );
-    if (columns[4].empty())
+    }
+    if (columns[4].empty()) {
       throw std::runtime_error("Missing name on peak gazetteer line " + std::to_string(index + 1));
+    }
     result.peaks_.push_back(
         {static_cast<uint32_t>(result.peaks_.size()),
          {latitude, longitude},

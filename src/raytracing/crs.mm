@@ -27,8 +27,9 @@ const geod_geodesic &wgs84_geodesic() {
 } // namespace
 
 Coord geographic_offset(LatLon origin, LatLon destination) {
-  if (!valid_lat_lon(origin) || !valid_lat_lon(destination))
+  if (!valid_lat_lon(origin) || !valid_lat_lon(destination)) {
     throw std::invalid_argument("Invalid WGS84 position");
+  }
   double distance, azimuth;
   geod_inverse(
       &wgs84_geodesic(),
@@ -45,8 +46,9 @@ Coord geographic_offset(LatLon origin, LatLon destination) {
 }
 
 LatLon offset_position(LatLon origin, double east, double north) {
-  if (!valid_lat_lon(origin) || !std::isfinite(east) || !std::isfinite(north))
+  if (!valid_lat_lon(origin) || !std::isfinite(east) || !std::isfinite(north)) {
     throw std::invalid_argument("Invalid geographic movement");
+  }
   LatLon result;
   geod_direct(
       &wgs84_geodesic(),
@@ -80,13 +82,15 @@ constexpr uint32_t kWgs84Epsg = 4326;
 }
 
 [[nodiscard]] OGRSpatialReference local_aeqd_reference(LatLon anchor) {
-  if (!valid_lat_lon(anchor))
+  if (!valid_lat_lon(anchor)) {
     throw std::invalid_argument("Azimuthal-equidistant anchor is invalid");
+  }
   OGRSpatialReference reference;
   if (reference.SetWellKnownGeogCS("WGS84") != OGRERR_NONE ||
       reference.SetAE(anchor.lat, anchor.lon, 0.0, 0.0) != OGRERR_NONE ||
-      reference.SetLinearUnits("metre", 1.0) != OGRERR_NONE)
+      reference.SetLinearUnits("metre", 1.0) != OGRERR_NONE) {
     throw std::runtime_error("Could not initialise local azimuthal-equidistant CRS");
+  }
   reference.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
   return reference;
 }
@@ -128,8 +132,9 @@ make_transformation(OGRSpatialReference source, OGRSpatialReference destination)
     std::span<const Coord> coordinates,
     const char *failure
 ) {
-  if (coordinates.empty())
+  if (coordinates.empty()) {
     return {};
+  }
   std::vector<double> xs, ys;
   xs.reserve(coordinates.size());
   ys.reserve(coordinates.size());
@@ -137,12 +142,14 @@ make_transformation(OGRSpatialReference source, OGRSpatialReference destination)
     xs.push_back(coordinate.x);
     ys.push_back(coordinate.y);
   }
-  if (!transformation.Transform(coordinates.size(), xs.data(), ys.data(), nullptr, nullptr))
+  if (!transformation.Transform(coordinates.size(), xs.data(), ys.data(), nullptr, nullptr)) {
     throw std::runtime_error(failure);
+  }
   std::vector<Coord> result;
   result.reserve(coordinates.size());
-  for (size_t index = 0; index < coordinates.size(); ++index)
+  for (size_t index = 0; index < coordinates.size(); ++index) {
     result.push_back({xs[index], ys[index]});
+  }
   return result;
 }
 
@@ -177,8 +184,9 @@ CoordinateTransform::CoordinateTransform(CoordinateTransform &&) noexcept = defa
 CoordinateTransform &CoordinateTransform::operator=(CoordinateTransform &&) noexcept = default;
 
 std::vector<Coord> CoordinateTransform::apply(std::span<const Coord> coordinates) const {
-  if (state_ == nullptr || state_->transformation == nullptr)
+  if (state_ == nullptr || state_->transformation == nullptr) {
     throw std::logic_error("Coordinate transform has been moved from");
+  }
   return transform(*state_->transformation, coordinates, "Could not transform coordinates");
 }
 
@@ -187,10 +195,12 @@ std::vector<Coord> transform_coordinates(
     uint32_t destination_epsg,
     std::span<const Coord> coordinates
 ) {
-  if (coordinates.empty())
+  if (coordinates.empty()) {
     return {};
-  if (source_epsg == destination_epsg)
+  }
+  if (source_epsg == destination_epsg) {
     return {coordinates.begin(), coordinates.end()};
+  }
   CoordinateTransform transformation(source_epsg, destination_epsg);
   return transformation.apply(coordinates);
 }
@@ -270,8 +280,9 @@ Coord Crs::from_lat_lon(LatLon coordinate) const {
 }
 
 std::vector<Coord> Crs::from_lat_lon(std::span<const LatLon> coordinates) const {
-  if (coordinates.empty())
+  if (coordinates.empty()) {
     return {};
+  }
   auto transformation = make_transformation(kWgs84Epsg, epsg_code());
   std::vector<double> longitudes;
   std::vector<double> latitudes;
@@ -287,8 +298,9 @@ std::vector<Coord> Crs::from_lat_lon(std::span<const LatLon> coordinates) const 
   }
   std::vector<Coord> result;
   result.reserve(coordinates.size());
-  for (size_t index = 0; index < coordinates.size(); ++index)
+  for (size_t index = 0; index < coordinates.size(); ++index) {
     result.push_back({longitudes[index], latitudes[index]});
+  }
   return result;
 }
 
