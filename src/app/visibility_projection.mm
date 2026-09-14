@@ -23,8 +23,9 @@ VisibilityProjectionGrid make_visibility_projection_grid(
       [](const CoordinateTransform &projection, std::vector<double> &x, std::vector<double> &y) {
         std::vector<Coord> input;
         input.reserve(x.size());
-        for (size_t i = 0; i < x.size(); ++i)
+        for (size_t i = 0; i < x.size(); ++i) {
           input.push_back({x[i], y[i]});
+        }
         const auto output = projection.apply(input);
         for (size_t i = 0; i < x.size(); ++i) {
           x[i] = output[i].x;
@@ -106,19 +107,23 @@ VisibilityProjectionGrid make_visibility_projection_grid(
         );
       }
     }
-    if (error > 0.25 && cells < 128)
+    if (error > 0.25 && cells < 128) {
       continue;
-    if (!std::isfinite(error) || error > 0.5)
+    }
+    if (!std::isfinite(error) || error > 0.5) {
       throw std::runtime_error("Minimap projection exceeds half-pixel error budget");
+    }
     VisibilityProjectionGrid grid = {left - observer.x,
                                      bottom - observer.y,
                                      (right - left) / cells,
                                      (top - bottom) / cells,
                                      cells + 1,
                                      {}};
-    for (uint32_t row = 0; row < fine; row += 2)
-      for (uint32_t col = 0; col < fine; col += 2)
+    for (uint32_t row = 0; row < fine; row += 2) {
+      for (uint32_t col = 0; col < fine; col += 2) {
         grid.pixels.push_back({float(x[row * fine + col]), float(y[row * fine + col])});
+      }
+    }
     return grid;
   }
   throw std::logic_error("Unreachable minimap grid refinement");

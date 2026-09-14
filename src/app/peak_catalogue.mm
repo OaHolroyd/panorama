@@ -45,8 +45,9 @@ namespace {
           break;
         }
       }
-      if (!closed || (offset < line.size() && line[offset] != ','))
+      if (!closed || (offset < line.size() && line[offset] != ',')) {
         throw std::runtime_error("Malformed peak gazetteer line " + std::to_string(line_number));
+      }
     } else {
       const size_t end = line.find(',', offset);
       field.assign(
@@ -55,8 +56,9 @@ namespace {
       offset = end == std::string_view::npos ? line.size() : end;
     }
     fields.push_back(std::move(field));
-    if (offset == line.size())
+    if (offset == line.size()) {
       break;
+    }
     ++offset;
   }
   return fields;
@@ -70,10 +72,11 @@ PeakCatalogue PeakCatalogue::load(const std::filesystem::path &path) {
   NSString *contents = [NSString stringWithContentsOfFile:file
                                                  encoding:NSUTF8StringEncoding
                                                     error:&error];
-  if (contents == nil)
+  if (contents == nil) {
     throw std::runtime_error(
         "Could not read peak gazetteer: " + std::string(error.localizedDescription.UTF8String)
     );
+  }
   NSArray<NSString *> *lines =
       [contents componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
   if (lines.count == 0 || ![lines[0] isEqualToString:@"Lat,Lon,Elevation,Prom,Name"]) {
@@ -99,10 +102,11 @@ PeakCatalogue PeakCatalogue::load(const std::filesystem::path &path) {
     const double longitude = parse_number(columns[1], index + 1, "longitude");
     const double elevation = parse_number(columns[2], index + 1, "elevation");
     const double prominence = parse_number(columns[3], index + 1, "prominence");
-    if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0)
+    if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
       throw std::runtime_error(
           "Invalid coordinate on peak gazetteer line " + std::to_string(index + 1)
       );
+    }
     if (columns[4].empty()) {
       throw std::runtime_error("Missing name on peak gazetteer line " + std::to_string(index + 1));
     }

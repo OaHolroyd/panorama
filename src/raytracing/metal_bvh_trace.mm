@@ -45,8 +45,9 @@ void dispatch_image(
     const RaytraceParameters &parameters
 ) {
   const MTLSize group = threadgroups::bounded_bvh(pipeline.maxTotalThreadsPerThreadgroup);
-  if (group.height == 0)
+  if (group.height == 0) {
     throw std::runtime_error("Raytracing pipeline cannot dispatch a 32-pixel BVH row");
+  }
   [encoder dispatchThreads:MTLSizeMake(parameters.image_width, parameters.image_height, 1)
       threadsPerThreadgroup:group];
 }
@@ -174,24 +175,28 @@ struct MetalBvhTrace::State {
       uint64_t budget
   )
       : gpu(resources), block_cells(cells), outputs(requested) {
-    if (cells == 0 || budget == 0)
+    if (cells == 0 || budget == 0) {
       throw std::invalid_argument("BVH block and cache sizes must be positive");
-    if (!gpu.device().supportsRaytracing)
+    }
+    if (!gpu.device().supportsRaytracing) {
       throw std::runtime_error(
           "This device does not support Metal ray tracing; use --raytracer software"
       );
+    }
     stats.budget_bytes = budget;
     NSError *error = nil;
     auto function = [gpu.library() newFunctionWithName:@"build_terrain_bvh_bounds"];
     bounds_pipeline = [gpu.device() newComputePipelineStateWithFunction:function error:&error];
-    if (bounds_pipeline == nil)
+    if (bounds_pipeline == nil) {
       throw std::runtime_error("Could not create BVH bounds pipeline: " + error_text(error));
+    }
     function = [gpu.library() newFunctionWithName:@"initialize_bvh_continuations"];
     initialize_pipeline = [gpu.device() newComputePipelineStateWithFunction:function error:&error];
-    if (initialize_pipeline == nil)
+    if (initialize_pipeline == nil) {
       throw std::runtime_error(
           "Could not create BVH initialization pipeline: " + error_text(error)
       );
+    }
     parameters = buffer(gpu.device(), 1, sizeof(BvhParameters), @"parameters");
     dummy = buffer(gpu.device(), 1, sizeof(uint32_t), @"unused output");
     scene_missing_count = buffer(gpu.device(), 1, sizeof(uint32_t), @"scene missing ray count");
@@ -240,8 +245,9 @@ struct MetalBvhTrace::State {
     trace_activity::Scope activity("BVH instance build");
     const auto sizes = [gpu.device() accelerationStructureSizesWithDescriptor:descriptor];
     auto result = [gpu.device() newAccelerationStructureWithSize:sizes.accelerationStructureSize];
-    if (result == nil)
+    if (result == nil) {
       throw std::runtime_error("Could not allocate BVH acceleration structure");
+    }
     auto scratch = buffer(
         gpu.device(),
         sizes.buildScratchBufferSize,
@@ -251,8 +257,9 @@ struct MetalBvhTrace::State {
     );
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command accelerationStructureCommandEncoder];
-    if (encoder == nil)
+    if (encoder == nil) {
       throw std::runtime_error("Could not encode BVH build");
+    }
     [encoder buildAccelerationStructure:result
                              descriptor:descriptor
                           scratchBuffer:scratch
@@ -280,8 +287,9 @@ struct MetalBvhTrace::State {
   }
 
   void update_shells() {
-    if (shells_valid)
+    if (shells_valid) {
       return;
+    }
     const auto &sources = manager->sources();
     tile_shells.resize(sources.size());
     if (current.transformed_catalogue) {
@@ -318,38 +326,44 @@ struct MetalBvhTrace::State {
           shell_width = std::max(shell_width, std::hypot(high_x - low_x, high_y - low_y));
         }
       }
-      for (size_t i = 0; i < sources.size(); ++i)
+      for (size_t i = 0; i < sources.size(); ++i) {
         tile_shells[i] = std::floor(distances[i] / shell_width);
+      }
     } else {
       const auto origin = sources[manager->observer_source_index()].key;
-      for (size_t i = 0; i < sources.size(); ++i)
+      for (size_t i = 0; i < sources.size(); ++i) {
         tile_shells[i] = std::abs(double(sources[i].key.row) - double(origin.row)) +
                          std::abs(double(sources[i].key.column) - double(origin.column));
+      }
     }
     shells_valid = true;
   }
 
   bool make_room(uint64_t required, const std::vector<Entry *> &pinned) {
-    if (required > stats.budget_bytes)
+    if (required > stats.budget_bytes) {
       throw std::runtime_error(
           "BVH cache cannot build one full-resolution tile: needs " + std::to_string(required) +
           " bytes including build/compaction workspace; increase --bvh-cache-mib"
       );
+    }
     while (stats.resident_bytes > stats.budget_bytes - required) {
       auto victim = cache.end();
       for (auto it = cache.begin(); it != cache.end(); ++it) {
-        if (std::find(pinned.begin(), pinned.end(), it->second.get()) != pinned.end())
+        if (std::find(pinned.begin(), pinned.end(), it->second.get()) != pinned.end()) {
           continue;
+        }
         const bool obsolete = it->first.lod != manager->lod_for_source(it->first.source_index);
         const bool victim_obsolete =
             victim != cache.end() &&
             victim->first.lod != manager->lod_for_source(victim->first.source_index);
         if (victim == cache.end() || (obsolete && !victim_obsolete) ||
-            (obsolete == victim_obsolete && it->second->used < victim->second->used))
+            (obsolete == victim_obsolete && it->second->used < victim->second->used)) {
           victim = it;
+        }
       }
-      if (victim == cache.end())
+      if (victim == cache.end()) {
         return false;
+      }
       stats.resident_bytes -= victim->second->bytes;
       invalidate_scene(SceneInvalidation::Eviction);
       cache.erase(victim);
@@ -420,8 +434,9 @@ struct MetalBvhTrace::State {
         y += height;
       }
     }
-    if (block_metadata.empty())
+    if (block_metadata.empty()) {
       throw std::logic_error("Selected terrain LOD has no owned cells");
+    }
     const uint32_t count = checked_count(block_metadata.size());
     const uint64_t vertex_bytes =
         side * side * (manager->traces_quantized() ? sizeof(uint16_t) : sizeof(float));
@@ -436,16 +451,20 @@ struct MetalBvhTrace::State {
     // and autoreleased build objects drain before the next admission.
     const uint64_t peak = base_bytes + 2 * sizes.accelerationStructureSize +
                           sizes.buildScratchBufferSize + sizeof(BvhTile) + sizeof(uint64_t);
-    if (optional && peak > stats.budget_bytes)
+    if (optional && peak > stats.budget_bytes) {
       return std::nullopt;
-    if (peak <= stats.budget_bytes && reserved > stats.budget_bytes - peak)
+    }
+    if (peak <= stats.budget_bytes && reserved > stats.budget_bytes - peak) {
       return std::nullopt;
+    }
     // Do not evict extra cached terrain just to enlarge a build batch. Flush
     // staged work first when the next build would need more temporary space.
-    if (reserved != 0 && stats.resident_bytes > stats.budget_bytes - reserved - peak)
+    if (reserved != 0 && stats.resident_bytes > stats.budget_bytes - reserved - peak) {
       return std::nullopt;
-    if (!make_room(peak + reserved, pinned))
+    }
+    if (!make_room(peak + reserved, pinned)) {
       return std::nullopt;
+    }
     const auto started = std::chrono::steady_clock::now();
     auto entry = std::make_unique<Entry>();
     entry->key = key;
@@ -463,8 +482,9 @@ struct MetalBvhTrace::State {
       manager->request(source, 0);
       while (manager->slot_for_source(source) == manager->slot_capacity()) {
         (void)manager->install_available(unpinned, timer);
-        if (manager->slot_for_source(source) == manager->slot_capacity())
+        if (manager->slot_for_source(source) == manager->slot_capacity()) {
           manager->wait_for_available();
+        }
       }
     }
     const uint32_t slot = manager->slot_for_source(source);
@@ -497,9 +517,10 @@ struct MetalBvhTrace::State {
                     uint32_t(bool(source_metadata.valid_cells))};
     auto *tile_transforms = static_cast<BvhAffinePatch *>(entry->transforms.contents);
     if (transformed) {
-      for (size_t patch = 0; patch < source_metadata.transform_patches.size(); ++patch)
+      for (size_t patch = 0; patch < source_metadata.transform_patches.size(); ++patch) {
         tile_transforms[patch] =
             affine_patch(source_metadata.transform_patches[patch], source, logical_scale);
+      }
       const Coord centre = source_metadata.transform_patches.front().transform.apply(
           0.5 * geometry.cell_count,
           0.5 * geometry.cell_count
@@ -539,8 +560,9 @@ struct MetalBvhTrace::State {
     auto compact_sizes = buffer(gpu.device(), staged.size(), sizeof(uint64_t), @"compacted sizes");
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command computeCommandEncoder];
-    if (encoder == nil)
+    if (encoder == nil) {
       throw std::runtime_error("Could not encode tile bounds");
+    }
     [encoder setComputePipelineState:bounds_pipeline];
     for (const auto &tile : staged) {
       const Entry &entry = *tile.entry;
@@ -556,15 +578,17 @@ struct MetalBvhTrace::State {
     }
     [encoder endEncoding];
     auto builder = [command accelerationStructureCommandEncoder];
-    if (builder == nil)
+    if (builder == nil) {
       throw std::runtime_error("Could not encode tile batch build");
+    }
     for (size_t i = 0; i < staged.size(); ++i) {
       const auto &tile = staged[i];
       const auto &entry = *tile.entry;
       auto original =
           [gpu.device() newAccelerationStructureWithSize:tile.sizes.accelerationStructureSize];
-      if (original == nil)
+      if (original == nil) {
         throw std::runtime_error("Could not allocate tile BVH");
+      }
       originals.push_back(original);
       scratch.push_back(buffer(
           gpu.device(),
@@ -589,15 +613,18 @@ struct MetalBvhTrace::State {
     ++stats.submissions;
     command = [gpu.command_queue() commandBuffer];
     builder = [command accelerationStructureCommandEncoder];
-    if (builder == nil)
+    if (builder == nil) {
       throw std::runtime_error("Could not encode tile batch compaction");
+    }
     const auto *sizes = static_cast<const uint64_t *>(compact_sizes.contents);
     for (size_t i = 0; i < staged.size(); ++i) {
-      if (sizes[i] == 0 || sizes[i] > staged[i].sizes.accelerationStructureSize)
+      if (sizes[i] == 0 || sizes[i] > staged[i].sizes.accelerationStructureSize) {
         throw std::runtime_error("Invalid compacted tile BVH size");
+      }
       auto compacted = [gpu.device() newAccelerationStructureWithSize:sizes[i]];
-      if (compacted == nil)
+      if (compacted == nil) {
         throw std::runtime_error("Could not allocate compacted tile BVH");
+      }
       staged[i].entry->acceleration = compacted;
       [builder copyAndCompactAccelerationStructure:originals[i] toAccelerationStructure:compacted];
     }
@@ -632,8 +659,9 @@ struct MetalBvhTrace::State {
     }
     @autoreleasepool {
       auto tile = stage_tile(source, pinned, timer, 0, optional);
-      if (!tile)
+      if (!tile) {
         return nullptr;
+      }
       std::vector<StagedTile> staged;
       staged.push_back(std::move(*tile));
       std::vector<Entry *> installed;
@@ -655,8 +683,9 @@ struct MetalBvhTrace::State {
           // Metal I/O; the queue and lookahead are bounded by atlas capacity.
           while (prefetched < std::min(sources.size(), next + lookahead)) {
             const uint32_t source = sources[prefetched++];
-            if (!cache.contains({source, manager->lod_for_source(source)}))
+            if (!cache.contains({source, manager->lod_for_source(source)})) {
               manager->request(source, float(prefetched - next));
+            }
           }
           const uint32_t source = sources[next];
           if (auto found = cache.find({source, manager->lod_for_source(source)});
@@ -668,14 +697,16 @@ struct MetalBvhTrace::State {
             continue;
           }
           auto tile = stage_tile(source, pinned, timer, reserved, true);
-          if (!tile)
+          if (!tile) {
             break;
+          }
           reserved += tile->peak_bytes;
           staged.push_back(std::move(*tile));
           ++next;
         }
-        if (staged.empty())
+        if (staged.empty()) {
           return next == sources.size();
+        }
         build_tiles(staged, pinned, timer);
         // Completed command/descriptor objects drain before reserving the next
         // batch. Peak accounting includes every staged build and compact copy.
@@ -781,18 +812,21 @@ struct MetalBvhTrace::State {
     [p.table setBuffer:coverage_polygons offset:0 atIndex:2];
     [p.table setBuffer:coverage_vertices offset:0 atIndex:3];
     const bool submit = command == nil;
-    if (submit)
+    if (submit) {
       command = [gpu.command_queue() commandBuffer];
+    }
     if (scene_mode && !shadows && !current.scene_resume) {
       auto clear = [command blitCommandEncoder];
-      if (clear == nil)
+      if (clear == nil) {
         throw std::runtime_error("Could not clear terrain usage");
+      }
       [clear fillBuffer:used_sources range:NSMakeRange(0, used_sources.length) value:0];
       [clear endEncoding];
     }
     auto encoder = [command computeCommandEncoder];
-    if (encoder == nil)
+    if (encoder == nil) {
       throw std::runtime_error("Could not encode BVH trace");
+    }
     [encoder setComputePipelineState:p.state];
     [encoder setAccelerationStructure:hierarchy.acceleration atBufferIndex:0];
     [encoder setIntersectionFunctionTable:p.table atBufferIndex:1];
@@ -864,19 +898,22 @@ struct MetalBvhTrace::State {
       [encoder useResource:entry->transforms usage:MTLResourceUsageRead];
       [encoder useResource:entry->acceleration usage:MTLResourceUsageRead];
     }
-    if (scene_mode && (shadows || !current.scene_resume))
+    if (scene_mode && (shadows || !current.scene_resume)) {
       dispatch_image(encoder, p.state, current.trace);
-    else
+    } else {
       dispatch_linear(encoder, p.state, current.work_count);
+    }
     [encoder endEncoding];
-    if (!submit)
+    if (!submit) {
       return;
+    }
     const double gpu_ms = complete(command);
     stats.trace_gpu_ms += gpu_ms;
     ++stats.trace_passes;
     ++stats.submissions;
-    if (scene_mode)
+    if (scene_mode) {
       ++stats.scene_passes;
+    }
     timer.add_work("GPU BVH detail traversal", gpu_ms);
     // Tables otherwise retain their previous argument buffers between batches.
     [p.table setBuffer:nil offset:0 atIndex:0];
@@ -905,18 +942,21 @@ struct MetalBvhTrace::State {
     if (scene.acceleration == nil) {
       std::vector<Entry *> entries;
       for (auto &[key, entry] : cache) {
-        if (key.lod == manager->lod_for_source(key.source_index))
+        if (key.lod == manager->lod_for_source(key.source_index)) {
           entries.push_back(entry.get());
+        }
       }
-      if (entries.empty())
+      if (entries.empty()) {
         return false;
+      }
       auto hierarchy = make_hierarchy(entries, timer);
       auto residency =
           buffer(gpu.device(), current.source_count, sizeof(uint32_t), @"scene residency");
       std::memset(residency.contents, 0, residency.length);
       auto *resident = static_cast<uint32_t *>(residency.contents);
-      for (Entry *entry : entries)
+      for (Entry *entry : entries) {
         resident[entry->key.source_index] = 1U;
+      }
       scene = std::move(hierarchy);
       scene_entries = std::move(entries);
       scene_resident = residency;
@@ -928,8 +968,9 @@ struct MetalBvhTrace::State {
   }
 
   bool trace_scene(Timer &timer, bool resume) {
-    if (!prepare_scene(timer))
+    if (!prepare_scene(timer)) {
       return false;
+    }
     current.scene_resume = resume;
     current.work_count = resume ? *static_cast<const uint32_t *>(scene_missing_count.contents)
                                 : current.trace.ray_count;
@@ -966,8 +1007,9 @@ struct MetalBvhTrace::State {
     [selector.table setBuffer:dummy offset:0 atIndex:2];
     auto command = [gpu.command_queue() commandBuffer];
     auto encoder = [command computeCommandEncoder];
-    if (encoder == nil)
+    if (encoder == nil) {
       throw std::runtime_error("Could not encode tile selection");
+    }
     [encoder setComputePipelineState:selector.state];
     [encoder setAccelerationStructure:catalogue atBufferIndex:0];
     [encoder setIntersectionFunctionTable:selector.table atBufferIndex:1];
@@ -975,12 +1017,14 @@ struct MetalBvhTrace::State {
     [encoder setBuffer:rays offset:0 atIndex:3];
     [encoder setBuffer:parameters offset:0 atIndex:4];
     [encoder setBuffer:selection_metadata offset:0 atIndex:5];
-    if (current.transformed_catalogue)
+    if (current.transformed_catalogue) {
       [encoder setBuffer:coverage_vertices offset:0 atIndex:6];
+    }
     [encoder setBuffer:work offset:0 atIndex:7];
     [encoder useResource:selection_metadata usage:MTLResourceUsageRead];
-    if (current.transformed_catalogue)
+    if (current.transformed_catalogue) {
       [encoder useResource:coverage_vertices usage:MTLResourceUsageRead];
+    }
     [encoder useResource:catalogue usage:MTLResourceUsageRead];
     [encoder useResource:selector.table usage:MTLResourceUsageRead];
     dispatch_linear(encoder, selector.state, current.work_count);
@@ -1015,12 +1059,14 @@ bool MetalBvhTrace::encode_scene(id<MTLCommandBuffer> command, Timer &timer) {
   State &state = *state_;
   state.scene_requests_ready = false;
   state.shadow_requests_ready = false;
-  if (command == nil || !state.prepare_scene(timer))
+  if (command == nil || !state.prepare_scene(timer)) {
     return false;
+  }
   *static_cast<uint32_t *>(state.scene_missing_count.contents) = 0U;
   auto clear = [command blitCommandEncoder];
-  if (clear == nil)
+  if (clear == nil) {
     throw std::runtime_error("Could not clear primary terrain requests");
+  }
   [clear fillBuffer:state.scene_requested_sources
               range:NSMakeRange(0, state.scene_requested_sources.length)
               value:0];
@@ -1050,21 +1096,24 @@ bool MetalBvhTrace::encode_shadows(id<MTLCommandBuffer> command, double azimuth,
   state.shadow_azimuth = azimuth;
   state.shadow_elevation = elevation;
   Timer timer("Encode scene shadows");
-  if (command == nil || !state.prepare_scene(timer))
+  if (command == nil || !state.prepare_scene(timer)) {
     return false;
+  }
   const uint32_t count = state.current.trace.ray_count;
   // A cold primary trace leaves work_count at its final streaming batch size.
   // Shadows always cover the entire image, including sky visibility values.
   state.current.work_count = count;
-  if (state.scene_shadows == nil || state.scene_shadows.length < count)
+  if (state.scene_shadows == nil || state.scene_shadows.length < count) {
     state.scene_shadows = buffer(state.gpu.device(), count, 1U, @"scene shadow visibility");
-  if (state.shadow_requested_sources == nil)
+  }
+  if (state.shadow_requested_sources == nil) {
     state.shadow_requested_sources = buffer(
         state.gpu.device(),
         state.current.source_count,
         sizeof(uint32_t),
         @"shadow terrain requests"
     );
+  }
   const auto basis = state.manager->catalogue().render_basis(state.observer.position);
   const double east = std::sin(azimuth), north = std::cos(azimuth);
   state.sun[0] = static_cast<float>(basis[0].x * east + basis[1].x * north);
@@ -1074,8 +1123,9 @@ bool MetalBvhTrace::encode_shadows(id<MTLCommandBuffer> command, double azimuth,
   *static_cast<uint32_t *>(state.shadow_missing_count.contents) = 0U;
   // Clear on the GPU: the producer may already contain work using this scene.
   auto clear = [command blitCommandEncoder];
-  if (clear == nil)
+  if (clear == nil) {
     throw std::runtime_error("Could not clear shadow terrain requests");
+  }
   [clear fillBuffer:state.shadow_requested_sources
               range:NSMakeRange(0, state.shadow_requested_sources.length)
               value:0];
@@ -1101,26 +1151,31 @@ bool MetalBvhTrace::trace_shadows(double azimuth, double elevation, Timer &timer
     // sun are unchanged. Primary repair/relocation invalidate this snapshot.
     if (state.shadow_requests_ready && state.shadow_azimuth == azimuth &&
         state.shadow_elevation == elevation) {
-      if (shadows_complete())
+      if (shadows_complete()) {
         return true;
-    } else
+      }
+    } else {
       @autoreleasepool {
         auto command = [state.gpu.command_queue() commandBuffer];
-        if (!encode_shadows(command, azimuth, elevation))
+        if (!encode_shadows(command, azimuth, elevation)) {
           break;
+        }
         const double gpu_ms = complete(command);
         state.stats.shadow_gpu_ms += gpu_ms;
         ++state.stats.shadow_passes;
         ++state.stats.submissions;
         timer.add_work("GPU BVH shadow repair", gpu_ms);
-        if (shadows_complete())
+        if (shadows_complete()) {
           return true;
+        }
       }
+    }
     const auto *requested = static_cast<const uint32_t *>(state.shadow_requested_sources.contents);
     std::vector<uint32_t> sources;
     for (uint32_t source = 0; source < state.current.source_count; ++source) {
-      if (requested[source] != 0)
+      if (requested[source] != 0) {
         sources.push_back(source);
+      }
     }
     const uint64_t before = state.stats.builds;
     const bool fits = state.acquire_many(sources, pinned, timer);
@@ -1130,8 +1185,9 @@ bool MetalBvhTrace::trace_shadows(double azimuth, double elevation, Timer &timer
       return state.current.transformed_catalogue ? stream_shadows(azimuth, elevation, timer)
                                                  : false;
     }
-    if (state.stats.builds == before)
+    if (state.stats.builds == before) {
       break;
+    }
   }
   ++state.stats.shadow_cache_fallbacks;
   return state.current.transformed_catalogue ? stream_shadows(azimuth, elevation, timer) : false;
@@ -1156,21 +1212,25 @@ bool MetalBvhTrace::stream_shadows(double azimuth, double elevation, Timer &time
   std::vector<uint8_t> visibility(state.current.trace.ray_count, 1U);
   for (uint32_t round = 0; round <= state.current.source_count; ++round) {
     @autoreleasepool {
-      if (!state.prepare_scene(timer))
+      if (!state.prepare_scene(timer)) {
         throw std::runtime_error("No resident BVH is available for shadow streaming");
-      for (const auto *entry : state.scene_entries)
+      }
+      for (const auto *entry : state.scene_entries) {
         tested[entry->key.source_index] = 1U;
+      }
       auto command = [state.gpu.command_queue() commandBuffer];
-      if (!encode_shadows(command, azimuth, elevation))
+      if (!encode_shadows(command, azimuth, elevation)) {
         throw std::runtime_error("Could not encode streamed BVH shadows");
+      }
       const double gpu_ms = complete(command);
       state.stats.shadow_gpu_ms += gpu_ms;
       ++state.stats.shadow_passes;
       ++state.stats.submissions;
       timer.add_work("GPU BVH shadow streaming", gpu_ms);
       const auto *current_visibility = static_cast<const uint8_t *>(state.scene_shadows.contents);
-      for (size_t index = 0; index < visibility.size(); ++index)
+      for (size_t index = 0; index < visibility.size(); ++index) {
         visibility[index] &= current_visibility[index];
+      }
       if (shadows_complete()) {
         std::memcpy(state.scene_shadows.contents, visibility.data(), visibility.size());
         return true;
@@ -1179,21 +1239,24 @@ bool MetalBvhTrace::stream_shadows(double azimuth, double elevation, Timer &time
           static_cast<const uint32_t *>(state.shadow_requested_sources.contents);
       std::vector<State::Entry *> batch;
       for (uint32_t source = 0; source < state.current.source_count; ++source) {
-        if (!requested[source] || tested[source])
+        if (!requested[source] || tested[source]) {
           continue;
+        }
         auto *entry = state.acquire(source, batch, timer, true);
         if (!entry) {
-          if (batch.empty())
+          if (batch.empty()) {
             throw std::runtime_error(
                 "BVH cache cannot hold one shadow terrain tile; increase --bvh-cache-mib"
             );
+          }
           break;
         }
         batch.push_back(entry);
         ++state.stats.shadow_tiles_built;
       }
-      if (batch.empty())
+      if (batch.empty()) {
         throw std::runtime_error("BVH shadow streaming did not advance to an untested source");
+      }
     }
   }
   throw std::runtime_error("BVH shadow streaming exceeded the source count");
@@ -1241,13 +1304,15 @@ void MetalBvhTrace::prepare(
                               ? 0U
                               : checked_count(tiles.sources().size());
   if (changed_lods == 0U) {
-    for (uint32_t source = 0U; source < state.selected_lods.size(); ++source)
+    for (uint32_t source = 0U; source < state.selected_lods.size(); ++source) {
       changed_lods += state.selected_lods[source] != tiles.lod_for_source(source);
+    }
   }
   if (changed_lods != 0U) {
     state.selected_lods.resize(tiles.sources().size());
-    for (uint32_t source = 0U; source < state.selected_lods.size(); ++source)
+    for (uint32_t source = 0U; source < state.selected_lods.size(); ++source) {
       state.selected_lods[source] = tiles.lod_for_source(source);
+    }
     // Detailed scenes contain one chosen LOD per source. Camera changes must
     // refresh that scene, while the LOD-independent catalogue remains reusable.
     ++state.stats.lod_plan_changes;
@@ -1265,8 +1330,9 @@ void MetalBvhTrace::prepare(
       state.stats.build_gpu_ms += shared.build_milliseconds();
       timer.add_work("BVH catalogue setup", std::chrono::steady_clock::now() - started);
     }
-    if (state.catalogue_generation != shared.generation())
+    if (state.catalogue_generation != shared.generation()) {
       state.update_catalogue();
+    }
     const Coord offset = shared.observer_offset();
     state.current.catalogue_x = float(offset.x);
     state.current.catalogue_y = float(offset.y);
@@ -1277,13 +1343,14 @@ void MetalBvhTrace::prepare(
         buffer(state.gpu.device(), parameters.ray_count, sizeof(BvhRayState), @"ray continuations");
     state.work =
         buffer(state.gpu.device(), parameters.ray_count, sizeof(uint32_t), @"ray work indices");
-    for (auto &pending : state.scene_pending_rays)
+    for (auto &pending : state.scene_pending_rays) {
       pending = buffer(
           state.gpu.device(),
           parameters.ray_count,
           sizeof(uint32_t),
           @"unresolved scene rays"
       );
+    }
     state.ray_capacity = parameters.ray_count;
   }
 }
@@ -1293,8 +1360,9 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
   state.current.trace = parameters;
   // Only an explicitly resumed producer may reuse requests and completed rays.
   // Ordinary synchronous traces own a fresh ray field, even if the scene stays.
-  if (!resume)
+  if (!resume) {
     state.scene_requests_ready = false;
+  }
   @autoreleasepool {
     bool has_scene = state.prepare_scene(timer);
     if (!has_scene) {
@@ -1315,31 +1383,36 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
                 ? *static_cast<const uint32_t *>(state.scene_missing_count.contents)
                 : std::numeric_limits<uint32_t>::max();
         if ((state.scene_requests_ready && missing == 0U) ||
-            (!state.scene_requests_ready && state.trace_scene(timer, resume)))
+            (!state.scene_requests_ready && state.trace_scene(timer, resume))) {
           return;
+        }
         resume = true;
         // Include the provisional winners of every completed repair pass:
         // their hit bounds are reused by the next pass, so they must survive.
         for (auto *entry : state.used_entries()) {
-          if (std::find(repair_pins.begin(), repair_pins.end(), entry) == repair_pins.end())
+          if (std::find(repair_pins.begin(), repair_pins.end(), entry) == repair_pins.end()) {
             repair_pins.push_back(entry);
+          }
         }
         const auto *requested =
             static_cast<const uint32_t *>(state.scene_requested_sources.contents);
         std::vector<uint32_t> sources;
         for (uint32_t source = 0; source < state.current.source_count; ++source) {
-          if (requested[source] == 0U)
+          if (requested[source] == 0U) {
             continue;
+          }
           const TileVariant key{source, state.manager->lod_for_source(source)};
-          if (state.cache.contains(key))
+          if (state.cache.contains(key)) {
             continue;
+          }
           sources.push_back(source);
         }
         const uint64_t before = state.stats.builds;
         const bool fits = state.acquire_many(sources, repair_pins, timer);
         const bool loaded = state.stats.builds != before;
-        if (!fits || !loaded)
+        if (!fits || !loaded) {
           break;
+        }
         state.scene_requests_ready = false;
         (void)state.prepare_scene(timer);
       }
@@ -1349,12 +1422,14 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
       // scene already marks its complete rays and leaves only seam/missing
       // rays active for the streaming fallback below.
       auto command = [state.gpu.command_queue() commandBuffer];
-      if (command == nil)
+      if (command == nil) {
         throw std::runtime_error("Could not create BVH initialization command");
+      }
       state.gpu.encode_clear_outputs(command);
       auto encoder = [command computeCommandEncoder];
-      if (encoder == nil)
+      if (encoder == nil) {
         throw std::runtime_error("Could not encode BVH initialization");
+      }
       [encoder setComputePipelineState:state.initialize_pipeline];
       [encoder setBuffer:state.rays offset:0 atIndex:0];
       [encoder setBytes:&parameters length:sizeof(parameters) atIndex:1];
@@ -1372,13 +1447,15 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
   const auto *rays = static_cast<const BvhRayState *>(state.rays.contents);
   std::vector<uint32_t> active;
   for (uint32_t i = 0; i < parameters.ray_count; ++i) {
-    if (!rays[i].done)
+    if (!rays[i].done) {
       active.push_back(i);
+    }
   }
   for (uint32_t round = 0; round <= traversal_limit; ++round) {
     std::erase_if(active, [&](uint32_t i) { return rays[i].done != 0U; });
-    if (active.empty())
+    if (active.empty()) {
       return;
+    }
     @autoreleasepool {
       state.select(active, timer);
     }
@@ -1387,14 +1464,17 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
     uint32_t active_rays = 0U;
     uint32_t failed_ray = parameters.ray_count;
     for (uint32_t i : active) {
-      if (rays[i].done)
+      if (rays[i].done) {
         continue;
+      }
       ++active_rays;
       if (failed_ray == parameters.ray_count &&
-          (rays[i].source >= state.current.source_count || !(rays[i].exit > rays[i].progress)))
+          (rays[i].source >= state.current.source_count || !(rays[i].exit > rays[i].progress))) {
         failed_ray = i;
-      if (rays[i].source >= state.current.source_count)
+      }
+      if (rays[i].source >= state.current.source_count) {
         continue;
+      }
       nearest_shell = std::min(nearest_shell, state.tile_shells[rays[i].source]);
     }
     if (failed_ray != parameters.ray_count) {
@@ -1406,8 +1486,9 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
       if (failed.source < state.current.source_count) {
         const TerrainSource &source = state.manager->sources()[failed.source];
         double maximum_residual = 0.0;
-        for (const TerrainTransformPatch &patch : source.transform_patches)
+        for (const TerrainTransformPatch &patch : source.transform_patches) {
           maximum_residual = std::max(maximum_residual, patch.transform.maximum_residual_metres);
+        }
         std::snprintf(
             diagnostic,
             sizeof(diagnostic),
@@ -1463,18 +1544,21 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
     // mixed-CRS catalogues use radial bands in their common render frame.
     std::map<uint32_t, std::vector<uint32_t>> groups;
     for (uint32_t i : active) {
-      if (rays[i].done)
+      if (rays[i].done) {
         continue;
-      if (state.tile_shells[rays[i].source] != nearest_shell)
+      }
+      if (state.tile_shells[rays[i].source] != nearest_shell) {
         continue;
+      }
       groups[rays[i].source].push_back(i);
     }
     state.stats.grouping_cpu_ms += std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - grouping_started
     )
                                        .count();
-    if (groups.empty())
+    if (groups.empty()) {
       return;
+    }
     state.stats.streaming_groups += groups.size();
     for (const auto &[source, indices] : groups) {
       (void)source;
@@ -1490,14 +1574,16 @@ void MetalBvhTrace::trace(const RaytraceParameters &parameters, Timer &timer, bo
         @autoreleasepool {
           entry = state.acquire(group->first, batch, timer);
         }
-        if (entry == nullptr)
+        if (entry == nullptr) {
           break;
+        }
         batch.push_back(entry);
         indices.insert(indices.end(), group->second.begin(), group->second.end());
         ++group;
       }
-      if (batch.empty())
+      if (batch.empty()) {
         throw std::logic_error("BVH cache cannot admit a tile");
+      }
       @autoreleasepool {
         state.trace_batch(batch, indices, timer);
       }

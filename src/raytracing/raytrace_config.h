@@ -103,8 +103,9 @@ struct RaytraceConfig {
 /// Resolve the compatibility spelling into one ordered dataset list.
 [[nodiscard]] inline std::vector<TerrainDatasetConfig>
 configured_terrain_datasets(const RaytraceConfig &config) {
-  if (!config.terrain_datasets.empty())
+  if (!config.terrain_datasets.empty()) {
     return config.terrain_datasets;
+  }
   return config.tile_dir.empty() ? std::vector<TerrainDatasetConfig>{}
                                  : std::vector<TerrainDatasetConfig>{{config.tile_dir, 0.0}};
 }

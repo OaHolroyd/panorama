@@ -293,8 +293,9 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 @implementation PanoramaView
 
 - (void)ensurePeakLabelOverlay {
-  if (_peakLabelOverlay != nil)
+  if (_peakLabelOverlay != nil) {
     return;
+  }
   _peakLabelOverlay = [[PeakLabelOverlayView alloc] initWithFrame:NSZeroRect];
   _peakLabelOverlay.translatesAutoresizingMaskIntoConstraints = NO;
   [self addSubview:_peakLabelOverlay];
@@ -323,8 +324,9 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 }
 
 - (void)setPeakLabelFrame:(const panorama::app::PeakLabelFrame &)frame {
-  if (_peakLabelFrameRevision == frame.revision)
+  if (_peakLabelFrameRevision == frame.revision) {
     return;
+  }
   [self ensurePeakLabelOverlay];
   _peakLabelFrameRevision = frame.revision;
   [_peakLabelOverlay setPeakFrame:frame];
@@ -591,14 +593,16 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   const NSPoint contentPoint = [content convertPoint:event.locationInWindow fromView:nil];
   NSView *hit = [content hitTest:contentPoint];
   if (hit != self && ![hit isDescendantOf:self]) {
-    if (_peakLabelsNearPointer)
+    if (_peakLabelsNearPointer) {
       [_peakLabelOverlay setPointerLocation:std::nullopt];
+    }
     [self.panoramaController pointerMovedOverOccludingView:hit];
     return;
   }
   const NSPoint panoramaPoint = [self convertPoint:event.locationInWindow fromView:nil];
-  if (_peakLabelsNearPointer)
+  if (_peakLabelsNearPointer) {
     [_peakLabelOverlay setPointerLocation:panoramaPoint];
+  }
   [self.panoramaController pointerMovedOverPanorama];
   if (_cruiseSteeringEnabled && !_viewerPaused) {
     const NSRect bounds = self.bounds;
@@ -646,8 +650,9 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
   if (_pointInspectionEnabled || _cruiseSteeringEnabled) {
     [self.panoramaController panoramaPointerExited];
   }
-  if (_peakLabelsNearPointer)
+  if (_peakLabelsNearPointer) {
     [_peakLabelOverlay setPointerLocation:std::nullopt];
+  }
 }
 
 - (BOOL)acceptsFirstResponder {

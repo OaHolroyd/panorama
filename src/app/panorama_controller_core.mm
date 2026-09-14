@@ -64,8 +64,9 @@ NSString *format_movement_speed(double metres_per_second) {
                              savedPeakLabels >= 0 && savedPeakLabels <= 2
                          ? static_cast<panorama::app::PeakLabelMode>(savedPeakLabels)
                          : panorama::app::PeakLabelMode::Off;
-    if (!renderer->peak_labels_available())
+    if (!renderer->peak_labels_available()) {
       _peakLabelMode = panorama::app::PeakLabelMode::Off;
+    }
     _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, false);
     _mapPointAction = panorama::app::MapPointAction::None;
     _pointerOwner = panorama::app::PointerOwner::None;

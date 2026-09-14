@@ -14,10 +14,12 @@
 namespace panorama::arguments {
 
 Raytracer parse_raytracer(std::string_view text) {
-  if (text == "software")
+  if (text == "software") {
     return Raytracer::Software;
-  if (text == "metal-bvh")
+  }
+  if (text == "metal-bvh") {
     return Raytracer::MetalBvh;
+  }
   throw std::invalid_argument(
       "Invalid raytracer (expected software or metal-bvh): " + std::string(text)
   );

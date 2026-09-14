@@ -546,8 +546,9 @@
 
 - (void)requestMetalFxInteraction {
   if (_metalfxActivation != panorama::app::MetalFxActivation::PanMoveOnly ||
-      _metalfxPreset == panorama::app::MetalFxPreset::Off || !_renderer->metalfx_supported())
+      _metalfxPreset == panorama::app::MetalFxPreset::Off || !_renderer->metalfx_supported()) {
     return;
+  }
   [_metalfxSettleTimer invalidate];
   _renderer->request_metalfx(_metalfxActivation, _metalfxPreset, true);
   __weak PanoramaController *weakSelf = self;
@@ -555,15 +556,17 @@
                                                repeats:NO
                                                  block:^(NSTimer *timer) {
                                                    PanoramaController *controller = weakSelf;
-                                                   if (controller != nil)
+                                                   if (controller != nil) {
                                                      [controller settleMetalFx:timer];
+                                                   }
                                                  }];
   [NSRunLoop.mainRunLoop addTimer:_metalfxSettleTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)settleMetalFx:(NSTimer *)timer {
-  if (timer != _metalfxSettleTimer)
+  if (timer != _metalfxSettleTimer) {
     return;
+  }
   _metalfxSettleTimer = nil;
   if (!_viewerPaused && !_cruiseRecovery && _window.isKeyWindow &&
       ([self isCruisingEnabled] || ([self isRoamingEnabled] && [self hasPressedRoamKey] &&

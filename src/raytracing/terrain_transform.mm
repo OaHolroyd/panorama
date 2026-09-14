@@ -45,8 +45,9 @@ namespace {
        -std::numeric_limits<double>::infinity(),
        -std::numeric_limits<double>::infinity()},
   };
-  if (!std::isfinite(result.determinant()) || std::abs(result.determinant()) < 1e-12)
+  if (!std::isfinite(result.determinant()) || std::abs(result.determinant()) < 1e-12) {
     throw std::runtime_error("CRS produced a singular terrain tile transform");
+  }
 
   const std::array<Coord, 8> logical = {
       Coord{minimum_column, minimum_row},
@@ -60,8 +61,9 @@ namespace {
   };
   std::vector<Coord> native;
   native.reserve(logical.size());
-  for (const Coord point : logical)
+  for (const Coord point : logical) {
     native.push_back(native_coordinate(header, point.x, point.y));
+  }
   const auto exact = projector.apply(native);
   for (size_t index = 0; index < logical.size(); ++index) {
     const Coord approximate = result.apply(logical[index].x, logical[index].y);
@@ -80,8 +82,9 @@ namespace {
 } // namespace
 
 TerrainRenderFrame TerrainRenderFrame::fixed(uint32_t epsg_code) {
-  if (!epsg_uses_projected_metres(epsg_code))
+  if (!epsg_uses_projected_metres(epsg_code)) {
     throw std::invalid_argument("Fixed terrain render frame must be a projected metre CRS");
+  }
   return {Kind::FixedEpsg, epsg_code, {0.0, 0.0}};
 }
 
@@ -93,15 +96,17 @@ TerrainRenderFrame TerrainRenderFrame::local_aeqd(LatLon anchor) {
 
 std::vector<Coord>
 TerrainRenderFrame::project(uint32_t source_epsg, std::span<const Coord> coordinates) const {
-  if (kind == Kind::FixedEpsg)
+  if (kind == Kind::FixedEpsg) {
     return transform_coordinates(source_epsg, fixed_epsg, coordinates);
+  }
   return transform_coordinates_to_local_aeqd(source_epsg, anchor, coordinates);
 }
 
 std::vector<Coord>
 TerrainRenderFrame::unproject(uint32_t destination_epsg, std::span<const Coord> coordinates) const {
-  if (kind == Kind::FixedEpsg)
+  if (kind == Kind::FixedEpsg) {
     return transform_coordinates(fixed_epsg, destination_epsg, coordinates);
+  }
   return transform_coordinates_from_local_aeqd(destination_epsg, anchor, coordinates);
 }
 
@@ -126,8 +131,9 @@ double TerrainTileTransform::determinant() const {
 
 Coord TerrainTileTransform::inverse(Coord coordinate) const {
   const double det = determinant();
-  if (!std::isfinite(det) || std::abs(det) <= std::numeric_limits<double>::min())
+  if (!std::isfinite(det) || std::abs(det) <= std::numeric_limits<double>::min()) {
     throw std::runtime_error("Terrain tile transform is singular");
+  }
   const double x = coordinate.x - origin.x;
   const double y = coordinate.y - origin.y;
   return {(x * row_step.y - y * row_step.x) / det, (y * column_step.x - x * column_step.y) / det};
@@ -140,8 +146,9 @@ double TerrainTileTransform::maximum_cell_size_metres() const {
 TerrainTileTransform
 make_terrain_tile_transform(const MetalTileHeader &header, const TerrainRenderFrame &frame) {
   if (header.epsg_code == 0U || header.cell_count == 0U || !std::isfinite(header.cell_size) ||
-      header.cell_size <= 0.0)
+      header.cell_size <= 0.0) {
     throw std::invalid_argument("Cannot transform invalid terrain tile geometry");
+  }
   const CoordinateTransform projector = frame.projector(header.epsg_code);
   return make_transform(header, projector, 0.0, 0.0, header.cell_count, header.cell_count);
 }
@@ -151,11 +158,13 @@ std::vector<TerrainTransformPatch> make_terrain_transform_patches(
     const TerrainRenderFrame &frame,
     double maximum_residual_metres
 ) {
-  if (!std::isfinite(maximum_residual_metres) || maximum_residual_metres <= 0.0)
+  if (!std::isfinite(maximum_residual_metres) || maximum_residual_metres <= 0.0) {
     throw std::invalid_argument("Terrain transform residual bound must be positive and finite");
+  }
   if (header.epsg_code == 0U || header.cell_count == 0U || !std::isfinite(header.cell_size) ||
-      header.cell_size <= 0.0)
+      header.cell_size <= 0.0) {
     throw std::invalid_argument("Cannot transform invalid terrain tile geometry");
+  }
   const CoordinateTransform projector = frame.projector(header.epsg_code);
   std::vector<std::array<uint32_t, 4>> pending = {{0U, 0U, header.cell_count, header.cell_count}};
   std::vector<TerrainTransformPatch> result;
@@ -194,11 +203,13 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
     uint32_t maximum_cells_per_side,
     std::span<const std::array<uint32_t, 2>> boundary_junctions
 ) {
-  if (maximum_cells_per_side == 0U)
+  if (maximum_cells_per_side == 0U) {
     throw std::invalid_argument("Coverage triangle side must be positive");
+  }
   if (header.epsg_code == 0U || header.cell_count == 0U || !std::isfinite(header.cell_size) ||
-      header.cell_size <= 0.0)
+      header.cell_size <= 0.0) {
     throw std::invalid_argument("Cannot transform invalid terrain tile geometry");
+  }
 
   const CoordinateTransform projector = frame.projector(header.epsg_code);
   std::vector<TerrainCoveragePolygon> result;
@@ -212,18 +223,22 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
     vertical[column].push_back(row);
   };
   for (const auto &region : ownership) {
-    for (uint32_t column : {region.minimum_column, region.minimum_column + region.cell_width})
-      for (uint32_t row : {region.minimum_row, region.minimum_row + region.cell_height})
+    for (uint32_t column : {region.minimum_column, region.minimum_column + region.cell_width}) {
+      for (uint32_t row : {region.minimum_row, region.minimum_row + region.cell_height}) {
         add_junction(column, row);
+      }
+    }
   }
-  for (const auto &point : boundary_junctions)
+  for (const auto &point : boundary_junctions) {
     add_junction(point[0], point[1]);
-  for (auto *edges : {&horizontal, &vertical})
+  }
+  for (auto *edges : {&horizontal, &vertical}) {
     for (auto &[line, cuts] : *edges) {
       (void)line;
       std::sort(cuts.begin(), cuts.end());
       cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
     }
+  }
   // Adjacent coverage rectangles share most boundary vertices. Project each
   // grid point once, in one batch, then reuse it in the original perimeters.
   std::unordered_map<uint64_t, size_t> vertex_indices;
@@ -250,19 +265,22 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
           );
           std::sort(coordinates.begin(), coordinates.end());
           coordinates.erase(std::unique(coordinates.begin(), coordinates.end()), coordinates.end());
-          if (reverse)
+          if (reverse) {
             std::reverse(coordinates.begin(), coordinates.end());
+          }
           for (uint32_t value : coordinates) {
             const uint32_t column = is_horizontal ? value : fixed;
             const uint32_t row = is_horizontal ? fixed : value;
             const Coord point = native_coordinate(header, column, row);
             const auto [vertex, inserted] =
                 vertex_indices.try_emplace((uint64_t(column) << 32U) | row, native.size());
-            if (inserted)
+            if (inserted) {
               native.push_back(point);
+            }
             if (perimeter.empty() || native[perimeter.back()].x != point.x ||
-                native[perimeter.back()].y != point.y)
+                native[perimeter.back()].y != point.y) {
               perimeter.push_back(vertex->second);
+            }
           }
         };
     append_edge(true, y0, x0, x1, false);
@@ -272,14 +290,16 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
     perimeter.pop_back(); // The last edge closes at the first vertex.
     perimeters.push_back(std::move(perimeter));
   }
-  if (native.empty())
+  if (native.empty()) {
     return result;
+  }
   const std::vector<Coord> vertices = projector.apply(native);
   for (const auto &perimeter : perimeters) {
     std::vector<Coord> projected;
     projected.reserve(perimeter.size());
-    for (size_t index : perimeter)
+    for (size_t index : perimeter) {
       projected.push_back(vertices[index]);
+    }
     double signed_area = 0.0;
     for (size_t index = 0; index < projected.size(); ++index) {
       const Coord a = projected[index];
@@ -287,8 +307,9 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
       signed_area += a.x * b.y - a.y * b.x;
     }
     if (std::abs(signed_area) > std::numeric_limits<double>::epsilon()) {
-      if (signed_area < 0.0)
+      if (signed_area < 0.0) {
         std::reverse(projected.begin(), projected.end());
+      }
       result.push_back({std::move(projected)});
     }
   }
@@ -309,8 +330,9 @@ std::array<Coord, 2> TerrainRenderFrame::basis(LatLon position) const {
   const auto rendered = project(4326U, points);
   const double dx = rendered[1].x - rendered[0].x, dy = rendered[1].y - rendered[0].y;
   const double length = std::hypot(dx, dy);
-  if (!(length > 0) || !std::isfinite(length))
+  if (!(length > 0) || !std::isfinite(length)) {
     throw std::runtime_error("Could not establish true-north render axes");
+  }
   return {{{dy / length, -dx / length}, {dx / length, dy / length}}};
 }
 Coord TerrainRenderFrame::offset(LatLon observer, LatLon point) const {

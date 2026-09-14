@@ -82,24 +82,27 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
   if (!std::filesystem::is_directory(tile_dir)) {
     throw std::invalid_argument("Prepared terrain path is not a directory: " + tile_dir.string());
   }
-  if (!std::isfinite(config.vertical_offset_metres))
+  if (!std::isfinite(config.vertical_offset_metres)) {
     throw std::invalid_argument("Terrain vertical offset must be finite");
+  }
 
   std::map<TileKey, TerrainManifestEntry> elevation_by_key;
   const std::filesystem::path manifest = terrain_manifest_path(tile_dir);
   if (std::filesystem::exists(manifest)) {
     for (const TerrainManifestEntry &entry : read_terrain_manifest(manifest)) {
       const TileKey key = {entry.row, entry.column};
-      if (!elevation_by_key.emplace(key, entry).second)
+      if (!elevation_by_key.emplace(key, entry).second) {
         throw std::runtime_error("Terrain manifest contains duplicate tile keys");
+      }
     }
   }
 
   std::vector<TerrainSource> sources;
   for (const std::filesystem::directory_entry &entry :
        std::filesystem::directory_iterator(tile_dir)) {
-    if ((!entry.is_regular_file() && !entry.is_symlink()) || !is_metal_tile_path(entry.path()))
+    if ((!entry.is_regular_file() && !entry.is_symlink()) || !is_metal_tile_path(entry.path())) {
       continue;
+    }
     try {
       const TileKey key = parse_tile_name(entry.path());
       const auto elevation = elevation_by_key.find(key);
@@ -126,14 +129,17 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
       // Prepared directories may contain unrelated files.
     }
   }
-  if (sources.empty())
+  if (sources.empty()) {
     throw std::runtime_error("Prepared-terrain directory contains no indexed .ptile files");
+  }
   std::sort(sources.begin(), sources.end(), [](const auto &left, const auto &right) {
     return left.key < right.key;
   });
-  for (size_t index = 1; index < sources.size(); ++index)
-    if (sources[index - 1].key == sources[index].key)
+  for (size_t index = 1; index < sources.size(); ++index) {
+    if (sources[index - 1].key == sources[index].key) {
       throw std::runtime_error("Prepared-terrain directory contains duplicate tile keys");
+    }
+  }
 
   const MetalTileHeader header = read_metal_tile_header(sources.front().path);
   const TileGrid grid = infer_tile_grid(sources.front());
@@ -142,11 +148,13 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
     const auto entry = elevation_by_key.find(source.key);
     auto coverage = entry == elevation_by_key.end() ? std::optional<TerrainCellCoverage>{}
                                                     : entry->second.coverage;
-    if (!coverage)
+    if (!coverage) {
       coverage = read_metal_tile_coverage(source.path, read_metal_tile_header(source.path));
+    }
     if (coverage) {
-      if (coverage->cell_count != header.cell_count)
+      if (coverage->cell_count != header.cell_count) {
         throw std::runtime_error("Terrain coverage disagrees with its grid");
+      }
       source.valid_cells = std::make_shared<TerrainCellCoverage>(std::move(*coverage));
     }
   }
@@ -168,19 +176,22 @@ discover_dataset(const TerrainDatasetConfig &config, uint32_t dataset_index) {
 
 std::vector<TerrainDataset>
 discover_terrain_datasets(std::span<const TerrainDatasetConfig> configs) {
-  if (configs.empty())
+  if (configs.empty()) {
     throw std::invalid_argument("At least one terrain dataset is required");
+  }
   std::set<std::filesystem::path> directories;
   std::vector<TerrainDataset> datasets;
   datasets.reserve(configs.size());
   for (size_t index = 0; index < configs.size(); ++index) {
     const auto directory = std::filesystem::weakly_canonical(configs[index].directory);
-    if (!directories.insert(directory).second)
+    if (!directories.insert(directory).second) {
       throw std::invalid_argument(
           "Terrain dataset is configured more than once: " + directory.string()
       );
-    if (index > std::numeric_limits<uint32_t>::max())
+    }
+    if (index > std::numeric_limits<uint32_t>::max()) {
       throw std::overflow_error("Too many terrain datasets");
+    }
     datasets.push_back(discover_dataset(configs[index], static_cast<uint32_t>(index)));
   }
   const TerrainDataset &layout = datasets.front();
@@ -200,10 +211,12 @@ discover_terrain_datasets(std::span<const TerrainDatasetConfig> configs) {
 
 TerrainRenderFrame
 select_terrain_render_frame(std::span<const TerrainDataset> datasets, LatLon observer) {
-  if (datasets.empty())
+  if (datasets.empty()) {
     throw std::invalid_argument("Cannot select a render frame without terrain datasets");
-  if (datasets.size() == 1U && epsg_uses_projected_metres(datasets.front().epsg_code))
+  }
+  if (datasets.size() == 1U && epsg_uses_projected_metres(datasets.front().epsg_code)) {
     return TerrainRenderFrame::fixed(datasets.front().epsg_code);
+  }
   return TerrainRenderFrame::local_aeqd(observer);
 }
 
@@ -219,8 +232,9 @@ bool TileKey::operator==(const TileKey &other) const {
 }
 
 bool TerrainCatalogue::SourceKey::operator<(const SourceKey &other) const {
-  if (dataset != other.dataset)
+  if (dataset != other.dataset) {
     return dataset < other.dataset;
+  }
   return tile < other.tile;
 }
 
@@ -293,8 +307,9 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
                                              : edge == 1U ? 1
                                                           : 0)};
     const auto *source = dataset_source(dataset, neighbour);
-    if (!source || !source->valid_cells || source->valid_cells->full())
+    if (!source || !source->valid_cells || source->valid_cells->full()) {
       continue;
+    }
     for (const auto &rect : source->valid_cells->rectangles) {
       if ((edge == 0U && rect.column + rect.width == side) || (edge == 1U && rect.column == 0U)) {
         points.push_back({edge == 0U ? 0U : side, rect.row});
@@ -324,11 +339,13 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
 ) {
   std::array<Coord, 9> samples;
   size_t index = 0U;
-  for (double y : {0.0, 0.5, 1.0})
-    for (double x : {0.0, 0.5, 1.0})
+  for (double y : {0.0, 0.5, 1.0}) {
+    for (double x : {0.0, 0.5, 1.0}) {
       samples[index++] = {
           header.lower_left_x + (logical_minimum_column + x * cell_width) * header.cell_size,
           header.lower_left_y + (logical_minimum_row + y * cell_height) * header.cell_size};
+    }
+  }
   const auto transformed = to_higher.apply(samples);
   int64_t minimum_row = std::numeric_limits<int64_t>::max();
   int64_t maximum_row = std::numeric_limits<int64_t>::min();
@@ -356,8 +373,9 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
       const double bottom = higher.grid.origin_y - double(row + 1) * higher.grid.width;
       const double ax = std::max(x0, left), bx = std::min(x1, left + higher.grid.width);
       const double ay = std::max(y0, bottom), by = std::min(y1, bottom + higher.grid.width);
-      if (ax >= bx || ay >= by)
+      if (ax >= bx || ay >= by) {
         continue;
+      }
       const TerrainSource *source = dataset_source(higher, {row, column});
       if (!source) {
         all = false;
@@ -410,8 +428,9 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
       const uint32_t y0 = std::max(owned.minimum_row, transform.minimum_row);
       const uint32_t x1 = std::min(ox1, tx1);
       const uint32_t y1 = std::min(oy1, ty1);
-      if (x0 < x1 && y0 < y1)
+      if (x0 < x1 && y0 < y1) {
         result.push_back({x0, y0, x1 - x0, y1 - y0, transform.transform});
+      }
     }
   }
   return result;
@@ -425,20 +444,23 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
     std::span<const TerrainTransformPatch> transforms,
     std::span<const TerrainDataset> higher_datasets
 ) {
-  if (higher_datasets.empty())
+  if (higher_datasets.empty()) {
     return {transforms.begin(), transforms.end()};
+  }
   std::vector<std::unique_ptr<CoordinateTransform>> to_higher;
   to_higher.reserve(higher_datasets.size());
   bool any_possible_overlap = false;
   for (const TerrainDataset &higher : higher_datasets) {
     to_higher.push_back(std::make_unique<CoordinateTransform>(header.epsg_code, higher.epsg_code));
     const CoverageRelation relation = coarse_coverage(header, higher, *to_higher.back());
-    if (relation == CoverageRelation::Covered)
+    if (relation == CoverageRelation::Covered) {
       return {};
+    }
     any_possible_overlap = any_possible_overlap || relation == CoverageRelation::Partial;
   }
-  if (!any_possible_overlap)
+  if (!any_possible_overlap) {
     return {transforms.begin(), transforms.end()};
+  }
 
   const uint32_t side = header.cell_count;
   struct Region {
@@ -464,8 +486,9 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
       covered = covered || relation == CoverageRelation::Covered;
       partial = partial || relation == CoverageRelation::Partial;
     }
-    if (covered)
+    if (covered) {
       continue;
+    }
     if (!partial) {
       owned.push_back({region.column, region.row, region.width, region.height, {}});
       continue;
@@ -481,12 +504,15 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
     const uint32_t bottom = region.height > 1U ? region.height / 2U : region.height;
     const uint32_t top = region.height - bottom;
     pending.push_back({region.column, region.row, left, bottom});
-    if (right != 0U)
+    if (right != 0U) {
       pending.push_back({region.column + left, region.row, right, bottom});
-    if (top != 0U)
+    }
+    if (top != 0U) {
       pending.push_back({region.column, region.row + bottom, left, top});
-    if (right != 0U && top != 0U)
+    }
+    if (right != 0U && top != 0U) {
       pending.push_back({region.column + left, region.row + bottom, right, top});
+    }
   }
 
   // The subdivision naturally produces a quadtree mosaic. Canonicalise it
@@ -505,13 +531,16 @@ coverage_boundary_junctions(const TerrainDataset &dataset, TileKey key) {
   for (uint32_t row = 0; row < side; ++row) {
     std::map<std::pair<uint32_t, uint32_t>, size_t> next;
     for (uint32_t column = 0; column < side;) {
-      while (column < side && ownership[size_t(row) * side + column] == 0U)
+      while (column < side && ownership[size_t(row) * side + column] == 0U) {
         ++column;
+      }
       const uint32_t begin = column;
-      while (column < side && ownership[size_t(row) * side + column] != 0U)
+      while (column < side && ownership[size_t(row) * side + column] != 0U) {
         ++column;
-      if (begin == column)
+      }
+      if (begin == column) {
         continue;
+      }
       const auto run = std::pair{begin, column};
       if (const auto previous = active.find(run); previous != active.end()) {
         merged[previous->second].cell_height++;
@@ -543,10 +572,11 @@ TerrainCatalogue::TerrainCatalogue(
       render_frame_(std::move(render_frame)) {
   if (!datasets_.empty()) {
     geographic_to_dataset_.reserve(datasets_.size());
-    for (const TerrainDataset &dataset : datasets_)
+    for (const TerrainDataset &dataset : datasets_) {
       geographic_to_dataset_.push_back(
           std::make_unique<CoordinateTransform>(4326U, dataset.epsg_code)
       );
+    }
   }
   float maximum_elevation = std::numeric_limits<float>::lowest();
   bool has_complete_maxima = true;
@@ -575,8 +605,9 @@ TerrainCatalogue TerrainCatalogue::discover(
     bool allow_observer_fallback
 ) {
   if (!valid_lat_lon(observer.position) || !std::isfinite(observer.elevation) ||
-      !std::isfinite(max_distance) || max_distance <= 0.0F)
+      !std::isfinite(max_distance) || max_distance <= 0.0F) {
     throw std::invalid_argument("Combined terrain catalogue requires finite observer and range");
+  }
   std::vector<TerrainDataset> datasets = discover_terrain_datasets(configs);
   const TerrainRenderFrame frame = select_terrain_render_frame(datasets, observer.position);
   const std::array<Coord, 1> observer_geographic = {
@@ -610,14 +641,17 @@ TerrainCatalogue TerrainCatalogue::discover(
                         : render_observer.y > whole.bounds[3] ? render_observer.y - whole.bounds[3]
                                                               : 0.0;
       const double distance = std::hypot(dx, dy);
-      if (distance > max_distance && available.key != observer_key)
+      if (distance > max_distance && available.key != observer_key) {
         continue;
+      }
       TerrainSource source = available;
       source.vertical_offset_metres = dataset.config.vertical_offset_metres;
-      if (source.maximum_elevation.has_value())
+      if (source.maximum_elevation.has_value()) {
         *source.maximum_elevation += static_cast<float>(source.vertical_offset_metres);
-      if (source.minimum_elevation.has_value())
+      }
+      if (source.minimum_elevation.has_value()) {
         *source.minimum_elevation += static_cast<float>(source.vertical_offset_metres);
+      }
       // Geometry uses sufficiently small affine regions that independently
       // transformed neighbouring tiles differ by less than half a metre at a
       // shared edge. Coverage uses a coarser shared-vertex tessellation: it
@@ -627,8 +661,9 @@ TerrainCatalogue TerrainCatalogue::discover(
           make_terrain_transform_patches(header, frame, geometry_residual_metres);
       std::vector<TerrainTransformPatch> coverage_patches;
       if (source.valid_cells) {
-        for (const auto &rect : source.valid_cells->rectangles)
+        for (const auto &rect : source.valid_cells->rectangles) {
           coverage_patches.push_back({rect.column, rect.row, rect.width, rect.height, whole});
+        }
       } else {
         coverage_patches.push_back({0U, 0U, header.cell_count, header.cell_count, whole});
       }
@@ -643,8 +678,9 @@ TerrainCatalogue TerrainCatalogue::discover(
           coverage_patches,
           std::span<const TerrainDataset>(datasets).first(dataset.index)
       );
-      if (source.transform_patches.empty() || coverage_ownership.empty())
+      if (source.transform_patches.empty() || coverage_ownership.empty()) {
         continue;
+      }
       // Physical coverage includes all usable cells, independent of ownership.
       // Adjacent fallback cells can overlap at a priority edge without opening
       // an artificial gap in this coverage hierarchy.
@@ -652,8 +688,9 @@ TerrainCatalogue TerrainCatalogue::discover(
       source.coverage_polygons =
           make_terrain_coverage_polygons(header, frame, coverage_patches, 256U, boundary_junctions);
       uint64_t owned_cells = 0U;
-      for (const TerrainTransformPatch &patch : source.transform_patches)
+      for (const TerrainTransformPatch &patch : source.transform_patches) {
         owned_cells += uint64_t(patch.cell_width) * patch.cell_height;
+      }
       // A coarse sample can straddle an ownership edge. Keep boundary sources
       // at native resolution so lower-priority geometry never expands back
       // into a region removed above.
@@ -688,13 +725,15 @@ TerrainCatalogue TerrainCatalogue::discover(
       candidates.push_back({std::move(source), distance, contains_observer});
     }
   }
-  if (candidates.empty())
+  if (candidates.empty()) {
     throw std::runtime_error("No prepared terrain lies within the configured range");
+  }
   const auto origin = std::find_if(candidates.begin(), candidates.end(), [](const Candidate &item) {
     return item.contains_observer;
   });
-  if (origin == candidates.end() && !allow_observer_fallback)
+  if (origin == candidates.end() && !allow_observer_fallback) {
     throw std::runtime_error("No prepared terrain tile contains the observer");
+  }
   if (origin == candidates.end()) {
     const auto &candidate = candidates.front().source;
     const auto &dataset = datasets[candidate.dataset_index];
@@ -720,27 +759,33 @@ TerrainCatalogue TerrainCatalogue::discover(
       candidates.begin(),
       candidates.end(),
       [](const Candidate &left, const Candidate &right) {
-        if (left.contains_observer != right.contains_observer)
+        if (left.contains_observer != right.contains_observer) {
           return left.contains_observer;
-        if (left.distance != right.distance)
+        }
+        if (left.distance != right.distance) {
           return left.distance < right.distance;
-        if (left.source.dataset_index != right.source.dataset_index)
+        }
+        if (left.source.dataset_index != right.source.dataset_index) {
           return left.source.dataset_index < right.source.dataset_index;
+        }
         return left.source.key < right.source.key;
       }
   );
-  if (max_tile_count != 0U && candidates.size() > max_tile_count)
+  if (max_tile_count != 0U && candidates.size() > max_tile_count) {
     candidates.resize(max_tile_count);
+  }
   std::vector<TerrainSource> sources;
   sources.reserve(candidates.size());
-  for (Candidate &candidate : candidates)
+  for (Candidate &candidate : candidates) {
     sources.push_back(std::move(candidate.source));
+  }
   TerrainCoverage coverage;
   for (const TerrainDataset &dataset : datasets) {
     TerrainDatasetCoverage footprint{dataset.grid, dataset.epsg_code, {}};
     footprint.tiles.reserve(dataset.sources.size());
-    for (const TerrainSource &source : dataset.sources)
+    for (const TerrainSource &source : dataset.sources) {
       footprint.tiles.push_back(source.key);
+    }
     coverage.datasets.push_back(std::move(footprint));
   }
   return TerrainCatalogue(
@@ -767,7 +812,7 @@ TerrainCatalogue TerrainCatalogue::discover(
           datasets.front().sources.begin(),
           datasets.front().sources.end(),
           [](const TerrainSource &source) { return bool(source.valid_cells); }
-      ))
+      )) {
     return discover(
         std::array<TerrainDatasetConfig, 1>{{{tile_dir, 0.0}}},
         observer,
@@ -775,6 +820,7 @@ TerrainCatalogue TerrainCatalogue::discover(
         max_tile_count,
         allow_observer_fallback
     );
+  }
   const TileGrid grid = datasets.front().grid;
   std::vector<TerrainSource> available_sources = std::move(datasets.front().sources);
   std::vector<TileKey> coverage_tiles;
@@ -905,8 +951,9 @@ std::optional<TerrainLocation> TerrainCatalogue::locate_source(LatLon position) 
     const Coord native = geographic_to_dataset_[dataset_index]->apply(input).front();
     const TileKey key = tile_key_at(datasets_[dataset_index].grid, native.x, native.y);
     if (const auto source = find_source(static_cast<uint32_t>(dataset_index), key)) {
-      if (!covers_sample(sources_[*source], datasets_[dataset_index].grid, native))
+      if (!covers_sample(sources_[*source], datasets_[dataset_index].grid, native)) {
         continue;
+      }
       return TerrainLocation{*source, native};
     }
   }
@@ -925,8 +972,9 @@ std::optional<TerrainSampleLocation> TerrainCatalogue::locate_sample(LatLon posi
     const auto &dataset = datasets_[index];
     const Coord native = geographic_to_dataset_[index]->apply(input).front();
     const auto *source = dataset_source(dataset, tile_key_at(dataset.grid, native.x, native.y));
-    if (source && covers_sample(*source, dataset.grid, native))
+    if (source && covers_sample(*source, dataset.grid, native)) {
       return TerrainSampleLocation{source, native};
+    }
   }
   return std::nullopt;
 }
@@ -934,8 +982,9 @@ std::optional<TerrainSampleLocation> TerrainCatalogue::locate_sample(LatLon posi
 const std::vector<TerrainDataset> &TerrainCatalogue::datasets() const { return datasets_; }
 
 const TerrainRenderFrame &TerrainCatalogue::render_frame() const {
-  if (!render_frame_.has_value())
+  if (!render_frame_.has_value()) {
     throw std::logic_error("Legacy terrain catalogue has no explicit render frame");
+  }
   return *render_frame_;
 }
 

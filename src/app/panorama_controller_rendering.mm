@@ -144,8 +144,9 @@
   diagnostics::display.mark("drawable");
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (drawable == nil) {
-    if (diagnostics::enabled)
+    if (diagnostics::enabled) {
       ++diagnostics::display.unavailable;
+    }
     return;
   }
   diagnostics::display.mark("command-buffer");
@@ -156,10 +157,12 @@
 
   command.label = @"Present panorama";
   diagnostics::display.mark("publication-lock");
-  if (!_renderer->submit_presentation(command, frame, drawable))
+  if (!_renderer->submit_presentation(command, frame, drawable)) {
     return;
-  if (diagnostics::enabled)
+  }
+  if (diagnostics::enabled) {
     diagnostics::display.revision = frame.revision;
+  }
   _renderFrame = frame.render_frame;
   diagnostics::display.mark("ui-update");
 
@@ -175,8 +178,9 @@
     }
   }
 
-  if (frame.peak_labels.has_value() && frame.peak_labels->revision == frame.revision)
+  if (frame.peak_labels.has_value() && frame.peak_labels->revision == frame.revision) {
     [_panoramaView setPeakLabelFrame:*frame.peak_labels];
+  }
 
   bool acceptedRoamMove = false;
   if (frame.roam_result_sequence != _displayedRoamResultSequence) {

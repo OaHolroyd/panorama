@@ -43,8 +43,9 @@ RayFieldRequest angular_field(ImageSize image, AngularProjection projection) {
 }
 RayFieldRequest camera_field(ImageSize image, Projection projection) { return {image, projection}; }
 void require(bool condition, const char *message) {
-  if (!condition)
+  if (!condition) {
     throw std::runtime_error(message);
+  }
 }
 
 void check_ownership_progress() {
@@ -96,8 +97,9 @@ void check_ownership_progress() {
         "Ownership did not advance"
     );
     require(result[i][1] == 1 && result[i][2] == 1, "Ownership skipped a representable ray point");
-    if (i < 5)
+    if (i < 5) {
       require(result[i][3] == 0, "Fixture did not reproduce unchanged shadow coordinates");
+    }
   }
   std::puts("Ownership continuation advances to the first distinct world point.");
 }
@@ -109,8 +111,9 @@ void check_coverage_index() {
     BvhCoveragePolygon polygon = {};
     polygon.vertex_offset = uint32_t(vertices.size());
     vertices.insert(vertices.end(), {{x, y}, {x + width, y}, {x + width, y + 10}});
-    if (concave)
+    if (concave) {
       vertices.push_back({x + 0.5F * width, y + 5});
+    }
     vertices.push_back({x, y + 10});
     polygon.vertex_count = uint32_t(vertices.size()) - polygon.vertex_offset;
     polygon.minimum_x = x;
@@ -120,10 +123,13 @@ void check_coverage_index() {
     polygons.push_back(polygon);
   };
   polygons[0].coverage_offset = uint32_t(polygons.size());
-  for (uint32_t row = 0; row < 32U; ++row)
-    for (uint32_t column = 0; column < 32U; ++column)
-      if ((row + column) % 11U != 0U)
+  for (uint32_t row = 0; row < 32U; ++row) {
+    for (uint32_t column = 0; column < 32U; ++column) {
+      if ((row + column) % 11U != 0U) {
         rectangle(40000 + float(column * 10U), -30000 + float(row * 10U), 10, column % 9U == 0U);
+      }
+    }
+  }
   polygons[0].coverage_count = uint32_t(polygons.size()) - polygons[0].coverage_offset;
   polygons[0].ownership_offset = polygons[0].coverage_offset;
   polygons[0].ownership_count = polygons[0].coverage_count;
@@ -132,9 +138,11 @@ void check_coverage_index() {
   polygons[1].ownership_offset += 7U;
   polygons[1].ownership_count -= 15U;
   polygons[0].blocker_offset = uint32_t(polygons.size());
-  for (uint32_t row = 0; row < 32U; ++row)
-    for (uint32_t column = 0; column < 32U; column += 5U)
+  for (uint32_t row = 0; row < 32U; ++row) {
+    for (uint32_t column = 0; column < 32U; column += 5U) {
       rectangle(40002 + float(column * 10U), -30000 + float(row * 10U), 3, false);
+    }
+  }
   polygons[0].blocker_count = uint32_t(polygons.size()) - polygons[0].blocker_offset;
   // Long, nearly straight shared sides reproduce the shape of the projected
   // coverage perimeters involved in the Matterhorn grazing-ray stall. Include
@@ -146,7 +154,7 @@ void check_coverage_index() {
     polygon.vertex_offset = uint32_t(vertices.size());
     polygon.minimum_x = polygon.minimum_y = INFINITY;
     polygon.maximum_x = polygon.maximum_y = -INFINITY;
-    for (uint32_t side = 0; side < 4U; ++side)
+    for (uint32_t side = 0; side < 4U; ++side) {
       for (uint32_t step = 0; step < 54U; ++step) {
         const float t = float(step) / 54;
         const float wave = 0.12F * std::sin(t * (row == 3U ? 48 : 16) * float(std::numbers::pi));
@@ -160,15 +168,18 @@ void check_coverage_index() {
                          : side == 2 ? 10 + wave
                                      : 10 * (1 - t));
         vertices.push_back({x, y});
-        if (row == 1U && step == 4U)
+        if (row == 1U && step == 4U) {
           vertices.push_back({x, y});
-        if (row == 2U && step == 4U)
+        }
+        if (row == 2U && step == 4U) {
           vertices.push_back({x + 0.00390625F, y});
+        }
         polygon.minimum_x = std::min(polygon.minimum_x, vertices.back().x);
         polygon.minimum_y = std::min(polygon.minimum_y, y);
         polygon.maximum_x = std::max(polygon.maximum_x, vertices.back().x);
         polygon.maximum_y = std::max(polygon.maximum_y, y);
       }
+    }
     polygon.vertex_count = uint32_t(vertices.size()) - polygon.vertex_offset;
     polygons.push_back(polygon);
   }
@@ -180,17 +191,20 @@ void check_coverage_index() {
   // A distant source split into many strips reproduces repeated continuity
   // queries at Float32-scale boundary gaps. Leave a real missing strip too.
   polygons[3].coverage_offset = uint32_t(polygons.size());
-  for (uint32_t column = 160U; column-- > 0U;)
-    if (column != 96U)
+  for (uint32_t column = 160U; column-- > 0U;) {
+    if (column != 96U) {
       rectangle(180000 + float(column) * 32, -5, 31.96875F, false);
+    }
+  }
   polygons[3].coverage_count = uint32_t(polygons.size()) - polygons[3].coverage_offset;
   polygons[3].ownership_offset = polygons[3].coverage_offset;
   polygons[3].ownership_count = polygons[3].coverage_count;
   // More disjoint components than the cache can retain, encountered farthest
   // first. The nearest valid interval must survive discarding farther entries.
   polygons[4].coverage_offset = uint32_t(polygons.size());
-  for (uint32_t column = 160U; column-- > 0U;)
+  for (uint32_t column = 160U; column-- > 0U;) {
     rectangle(180000 + float(column) * 32, 25, 8, false);
+  }
   polygons[4].coverage_count = uint32_t(polygons.size()) - polygons[4].coverage_offset;
   polygons[4].ownership_offset = polygons[4].coverage_offset;
   polygons[4].ownership_count = polygons[4].coverage_count;
@@ -228,10 +242,11 @@ void check_coverage_index() {
       const auto a = vertices[polygon.vertex_offset + edge];
       const auto b = vertices[polygon.vertex_offset + (edge + 1) % polygon.vertex_count];
       const float length = std::hypot(b.x - a.x, b.y - a.y);
-      if (length == 0)
+      if (length == 0) {
         continue;
+      }
       const float dx = (b.x - a.x) / length, dy = (b.y - a.y) / length;
-      for (float distance : {0.0F, 1000.0F, 500000.0F})
+      for (float distance : {0.0F, 1000.0F, 500000.0F}) {
         for (float offset : {-0.05F, 0.0F, 0.05F}) {
           queries.push_back(
               {a.x - distance * dx - offset * dy, a.y - distance * dy + offset * dx, dx, dy}
@@ -240,6 +255,7 @@ void check_coverage_index() {
               {distance, distance + std::max(0.125F, 2 * length), 2, float(edge % 2)}
           );
         }
+      }
     }
   }
   // Oscillating perimeters exercise repeated boundary crossings.
@@ -289,13 +305,14 @@ void check_coverage_index() {
       queries[i][0] -= shift;
       queries[i][1] -= shift;
     }
-    for (auto *list : {&polygons, &indexed})
+    for (auto *list : {&polygons, &indexed}) {
       for (auto &p : *list) {
         p.minimum_x -= shift;
         p.maximum_x -= shift;
         p.minimum_y -= shift;
         p.maximum_y -= shift;
       }
+    }
     std::memcpy(plain_buffer.contents, polygons.data(), plain_buffer.length);
     std::memcpy(indexed_buffer.contents, indexed.data(), indexed_buffer.length);
     std::memcpy(vertex_buffer.contents, vertices.data(), vertex_buffer.length);
@@ -362,11 +379,12 @@ void check_coverage_index() {
         walk[0] == walk[1] && walk[0] > 183000.0F && walk[0] < 183104.0F,
         "Cached continuity crossed a real missing coverage strip"
     );
-    if (shift == 0.0F)
+    if (shift == 0.0F) {
       require(
           walk[2] > 64 && walk[3] <= 4,
           "Fragmented source regressed to repeated complete coverage walks"
       );
+    }
     std::printf(
         "Coverage walk: %.0f -> %.0f queries, same gap at %.6f m.\n",
         walk[2],
@@ -379,11 +397,12 @@ void check_coverage_index() {
 // Match the viewer's default camera and output requirements, excluding image
 // generation, lighting and display. Run each backend in a separate process.
 void benchmark(int argc, const char *argv[]) {
-  if (argc < 5 || argc > 11)
+  if (argc < 5 || argc > 11) {
     throw std::invalid_argument(
         "usage: metal-bvh-test --benchmark TILE_DIR software|metal-bvh CACHE_MIB "
         "[RANGE [WIDTH HEIGHT [LOD_SCALE [DEBUG_OUTPUTS [TILE_BVH]]]]]"
     );
+  }
   RaytraceConfig config{};
   config.tile_dir = argv[2];
   config.observer = lv95_observer(2623452.4, 1100502.2, 3415.0);
@@ -413,11 +432,12 @@ void benchmark(int argc, const char *argv[]) {
   );
   for (uint32_t frame = 0; frame < 6; ++frame) {
     @autoreleasepool {
-      if (frame == 3)
+      if (frame == 3) {
         field = camera_field(
             image,
             CameraProjection{{std::numbers::pi / 180.0, 0, 0}, intrinsics, NoDistortion{}}
         );
+      }
       if (frame == 5) {
         move_lv95(config.observer, 1.0, 0);
         require(session.relocate_observer(config.observer), "Benchmark relocation failed");
@@ -437,10 +457,11 @@ void benchmark(int argc, const char *argv[]) {
 
 // Includes GPU projection/LOD preparation and the complete producer.
 void benchmark_camera(int argc, const char *argv[]) {
-  if (argc != 4 && argc != 5)
+  if (argc != 4 && argc != 5) {
     throw std::invalid_argument(
         "usage: metal-bvh-test --benchmark-camera TILE_DIR gpu|gpu-shadows [FALLBACK_TILE_DIR]"
     );
+  }
   const bool shadows = std::string_view(argv[3]) == "gpu-shadows";
   require(shadows || std::string_view(argv[3]) == "gpu", "Choose gpu or gpu-shadows");
   RaytraceConfig config{argv[2],
@@ -461,8 +482,9 @@ void benchmark_camera(int argc, const char *argv[]) {
         TerrainDatasetConfig{argv[4], 0.0},
     };
   }
-  if (shadows)
+  if (shadows) {
     config.max_distance = 600000;
+  }
   const ImageSize image{1600, 900};
   RayFieldRequest camera{
       image,
@@ -496,9 +518,10 @@ void benchmark_camera(int argc, const char *argv[]) {
         move_lv95(config.observer, 1, 0);
         require(session->relocate_observer(config.observer), "Benchmark relocation failed");
       }
-      if (frame == 16)
+      if (frame == 16) {
         std::get<CameraProjection>(camera.projection).intrinsics =
             CameraIntrinsics::from_vertical_field_of_view(image, 1.1);
+      }
       const auto started = std::chrono::steady_clock::now();
       const auto before = session->bvh_statistics();
       const auto io_before = session->tile_statistics().bytes_loaded_with_metal_io;
@@ -533,8 +556,9 @@ void benchmark_camera(int argc, const char *argv[]) {
           timing.gpu_milliseconds,
           timing.streamed
       );
-      if (frame >= 2 && frame < 14)
+      if (frame >= 2 && frame < 14) {
         warm.push_back(wall);
+      }
     }
   }
   std::sort(warm.begin(), warm.end());
@@ -563,8 +587,9 @@ void write_fixture(
   for (int row = -1; row <= 1; ++row) {
     for (int column = -1; column <= 2; ++column) {
       // A missing column followed by terrain tests continuation across empty tiles.
-      if (column == 1)
+      if (column == 1) {
         continue;
+      }
       std::vector<MetalTileLod> lods;
       std::vector<std::byte> payload;
       uint64_t offset = kMetalTileLodHeaderSize + levels * sizeof(MetalTileLod);
@@ -638,8 +663,9 @@ void write_fixture(
     }
   }
   // Exercise both indexed and legacy/no-manifest uint16 directories.
-  if (with_manifest)
+  if (with_manifest) {
     write_terrain_manifest(terrain_manifest_path(directory), manifest);
+  }
 }
 
 void check_dataset_foundation(const std::filesystem::path &root) {
@@ -750,8 +776,9 @@ void check_dataset_foundation(const std::filesystem::path &root) {
             const Coord right_start = right.vertices[right_index];
             const Coord right_end = right.vertices[(right_index + 1U) % right.vertices.size()];
             if ((same_point(left_start, right_start) && same_point(left_end, right_end)) ||
-                (same_point(left_start, right_end) && same_point(left_end, right_start)))
+                (same_point(left_start, right_end) && same_point(left_end, right_start))) {
               ++count;
+            }
           }
         }
         return count;
@@ -894,23 +921,24 @@ void check_catalogue_relocation(const std::filesystem::path &root) {
         catalogue.generation() == generation + uint64_t(rebuilt),
         "Catalogue generation changed"
     );
-    if (!rebuilt)
+    if (!rebuilt) {
       require(
           catalogue.acceleration() == coverage && catalogue.candidate_acceleration() == candidates,
           "Movement replaced anchored acceleration structures"
       );
+    }
     TerrainTileBvh reference(gpu);
     require(reference.prepare(tiles, observer, parameters), "Fresh catalogue was not built");
     for (const auto &pair :
          {std::pair{catalogue.tiles(), reference.tiles()},
           std::pair{catalogue.coverage_polygons(), reference.coverage_polygons()},
           std::pair{catalogue.coverage_vertices(), reference.coverage_vertices()},
-          std::pair{catalogue.candidate_patches(), reference.candidate_patches()}})
+          std::pair{catalogue.candidate_patches(), reference.candidate_patches()}}) {
       if (pair.first.length != pair.second.length ||
           std::memcmp(pair.first.contents, pair.second.contents, pair.first.length) != 0) {
         const auto *a = static_cast<const uint32_t *>(pair.first.contents);
         const auto *b = static_cast<const uint32_t *>(pair.second.contents);
-        for (size_t word = 0; word < std::min(pair.first.length, pair.second.length) / 4; ++word)
+        for (size_t word = 0; word < std::min(pair.first.length, pair.second.length) / 4; ++word) {
           if (a[word] != b[word]) {
             std::printf(
                 "Catalogue mismatch move=%zu buffer=%s word=%zu: %.9g vs %.9g\n",
@@ -922,8 +950,10 @@ void check_catalogue_relocation(const std::filesystem::path &root) {
             );
             break;
           }
+        }
         require(false, "Anchored catalogue changed observer-relative exact metadata");
       }
+    }
   }
   parameters.curvature_coefficient *= 0.5F;
   require(
@@ -967,8 +997,9 @@ void check_prepared_dataset_stack(
       0U
   );
   size_t combined_patches = 0U;
-  for (const TerrainSource &source : combined.sources())
+  for (const TerrainSource &source : combined.sources()) {
     combined_patches += source.transform_patches.size();
+  }
   const double catalogue_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   std::printf(
@@ -1009,8 +1040,9 @@ void compare(
   size_t mismatches = 0, hits = 0;
   float maximum_error = 0.0F;
   for (size_t i = 0; i < pixel_count(field.image); ++i) {
-    if (expected[i] > 0)
+    if (expected[i] > 0) {
       ++hits;
+    }
     const float delta = std::abs(expected[i] - actual[i]);
     maximum_error = std::max(maximum_error, delta);
     const float elevation_tolerance =
@@ -1022,7 +1054,7 @@ void compare(
         (expected[i] > 0) != (actual[i] > 0) || delta > distance_tolerance ||
         (expected[i] > 0 && std::abs(expected_z[i] - actual_z[i]) > elevation_tolerance);
     if (mismatch) {
-      if (mismatches < 8)
+      if (mismatches < 8) {
         std::fprintf(
             stderr,
             "ray %zu: software %.7g BVH %.7g (dz %.7g), direction %.9g %.9g %.9g\n",
@@ -1034,6 +1066,7 @@ void compare(
             directions[i].y,
             directions[i].slope
         );
+      }
       ++mismatches;
     }
     if (expected[i] > 0 && actual[i] > 0 && expected_n[i] != actual_n[i]) {
@@ -1068,7 +1101,7 @@ void compare(
         const float half_tolerance =
             std::max(0.002F, std::max(std::abs(ga), std::abs(gb)) * 0.002F);
         if (!on_patch_edge && std::abs(ga - gb) > half_tolerance) {
-          if (mismatches < 30)
+          if (mismatches < 30) {
             std::fprintf(
                 stderr,
                 "gradient %zu: %.7g vs %.7g, distances %.9g %.9g; xy %.9g %.9g\n",
@@ -1080,6 +1113,7 @@ void compare(
                 expected[i] * directions[i].x,
                 expected[i] * directions[i].y
             );
+          }
           ++mismatches;
         }
       }
@@ -1219,14 +1253,18 @@ void write_masked_fixture(
   auto header = read_metal_tile_header(old_path);
   auto lod = read_metal_tile_lods(old_path, header).front();
   std::vector<uint16_t> samples(17U * 17U, 1U);
-  if (hole)
-    for (uint32_t y = 0; y < 17; ++y)
+  if (hole) {
+    for (uint32_t y = 0; y < 17; ++y) {
       samples[y * 17 + 7] = samples[y * 17 + 8] = 0;
+    }
+  }
   std::vector<uint8_t> usable(16U * 16U);
-  for (uint32_t y = 0; y < 16; ++y)
-    for (uint32_t x = 0; x < 16; ++x)
+  for (uint32_t y = 0; y < 16; ++y) {
+    for (uint32_t x = 0; x < 16; ++x) {
       usable[y * 16 + x] = samples[y * 17 + x] && samples[y * 17 + x + 1] &&
                            samples[(y + 1) * 17 + x] && samples[(y + 1) * 17 + x + 1];
+    }
+  }
   const auto coverage = make_cell_coverage(16, usable);
   const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
   const uint64_t bytes = count * sizeof(TerrainCoverageRect);
@@ -1241,8 +1279,9 @@ void write_masked_fixture(
   header.maximum_elevation = lod.maximum_elevation = height;
   header.vertex_offset = lod.vertex_offset += bytes;
   std::vector<std::byte> payload(bytes + samples.size() * sizeof(uint16_t));
-  if (bytes)
+  if (bytes) {
     std::memcpy(payload.data(), coverage.rectangles.data(), bytes);
+  }
   std::memcpy(payload.data() + bytes, samples.data(), samples.size() * sizeof(uint16_t));
   std::filesystem::remove(old_path);
   write_metal_tile_lods(
@@ -1444,13 +1483,16 @@ void write_geographic_junction_fixture(
     auto header = original;
     auto lod = original_lod;
     std::vector<uint16_t> vertices(17U * 17U, 1000U);
-    if (hole && row == int64_t(across_tiles))
+    if (hole && row == int64_t(across_tiles)) {
       vertices[(across_tiles ? 16U : 11U) * 17U + 2U] = 0;
+    }
     std::vector<uint8_t> usable(16U * 16U);
-    for (uint32_t y = 0; y < 16; ++y)
-      for (uint32_t x = 0; x < 16; ++x)
+    for (uint32_t y = 0; y < 16; ++y) {
+      for (uint32_t x = 0; x < 16; ++x) {
         usable[y * 16 + x] = vertices[y * 17 + x] && vertices[y * 17 + x + 1] &&
                              vertices[(y + 1) * 17 + x] && vertices[(y + 1) * 17 + x + 1];
+      }
+    }
     const auto coverage = make_cell_coverage(16, usable);
     const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
     const size_t bytes = size_t(count) * sizeof(TerrainCoverageRect);
@@ -1462,8 +1504,9 @@ void write_geographic_junction_fixture(
     header.reserved = count;
     header.vertex_offset = lod.vertex_offset += bytes;
     std::vector<std::byte> payload(bytes + vertices.size() * sizeof(uint16_t));
-    if (bytes)
+    if (bytes) {
       std::memcpy(payload.data(), coverage.rectangles.data(), bytes);
+    }
     std::memcpy(payload.data() + bytes, vertices.data(), vertices.size() * sizeof(uint16_t));
     write_metal_tile_lods(
         directory / ("flat_r" + std::to_string(row) + "_c0.ptile"),
@@ -1546,11 +1589,13 @@ void write_empty_gap_fixture(const std::filesystem::path &directory, bool whole_
   const auto coverage = *read_metal_tile_coverage(first, header);
   const size_t coverage_bytes = header.reserved * sizeof(TerrainCoverageRect);
   std::vector<uint16_t> samples(17U * 17U, 1U);
-  for (uint32_t y = 0; y < 17; ++y)
-    for (uint32_t x = 0; x < 17; ++x)
+  for (uint32_t y = 0; y < 17; ++y) {
+    for (uint32_t x = 0; x < 17; ++x) {
       samples[y * 17 + x] = !whole_tile && (x == 7 || x == 8)
                                 ? 0U
                                 : uint16_t(1U + 100U * (whole_tile ? x : (x > 9 ? x - 9 : 0)));
+    }
+  }
   const float maximum = whole_tile ? 1160.0F : 1070.0F;
   header.maximum_elevation = lod.maximum_elevation = maximum;
   if (whole_tile) {
@@ -1558,8 +1603,9 @@ void write_empty_gap_fixture(const std::filesystem::path &directory, bool whole_
     header.lower_left_x += 320;
   }
   std::vector<std::byte> payload(coverage_bytes + samples.size() * sizeof(uint16_t));
-  if (coverage_bytes)
+  if (coverage_bytes) {
     std::memcpy(payload.data(), coverage.rectangles.data(), coverage_bytes);
+  }
   std::memcpy(payload.data() + coverage_bytes, samples.data(), samples.size() * sizeof(uint16_t));
   write_metal_tile_lods(
       directory / (whole_tile ? "flat_r0_c2.ptile" : "flat_r0_c0.ptile"),
@@ -1568,8 +1614,9 @@ void write_empty_gap_fixture(const std::filesystem::path &directory, bool whole_
       payload
   );
   std::vector<TerrainManifestEntry> entries = {{0, whole_tile ? 2 : 0, maximum, 1000, coverage}};
-  if (whole_tile)
+  if (whole_tile) {
     entries.push_back({0, 0, 1000, 1000, coverage});
+  }
   write_terrain_manifest(terrain_manifest_path(directory), entries);
 }
 
@@ -1599,19 +1646,21 @@ void check_empty_gaps(const std::filesystem::path &root, bool retained) {
         config.raytracer = mode < 2 ? Raytracer::Software : Raytracer::MetalBvh;
         config.use_tile_bvh = mode != 0;
         config.bvh_cache_size_bytes = mode == 3 ? (retained ? 14200U : 14800U) : 1048576U;
-        if (mode == 3)
+        if (mode == 3) {
           config.terrain_datasets = {{directory, 0}, {dummy, 0}};
+        }
         TerrainTraceSession session(config, near_field, {true, true, true});
         for (bool bilinear : {false, true}) {
           session.set_collision_options(bilinear, true);
           session.trace(near_field);
           const auto *distances = static_cast<const float *>(session.distances().contents);
           const auto *elevations = static_cast<const float *>(session.elevations().contents);
-          for (size_t i = 0; i < pixel_count(near_field.image); ++i)
+          for (size_t i = 0; i < pixel_count(near_field.image); ++i) {
             require(
                 distances[i] > 9 && distances[i] < 11 && std::abs(elevations[i] - 1000) < 0.01F,
                 "Empty-gap fixture did not hit the near ground"
             );
+          }
           session.trace_shadows(std::numbers::pi / 2, std::atan(0.1));
           const auto *visibility =
               static_cast<const uint8_t *>(session.shadow_visibility().contents);
@@ -1623,11 +1672,12 @@ void check_empty_gaps(const std::filesystem::path &root, bool retained) {
               ),
               "Empty gap hid a known shadow caster"
           );
-          if (whole_tile && mode >= 2 && !bilinear)
+          if (whole_tile && mode >= 2 && !bilinear) {
             require(
                 session.bvh_statistics().shadow_tiles_built > 0,
                 "Gap shadow test did not load the initially absent caster"
             );
+          }
           session.trace_shadows(std::numbers::pi / 2, std::atan(2.0));
           require(
               std::all_of(
@@ -1640,18 +1690,20 @@ void check_empty_gaps(const std::filesystem::path &root, bool retained) {
           session.trace(far_field);
           distances = static_cast<const float *>(session.distances().contents);
           elevations = static_cast<const float *>(session.elevations().contents);
-          for (size_t i = 0; i < pixel_count(far_field.image); ++i)
+          for (size_t i = 0; i < pixel_count(far_field.image); ++i) {
             require(
                 distances[i] > (whole_tile ? 275 : 45) && distances[i] < (whole_tile ? 300 : 70) &&
                     elevations[i] > 1000,
                 "Camera ray did not cross empty space to the far surface"
             );
+          }
         }
-        if (whole_tile && mode == 3)
+        if (whole_tile && mode == 3) {
           require(
               session.bvh_statistics().evictions > 0,
               "Empty-gap fixture did not exercise bounded streaming"
           );
+        }
         // Place the near hit just inside a tile edge, so the shadow bias puts
         // its origin in the missing tile. It must still find the far caster.
         if (whole_tile) {
@@ -1768,7 +1820,7 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
           const auto *gradients =
               static_cast<const uint32_t *>(session.surface_gradients().contents);
           for (uint32_t i = 0; i < pixel_count(field.image); ++i) {
-            if (!(distances[i] > 0 && std::abs(elevations[i] - height) < 0.01F))
+            if (!(distances[i] > 0 && std::abs(elevations[i] - height) < 0.01F)) {
               std::fprintf(
                   stderr,
                   "Masked hit retained=%d bounded=%d bilinear=%d pixel=%u t=%g z=%g expected=%g\n",
@@ -1780,6 +1832,7 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
                   elevations[i],
                   height
               );
+            }
             require(
                 distances[i] > 0 && std::abs(elevations[i] - height) < 0.01F,
                 "GPU hit did not respect valid coverage priority"
@@ -1790,10 +1843,11 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
           const auto *visibility =
               static_cast<const uint8_t *>(session.shadow_visibility().contents);
           for (uint32_t i = 0; i < pixel_count(field.image); ++i) {
-            if (height == 10.0F)
+            if (height == 10.0F) {
               require(visibility[i] != 0, "Flat fallback incorrectly shadowed itself");
+            }
             if (distances[i] < 11.0F) {
-              if (visibility[i] != 0)
+              if (visibility[i] != 0) {
                 std::fprintf(
                     stderr,
                     "Shadow failed retained=%d bounded=%d bilinear=%d pixel=%u t=%g z=%g "
@@ -1806,6 +1860,7 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
                     elevations[i],
                     (unsigned long long)session.bvh_statistics().shadow_cache_fallbacks
                 );
+              }
               require(visibility[i] == 0, "Fallback in the hole did not cast a shadow");
             }
           }
@@ -1828,8 +1883,9 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
             "Priority clipping lost the step between known surfaces"
         );
       }
-      if (bounded)
+      if (bounded) {
         require(session.bvh_statistics().evictions > 0, "Masked test did not exercise streaming");
+      }
       require(
           session.relocate_observer(lv95_observer(2600046, 1199946, 20)),
           "Masked observer relocation failed"
@@ -1995,8 +2051,9 @@ void check_misaligned_coverage(const std::filesystem::path &root) {
         TerrainTraceSession mixed(config, far_field, {true, true, true});
         compare(expected, mixed, far_field, 0.01F);
         compare(expected, mixed, far_field, 0.01F);
-        if (bounded)
+        if (bounded) {
           require(mixed.bvh_statistics().evictions > 0, "Coverage fixture did not force streaming");
+        }
         config.terrain_datasets = {{primary, 0.0}, {gap, 0.0}};
         TerrainTraceSession missing(config, far_field, {true, true, true});
         compare(expected, missing, far_field, 0.01F);
@@ -2357,11 +2414,12 @@ void check_session_replacement(
           ),
           "Replacement fixture did not render terrain"
       );
-      for (size_t i = 0; i < rendered.bytes.size(); ++i)
+      for (size_t i = 0; i < rendered.bytes.size(); ++i) {
         require(
             std::abs(int(rendered.bytes[i]) - int(baseline.bytes[i])) <= 2,
             "Replacement session changed rendered terrain"
         );
+      }
     }
   }
   std::printf(
@@ -2440,10 +2498,12 @@ void check_gpu_projection(const std::filesystem::path &directory) {
           );
         };
         for (size_t i = 0; i < rays.size(); ++i) {
-          if (i % image.width + 1 < image.width)
+          if (i % image.width + 1 < image.width) {
             measure(rays[i], rays[i + 1]);
-          if (i + image.width < rays.size())
+          }
+          if (i + image.width < rays.size()) {
             measure(rays[i], rays[i + image.width]);
+          }
         }
         require(std::abs(angle / minimum - 1) < .001, "GPU footprint disagrees with adjacent rays");
       }
@@ -2484,8 +2544,9 @@ void check_gpu_projection(const std::filesystem::path &directory) {
         tiles.sources()[i].key,
         tiles.catalogue().render_coordinate(config.observer.position)
     );
-    if (distance == 0)
+    if (distance == 0) {
       continue;
+    }
     for (uint32_t level : {2U, 3U}) {
       for (double factor : {.99999, 1.0, 1.00001}) {
         const float scale = float(
@@ -2608,11 +2669,13 @@ void check_producer(
                         bilinear,
                         false};
   auto field = angular_field({129, 65}, {0, 6.3, -1.3, 0.1});
-  if (partial)
+  if (partial) {
     field = angular_field({1, 1}, {0, 0.01, -1.55, -1.54});
+  }
   auto camera = camera_request(field.image, partial);
-  if (pinhole)
+  if (pinhole) {
     field = camera_field(camera.image, camera.projection);
+  }
   TerrainTraceSession reference(config, field, {true, true, true});
   config.raytracer = Raytracer::MetalBvh;
   TerrainTraceSession trace(config, field, {true, true, true});
@@ -2637,10 +2700,12 @@ void check_producer(
     // A pinhole view need not load off-screen shadow casters into the primary
     // BVH cache. Exercise its guaranteed resident path with shadows off first;
     // later frames verify exact shadow repair as well.
-    if (pinhole && frame < 7 && !partial)
+    if (pinhole && frame < 7 && !partial) {
       settings.appearance.raytraced_shadows = false;
-    if (partial && frame == 1)
+    }
+    if (partial && frame == 1) {
       field = angular_field({129, 65}, {0, 6.3, -1.3, 0.1});
+    }
     settings.appearance.feature_outlines = frame == 2;
     settings.appearance.colour_source =
         frame == 3 ? TerrainColourSource::White : TerrainColourSource::Distance;
@@ -2648,8 +2713,9 @@ void check_producer(
                                         : frame == 5 ? std::numbers::pi / 2
                                                      : 0.35;
     const bool appearance_only = frame == 3 || frame == 12;
-    if (frame == 7)
+    if (frame == 7) {
       field = angular_field({161, 97}, {0.2, 6.5, -1.3, 0.1});
+    }
     if (frame == 8) {
       const ObserverLocation moved = lv95_observer(2599965, 1199975, 1120);
       require(
@@ -2661,18 +2727,22 @@ void check_producer(
       reference.set_lod_scale(3);
       trace.set_lod_scale(3);
     }
-    if (frame == 10)
+    if (frame == 10) {
       trace.set_raytracer(Raytracer::Software);
-    if (frame == 11)
+    }
+    if (frame == 11) {
       trace.set_raytracer(Raytracer::MetalBvh);
+    }
     if (pinhole) {
       camera = camera_request(field.image, partial && frame == 0);
       field = camera_field(camera.image, camera.projection);
     }
-    if (!appearance_only)
+    if (!appearance_only) {
       reference.trace(field);
-    if (settings.appearance.raytraced_shadows)
+    }
+    if (settings.appearance.raytraced_shadows) {
       reference.trace_shadows(settings.appearance.sun_azimuth, settings.appearance.sun_elevation);
+    }
     expected.resize(field.image);
     expected.render_synthetic(
         reference.surface_gradients(),
@@ -2690,15 +2760,18 @@ void check_producer(
     const auto mipmaps_before = trace.tile_statistics().mipmap_generations;
     const auto timing =
         render_terrain_frame(trace, appearance_only ? nullptr : &field, actual, settings, {});
-    if (frame < 10)
+    if (frame < 10) {
       require(trace.tile_statistics().mipmap_generations == 0, "BVH tracing generated mipmaps");
-    if (frame == 10)
+    }
+    if (frame == 10) {
       require(
           trace.tile_statistics().mipmap_generations > 0,
           "Software switch missed lazy mipmaps"
       );
-    if (frame > 10)
+    }
+    if (frame > 10) {
       require(trace.tile_statistics().mipmap_generations == mipmaps_before, "BVH rebuilt mipmaps");
+    }
     if (partial && frame == 1) {
       const auto after = trace.bvh_statistics();
       const uint64_t passes = after.scene_repair_passes - repair_before.scene_repair_passes;
@@ -2724,19 +2797,20 @@ void check_producer(
         timing.producer_submissions,
         timing.streamed
     );
-    if (frame == 0)
+    if (frame == 0) {
       require(timing.streamed, "Cold producer did not stream");
-    else if (partial && frame == 1)
+    } else if (partial && frame == 1) {
       require(
           timing.streamed && timing.producer_submissions == 2U,
           "Partial resident producer did not repair missing terrain before presentation"
       );
-    else if (frame < 7 && !(pinhole && settings.appearance.raytraced_shadows))
+    } else if (frame < 7 && !(pinhole && settings.appearance.raytraced_shadows)) {
       require(
           !timing.streamed && timing.producer_submissions == 1U,
           "Resident producer required intermediate submissions"
       );
-    if (settings.appearance.raytraced_shadows)
+    }
+    if (settings.appearance.raytraced_shadows) {
       require(
           std::memcmp(
               reference.shadow_visibility().contents,
@@ -2745,13 +2819,16 @@ void check_producer(
           ) == 0,
           "Producer shadow parity failed"
       );
+    }
     const auto a = expected.readback(timer);
     const auto b = actual.readback(timer);
     require(a.bytes.size() == b.bytes.size(), "Producer image size mismatch");
     uint32_t different = 0;
-    for (size_t i = 0; i < a.bytes.size(); ++i)
-      if (std::abs(int(a.bytes[i]) - int(b.bytes[i])) > 2)
+    for (size_t i = 0; i < a.bytes.size(); ++i) {
+      if (std::abs(int(a.bytes[i]) - int(b.bytes[i])) > 2) {
         ++different;
+      }
+    }
     std::printf("Producer image mismatched channels: %u\n", different);
     require(different == 0, "Producer colouring parity failed");
     if (frame == 6) {
@@ -2851,12 +2928,13 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
     [command waitUntilCompleted];
     require(command.status == MTLCommandBufferStatusCompleted, "MetalFX producer readback failed");
     std::vector<uint8_t> bytes(texture.width * texture.height * 4);
-    for (NSUInteger y = 0; y < texture.height; ++y)
+    for (NSUInteger y = 0; y < texture.height; ++y) {
       std::memcpy(
           bytes.data() + y * texture.width * 4,
           static_cast<const uint8_t *>(buffer.contents) + y * row,
           texture.width * 4
       );
+    }
     return bytes;
   };
   TerrainPresentationSettings settings{};
@@ -2925,23 +3003,26 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
         expected,
         settings,
         [&](id<MTLCommandBuffer> command) {
-          if (resolution.enabled)
+          if (resolution.enabled) {
             expected_scaler.encode(command, expected.texture());
+          }
         },
         lod_footprint_scale
     );
     if (!appearance_only) {
       const uint64_t changes = trace.bvh_statistics().lod_plan_changes;
-      if (frame == 0)
+      if (frame == 0) {
         stable_lod_plan_changes = changes;
-      else
+      } else {
         require(
             changes == stable_lod_plan_changes,
             "MetalFX internal resolution changed the terrain LOD plan"
         );
+      }
     }
-    if (published != nil)
+    if (published != nil) {
       require(read(published) == published_bytes, "Producer overwrote the displayed frame");
+    }
     published = resolution.enabled ? scaler.texture() : actual.texture();
     require(
         published.width == output.image.width && published.height == output.image.height,
@@ -2951,13 +3032,15 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
     const auto expected_bytes =
         read(resolution.enabled ? expected_scaler.texture() : expected.texture());
     require(published_bytes.size() == expected_bytes.size(), "MetalFX output size mismatch");
-    for (size_t i = 0; i < published_bytes.size(); ++i)
+    for (size_t i = 0; i < published_bytes.size(); ++i) {
       require(
           std::abs(int(published_bytes[i]) - int(expected_bytes[i])) <= 3,
           "MetalFX terrain/shadow output differs from complete software reference"
       );
-    if (frame >= 6)
+    }
+    if (frame >= 6) {
       require(!timing.streamed, "Warmed MetalFX view unexpectedly repaired terrain");
+    }
     std::printf(
         "MetalFX producer frame %zu: %ux%u -> %ux%u, submits=%u, streamed=%d\n",
         frame,
@@ -3078,9 +3161,9 @@ void check_shadow_reuse(
       static_cast<unsigned long long>(stats.shadow_tiles_built),
       static_cast<unsigned long long>(stats.shadow_cache_fallbacks)
   );
-  if (bounded)
+  if (bounded) {
     require(stats.shadow_cache_fallbacks > 0, "Small cache did not exercise exact shadow fallback");
-  else {
+  } else {
     require(stats.shadow_tiles_built > 0, "Fixture did not request off-screen shadow terrain");
     require(stats.shadow_cache_fallbacks == 0, "Roomy shadow cache unexpectedly fell back");
   }
@@ -3199,10 +3282,12 @@ int main(int argc, const char *argv[]) {
                               true,
                               true,
                               false};
-        if (argc >= 3)
+        if (argc >= 3) {
           config.max_distance = std::stof(argv[2]);
-        if (argc >= 4)
+        }
+        if (argc >= 4) {
           config.bvh_cache_size_bytes = std::stoull(argv[3]) * 1048576U;
+        }
         const auto field = angular_field({512, 128}, {0, 2 * std::numbers::pi, -0.6, 0.15});
         config.use_tile_bvh = false;
         TerrainTraceSession software(config, field, {true, true, true});

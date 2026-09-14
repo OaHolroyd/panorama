@@ -31,8 +31,9 @@
           panorama::transform_coordinates(4326U, dataset.epsg_code, std::span(&coordinate, 1U))
               .front();
       const panorama::TileKey key = panorama::tile_key_at(dataset.grid, native.x, native.y);
-      if (std::binary_search(dataset.tiles.begin(), dataset.tiles.end(), key))
+      if (std::binary_search(dataset.tiles.begin(), dataset.tiles.end(), key)) {
         return true;
+      }
     } catch (const std::out_of_range &) {
       // Try the remaining datasets when this point is outside a native grid.
     }
@@ -695,8 +696,9 @@
     return;
   }
   [self updateDebugPointInfo:inspection];
-  if (!_pointInspectionEnabled)
+  if (!_pointInspectionEnabled) {
     return;
+  }
   if (!inspection.has_value()) {
     if (!_pointInspectionLocked) {
       [_miniMapPanel clearInspectedPoint];

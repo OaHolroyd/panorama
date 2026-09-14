@@ -242,8 +242,9 @@ TileManager::TileManager(const RaytraceConfig &config) : state_(std::make_unique
       catalogue_datasets.empty() ? 0U : catalogue_datasets.front().epsg_code
   ));
   state.trace_quantized = state.config.retain_quantized;
-  if (config.terrain_datasets.empty())
+  if (config.terrain_datasets.empty()) {
     validate_tile_position(*state.origin, state.catalogue->origin().key, state.catalogue->grid());
+  }
   const size_t mip_count =
       static_cast<size_t>(metal_tile_mipmap_value_count(state.origin->cell_count));
   if (mip_count > std::numeric_limits<uint32_t>::max()) {
@@ -254,11 +255,14 @@ TileManager::TileManager(const RaytraceConfig &config) : state_(std::make_unique
 }
 
 void TileManager::install_lod_plan(std::span<const uint32_t> lods) {
-  if (lods.size() != sources().size())
+  if (lods.size() != sources().size()) {
     throw std::invalid_argument("GPU LOD plan has the wrong source count");
-  for (size_t i = 0; i < lods.size(); ++i)
-    if (lods[i] == 0 || lods[i] > sources()[i].lod_count)
+  }
+  for (size_t i = 0; i < lods.size(); ++i) {
+    if (lods[i] == 0 || lods[i] > sources()[i].lod_count) {
       throw std::invalid_argument("GPU LOD plan contains an invalid level");
+    }
+  }
   state_->lod_by_source.assign(lods.begin(), lods.end());
 }
 

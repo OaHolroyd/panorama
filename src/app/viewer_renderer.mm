@@ -287,8 +287,9 @@ void print_usage(const char *program) {
       settings.bvh_block_cells = arguments::parse_uint32(value, option, false);
     } else if (option == "--bvh-cache-mib") {
       const uint64_t size = arguments::parse_uint64(value, option);
-      if (size == 0U || size > std::numeric_limits<uint64_t>::max() / kBytesPerMiB)
+      if (size == 0U || size > std::numeric_limits<uint64_t>::max() / kBytesPerMiB) {
         throw std::out_of_range("BVH cache is outside the supported byte range");
+      }
       settings.bvh_cache_size_bytes = size * kBytesPerMiB;
     } else if (option == "--tile-cache-mib") {
       const uint64_t size = arguments::parse_uint64(value, option);
@@ -339,10 +340,11 @@ void print_usage(const char *program) {
   if (pixels == 0U || pixels > std::numeric_limits<uint32_t>::max()) {
     throw std::out_of_range("Viewer image dimensions exceed the Metal ray-index range");
   }
-  if (!valid_lat_lon(settings.observer.position))
+  if (!valid_lat_lon(settings.observer.position)) {
     throw std::invalid_argument(
         "Observer latitude must be in [-90, 90] and longitude in [-180, 180]"
     );
+  }
   return settings;
 }
 
@@ -469,8 +471,9 @@ public:
     pipeline_ = vertex == nil || fragment == nil
                     ? nil
                     : [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    if (pipeline_ == nil)
+    if (pipeline_ == nil) {
       throw std::runtime_error("Could not create fullscreen presentation pipeline");
+    }
   }
   void
   encode(id<MTLCommandBuffer> command, id<MTLTexture> source, id<MTLTexture> destination) const {
@@ -479,8 +482,9 @@ public:
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-    if (encoder == nil)
+    if (encoder == nil) {
       throw std::runtime_error("Could not create fullscreen presentation encoder");
+    }
     [encoder setRenderPipelineState:pipeline_];
     [encoder setFragmentTexture:source atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -581,8 +585,9 @@ public:
     device_ = trace_->device();
     display_queue_ = trace_->command_queue();
     library_ = trace_->library();
-    if (display_queue_ == nil)
+    if (display_queue_ == nil) {
       throw std::runtime_error("Could not create viewer display command queue");
+    }
     presentation_ = std::make_unique<GpuImageRenderer>(
         device_,
         display_queue_,
@@ -613,8 +618,9 @@ public:
     requested_bilinear_collisions_ = settings_.bilinear_collisions;
     requested_c1_normals_ = settings_.c1_normals;
     presented_observer_ = settings_.observer;
-    if (settings_.trace_diagnostics)
+    if (settings_.trace_diagnostics) {
       diagnostics_ = std::make_unique<diagnostics::Monitor>(device_);
+    }
     worker_ = std::thread([this] { render_loop(); });
     request_view(settings_.orientation, settings_.vertical_field_of_view, settings_.image);
   }
@@ -639,8 +645,9 @@ public:
   void request_minimap_enabled(bool enabled) override {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (minimap_enabled_ == enabled)
+      if (minimap_enabled_ == enabled) {
         return;
+      }
       minimap_enabled_ = enabled;
       ++minimap_generation_;
       minimap_changed_ = true;
@@ -657,13 +664,15 @@ public:
   void request_peak_labels_enabled(bool enabled) override {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (peak_labels_enabled_ == enabled)
+      if (peak_labels_enabled_ == enabled) {
         return;
+      }
       peak_labels_enabled_ = enabled && peak_catalogue_.has_value();
       ++peak_labels_generation_;
       peak_labels_changed_ = true;
-      if (!peak_labels_enabled_)
+      if (!peak_labels_enabled_) {
         presented_peak_labels_.reset();
+      }
     }
     changed_.notify_one();
   }
@@ -691,8 +700,9 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const MetalFxSelection requested = {activation, preset, interacting};
-      if (requested_metalfx_ == requested)
+      if (requested_metalfx_ == requested) {
         return;
+      }
       requested_metalfx_ = requested;
       requested_revision_++;
       trace_pending_ = true;
@@ -705,8 +715,9 @@ public:
   void request_raytracer(Raytracer raytracer) override {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (requested_raytracer_ == raytracer)
+      if (requested_raytracer_ == raytracer) {
         return;
+      }
       requested_raytracer_ = raytracer;
       requested_revision_++;
       trace_pending_ = true;
@@ -739,8 +750,9 @@ public:
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (requested_lod_scale_ == lodScale)
+      if (requested_lod_scale_ == lodScale) {
         return;
+      }
       requested_lod_scale_ = lodScale;
       requested_revision_++;
       lod_scale_pending_ = true;
@@ -755,8 +767,9 @@ public:
   void request_collision_settings(bool bilinear, bool c1Normals) override {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (requested_bilinear_collisions_ == bilinear && requested_c1_normals_ == c1Normals)
+      if (requested_bilinear_collisions_ == bilinear && requested_c1_normals_ == c1Normals) {
         return;
+      }
       requested_bilinear_collisions_ = bilinear;
       requested_c1_normals_ = c1Normals;
       requested_revision_++;
@@ -920,8 +933,9 @@ public:
   ) const override {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frame.revision != presented_revision_ || frame.texture != presented_texture_) {
-      if (diagnostics::enabled)
+      if (diagnostics::enabled) {
         ++diagnostics::display.refreshed;
+      }
     }
     frame = presented_frame_locked();
     diagnostics::display.mark("encode");
@@ -934,8 +948,9 @@ public:
       pass.colorAttachments[0].storeAction = MTLStoreActionStore;
       pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
       id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-      if (encoder == nil)
+      if (encoder == nil) {
         return false;
+      }
       [encoder endEncoding];
     }
     diagnostics::display.mark("submit");
@@ -995,11 +1010,13 @@ private:
                              .output_image = current_output_image_,
                              .peaks = {}};
     if (!peak_catalogue_.has_value() || current_field_.image.width == 0U ||
-        current_field_.image.height == 0U)
+        current_field_.image.height == 0U) {
       return result;
+    }
     const auto *distances = static_cast<const float *>(trace_->distances().contents);
-    if (distances == nullptr)
+    if (distances == nullptr) {
       return result;
+    }
     size_t within_range = 0U;
     size_t onscreen = 0U;
     size_t sampled = 0U;
@@ -1007,8 +1024,9 @@ private:
     const auto &frame = trace_->render_frame();
     if (!peak_render_frame_ || *peak_render_frame_ != frame) {
       std::vector<Coord> positions;
-      for (const auto &peak : peak_catalogue_->peaks())
+      for (const auto &peak : peak_catalogue_->peaks()) {
         positions.push_back({peak.position.lon, peak.position.lat});
+      }
       projected_peaks_ = frame.project(4326U, positions);
       peak_render_frame_ = frame;
     }
@@ -1022,8 +1040,12 @@ private:
                             delta_x * axes[1].x + delta_y * axes[1].y};
       const double east = offset.x, north = offset.y;
       const double horizontal = std::hypot(east, north);
-      if (horizontal > settings_.max_distance)
+      if (horizontal > settings_.max_distance) {
         continue;
+      }
+      if (horizontal < 50.0) {
+        continue;
+      }
       ++within_range;
       const LockedPointProjection projection = project_offset(
           offset,
@@ -1032,16 +1054,18 @@ private:
           current_vertical_field_of_view_,
           current_orientation_
       );
-      if (!projection.onscreen)
+      if (!projection.onscreen) {
         continue;
+      }
       ++onscreen;
       const auto pixel = inspection_pixel(
           {projection.pixel_x / current_output_image_.width,
            projection.pixel_y / current_output_image_.height},
           current_field_.image
       );
-      if (!pixel)
+      if (!pixel) {
         continue;
+      }
       ++sampled;
       const double angular_pixel = current_vertical_field_of_view_ / current_field_.image.height;
       // Gazetteer summits and the rendered DEM need not identify the same
@@ -1055,17 +1079,20 @@ private:
           const int x = static_cast<int>(pixel->x) + dx;
           const int y = static_cast<int>(pixel->y) + dy;
           if (x < 0 || y < 0 || x >= static_cast<int>(current_field_.image.width) ||
-              y >= static_cast<int>(current_field_.image.height))
+              y >= static_cast<int>(current_field_.image.height)) {
             continue;
+          }
           const float distance = distances
               [static_cast<size_t>(y) * current_field_.image.width + static_cast<size_t>(x)];
-          if (std::isfinite(distance))
+          if (std::isfinite(distance)) {
             farthest = std::max(farthest, distance);
+          }
         }
       }
       best_margin = std::max(best_margin, static_cast<double>(farthest) + tolerance - horizontal);
-      if (farthest + tolerance < horizontal)
+      if (farthest + tolerance < horizontal) {
         continue;
+      }
       result.peaks.push_back(
           {peak.id,
            projection.pixel_x,
@@ -1077,14 +1104,17 @@ private:
       );
     }
     std::ranges::sort(result.peaks, [](const VisiblePeak &left, const VisiblePeak &right) {
-      if (left.prominence != right.prominence)
+      if (left.prominence != right.prominence) {
         return left.prominence > right.prominence;
-      if (left.distance != right.distance)
+      }
+      if (left.distance != right.distance) {
         return left.distance < right.distance;
+      }
       return left.peak_id < right.peak_id;
     });
-    if (result.peaks.size() > 100U)
+    if (result.peaks.size() > 100U) {
       result.peaks.resize(100U);
+    }
     if (settings_.trace_diagnostics) {
       std::printf(
           "Peak labels: %zu/%zu visible, %zu onscreen, %zu within range, best margin %.1f m\n",
@@ -1131,8 +1161,9 @@ private:
          projection.pixel_y / current_output_image_.height},
         current_field_.image
     );
-    if (!pixel)
+    if (!pixel) {
       return false;
+    }
     const size_t index = static_cast<size_t>(pixel->y) * current_field_.image.width + pixel->x;
     const float collision_distance = distances[index];
     if (!(collision_distance > 0.0F) || !std::isfinite(collision_distance)) {
@@ -1143,8 +1174,9 @@ private:
 
   [[nodiscard]] std::optional<PointInspection> inspect_location(InspectionLocation location) const {
     const auto mapped_pixel = inspection_pixel(location, current_field_.image);
-    if (!mapped_pixel)
+    if (!mapped_pixel) {
       return std::nullopt;
+    }
     const InspectionPixel pixel = *mapped_pixel;
     const size_t index =
         static_cast<size_t>(pixel.y) * static_cast<size_t>(current_field_.image.width) + pixel.x;
@@ -1254,8 +1286,9 @@ private:
         peak_labels_generation = peak_labels_generation_;
         peak_labels_requested = peak_labels_changed_ || (peak_labels_enabled && trace_pending_);
         peak_labels_changed_ = false;
-        if (!minimap_enabled)
+        if (!minimap_enabled) {
           current_visibility_points_ = nil;
+        }
         orientation = requested_orientation_;
         vertical_field_of_view = requested_vertical_field_of_view_;
         image = requested_image_;
@@ -1351,8 +1384,10 @@ private:
                 panorama::app::metalfx_resolution(image, metalfx_selection, metalfx_->supported());
             // Configure before creating the GPU request so failure traces at
             // native resolution rather than stretching a reduced ray image.
-            if (metalfx_resolution.enabled && !metalfx_->configure(metalfx_resolution.trace, image))
+            if (metalfx_resolution.enabled &&
+                !metalfx_->configure(metalfx_resolution.trace, image)) {
               metalfx_resolution = {image, false};
+            }
             RayFieldRequest field = metalfx_ray_request(
                 make_view(image, orientation, vertical_field_of_view),
                 metalfx_resolution.trace
@@ -1439,13 +1474,14 @@ private:
                   // run again; only its final snapshot is published.
                   std::lock_guard<std::mutex> lock(mutex_);
                   if (trace_requested && minimap_enabled_ &&
-                      minimap_generation == minimap_generation_)
+                      minimap_generation == minimap_generation_) {
                     next_visibility_points = visibility_->project(
                         trace_->ray_directions(),
                         trace_->distances(),
                         current_field_.image,
                         command
                     );
+                  }
                 },
                 lod_footprint_scale
             );
@@ -1615,18 +1651,21 @@ private:
             };
           }
           std::optional<PeakLabelFrame> peak_labels;
-          if (peak_labels_enabled && peak_labels_requested)
+          if (peak_labels_enabled && peak_labels_requested) {
             peak_labels = visible_peaks();
+          }
 
           diagnostics::worker.mark("publish");
           std::lock_guard<std::mutex> lock(mutex_);
-          if (trace_requested)
+          if (trace_requested) {
             error_.clear();
+          }
           if (presentation_requested) {
             presented_texture_ =
                 current_metalfx_enabled_ ? metalfx_->texture() : presentation_->texture();
-            if (!minimap_enabled_ || minimap_generation != minimap_generation_)
+            if (!minimap_enabled_ || minimap_generation != minimap_generation_) {
               current_visibility_points_ = nil;
+            }
             presented_visibility_points_ = current_visibility_points_;
             presented_image_ = current_field_.image;
             presented_output_image_ = current_output_image_;
@@ -1635,8 +1674,9 @@ private:
             presented_orientation_ = orientation;
             presented_vertical_field_of_view_ = vertical_field_of_view;
             presented_revision_ = revision;
-            if (diagnostics::enabled)
+            if (diagnostics::enabled) {
               diagnostics::worker.revision = revision;
+            }
             presented_observer_ = current_observer_;
             presented_render_frame_ = trace_->render_frame();
             unpublished_frame = false;
@@ -1663,8 +1703,9 @@ private:
             presented_target_visibility_ = target_visibility;
             presented_target_visibility_sequence_++;
           }
-          if (peak_labels_requested && peak_labels_generation == peak_labels_generation_)
+          if (peak_labels_requested && peak_labels_generation == peak_labels_generation_) {
             presented_peak_labels_ = peak_labels_enabled_ ? std::move(peak_labels) : std::nullopt;
+          }
           if (roam_requested) {
             presented_roam_result_ = roam_result;
             presented_roam_result_sequence_++;
@@ -1684,8 +1725,9 @@ private:
         if (unpublished_frame) {
           presentation_->cancel_frame();
         }
-        if (upscale_frame_started)
+        if (upscale_frame_started) {
           metalfx_->cancel_frame();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = exception.what();
         printf("ERROR: %s\n", error_.c_str());
