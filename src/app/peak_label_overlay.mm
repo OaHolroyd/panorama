@@ -12,6 +12,15 @@
 }
 @end
 
+namespace {
+struct PeakLabelLayout {
+  NSPoint anchor;
+  NSPoint leader_end;
+  NSRect box;
+  NSString *__strong label;
+};
+} // namespace
+
 @implementation PeakLabelOverlayView
 
 - (BOOL)isOpaque {
@@ -51,6 +60,7 @@
     NSParagraphStyleAttributeName : paragraph,
   };
   std::vector<NSRect> occupied;
+  std::vector<PeakLabelLayout> layouts;
   NSUInteger displayed = 0;
   for (const auto &peak : _frame.peaks) {
     const NSPoint anchor = NSMakePoint(
@@ -63,7 +73,7 @@
       continue;
     }
     NSString *name = [NSString stringWithUTF8String:peak.name.c_str()];
-    NSString *label = [NSString stringWithFormat:@"%@ · %.0f m", name, peak.elevation];
+    NSString *label = [NSString stringWithFormat:@"%@ · %.1f km", name, peak.distance / 1000.0];
     NSSize size = [label sizeWithAttributes:attributes];
     size.width += 12.0;
     size.height += 6.0;
@@ -103,21 +113,29 @@
         std::clamp(anchor.x, NSMinX(box), NSMaxX(box)),
         std::clamp(anchor.y, NSMinY(box), NSMaxY(box))
     );
-    [[NSColor colorWithWhite:1.0 alpha:0.72] setStroke];
-    NSBezierPath *leader = [NSBezierPath bezierPath];
-    leader.lineWidth = 1.0;
-    [leader moveToPoint:anchor];
-    [leader lineToPoint:leaderEnd];
-    [leader stroke];
-    [[NSColor colorWithWhite:0.05 alpha:0.72] setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:box xRadius:5.0 yRadius:5.0] fill];
-    [NSColor.whiteColor setFill];
-    [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(anchor.x - 2.5, anchor.y - 2.5, 5.0, 5.0)]
-        fill];
-    [label drawInRect:NSInsetRect(box, 6.0, 3.0) withAttributes:attributes];
+    layouts.push_back({anchor, leaderEnd, box, label});
     if (++displayed >= limit) {
       break;
     }
+  }
+
+  for (auto layout = layouts.rbegin(); layout != layouts.rend(); ++layout) {
+    [[NSColor colorWithWhite:1.0 alpha:0.72] setStroke];
+    NSBezierPath *leader = [NSBezierPath bezierPath];
+    leader.lineWidth = 1.0;
+    [leader moveToPoint:layout->anchor];
+    [leader lineToPoint:layout->leader_end];
+    [leader stroke];
+    [[NSColor colorWithWhite:0.05 alpha:0.72] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:layout->box xRadius:5.0 yRadius:5.0] fill];
+    [NSColor.whiteColor setFill];
+    [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(
+                                                layout->anchor.x - 2.5,
+                                                layout->anchor.y - 2.5,
+                                                5.0,
+                                                5.0
+                                            )] fill];
+    [layout->label drawInRect:NSInsetRect(layout->box, 6.0, 3.0) withAttributes:attributes];
   }
 }
 
