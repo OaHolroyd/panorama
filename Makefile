@@ -234,7 +234,8 @@ $(OBJ_DIR)/peak-catalogue-test: tests/peak_catalogue_test.mm $(OBJ_DIR)/app/peak
 check-labels: $(OBJ_DIR)/peak-catalogue-test
 	$(OBJ_DIR)/peak-catalogue-test
 
-$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(SHARED_OBJ)
+$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o \
+		$(OBJ_DIR)/tile-gen/rechunker.o $(OBJ_DIR)/tile-gen/source_catalogue.o $(SHARED_OBJ)
 	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
 
 .PHONY: check-manifest

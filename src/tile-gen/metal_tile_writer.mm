@@ -167,8 +167,13 @@ TerrainElevationRange write_metal_tile_chunk(
         any = true;
       }
     if (any &&
-        (minimum == std::numeric_limits<int32_t>::min() || int64_t(maximum) - minimum > 65534))
-      throw std::runtime_error("Terrain LOD elevation range exceeds 6553.4 metres");
+        (minimum == std::numeric_limits<int32_t>::min() || int64_t(maximum) - minimum > 65534)) {
+      throw std::runtime_error(
+          "Terrain LOD elevation range exceeds 6553.4 metres in " + path.string() + " (LOD " +
+          std::to_string(index + 1U) + ", minimum " + std::to_string(double(minimum) / 10.0) +
+          " m, maximum " + std::to_string(double(maximum) / 10.0) + " m)"
+      );
+    }
     const uint64_t byte_count = static_cast<uint64_t>(variant.values.size()) * sizeof(uint16_t);
     const int32_t base = any ? minimum - 1 : 0;
     const float stored_maximum = any ? float(maximum) / 10.0F : 0.0F;

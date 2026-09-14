@@ -52,7 +52,11 @@ For SRTM, place the raw `.hgt` files below one input directory; nested
 directories are supported. The filename supplies each tile's one-degree WGS 84
 bounds, while its 3601- or 1201-sample side selects one- or three-arcsecond
 spacing. HGT elevations are decoded as signed, big-endian 16-bit metres and the
-standard `-32768` void value is treated as no-data. Native geographic SRTM tiles
+standard `-32768` void value is treated as no-data. HGT samples below -1000 m
+are also treated as no-data, with a warning: this land-elevation sanity check
+catches undeclared void values and severely negative interpolation artifacts.
+These samples remain coverage holes in the generated tiles; valid negative
+elevations and sea-level zero are retained. Native geographic SRTM tiles
 can be combined with projected terrain through the Metal BVH raytracer.
 
 ### Prepare tracing tiles
