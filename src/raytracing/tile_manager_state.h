@@ -184,8 +184,8 @@ struct TileManager::State {
   // Exact LOD-1 point inspection reuses resident data or one retained payload.
   /// Shared buffer for the most recently sampled nonresident source.
   id<MTLBuffer> sampled_vertices = nil;
-  /// Catalogue source currently stored in `sampled_vertices`.
-  std::optional<uint32_t> sampled_source_index;
+  /// Source from the complete immutable dataset index stored in `sampled_vertices`.
+  const TerrainSource *sampled_source = nullptr;
   /// Per-source encoding and quantization base for the retained payload.
   MetalTileHeader sampled_header = {};
 

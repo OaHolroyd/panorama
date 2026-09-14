@@ -372,6 +372,10 @@ observer without changing scale, while the scope button toggles following the
 panorama mouseover point. Following pauses while the pointer is over the map.
 A locked point can be used as the new observer location with **Move here**.
 Option-click the minimap, or use its secondary-click menu, to move immediately.
+Map inspection and relocation can use any covered point in the configured
+datasets, including points beyond the current rendering distance. Distant map
+queries load only the target tile; relocation builds a render catalogue around
+the destination.
 The Position tab also accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
 easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
 `NG907598`, or `190716, 859877`. Its coordinate-system menu defaults to Auto,

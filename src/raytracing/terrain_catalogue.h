@@ -92,6 +92,13 @@ struct TerrainLocation {
   Coord native_coordinate;
 };
 
+/// A point in the complete dataset index, independent of render-radius filtering.
+/// The source remains valid for the lifetime of its immutable catalogue.
+struct TerrainSampleLocation {
+  const TerrainSource *source;
+  Coord native_coordinate;
+};
+
 /// Discover an ordered stack and enforce the payload/atlas layout shared by
 /// all datasets. Native CRS and cell spacing may differ.
 [[nodiscard]] std::vector<TerrainDataset>
@@ -152,9 +159,13 @@ public:
   /// Return a source index for a grid key, or no value when coverage is absent.
   [[nodiscard]] std::optional<uint32_t> find_source(TileKey key) const;
   [[nodiscard]] std::optional<uint32_t> find_source(uint32_t dataset_index, TileKey key) const;
-  /// Resolve a point in the first dataset's navigation CRS, respecting the
-  /// configured dataset priority.
+  /// Resolve a point among retained render sources in the first dataset's
+  /// navigation CRS, respecting the configured dataset priority.
   [[nodiscard]] std::optional<TerrainLocation> locate_source(Coord navigation_coordinate) const;
+  /// Resolve a sampling point across all available tiles, including those
+  /// outside the render radius or tile-count limit, with valid-coverage priority.
+  [[nodiscard]] std::optional<TerrainSampleLocation>
+  locate_sample(Coord navigation_coordinate) const;
   [[nodiscard]] const std::vector<TerrainDataset> &datasets() const;
   [[nodiscard]] const TerrainRenderFrame &render_frame() const;
   [[nodiscard]] Coord render_coordinate(Coord navigation_coordinate) const;
@@ -170,7 +181,8 @@ private:
       ObserverLocation observer,
       TerrainCoverage coverage,
       std::vector<TerrainDataset> datasets = {},
-      std::optional<TerrainRenderFrame> render_frame = std::nullopt
+      std::optional<TerrainRenderFrame> render_frame = std::nullopt,
+      std::vector<TerrainSource> legacy_sample_sources = {}
   );
 
   struct SourceKey {
@@ -186,6 +198,8 @@ private:
   std::map<SourceKey, uint32_t> source_index_by_key_;
   std::optional<float> maximum_elevation_;
   std::vector<TerrainDataset> datasets_;
+  /// Complete native index for the legacy single-grid path without `datasets_`.
+  std::vector<TerrainSource> legacy_sample_sources_;
   std::vector<std::unique_ptr<CoordinateTransform>> navigation_to_dataset_;
   std::optional<TerrainRenderFrame> render_frame_;
 };

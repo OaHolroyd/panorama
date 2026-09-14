@@ -257,14 +257,29 @@ namespace {
 
 enum class CoverageRelation { Uncovered, Covered, Partial };
 
-[[nodiscard]] const TerrainSource *dataset_source(const TerrainDataset &dataset, TileKey key) {
+[[nodiscard]] const TerrainSource *
+native_source(std::span<const TerrainSource> sources, TileKey key) {
   const auto found = std::lower_bound(
-      dataset.sources.begin(),
-      dataset.sources.end(),
+      sources.begin(),
+      sources.end(),
       key,
       [](const TerrainSource &source, TileKey wanted) { return source.key < wanted; }
   );
-  return found != dataset.sources.end() && found->key == key ? &*found : nullptr;
+  return found != sources.end() && found->key == key ? &*found : nullptr;
+}
+
+[[nodiscard]] const TerrainSource *dataset_source(const TerrainDataset &dataset, TileKey key) {
+  return native_source(dataset.sources, key);
+}
+
+[[nodiscard]] bool covers_sample(const TerrainSource &source, const TileGrid &grid, Coord native) {
+  const auto &coverage = source.valid_cells;
+  return !coverage || coverage->contains(
+                          (native.x - grid.origin_x - double(source.key.column) * grid.width) *
+                              coverage->cell_count / grid.width,
+                          (native.y - grid.origin_y + double(source.key.row + 1) * grid.width) *
+                              coverage->cell_count / grid.width
+                      );
 }
 
 /// Match subdivisions on each shared tile boundary as well as inside a tile.
@@ -522,10 +537,12 @@ TerrainCatalogue::TerrainCatalogue(
     ObserverLocation observer,
     TerrainCoverage coverage,
     std::vector<TerrainDataset> datasets,
-    std::optional<TerrainRenderFrame> render_frame
+    std::optional<TerrainRenderFrame> render_frame,
+    std::vector<TerrainSource> legacy_sample_sources
 )
     : grid_(grid), sources_(std::move(sources)), observer_(observer),
       coverage_(std::move(coverage)), datasets_(std::move(datasets)),
+      legacy_sample_sources_(std::move(legacy_sample_sources)),
       render_frame_(std::move(render_frame)) {
   if (!datasets_.empty()) {
     navigation_to_dataset_.reserve(datasets_.size());
@@ -822,10 +839,10 @@ TerrainCatalogue TerrainCatalogue::discover(
         grid.origin_y - (static_cast<double>(origin_key.row) + 0.5) * grid.width;
   }
   std::vector<TerrainSource> sources;
-  for (TerrainSource &source : available_sources) {
+  for (const TerrainSource &source : available_sources) {
     if (source.key == origin_key ||
         tile_minimum_distance(grid, source.key, resolved_observer) <= max_distance) {
-      sources.push_back(std::move(source));
+      sources.push_back(source);
     }
   }
   std::sort(
@@ -854,7 +871,10 @@ TerrainCatalogue TerrainCatalogue::discover(
       grid,
       std::move(sources),
       resolved_observer,
-      TerrainCoverage{{{grid, datasets.front().epsg_code, std::move(coverage_tiles)}}}
+      TerrainCoverage{{{grid, datasets.front().epsg_code, std::move(coverage_tiles)}}},
+      {},
+      std::nullopt,
+      std::move(available_sources)
   );
 }
 
@@ -889,17 +909,31 @@ std::optional<TerrainLocation> TerrainCatalogue::locate_source(Coord navigation_
     const Coord native = navigation_to_dataset_[dataset_index]->apply(input).front();
     const TileKey key = tile_key_at(datasets_[dataset_index].grid, native.x, native.y);
     if (const auto source = find_source(static_cast<uint32_t>(dataset_index), key)) {
-      const auto &coverage = sources_[*source].valid_cells;
-      const auto &grid = datasets_[dataset_index].grid;
-      if (coverage && !coverage->contains(
-                          (native.x - grid.origin_x - double(key.column) * grid.width) *
-                              coverage->cell_count / grid.width,
-                          (native.y - grid.origin_y + double(key.row + 1) * grid.width) *
-                              coverage->cell_count / grid.width
-                      ))
+      if (!covers_sample(sources_[*source], datasets_[dataset_index].grid, native))
         continue;
       return TerrainLocation{*source, native};
     }
+  }
+  return std::nullopt;
+}
+
+std::optional<TerrainSampleLocation>
+TerrainCatalogue::locate_sample(Coord navigation_coordinate) const {
+  if (datasets_.empty()) {
+    const auto *source = native_source(
+        legacy_sample_sources_,
+        tile_key_at(grid_, navigation_coordinate.x, navigation_coordinate.y)
+    );
+    return source ? std::optional<TerrainSampleLocation>{{source, navigation_coordinate}}
+                  : std::nullopt;
+  }
+  const std::array<Coord, 1> input = {navigation_coordinate};
+  for (size_t index = 0; index < datasets_.size(); ++index) {
+    const auto &dataset = datasets_[index];
+    const Coord native = navigation_to_dataset_[index]->apply(input).front();
+    const auto *source = dataset_source(dataset, tile_key_at(dataset.grid, native.x, native.y));
+    if (source && covers_sample(*source, dataset.grid, native))
+      return TerrainSampleLocation{source, native};
   }
   return std::nullopt;
 }

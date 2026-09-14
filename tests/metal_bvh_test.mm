@@ -1160,7 +1160,9 @@ void write_masked_fixture(
     float height,
     double x_min,
     double spacing,
-    MetalTileCompression compression
+    MetalTileCompression compression,
+    uint32_t epsg = 2056U,
+    double y_min = 1199840.0
 ) {
   write_flat_coverage_fixture(directory, x_min, spacing, 1000.0F);
   const auto old_path = directory / "flat_r0_c0.ptile";
@@ -1179,6 +1181,8 @@ void write_masked_fixture(
   const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
   const uint64_t bytes = count * sizeof(TerrainCoverageRect);
   header.magic = kMetalTileLodMagic;
+  header.epsg_code = epsg;
+  header.lower_left_y = y_min;
   header.version = kMetalTileLodVersion;
   header.compression = compression;
   header.reserved = count;
@@ -1199,6 +1203,150 @@ void write_masked_fixture(
   );
   const std::array<TerrainManifestEntry, 1> entries = {{{0, 0, height, height, coverage}}};
   write_terrain_manifest(terrain_manifest_path(directory), entries);
+}
+
+void check_distant_point_sampling(const std::filesystem::path &root) {
+  const auto field = angular_field({9, 3}, {0, 6.3, -1.4, -1.3});
+  for (bool retained : {false, true}) {
+    @autoreleasepool {
+      const auto directory = root / (retained ? "sample-quantized" : "sample-expanded");
+      const auto near = directory / "near", primary = directory / "primary",
+                 fallback = directory / "fallback";
+      const auto compression = retained ? MetalTileCompression::Lz4 : MetalTileCompression::None;
+      write_masked_fixture(near, false, 1000, 2600000, 10, compression);
+      // Small geographic tiles on Hvar, over 600 km from the Swiss observer.
+      // All three datasets use r0/c0, exercising dataset identity in the sample cache.
+      constexpr double spacing = 1.0 / 3600.0;
+      write_masked_fixture(primary, true, 0, 16.44, spacing, compression, 4326, 43.17);
+      write_masked_fixture(fallback, false, 10, 16.44, spacing, compression, 4326, 43.17);
+      RaytraceConfig
+          config{near, {2600045, 1199945, 1020}, 600000, 0, 16384, 2, retained, true, false};
+      config.raytracer = Raytracer::MetalBvh;
+      config.terrain_datasets = {{near, 0}, {primary, 0}, {fallback, -2.5}};
+      const std::array<Coord, 3> geographic = {{{16.44 + 7.5 * spacing, 43.17 + 5.5 * spacing},
+                                                {16.44 + 9.5 * spacing, 43.17 + 5.5 * spacing},
+                                                {16.44 + 30 * spacing, 43.17 + 5.5 * spacing}}};
+      const auto points = transform_coordinates(4326, 2056, geographic);
+      const auto catalogue = TerrainCatalogue::discover(
+          config.terrain_datasets,
+          config.observer,
+          config.max_distance,
+          0
+      );
+      require(
+          catalogue.sources().size() == 1 && !catalogue.locate_source(points[0]),
+          "Distant sampling fixture was not excluded by the render radius"
+      );
+      TerrainTraceSession session(config, field, {true, true, true});
+      session.trace(field);
+      const auto tiles_before = session.tile_statistics();
+      const auto bvh_before = session.bvh_statistics();
+      const auto check = [&](Coord point, float height) {
+        const auto sampled = session.sample_terrain(point.x, point.y);
+        require(
+            sampled && std::abs(*sampled - height) < 0.001F,
+            "Distant sample lost coverage priority, native coordinates or vertical offset"
+        );
+      };
+      check(points[0], 7.5F);
+      const auto loaded = session.tile_statistics().bytes_loaded_with_metal_io;
+      require(
+          loaded == tiles_before.bytes_loaded_with_metal_io + 17U * 17U * sizeof(uint16_t),
+          "Distant sampling did not load exactly one LOD-1 payload"
+      );
+      check(points[0], 7.5F);
+      require(
+          session.tile_statistics().bytes_loaded_with_metal_io == loaded,
+          "Repeated distant sampling reread the same tile"
+      );
+      check(points[1], 0);
+      check(points[0], 7.5F);
+      const auto before_resident = session.tile_statistics().bytes_loaded_with_metal_io;
+      check({config.observer.easting, config.observer.northing}, 1000);
+      require(
+          session.tile_statistics().bytes_loaded_with_metal_io == before_resident,
+          "Resident LOD-1 sample performed an unnecessary disk read"
+      );
+      require(
+          !session.sample_terrain(points[2].x, points[2].y),
+          "Out-of-coverage point acquired invented terrain"
+      );
+      const auto tiles_after = session.tile_statistics();
+      const auto bvh_after = session.bvh_statistics();
+      require(
+          tiles_after.installations == tiles_before.installations &&
+              tiles_after.evictions == tiles_before.evictions &&
+              tiles_after.requests == tiles_before.requests &&
+              bvh_after.builds == bvh_before.builds &&
+              bvh_after.catalogue_builds == bvh_before.catalogue_builds,
+          "Map sampling changed rendering residency or built acceleration structures"
+      );
+      const ObserverLocation moved{points[0].x, points[0].y, 27.5};
+      require(
+          !session.relocate_observer(moved),
+          "Distant relocation did not request a new session"
+      );
+      config.observer = moved;
+      TerrainTraceSession replacement(config, field, {true, true, true}, session.command_queue());
+      const auto ground = replacement.sample_terrain(moved.easting, moved.northing);
+      require(
+          ground && std::abs(*ground - 7.5F) < 0.001F,
+          "Relocated session lost the requested destination"
+      );
+      replacement.trace(field);
+      const auto *distances = static_cast<const float *>(replacement.distances().contents);
+      require(
+          std::any_of(
+              distances,
+              distances + pixel_count(field.image),
+              [](float t) { return t > 0; }
+          ),
+          "Relocated destination did not render terrain"
+      );
+
+      config.observer = {2600045, 1199945, 1020};
+      config.terrain_datasets.pop_back();
+      TerrainTraceSession no_fallback(config, field, {true, true, true});
+      require(
+          !no_fallback.sample_terrain(points[0].x, points[0].y) &&
+              no_fallback.sample_terrain(points[1].x, points[1].y) == 0.0F,
+          "Distant no-data hole confused with valid sea-level terrain"
+      );
+    }
+  }
+
+  // The legacy single-grid path also needs the complete native tile index,
+  // including tiles removed solely by --max-tiles rather than trace distance.
+  for (bool tile_limit : {false, true}) {
+    const Coord target{2600365, 1199945};
+    RaytraceConfig config{root / "quantized",
+                          {2600045, 1199945, 1120},
+                          tile_limit ? 1000.0F : 40.0F,
+                          tile_limit ? 1U : 0U,
+                          16384,
+                          2,
+                          true,
+                          true,
+                          false};
+    TerrainTraceSession session(config, field, {true, true, true});
+    const auto ground = session.sample_terrain(target.x, target.y);
+    require(
+        ground && *ground > 900 && *ground < 1100,
+        "Legacy point sampling was restricted to retained render tiles"
+    );
+    const ObserverLocation moved{target.x, target.y, 1120};
+    require(!session.relocate_observer(moved), "Legacy target was already in the render catalogue");
+    config.observer = moved;
+    TerrainTraceSession reference(config, field, {true, true, true});
+    require(
+        reference.sample_terrain(target.x, target.y) == ground,
+        "Distant sample differs from the same tile when resident"
+    );
+  }
+  std::puts(
+      "Distant map sampling: geographic priority, holes, offsets, cache reuse and relocation "
+      "passed."
+  );
 }
 
 // A void at the west side changes coverage rectangles across the entire tile.
@@ -2904,10 +3052,11 @@ int main(int argc, const char *argv[]) {
       const bool coverage_junctions =
           argc == 2 && std::string_view(argv[1]) == "--coverage-junctions";
       const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
+      const bool point_sampling = argc == 2 && std::string_view(argv[1]) == "--point-sampling";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
           !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage &&
           !valid_quantized && !valid_expanded && !coverage_junctions && !empty_quantized &&
-          !empty_expanded) {
+          !empty_expanded && !point_sampling) {
         RaytraceConfig config{argv[1],
                               {2623452.4, 1100502.2, 3415.0},
                               21000.0F,
@@ -2968,7 +3117,9 @@ int main(int argc, const char *argv[]) {
         write_fixture(root / "partial-overlap", true, 10.0, 2056U, 2600080.0, 1200000.0, 100.0);
         write_fixture(root / "distant", true, 1000.0);
         check_dataset_foundation(root);
-        if (shadow_expanded || shadow_quantized) {
+        if (point_sampling) {
+          check_distant_point_sampling(root);
+        } else if (shadow_expanded || shadow_quantized) {
           for (bool bilinear : {false, true}) {
             for (bool bounded : {false, true}) {
               @autoreleasepool {

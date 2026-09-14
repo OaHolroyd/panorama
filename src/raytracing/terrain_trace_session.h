@@ -89,7 +89,8 @@ public:
   [[nodiscard]] ObserverLocation observer() const;
   /// Return the complete prepared-data footprint used by the minimap.
   [[nodiscard]] const TerrainCoverage &terrain_coverage() const;
-  /// Sample full-resolution terrain through this session's TileManager.
+  /// Sample full-resolution terrain across all datasets, even outside this
+  /// session's render radius, without changing rendering residency.
   [[nodiscard]] std::optional<float> sample_terrain(double easting, double northing);
   /// Return the device on which terrain and presentation resources must live.
   [[nodiscard]] id<MTLDevice> device() const;
