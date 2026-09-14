@@ -128,10 +128,11 @@ public:
   /// Load and return the current observer tile before a frame begins.
   [[nodiscard]] uint32_t ensure_observer_resident(Timer &timer);
 
-  /// Bilinearly sample full-resolution terrain at one projected coordinate.
+  /// Bilinearly sample full-resolution terrain at one projected coordinate,
+  /// including tiles outside the current render catalogue.
   /// A resident LOD-1 atlas slot is used when possible; otherwise the manager
   /// loads and retains one LOD-1 payload through its existing Metal-I/O queue.
-  [[nodiscard]] std::optional<float> sample_terrain(double easting, double northing);
+  [[nodiscard]] std::optional<float> sample_terrain(LatLon position);
   /// Signal every worker and join it; safe to call repeatedly.
   void stop();
 

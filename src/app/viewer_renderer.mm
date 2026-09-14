@@ -231,13 +231,13 @@ void print_usage(const char *program) {
       "(temporarily enabled by default)\n"
       "  --no-trace-diagnostics\n"
       "                        disable trace diagnostics\n"
-      "  --easting M           fixed observer easting (default: 2623452.4)\n"
-      "  --northing M          fixed observer northing (default: 1100502.2)\n"
-      "  --elevation M         fixed observer elevation (default: 3415)\n"
+      "  --latitude D          observer latitude in WGS84 degrees (default: 46.1012605320838)\n"
+      "  --longitude D         observer longitude in WGS84 degrees (default: 7.71604367731172)\n"
+      "  --elevation M         fixed observer elevation (default: 4515)\n"
       "  --image-width N       internal render width (default: 1600)\n"
       "  --image-height N      internal render height (default: 900)\n"
       "  --vertical-fov D      vertical camera field of view in degrees (default: 70)\n"
-      "  --heading D           initial heading clockwise from north (default: 0)\n"
+      "  --heading D           initial heading clockwise from true north (default: 0)\n"
       "  --pitch D             initial pitch above the horizon (default: 0)\n"
       "  --help                show this message\n"
       "\n"
@@ -306,10 +306,10 @@ void print_usage(const char *program) {
         throw std::out_of_range("LOD scale must be a nonnegative float32 value");
       }
       settings.lod_scale = static_cast<float>(scale);
-    } else if (option == "--easting") {
-      settings.observer.easting = arguments::parse_finite_double(value, option);
-    } else if (option == "--northing") {
-      settings.observer.northing = arguments::parse_finite_double(value, option);
+    } else if (option == "--latitude") {
+      settings.observer.position.lat = arguments::parse_finite_double(value, option);
+    } else if (option == "--longitude") {
+      settings.observer.position.lon = arguments::parse_finite_double(value, option);
     } else if (option == "--elevation") {
       settings.observer.elevation = arguments::parse_finite_double(value, option);
     } else if (option == "--image-width") {
@@ -339,6 +339,10 @@ void print_usage(const char *program) {
   if (pixels == 0U || pixels > std::numeric_limits<uint32_t>::max()) {
     throw std::out_of_range("Viewer image dimensions exceed the Metal ray-index range");
   }
+  if (!valid_lat_lon(settings.observer.position))
+    throw std::invalid_argument(
+        "Observer latitude must be in [-90, 90] and longitude in [-180, 180]"
+    );
   return settings;
 }
 
@@ -356,18 +360,17 @@ make_view(ImageSize image, CameraOrientation orientation, double vertical_field_
 /// Reproject a sampled terrain location through the viewer's ideal pinhole
 /// camera. The curvature adjustment reconstructs the apparent vertical ray
 /// displacement used when the original terrain collision was recorded.
-[[nodiscard]] LockedPointProjection project_locked_point(
-    TerrainPoint point,
-    ObserverLocation observer,
+[[nodiscard]] static LockedPointProjection project_offset(
+    Coord offset,
+    double elevation_difference,
     ImageSize image,
     double vertical_field_of_view,
     CameraOrientation orientation
 ) {
-  const double east = point.easting - observer.easting;
-  const double north = point.northing - observer.northing;
+  const double east = offset.x, north = offset.y;
   const double horizontal_distance = std::hypot(east, north);
-  const double up = point.elevation - observer.elevation -
-                    kCurvatureCoefficient * horizontal_distance * horizontal_distance;
+  const double up =
+      elevation_difference - kCurvatureCoefficient * horizontal_distance * horizontal_distance;
 
   const double sin_heading = std::sin(orientation.heading);
   const double cos_heading = std::cos(orientation.heading);
@@ -423,6 +426,23 @@ make_view(ImageSize image, CameraOrientation orientation, double vertical_field_
     direction_y = 0.0;
   }
   return {false, pixel_x, pixel_y, direction_x, direction_y};
+}
+
+LockedPointProjection project_locked_point(
+    TerrainPoint point,
+    ObserverLocation observer,
+    const TerrainRenderFrame &frame,
+    ImageSize image,
+    double vertical_field_of_view,
+    CameraOrientation orientation
+) {
+  return project_offset(
+      frame.offset(observer.position, point.position),
+      point.elevation - observer.elevation,
+      image,
+      vertical_field_of_view,
+      orientation
+  );
 }
 
 /// Decode one IEEE float16 value emitted by Metal without depending on a SIMD
@@ -515,17 +535,16 @@ public:
     );
     settings_.observer = trace_->observer();
     try {
-      peak_catalogue_ = PeakCatalogue::load(settings_.peak_gazetteer, trace_->crs());
+      peak_catalogue_ = PeakCatalogue::load(settings_.peak_gazetteer);
     } catch (const std::exception &error) {
       std::fprintf(stderr, "Peak labels disabled: %s\n", error.what());
     }
-    observer_fallback_used_ = settings_.observer.easting != requestedObserver.easting ||
-                              settings_.observer.northing != requestedObserver.northing;
+    observer_fallback_used_ = settings_.observer.position.lon != requestedObserver.position.lon ||
+                              settings_.observer.position.lat != requestedObserver.position.lat;
     device_ = trace_->device();
     // Ground queries share the trace session's catalogue and resident atlas;
     // constructing a second app-local tile cache would duplicate I/O.
-    if (const std::optional<float> ground =
-            trace_->sample_terrain(settings_.observer.easting, settings_.observer.northing)) {
+    if (const std::optional<float> ground = trace_->sample_terrain(settings_.observer.position)) {
       if (observer_fallback_used_) {
         settings_.observer.elevation = static_cast<double>(*ground) + kFallbackEyeHeight;
         trace_ = std::make_unique<TerrainTraceSession>(
@@ -554,8 +573,8 @@ public:
       std::fprintf(
           stderr,
           "Requested observer is outside the prepared terrain; starting at (%.3f, %.3f, %.1f).\n",
-          settings_.observer.easting,
-          settings_.observer.northing,
+          settings_.observer.position.lat,
+          settings_.observer.position.lon,
           settings_.observer.elevation
       );
     }
@@ -799,8 +818,7 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       observer_ground_clearance_ = groundClearance;
       requested_observer_ = {
-          point.easting,
-          point.northing,
+          point.position,
           static_cast<double>(point.elevation) + groundClearance,
       };
       requested_revision_++;
@@ -878,6 +896,7 @@ private:
         .inspection_sequence = presented_inspection_sequence_,
         .inspection_request_token = presented_inspection_token_,
         .observer = presented_observer_,
+        .render_frame = presented_render_frame_,
         .map_point = presented_map_point_,
         .map_point_sequence = presented_map_point_sequence_,
         .map_point_request_token = presented_map_point_token_,
@@ -968,6 +987,9 @@ public:
   }
 
 private:
+  mutable std::optional<TerrainRenderFrame> peak_render_frame_;
+  mutable std::vector<Coord> projected_peaks_;
+
   [[nodiscard]] PeakLabelFrame visible_peaks() const {
     PeakLabelFrame result = {.revision = current_revision_,
                              .output_image = current_output_image_,
@@ -982,16 +1004,30 @@ private:
     size_t onscreen = 0U;
     size_t sampled = 0U;
     double best_margin = -std::numeric_limits<double>::infinity();
+    const auto &frame = trace_->render_frame();
+    if (!peak_render_frame_ || *peak_render_frame_ != frame) {
+      std::vector<Coord> positions;
+      for (const auto &peak : peak_catalogue_->peaks())
+        positions.push_back({peak.position.lon, peak.position.lat});
+      projected_peaks_ = frame.project(4326U, positions);
+      peak_render_frame_ = frame;
+    }
+    const Coord observer = frame.project(current_observer_.position);
+    const auto axes = frame.basis(current_observer_.position);
+    size_t index = 0;
     for (const PeakRecord &peak : peak_catalogue_->peaks()) {
-      const double east = peak.easting - current_observer_.easting;
-      const double north = peak.northing - current_observer_.northing;
+      const Coord projected = projected_peaks_[index++];
+      const double delta_x = projected.x - observer.x, delta_y = projected.y - observer.y;
+      const Coord offset = {delta_x * axes[0].x + delta_y * axes[0].y,
+                            delta_x * axes[1].x + delta_y * axes[1].y};
+      const double east = offset.x, north = offset.y;
       const double horizontal = std::hypot(east, north);
       if (horizontal > settings_.max_distance)
         continue;
       ++within_range;
-      const LockedPointProjection projection = project_locked_point(
-          {peak.easting, peak.northing, peak.elevation},
-          current_observer_,
+      const LockedPointProjection projection = project_offset(
+          offset,
+          peak.elevation - current_observer_.elevation,
           current_output_image_,
           current_vertical_field_of_view_,
           current_orientation_
@@ -1070,6 +1106,7 @@ private:
     const LockedPointProjection projection = project_locked_point(
         point,
         current_observer_,
+        trace_->render_frame(),
         current_output_image_,
         vertical_field_of_view,
         orientation
@@ -1077,10 +1114,8 @@ private:
     if (!projection.onscreen) {
       return false;
     }
-    const double target_distance = std::hypot(
-        point.easting - current_observer_.easting,
-        point.northing - current_observer_.northing
-    );
+    const Coord offset = trace_->render_frame().offset(current_observer_.position, point.position);
+    const double target_distance = std::hypot(offset.x, offset.y);
     const double angular_pixel = vertical_field_of_view / current_field_.image.height;
     const double tolerance = std::max(5.0, 2.0 * target_distance * std::tan(angular_pixel));
     if (target_distance > static_cast<double>(settings_.max_distance) + tolerance) {
@@ -1127,8 +1162,7 @@ private:
         .hit = false,
         .distance = 0.0F,
         .elevation = 0.0F,
-        .easting = 0.0,
-        .northing = 0.0,
+        .position = {},
         .slope_degrees = 0.0F,
         .aspect_degrees = 0.0F,
         .map_selected = false,
@@ -1146,17 +1180,20 @@ private:
     const float north_gradient =
         float_from_half_bits(static_cast<uint16_t>(packed_gradients >> 16U));
     const float slope = std::atan(std::hypot(east_gradient, north_gradient));
-    double aspect = std::atan2(-east_gradient, -north_gradient) * kRadiansToDegrees;
+    const auto basis = trace_->render_frame().basis(
+        trace_->collision_position({double(distance) * ray.x, double(distance) * ray.y})
+    );
+    const double true_east = east_gradient * basis[0].x + north_gradient * basis[0].y;
+    const double true_north = east_gradient * basis[1].x + north_gradient * basis[1].y;
+    double aspect = std::atan2(-true_east, -true_north) * kRadiansToDegrees;
     if (aspect < 0.0) {
       aspect += 360.0;
     }
     result.hit = true;
     result.distance = distance;
     result.elevation = elevations[index];
-    result.easting =
-        current_observer_.easting + static_cast<double>(distance) * static_cast<double>(ray.x);
-    result.northing =
-        current_observer_.northing + static_cast<double>(distance) * static_cast<double>(ray.y);
+    result.position =
+        trace_->collision_position({double(distance) * ray.x, double(distance) * ray.y});
     result.slope_degrees = slope * static_cast<float>(kRadiansToDegrees);
     result.aspect_degrees = static_cast<float>(aspect);
     return result;
@@ -1283,8 +1320,7 @@ private:
           if (roam_requested) {
             // Resolve terrain on the render worker through TileManager so
             // continuous input never blocks the AppKit event thread.
-            const std::optional<float> ground =
-                trace_->sample_terrain(roam_coordinate.easting, roam_coordinate.northing);
+            const std::optional<float> ground = trace_->sample_terrain(roam_coordinate.position);
             const bool terrain_clear =
                 ground.has_value() && (roam_altitude_mode == RoamAltitudeMode::FollowTerrain ||
                                        roam_height >= static_cast<double>(*ground) + 0.5);
@@ -1296,8 +1332,7 @@ private:
             };
             if (terrain_clear) {
               observer = {
-                  roam_coordinate.easting,
-                  roam_coordinate.northing,
+                  roam_coordinate.position,
                   roam_altitude_mode == RoamAltitudeMode::FollowTerrain
                       ? static_cast<double>(*ground) + roam_height
                       : roam_height,
@@ -1446,7 +1481,7 @@ private:
             std::printf(
                 "Frame phases %llu: pre-render %.3f ms, prepare %.3f ms, primary repair %.3f ms, "
                 "shadow repair %.3f ms, producer wait %.3f ms; "
-                "observer=%.2f/%.2f/%.2f, moved=%.2f m, roam=%d, replaced=%d, "
+                "observer=%.6f/%.6f/%.2f, moved=%.2f m, roam=%d, replaced=%d, "
                 "output=%ux%u, trace=%ux%u, MetalFX=%s, LOD=%.3f, shadows=%d, minimap=%d\n",
                 static_cast<unsigned long long>(revision),
                 milliseconds - producer_timing.wall_milliseconds,
@@ -1454,12 +1489,12 @@ private:
                 producer_timing.primary_repair_milliseconds,
                 producer_timing.shadow_repair_milliseconds,
                 producer_timing.producer_wait_milliseconds,
-                current_observer_.easting,
-                current_observer_.northing,
+                current_observer_.position.lat,
+                current_observer_.position.lon,
                 current_observer_.elevation,
                 std::hypot(
-                    current_observer_.easting - previous_observer.easting,
-                    current_observer_.northing - previous_observer.northing
+                    geographic_offset(previous_observer.position, current_observer_.position).x,
+                    geographic_offset(previous_observer.position, current_observer_.position).y
                 ),
                 int(roam_requested),
                 int(session_replaced),
@@ -1560,10 +1595,9 @@ private:
             // Map inspection uses exact LOD-1 sampling even when the current
             // render selected a coarser terrain variant for this source.
             if (const std::optional<float> elevation =
-                    trace_->sample_terrain(map_coordinate.easting, map_coordinate.northing)) {
+                    trace_->sample_terrain(map_coordinate.position)) {
               map_point = TerrainPoint{
-                  map_coordinate.easting,
-                  map_coordinate.northing,
+                  map_coordinate.position,
                   *elevation,
               };
             }
@@ -1604,6 +1638,7 @@ private:
             if (diagnostics::enabled)
               diagnostics::worker.revision = revision;
             presented_observer_ = current_observer_;
+            presented_render_frame_ = trace_->render_frame();
             unpublished_frame = false;
             upscale_frame_started = false;
             // The title reports camera-update throughput. A cheap appearance-only
@@ -1729,6 +1764,8 @@ private:
   std::optional<PointInspection> presented_inspection_;
   std::optional<TerrainPoint> presented_map_point_;
   ObserverLocation presented_observer_ = {};
+  TerrainRenderFrame presented_render_frame_ =
+      TerrainRenderFrame::local_aeqd(settings_.observer.position);
   std::optional<TargetVisibility> presented_target_visibility_;
   std::optional<PeakLabelFrame> presented_peak_labels_;
   std::optional<RoamResult> presented_roam_result_;

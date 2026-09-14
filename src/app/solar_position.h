@@ -17,7 +17,7 @@ struct CalendarDateTime {
   int minute;
 };
 
-/// Sun direction in the renderer's projected grid frame.
+/// Sun direction in the renderer's true-north frame.
 struct SolarPosition {
   double azimuth;
   double elevation;
@@ -42,12 +42,12 @@ struct DaylightTimes {
 [[nodiscard]] std::optional<CalendarDateTime>
 parse_date_time(std::string_view date, std::string_view time);
 
-/// Derive geometric solar angles at a projected observer coordinate.
-/// Azimuth is clockwise from grid north and elevation is above the horizon.
-[[nodiscard]] SolarPosition solar_position(const Crs &crs, Coord observer, CalendarDateTime utc);
+/// Derive geometric solar angles at a WGS84 observer position.
+/// Azimuth is clockwise from true north and elevation is above the horizon.
+[[nodiscard]] SolarPosition solar_position(LatLon observer, CalendarDateTime utc);
 
 /// Derive geometric sunrise and sunset for the supplied Gregorian date.
 /// The clock fields in `date` are ignored.
-[[nodiscard]] DaylightTimes daylight_times(const Crs &crs, Coord observer, CalendarDateTime date);
+[[nodiscard]] DaylightTimes daylight_times(LatLon observer, CalendarDateTime date);
 
 } // namespace panorama::app

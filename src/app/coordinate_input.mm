@@ -146,13 +146,11 @@ namespace {
 }
 
 [[nodiscard]] ParsedCoordinateInput
-from_geographic(LatLon coordinate, const Crs &terrain_crs, std::string source_name) {
-  if (coordinate.lat < -90.0 || coordinate.lat > 90.0 || coordinate.lon < -180.0 ||
-      coordinate.lon > 180.0) {
+from_geographic(LatLon coordinate, const Crs &, std::string source_name) {
+  if (!valid_lat_lon(coordinate)) {
     throw std::invalid_argument("Latitude must be within ±90° and longitude within ±180°");
   }
   return {
-      terrain_crs.from_lat_lon(coordinate),
       coordinate,
       std::move(source_name),
   };
@@ -276,7 +274,17 @@ struct NormalisedInput {
     );
     break;
   case CoordinateInputSystem::Terrain:
-    parsed = from_projected(coordinate, terrain_crs, terrain_crs, system_name(system, terrain_crs));
+    parsed = terrain_crs.id() == CrsId::Wgs84 ? from_geographic(
+                                                    {coordinate.x, coordinate.y},
+                                                    terrain_crs,
+                                                    system_name(system, terrain_crs)
+                                                )
+                                              : from_projected(
+                                                    coordinate,
+                                                    terrain_crs,
+                                                    terrain_crs,
+                                                    system_name(system, terrain_crs)
+                                                );
     break;
   }
   parsed.system = system;
@@ -293,8 +301,8 @@ void append_candidate(
     ParsedCoordinateInput candidate = parse_normalised_input(text, terrain_crs, system);
     const bool duplicate =
         std::any_of(candidates.begin(), candidates.end(), [&](const auto &other) {
-          return std::abs(other.projected.x - candidate.projected.x) < 0.01 &&
-                 std::abs(other.projected.y - candidate.projected.y) < 0.01;
+          const auto offset = geographic_offset(other.geographic, candidate.geographic);
+          return std::hypot(offset.x, offset.y) < 0.01;
         });
     if (!duplicate) {
       candidates.push_back(std::move(candidate));

@@ -19,7 +19,7 @@ struct ImageSize {
 
 /// Orientation of a camera optical axis in the projected terrain frame.
 ///
-/// All angles are radians. Heading is clockwise from grid north, pitch is
+/// All angles are radians. Heading is clockwise from true north, pitch is
 /// positive above the horizontal plane, and roll is applied last about the
 /// pitched optical axis. Positive roll rotates a right-of-centre camera ray
 /// towards the camera's up direction.
@@ -75,7 +75,7 @@ using LensDistortion = std::variant<NoDistortion, BrownConradyDistortion>;
 /// Existing equally spaced azimuth/elevation output projection.
 ///
 /// Columns advance from `azimuth_start` to `azimuth_end`; azimuth is clockwise
-/// from grid north. Rows advance from `elevation_start` to
+/// from true north. Rows advance from `elevation_start` to
 /// `elevation_end`; elevation is positive upwards. Samples lie at pixel centres
 /// and the end values are exclusive, preserving the existing panorama output.
 struct AngularProjection {
@@ -88,8 +88,8 @@ struct AngularProjection {
 /// Perspective camera projection used for photo-mimic output.
 ///
 /// Each distorted output-pixel centre is unprojected through the calibrated
-/// lens, then rotated from camera coordinates into projected east/north/up
-/// coordinates using `orientation`.
+/// lens, then rotated from camera coordinates into true east/north/up coordinates using
+/// `orientation`, then into the metric terrain render frame.
 struct CameraProjection {
   CameraOrientation orientation;
   CameraIntrinsics intrinsics;

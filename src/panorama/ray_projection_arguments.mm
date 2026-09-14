@@ -160,7 +160,7 @@ void print_ray_projection_usage() {
       "  --image-width N       output width in pixels (default: 1920)\n"
       "  --image-height N      output height in pixels (default: 1080)\n"
       "  --horizontal-fov D    horizontal field of view (default: 60)\n"
-      "  --heading D           clockwise from grid north (default: 0)\n"
+      "  --heading D           clockwise from true north (default: 0)\n"
       "  --pitch D             optical-axis elevation (default: 0)\n"
       "  --roll D              rotation about the optical axis (default: 0)\n"
       "  --distortion-k1 V     Brown-Conrady radial coefficient (default: 0)\n"

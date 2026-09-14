@@ -285,8 +285,7 @@ struct MetalBvhTrace::State {
     const auto &sources = manager->sources();
     tile_shells.resize(sources.size());
     if (current.transformed_catalogue) {
-      const Coord render_observer =
-          manager->catalogue().render_coordinate({observer.easting, observer.northing});
+      const Coord render_observer = manager->catalogue().render_coordinate(observer.position);
       std::vector<double> distances(sources.size(), std::numeric_limits<double>::infinity());
       double shell_width = 1.0;
       for (size_t i = 0; i < sources.size(); ++i) {
@@ -699,8 +698,7 @@ struct MetalBvhTrace::State {
         static_cast<MTLAccelerationStructureInstanceDescriptor *>(instances.contents);
     auto *resources = static_cast<BvhChunk *>(chunks.contents);
     auto *structures = [[NSMutableArray<id<MTLAccelerationStructure>> alloc] init];
-    const Coord render_observer =
-        manager->catalogue().render_coordinate({observer.easting, observer.northing});
+    const Coord render_observer = manager->catalogue().render_coordinate(observer.position);
     for (size_t i = 0; i < batch.size(); ++i) {
       Entry &entry = *batch[i];
       BvhTile tile = entry.local;
@@ -1067,8 +1065,7 @@ bool MetalBvhTrace::encode_shadows(id<MTLCommandBuffer> command, double azimuth,
         sizeof(uint32_t),
         @"shadow terrain requests"
     );
-  const auto basis =
-      state.manager->catalogue().render_basis({state.observer.easting, state.observer.northing});
+  const auto basis = state.manager->catalogue().render_basis(state.observer.position);
   const double east = std::sin(azimuth), north = std::cos(azimuth);
   state.sun[0] = static_cast<float>(basis[0].x * east + basis[1].x * north);
   state.sun[1] = static_cast<float>(basis[0].y * east + basis[1].y * north);
@@ -1211,7 +1208,7 @@ void MetalBvhTrace::prepare(
   State &state = *state_;
   state.shadow_requests_ready = false;
   state.manager = &tiles;
-  if (state.observer.easting != observer.easting || state.observer.northing != observer.northing) {
+  if (state.observer.position != observer.position) {
     state.invalidate_scene(State::SceneInvalidation::Catalogue);
     state.shells_valid = false;
   }

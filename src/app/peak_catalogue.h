@@ -14,8 +14,7 @@ enum class PeakLabelMode : uint8_t { Off, On, NearPointer };
 
 struct PeakRecord {
   uint32_t id;
-  double easting;
-  double northing;
+  LatLon position;
   float elevation;
   float prominence;
   std::string name;
@@ -39,7 +38,7 @@ struct PeakLabelFrame {
 
 class PeakCatalogue {
 public:
-  [[nodiscard]] static PeakCatalogue load(const std::filesystem::path &path, const Crs &crs);
+  [[nodiscard]] static PeakCatalogue load(const std::filesystem::path &path);
   [[nodiscard]] const std::vector<PeakRecord> &peaks() const { return peaks_; }
   [[nodiscard]] const PeakRecord &at(uint32_t id) const { return peaks_.at(id); }
 

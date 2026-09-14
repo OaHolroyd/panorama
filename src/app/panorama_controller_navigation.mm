@@ -122,7 +122,7 @@
   }
   *state = pressed;
   if (pressed && !wasMoving) {
-    _roamDesiredPosition = {_observer.easting, _observer.northing};
+    _roamDesiredPosition = {_observer.position};
     _pointInspectionLocked = false;
     _pointLockPending = false;
     _lockedPoint.reset();
@@ -310,10 +310,11 @@
   const double heading = _orientation.heading;
   const bool flight = cruising && _roamAltitudeModeControl.selectedSegment == 1;
   const double horizontal_distance = flight ? distance * std::cos(_orientation.pitch) : distance;
-  _roamDesiredPosition.easting +=
-      horizontal_distance * (forward * std::sin(heading) + right * std::cos(heading));
-  _roamDesiredPosition.northing +=
-      horizontal_distance * (forward * std::cos(heading) - right * std::sin(heading));
+  _roamDesiredPosition.position = panorama::offset_position(
+      _roamDesiredPosition.position,
+      horizontal_distance * (forward * std::sin(heading) + right * std::cos(heading)),
+      horizontal_distance * (forward * std::cos(heading) - right * std::sin(heading))
+  );
   if (flight) {
     _roamAltitude += distance * std::sin(_orientation.pitch);
     if (_groundClearanceControl.currentEditor == nil) {
@@ -424,7 +425,7 @@
     _cruiseRecovery = false;
     [_panoramaView setViewerPaused:_viewerPaused recoveryMessage:nil];
   }
-  _roamDesiredPosition = {_observer.easting, _observer.northing};
+  _roamDesiredPosition = {_observer.position};
   _roamAltitude = _observer.elevation;
   if ([self isCruisingEnabled]) {
     // Cruise is potentially fast and begins under continuous input. Enter it
@@ -463,7 +464,7 @@
     _aircraftDynamicsControl.state = NSControlStateValueOff;
     [self levelAircraft];
   }
-  _roamDesiredPosition = {_observer.easting, _observer.northing};
+  _roamDesiredPosition = {_observer.position};
   if (_roamAltitudeModeControl.selectedSegment == 1) {
     _roamAltitude = _observer.elevation;
   }
@@ -483,7 +484,7 @@
     _cruiseSpeed = _aircraftAirspeed;
     [self levelAircraft];
   }
-  _roamDesiredPosition = {_observer.easting, _observer.northing};
+  _roamDesiredPosition = {_observer.position};
   [self updateRoamControls];
 }
 

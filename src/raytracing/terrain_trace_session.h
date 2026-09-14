@@ -78,19 +78,26 @@ public:
   [[nodiscard]] TileManagerStatistics tile_statistics() const;
 
   /// Trace one directional sun ray from each eligible primary collision.
-  /// Angles are radians; azimuth is clockwise from grid north and elevation
+  /// Angles are radians; azimuth is clockwise from true north and elevation
   /// is above the horizontal plane.
   void trace_shadows(double sun_azimuth, double sun_elevation);
 
   [[nodiscard]] ImageSize image() const;
-  /// Return the projected coordinate system shared by the resident terrain.
+  /// Return the first dataset's native CRS for the dataset-coordinate input option.
   [[nodiscard]] Crs crs() const;
-  /// Return the current projected observer position and absolute elevation.
+  /// Metric frame used by this session's rays and collision buffers.
+  [[nodiscard]] const TerrainRenderFrame &render_frame() const;
+  /// Convert an observer-relative horizontal collision offset to WGS84.
+  [[nodiscard]] LatLon collision_position(Coord relative) const;
+  /// Convert a true-north azimuth to the metric render frame (radians).
+  [[nodiscard]] double render_azimuth(double true_azimuth) const;
+  /// Return the current WGS84 observer position and absolute elevation.
   [[nodiscard]] ObserverLocation observer() const;
   /// Return the complete prepared-data footprint used by the minimap.
   [[nodiscard]] const TerrainCoverage &terrain_coverage() const;
-  /// Sample full-resolution terrain through this session's TileManager.
-  [[nodiscard]] std::optional<float> sample_terrain(double easting, double northing);
+  /// Sample full-resolution terrain across all datasets, even outside this
+  /// session's render radius, without changing rendering residency.
+  [[nodiscard]] std::optional<float> sample_terrain(LatLon position);
   /// Return the device on which terrain and presentation resources must live.
   [[nodiscard]] id<MTLDevice> device() const;
   /// Return the queue used for ordered primary tracing and presentation.

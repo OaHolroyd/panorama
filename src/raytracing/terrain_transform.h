@@ -18,6 +18,7 @@ struct TerrainRenderFrame {
   Kind kind;
   uint32_t fixed_epsg;
   LatLon anchor;
+  bool operator==(const TerrainRenderFrame &) const = default;
 
   [[nodiscard]] static TerrainRenderFrame fixed(uint32_t epsg_code);
   [[nodiscard]] static TerrainRenderFrame local_aeqd(LatLon anchor);
@@ -27,10 +28,15 @@ struct TerrainRenderFrame {
   unproject(uint32_t destination_epsg, std::span<const Coord> coordinates) const;
   [[nodiscard]] CoordinateTransform projector(uint32_t source_epsg) const;
   [[nodiscard]] CoordinateTransform unprojector(uint32_t destination_epsg) const;
+  [[nodiscard]] Coord project(LatLon position) const;
+  [[nodiscard]] LatLon unproject(Coord position) const;
+  [[nodiscard]] std::array<Coord, 2> basis(LatLon position) const;
+  /// Render-frame displacement expressed along true east/north at the observer.
+  [[nodiscard]] Coord offset(LatLon observer, LatLon point) const;
 };
 
 /// Affine map from a tile's logical `(column, row)` sample coordinates to the
-/// navigation CRS. Coefficients are expressed per logical cell, which keeps
+/// metric render frame. Coefficients are expressed per logical cell, which keeps
 /// geographic source coordinates out of Float32 GPU geometry.
 struct TerrainTileTransform {
   Coord origin;

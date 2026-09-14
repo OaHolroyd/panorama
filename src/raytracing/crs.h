@@ -9,15 +9,24 @@ namespace panorama {
 
 /// Geographic WGS 84 coordinates in the explicit `(latitude, longitude)` order.
 struct LatLon {
-  double lat;
-  double lon;
+  double lat = 0;
+  double lon = 0;
+  constexpr LatLon() = default;
+  constexpr LatLon(double latitude, double longitude) : lat(latitude), lon(longitude) {}
+  bool operator==(const LatLon &) const = default;
 };
 
-/// Projected metre coordinates where x is easting and y is northing.
+/// CRS coordinates in GIS axis order: x/y is easting/northing or longitude/latitude.
 struct Coord {
   double x;
   double y;
 };
+
+[[nodiscard]] bool valid_lat_lon(LatLon position);
+/// East/north displacement in metres, using the WGS84 geodesic distance and
+/// initial bearing from origin. Directions are relative to true north.
+[[nodiscard]] Coord geographic_offset(LatLon origin, LatLon destination);
+[[nodiscard]] LatLon offset_position(LatLon origin, double east, double north);
 
 /// Reusable GDAL/PROJ transformation for catalogue-sized coordinate batches.
 class CoordinateTransform {
@@ -62,8 +71,9 @@ private:
 /// Return whether an EPSG CRS is projected with metre horizontal units.
 [[nodiscard]] bool epsg_uses_projected_metres(uint32_t epsg_code);
 
-/// Projected coordinate reference systems supported by terrain tiles.
+/// Coordinate reference systems supported by terrain tiles.
 enum class CrsId : uint32_t {
+  Wgs84 = 4326,
   SwissLv95 = 2056,
   FrenchLambert93 = 2154,
   BritishNationalGrid = 27700,
@@ -72,7 +82,7 @@ enum class CrsId : uint32_t {
 /// Restricted terrain CRS value type whose transforms are delegated to GDAL/PROJ.
 class Crs {
 public:
-  /// Construct one of the explicitly supported projected coordinate systems.
+  /// Construct one of the coordinate systems offered by the coordinate-input UI.
   explicit Crs(CrsId id);
 
   /// Return the supported CRS identified by `epsg_code`, or throw if unknown.
@@ -87,13 +97,13 @@ public:
   /// Return a stable human-readable name for this CRS.
   [[nodiscard]] const char *name() const;
 
-  /// Transform WGS 84 latitude/longitude degrees into projected metres.
+  /// Transform WGS 84 latitude/longitude degrees into native CRS coordinates.
   [[nodiscard]] Coord from_lat_lon(LatLon coordinate) const;
 
   /// Transform a batch while sharing one GDAL/PROJ transformation.
   [[nodiscard]] std::vector<Coord> from_lat_lon(std::span<const LatLon> coordinates) const;
 
-  /// Transform projected metres in this CRS into WGS 84 latitude/longitude
+  /// Transform native coordinates in this CRS into WGS 84 latitude/longitude
   /// degrees.
   [[nodiscard]] LatLon to_lat_lon(Coord coordinate) const;
 

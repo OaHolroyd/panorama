@@ -58,8 +58,8 @@ struct EntrypointSettings {
       .ambient_detail = 0.65F,
       .diffusivity = 1.0F,
   };
-  double easting = 2623452.4;
-  double northing = 1100502.2;
+  double latitude = 46.0556438620246;
+  double longitude = 7.74166823440432;
   double elevation = 3415.0;
   panorama::RayProjectionArguments projection;
 };
@@ -226,7 +226,7 @@ void print_usage(const char *program) {
       "                        (default: --max-distance)\n"
       "\n"
       "Synthetic image options (angles are degrees):\n"
-      "  --sun-azimuth D       clockwise from grid north (default: 225)\n"
+      "  --sun-azimuth D       clockwise from true north (default: 225)\n"
       "  --sun-elevation D     above the horizon (default: 35)\n"
       "  --ambient-light V     diffuse sky-light strength, 0 to 1 (default: 0.28)\n"
       "  --ambient-detail V    normal-dependent five-lobe skylight, 0 to 1 (default: 0.65)\n"
@@ -241,8 +241,8 @@ void print_usage(const char *program) {
       "                        (default: linear)\n"
       "\n"
       "Observer options:\n"
-      "  --easting M           observer easting in the tile CRS (default: 2623452.4)\n"
-      "  --northing M          observer northing in the tile CRS (default: 1100502.2)\n"
+      "  --latitude D          observer WGS84 latitude in degrees (default: 46.0556438620246)\n"
+      "  --longitude D         observer WGS84 longitude in degrees (default: 7.74166823440432)\n"
       "  --elevation M         observer elevation in metres (default: 3415.0)\n"
       "  --help                show this message\n"
   );
@@ -342,10 +342,10 @@ void print_usage(const char *program) {
         throw std::out_of_range("LOD scale must be a nonnegative float32 value");
       }
       settings.lod_scale = parsed;
-    } else if (option == "--easting") {
-      settings.easting = panorama::arguments::parse_finite_double(value, option);
-    } else if (option == "--northing") {
-      settings.northing = panorama::arguments::parse_finite_double(value, option);
+    } else if (option == "--latitude") {
+      settings.latitude = panorama::arguments::parse_finite_double(value, option);
+    } else if (option == "--longitude") {
+      settings.longitude = panorama::arguments::parse_finite_double(value, option);
     } else if (option == "--elevation") {
       settings.elevation = panorama::arguments::parse_finite_double(value, option);
     } else if (option == "--sun-azimuth") {
@@ -425,6 +425,10 @@ void print_usage(const char *program) {
   }
   settings.projection.validate();
   validate_output_settings(settings);
+  if (!panorama::valid_lat_lon({settings.latitude, settings.longitude}))
+    throw std::invalid_argument(
+        "Observer latitude must be in [-90, 90] and longitude in [-180, 180]"
+    );
   return settings;
 }
 
@@ -437,7 +441,7 @@ int main(int argc, const char *argv[]) {
 
     const panorama::RaytraceConfig config = {
         settings.tile_dir,
-        {settings.easting, settings.northing, settings.elevation},
+        {{settings.latitude, settings.longitude}, settings.elevation},
         settings.max_distance,
         settings.max_tile_count,
         settings.tile_cache_size_bytes,
@@ -465,10 +469,10 @@ int main(int argc, const char *argv[]) {
         colour_range,
     };
     std::printf(
-        "Tracing %zu terrain dataset(s) from projected coordinate (%.3f, %.3f, %.1f).\n",
+        "Tracing %zu terrain dataset(s) from WGS84 (%.6f, %.6f), elevation %.1f m.\n",
         settings.terrain_datasets.empty() ? size_t(1) : settings.terrain_datasets.size(),
-        settings.easting,
-        settings.northing,
+        settings.latitude,
+        settings.longitude,
         settings.elevation
     );
     // Echo every benchmark-relevant setting so redirected timing logs remain

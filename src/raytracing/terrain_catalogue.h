@@ -86,9 +86,16 @@ struct TerrainDataset {
   std::vector<TerrainSource> sources;
 };
 
-/// A navigation-frame point resolved into one source dataset's native grid.
+/// A WGS84 point resolved into one source dataset's native grid.
 struct TerrainLocation {
   uint32_t source_index;
+  Coord native_coordinate;
+};
+
+/// A point in the complete dataset index, independent of render-radius filtering.
+/// The source remains valid for the lifetime of its immutable catalogue.
+struct TerrainSampleLocation {
+  const TerrainSource *source;
   Coord native_coordinate;
 };
 
@@ -98,9 +105,9 @@ struct TerrainLocation {
 discover_terrain_datasets(std::span<const TerrainDatasetConfig> configs);
 
 /// Select the native projected frame for one metre dataset, otherwise centre
-/// an AEQD metre frame on the observer expressed in the first dataset's CRS.
+/// an AEQD metre frame anchored at the WGS84 observer.
 [[nodiscard]] TerrainRenderFrame
-select_terrain_render_frame(std::span<const TerrainDataset> datasets, Coord navigation_observer);
+select_terrain_render_frame(std::span<const TerrainDataset> datasets, LatLon observer);
 
 /// A finite, indexed catalogue of terrain sources relevant to one render.
 ///
@@ -152,15 +159,19 @@ public:
   /// Return a source index for a grid key, or no value when coverage is absent.
   [[nodiscard]] std::optional<uint32_t> find_source(TileKey key) const;
   [[nodiscard]] std::optional<uint32_t> find_source(uint32_t dataset_index, TileKey key) const;
-  /// Resolve a point in the first dataset's navigation CRS, respecting the
-  /// configured dataset priority.
-  [[nodiscard]] std::optional<TerrainLocation> locate_source(Coord navigation_coordinate) const;
+  /// Resolve a WGS84 point among retained render sources, respecting the configured dataset
+  /// priority.
+  [[nodiscard]] std::optional<TerrainLocation> locate_source(LatLon position) const;
+  /// Resolve a sampling point across all available tiles, including those
+  /// outside the render radius or tile-count limit, with valid-coverage priority.
+  [[nodiscard]] std::optional<TerrainSampleLocation> locate_sample(LatLon position) const;
   [[nodiscard]] const std::vector<TerrainDataset> &datasets() const;
   [[nodiscard]] const TerrainRenderFrame &render_frame() const;
-  [[nodiscard]] Coord render_coordinate(Coord navigation_coordinate) const;
-  /// Unit render-frame directions corresponding to the navigation CRS's
-  /// positive easting and northing axes at a point.
-  [[nodiscard]] std::array<Coord, 2> render_basis(Coord navigation_coordinate) const;
+  [[nodiscard]] Coord render_coordinate(LatLon position) const;
+  [[nodiscard]] LatLon geographic_coordinate(Coord rendered) const;
+  /// Unit render-frame directions corresponding to geographic
+  /// true east and true north axes at a point.
+  [[nodiscard]] std::array<Coord, 2> render_basis(LatLon position) const;
 
 private:
   /// Construct an already validated, indexable catalogue.
@@ -170,7 +181,8 @@ private:
       ObserverLocation observer,
       TerrainCoverage coverage,
       std::vector<TerrainDataset> datasets = {},
-      std::optional<TerrainRenderFrame> render_frame = std::nullopt
+      std::optional<TerrainRenderFrame> render_frame = std::nullopt,
+      std::vector<TerrainSource> legacy_sample_sources = {}
   );
 
   struct SourceKey {
@@ -186,7 +198,9 @@ private:
   std::map<SourceKey, uint32_t> source_index_by_key_;
   std::optional<float> maximum_elevation_;
   std::vector<TerrainDataset> datasets_;
-  std::vector<std::unique_ptr<CoordinateTransform>> navigation_to_dataset_;
+  /// Complete native index for the legacy single-grid path without `datasets_`.
+  std::vector<TerrainSource> legacy_sample_sources_;
+  std::vector<std::unique_ptr<CoordinateTransform>> geographic_to_dataset_;
   std::optional<TerrainRenderFrame> render_frame_;
 };
 
@@ -194,7 +208,6 @@ private:
 [[nodiscard]] TileKey tile_key_at(const TileGrid &grid, double easting, double northing);
 
 /// Return the shortest horizontal distance from an observer to one tile square.
-[[nodiscard]] double
-tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLocation &observer);
+[[nodiscard]] double tile_minimum_distance(const TileGrid &grid, TileKey key, Coord observer);
 
 } // namespace panorama

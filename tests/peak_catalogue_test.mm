@@ -6,10 +6,8 @@
 
 int main() {
   try {
-    const panorama::app::PeakCatalogue catalogue = panorama::app::PeakCatalogue::load(
-        "data/gazetteers/peaks.csv",
-        panorama::Crs(panorama::CrsId::SwissLv95)
-    );
+    const panorama::app::PeakCatalogue catalogue =
+        panorama::app::PeakCatalogue::load("data/gazetteers/peaks.csv");
     if (catalogue.peaks().size() != 633U)
       throw std::runtime_error("Unexpected Alpine peak count");
     const auto &montBlanc = catalogue.at(0U);

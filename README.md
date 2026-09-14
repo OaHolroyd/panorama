@@ -22,8 +22,8 @@ Building the project produces three executables:
 
 ## Getting started
 
-Install Clang/Xcode command-line tools, Metal, GDAL, and `clang-format`, then
-build all three programs:
+Install Clang/Xcode command-line tools, Metal, GDAL, PROJ, `pkg-config`, and
+`clang-format`, then build all three programs:
 
 ```sh
 make
@@ -52,7 +52,11 @@ For SRTM, place the raw `.hgt` files below one input directory; nested
 directories are supported. The filename supplies each tile's one-degree WGS 84
 bounds, while its 3601- or 1201-sample side selects one- or three-arcsecond
 spacing. HGT elevations are decoded as signed, big-endian 16-bit metres and the
-standard `-32768` void value is treated as no-data. Native geographic SRTM tiles
+standard `-32768` void value is treated as no-data. HGT samples below -1000 m
+are also treated as no-data, with a warning: this land-elevation sanity check
+catches undeclared void values and severely negative interpolation artifacts.
+These samples remain coverage holes in the generated tiles; valid negative
+elevations and sea-level zero are retained. Native geographic SRTM tiles
 can be combined with projected terrain through the Metal BVH raytracer.
 
 ### Prepare tracing tiles
@@ -74,11 +78,16 @@ the input directory to prepare OS data in the same way. Run
 `./panorama-tile-gen --help` for chunk-size, grid-origin, compression, and
 overwrite options.
 
-Observer eastings and northings are always expressed in the prepared dataset's
-projected CRS. The executable defaults describe the Swiss example, so supply
-British National Grid coordinates with `--easting`, `--northing`, and
-`--elevation` when using OS data. Uint16 Metal tiles remain quantized in the GPU
-atlas by default; `--discard-quantized` expands them to Float32 during loading.
+Observer inputs use WGS84 decimal degrees: `--latitude`, `--longitude`, and
+`--elevation` in metres, independent of which datasets are loaded or their order.
+For example, `--latitude 43.1729 --longitude 16.4412 --elevation 45` selects Hvar.
+Headings and sun azimuths are clockwise from true north. Movement uses metres on
+the WGS84 ellipsoid; the renderer retains local metric coordinates and each
+dataset's native grid. Elevation datums and per-dataset vertical offsets are
+unchanged. Existing ptiles do not need regeneration.
+
+Uint16 Metal tiles remain quantized in the GPU atlas by default;
+`--discard-quantized` expands them to Float32 during loading.
 
 The resulting directory can be opened interactively:
 
@@ -368,6 +377,10 @@ observer without changing scale, while the scope button toggles following the
 panorama mouseover point. Following pauses while the pointer is over the map.
 A locked point can be used as the new observer location with **Move here**.
 Option-click the minimap, or use its secondary-click menu, to move immediately.
+Map inspection and relocation can use any covered point in the configured
+datasets, including points beyond the current rendering distance. Distant map
+queries load only the target tile; relocation builds a render catalogue around
+the destination.
 The Position tab also accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
 easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
 `NG907598`, or `190716, 859877`. Its coordinate-system menu defaults to Auto,

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "crs.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <utility>
@@ -20,10 +22,10 @@ struct TerrainDatasetConfig {
 /// ray's elevation gain relative to the curved terrain datum.
 inline constexpr double kCurvatureCoefficient = 0.1695 / (1609.344 * 1609.344);
 
-/// A fixed projected observer position used to establish local trace axes.
+/// Canonical WGS84 observer position, independent of terrain dataset order.
+/// Elevation retains the terrain's existing vertical datum and is in metres.
 struct ObserverLocation {
-  double easting;
-  double northing;
+  LatLon position;
   double elevation;
 };
 

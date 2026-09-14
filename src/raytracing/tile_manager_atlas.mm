@@ -62,11 +62,11 @@ void print_error(NSString *context, NSError *error) {
     float maximum_elevation,
     TileKey key,
     uint32_t lod,
-    const RaytraceConfig &config,
+    Coord observer,
     uint32_t no_data
 ) {
-  const double x = lower_left_x - config.observer.easting;
-  const double y = lower_left_y - config.observer.northing;
+  const double x = lower_left_x - observer.x;
+  const double y = lower_left_y - observer.y;
   if (x < static_cast<double>(std::numeric_limits<float>::lowest()) ||
       x > static_cast<double>(std::numeric_limits<float>::max()) ||
       y < static_cast<double>(std::numeric_limits<float>::lowest()) ||
@@ -636,7 +636,7 @@ void TileManager::State::attach_atlas(
       origin_tile.maximum_elevation,
       origin_key,
       1U,
-      config,
+      state->catalogue->render_coordinate(config.observer.position),
       bool(sources.front().valid_cells)
   );
   state->slot_by_variant[{0U, 1U}] = 0U;
@@ -746,7 +746,7 @@ TileManager::State::install_prepared(std::span<const uint8_t> pinned_slots, Time
         lod.maximum_elevation,
         source.key,
         installation.prepared.variant.lod,
-        state.config,
+        state.catalogue->render_coordinate(state.config.observer.position),
         bool(source.valid_cells)
     );
   }
@@ -822,11 +822,10 @@ void TileManager::State::record_slot_use(std::span<const uint32_t> slots) {
 
 void TileManager::State::rebase_observer(ObserverLocation observer) {
   State &state = *this;
-  if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing)) {
+  if (!valid_lat_lon(observer.position)) {
     throw std::invalid_argument("Resident terrain rebase requires a finite observer");
   }
-  const Coord rendered_observer =
-      state.catalogue->render_coordinate({observer.easting, observer.northing});
+  const Coord rendered_observer = state.catalogue->render_coordinate(observer.position);
   for (uint32_t slot = 0U; slot < state.slot_capacity; slot++) {
     const std::optional<TileVariant> variant = state.variant_by_slot[slot];
     if (!variant.has_value()) {
@@ -855,21 +854,20 @@ void TileManager::State::rebase_observer(ObserverLocation observer) {
   }
 }
 
-std::optional<float> TileManager::State::sample_terrain(double easting, double northing) {
-  if (!std::isfinite(easting) || !std::isfinite(northing)) {
-    throw std::invalid_argument("Terrain sampling requires a finite projected coordinate");
+std::optional<float> TileManager::State::sample_terrain(LatLon position) {
+  if (!valid_lat_lon(position)) {
+    throw std::invalid_argument("Terrain sampling requires a valid WGS84 position");
   }
   if (!atlas_attached || device == nil || io_queue == nil) {
     throw std::logic_error("Terrain sampling requires an attached TileManager atlas");
   }
 
-  const auto location = catalogue->locate_source({easting, northing});
+  const auto location = catalogue->locate_sample(position);
   if (!location.has_value()) {
     return std::nullopt;
   }
 
-  const uint32_t source_index = location->source_index;
-  const TerrainSource &source = catalogue->sources()[source_index];
+  const TerrainSource &source = *location->source;
   const uint32_t cell_count = header_template.cell_count;
   const size_t side = static_cast<size_t>(cell_count) + 1U;
   const TileGrid &grid = catalogue->datasets().empty()
@@ -893,7 +891,9 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
   const void *values = nullptr;
   bool expanded_vertices = false;
   int32_t elevation_base = 0;
-  const auto resident = slot_by_variant.find({source_index, 1U});
+  const auto source_index = catalogue->find_source(source.dataset_index, source.key);
+  const auto resident =
+      source_index ? slot_by_variant.find({*source_index, 1U}) : slot_by_variant.end();
   if (resident != slot_by_variant.end()) {
     // Inspection requires exact LOD-1 terrain. Reuse it in place when the
     // render atlas already contains that variant, decoding packed records
@@ -914,10 +914,10 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
       expanded_vertices = true;
     }
   } else {
-    // A render may legitimately retain only a coarse variant. Keep a separate
-    // one-tile LOD-1 payload so cursor queries do not perturb frontier
-    // residency or force the selected rendering LOD to change.
-    if (!sampled_source_index.has_value() || *sampled_source_index != source_index) {
+    // A source may lie outside the render catalogue or have only a coarse
+    // resident variant. Keep one LOD-1 payload so map queries do not change
+    // rendering residency, LOD selection, or the observer's trace radius.
+    if (sampled_source != &source) {
       const MetalTileHeader header = read_metal_tile_header(source.path);
       if (header.cell_count != cell_count || header.sample_type != header_template.sample_type ||
           header.vertex_byte_count > std::numeric_limits<NSUInteger>::max()) {
@@ -938,6 +938,9 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
           header.vertex_offset,
           header.vertex_byte_count,
       };
+      // A failed read must not leave the previous source associated with a
+      // buffer that the I/O request may have partially overwritten.
+      sampled_source = nullptr;
       load_metal_tiles_into_buffer(
           device,
           io_queue,
@@ -947,7 +950,7 @@ std::optional<float> TileManager::State::sample_terrain(double easting, double n
       );
       bytes_loaded_with_metal_io += header.vertex_byte_count;
       sampled_header = header;
-      sampled_source_index = source_index;
+      sampled_source = &source;
     }
     values = sampled_vertices.contents;
     elevation_base = sampled_header.elevation_base_decimeters;

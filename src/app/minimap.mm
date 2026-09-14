@@ -369,11 +369,12 @@ struct VisibilityMaskRequest {
   id<MKOverlay> _headingOverlay;
   MKTileOverlay *_tileOverlay;
   NSArray<MKMultiPolygon *> *_coverageOverlays;
-  double _observerEasting;
-  double _observerNorthing;
+  double _observerLatitude;
+  double _observerLongitude;
   double _maxDistance;
   CGFloat _pointInfoHeight;
-  uint32_t _terrainEpsgCode;
+  panorama::TerrainRenderFrame _renderFrame;
+  panorama::LatLon _visibilityObserver;
   __weak id<MiniMapPanelViewSizeDelegate> _sizeDelegate;
   __weak id<MiniMapPanelViewInteractionDelegate> _interactionDelegate;
   CLLocationCoordinate2D _contextCoordinate;
@@ -397,25 +398,25 @@ struct VisibilityMaskRequest {
 @synthesize sizeDelegate = _sizeDelegate;
 @synthesize interactionDelegate = _interactionDelegate;
 
-- (instancetype)initWithObserverEasting:(double)easting
-                               northing:(double)northing
-                        terrainEpsgCode:(uint32_t)epsgCode
-                        terrainCoverage:(const panorama::TerrainCoverage &)coverage
-               coverageInitiallyVisible:(bool)coverageVisible
-                            maxDistance:(double)maxDistance
-                          pointInfoView:(NSView *)pointInfoView
-                            metalDevice:(id<MTLDevice>)metalDevice
-                           commandQueue:(id<MTLCommandQueue>)commandQueue
-                                library:(id<MTLLibrary>)library {
+- (instancetype)initWithObserverLatitude:(double)latitude
+                               longitude:(double)longitude
+                         terrainCoverage:(const panorama::TerrainCoverage &)coverage
+                coverageInitiallyVisible:(bool)coverageVisible
+                             maxDistance:(double)maxDistance
+                           pointInfoView:(NSView *)pointInfoView
+                             metalDevice:(id<MTLDevice>)metalDevice
+                            commandQueue:(id<MTLCommandQueue>)commandQueue
+                                 library:(id<MTLLibrary>)library {
   self =
       [super initWithFrame:NSMakeRect(0.0, 0.0, kCompactMapPanelWidth, kCompactMapSectionHeight)];
   if (self == nil) {
     return nil;
   }
 
-  _observerEasting = easting;
-  _observerNorthing = northing;
-  _terrainEpsgCode = epsgCode;
+  _observerLatitude = latitude;
+  _observerLongitude = longitude;
+  _renderFrame = panorama::TerrainRenderFrame::local_aeqd({latitude, longitude});
+  _visibilityObserver = {latitude, longitude};
   _maxDistance = maxDistance;
   _pointInfoHeight = kMinimumPointSectionHeight;
   _pointInfoView = pointInfoView;
@@ -543,16 +544,8 @@ struct VisibilityMaskRequest {
     [_mapView.bottomAnchor constraintEqualToAnchor:_mapSection.bottomAnchor constant:-6.0],
   ]];
 
-  // Terrain and ray geometry use the dataset's projected CRS (for example,
-  // EPSG:2056 Swiss LV95), whereas MapKit accepts WGS84 latitude/longitude.
-  // The observer is therefore transformed before becoming the initial map
-  // centre. Camera headings must *not* simply be treated as geographic
-  // bearings: setCameraOrientation constructs endpoints in the terrain CRS
-  // first and transforms those complete points to WGS84, preserving the
-  // projected grid's local convergence relative to true north.
-  const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
-  const panorama::LatLon observerLatLon =
-      terrainCrs.to_lat_lon({_observerEasting, _observerNorthing});
+  // Observer and map inputs share WGS84 latitude/longitude.
+  const panorama::LatLon observerLatLon = panorama::LatLon{_observerLatitude, _observerLongitude};
   const CLLocationCoordinate2D observerCoordinate =
       CLLocationCoordinate2DMake(observerLatLon.lat, observerLatLon.lon);
   [_mapView setRegion:MKCoordinateRegionMakeWithDistance(
@@ -828,12 +821,11 @@ struct VisibilityMaskRequest {
       rect.origin.y,
       rect.size.width,
       rect.size.height,
-      _observerEasting,
-      _observerNorthing,
+      _visibilityObserver,
       _maxDistance,
-      _terrainEpsgCode,
+      _renderFrame,
   };
-  if (_lastMask && _lastMask->points == _visibilityPoints &&
+  if (_lastMask && _lastMask->points == _visibilityPoints && _lastMask->region == region &&
       MKMapRectEqualToRect(_lastMask->rect, rect) &&
       std::memcmp(&_lastMask->parameters, &parameters, sizeof(parameters)) == 0)
     return;
@@ -925,21 +917,20 @@ struct VisibilityMaskRequest {
   const double leftHeading = orientation.heading - horizontalFieldOfView * 0.5;
   const double rightHeading = orientation.heading + horizontalFieldOfView * 0.5;
 
-  // Heading is clockwise from projected grid north. Build both far endpoints
-  // as (easting, northing) offsets in that same terrain CRS, then transform the
-  // actual coordinates to WGS84 for MapKit. Converting heading directly to a
-  // WGS84 bearing would silently ignore grid convergence and rotate the wedge
-  // away from the rays for projected CRSs such as Swiss LV95.
+  // Match the rays in the retained metric frame, including after observer movement.
+  const panorama::LatLon observer{_observerLatitude, _observerLongitude};
+  const auto origin = _renderFrame.project(observer);
+  const auto axes = _renderFrame.basis(observer);
   const auto endpoint = [&](double heading) {
-    return panorama::Coord{
-        _observerEasting + _maxDistance * std::sin(heading),
-        _observerNorthing + _maxDistance * std::cos(heading),
-    };
+    const double east = _maxDistance * std::sin(heading);
+    const double north = _maxDistance * std::cos(heading);
+    return _renderFrame.unproject(
+        panorama::Coord{origin.x + east * axes[0].x + north * axes[1].x,
+                        origin.y + east * axes[0].y + north * axes[1].y}
+    );
   };
-  const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
-  const auto mapCoordinate = [&](panorama::Coord projected) {
-    const panorama::LatLon geographic = terrainCrs.to_lat_lon(projected);
-    return CLLocationCoordinate2DMake(geographic.lat, geographic.lon);
+  const auto mapCoordinate = [](panorama::LatLon position) {
+    return CLLocationCoordinate2DMake(position.lat, position.lon);
   };
   CLLocationCoordinate2D wedge[3] = {
       _observerAnnotation.coordinate,
@@ -966,7 +957,16 @@ struct VisibilityMaskRequest {
   _headingOverlay = nextHeading;
 }
 
-- (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image {
+- (void)setVisibilityPoints:(id<MTLBuffer>)points
+                      image:(panorama::ImageSize)image
+                renderFrame:(panorama::TerrainRenderFrame)frame
+                   observer:(panorama::LatLon)observer {
+  if (_renderFrame != frame || _visibilityObserver != observer) {
+    ++_visibilityGeneration;
+    _cameraDirty = true;
+  }
+  _renderFrame = frame;
+  _visibilityObserver = observer;
   if (!_contentVisible)
     return;
   const uint64_t count = uint64_t(image.width) * image.height;
@@ -985,9 +985,8 @@ struct VisibilityMaskRequest {
   [self updateVisibilityTransform];
 }
 
-- (panorama::Coord)projectedCoordinate:(CLLocationCoordinate2D)coordinate {
-  const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
-  return terrainCrs.from_lat_lon({coordinate.latitude, coordinate.longitude});
+- (panorama::LatLon)geographicCoordinate:(CLLocationCoordinate2D)coordinate {
+  return {coordinate.latitude, coordinate.longitude};
 }
 
 - (void)mapPointerDidEnter {
@@ -1003,8 +1002,8 @@ struct VisibilityMaskRequest {
   if (_interactionDelegate == nil) {
     return;
   }
-  const panorama::Coord projected = [self projectedCoordinate:coordinate];
-  [_interactionDelegate miniMapPanel:self didHoverEasting:projected.x northing:projected.y];
+  const panorama::LatLon geographic = [self geographicCoordinate:coordinate];
+  [_interactionDelegate miniMapPanel:self didHoverLatitude:geographic.lat longitude:geographic.lon];
 }
 
 - (void)mapDidEndHover {
@@ -1012,15 +1011,17 @@ struct VisibilityMaskRequest {
 }
 
 - (void)mapDidSelectCoordinate:(CLLocationCoordinate2D)coordinate {
-  const panorama::Coord projected = [self projectedCoordinate:coordinate];
-  [_interactionDelegate miniMapPanel:self didSelectEasting:projected.x northing:projected.y];
+  const panorama::LatLon geographic = [self geographicCoordinate:coordinate];
+  [_interactionDelegate miniMapPanel:self
+                   didSelectLatitude:geographic.lat
+                           longitude:geographic.lon];
 }
 
 - (void)mapDidRequestObserverMoveCoordinate:(CLLocationCoordinate2D)coordinate {
-  const panorama::Coord projected = [self projectedCoordinate:coordinate];
+  const panorama::LatLon geographic = [self geographicCoordinate:coordinate];
   [_interactionDelegate miniMapPanel:self
-      didRequestObserverMoveToEasting:projected.x
-                             northing:projected.y];
+      didRequestObserverMoveToLatitude:geographic.lat
+                             longitude:geographic.lon];
 }
 
 - (void)showContextMenuForCoordinate:(CLLocationCoordinate2D)coordinate event:(NSEvent *)event {
@@ -1040,11 +1041,11 @@ struct VisibilityMaskRequest {
   [self mapDidRequestObserverMoveCoordinate:_contextCoordinate];
 }
 
-- (void)setObserverEasting:(double)easting northing:(double)northing {
-  if (_observerEasting == easting && _observerNorthing == northing)
+- (void)setObserverLatitude:(double)latitude longitude:(double)longitude {
+  if (_observerLatitude == latitude && _observerLongitude == longitude)
     return;
-  _observerEasting = easting;
-  _observerNorthing = northing;
+  _observerLatitude = latitude;
+  _observerLongitude = longitude;
   _observerDirty = true;
   _cameraDirty = true;
   ++_visibilityGeneration;
@@ -1063,20 +1064,18 @@ struct VisibilityMaskRequest {
   if (!_contentVisible || !_observerDirty)
     return;
   _observerDirty = false;
-  const double easting = _observerEasting, northing = _observerNorthing;
-  const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
-  const panorama::LatLon observer = terrainCrs.to_lat_lon({easting, northing});
+  const double latitude = _observerLatitude, longitude = _observerLongitude;
+  const panorama::LatLon observer{latitude, longitude};
   const CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(observer.lat, observer.lon);
   _observerAnnotation.coordinate = coordinate;
 
   [self updateVisibilityTransform];
 }
 
-- (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked {
+- (void)setInspectedPointLatitude:(double)latitude longitude:(double)longitude locked:(bool)locked {
   if (!_contentVisible)
     return;
-  const panorama::Crs terrainCrs = panorama::Crs::from_epsg(_terrainEpsgCode);
-  const panorama::LatLon geographic = terrainCrs.to_lat_lon({easting, northing});
+  const panorama::LatLon geographic = panorama::LatLon{latitude, longitude};
   const CLLocationCoordinate2D coordinate =
       CLLocationCoordinate2DMake(geographic.lat, geographic.lon);
   if (_inspectionAnnotation == nil) {

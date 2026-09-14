@@ -1,5 +1,6 @@
 #include "gdal_utils.h"
 #include "metal_tile_writer.h"
+#include "rechunker.h"
 #include "terrain_manifest.h"
 #include <array>
 #include <cmath>
@@ -36,8 +37,9 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
   SourceGrid source{};
   source.projection_wkt = wkt;
   CPLFree(wkt);
+  constexpr float no_data = -3.4e38F;
   const TerrainChunk chunk{3,
-                           {-42.35F, 5, 100, 40, 200.24F, 0, -3, 25, 80},
+                           {no_data, 5, 100, 40, 200.24F, 0, -1200, 25, 80},
                            std::vector<uint8_t>(9, 1),
                            {}};
   // GeoTIFF remains an input format. Create the source fixture directly with
@@ -57,20 +59,21 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
     );
     auto *band = dataset->GetRasterBand(1);
     require(
-        band->SetNoDataValue(-9999) == CE_None && band->RasterIO(
-                                                      GF_Write,
-                                                      0,
-                                                      0,
-                                                      3,
-                                                      3,
-                                                      const_cast<float *>(chunk.elevations.data()),
-                                                      3,
-                                                      3,
-                                                      GDT_Float32,
-                                                      0,
-                                                      0,
-                                                      nullptr
-                                                  ) == CE_None,
+        band->SetNoDataValue(no_data) == CE_None &&
+            band->RasterIO(
+                GF_Write,
+                0,
+                0,
+                3,
+                3,
+                const_cast<float *>(chunk.elevations.data()),
+                3,
+                3,
+                GDT_Float32,
+                0,
+                0,
+                nullptr
+            ) == CE_None,
         "Fixture GeoTIFF samples"
     );
   }
@@ -104,6 +107,12 @@ void check_generator(const std::filesystem::path &executable, const std::filesys
   const auto path = terrain_manifest_path(output);
   const auto original = read_terrain_manifest(path);
   require(!original.empty(), "Generator omitted manifest entries");
+  require(
+      original.size() == 1 && original.front().minimum_elevation &&
+          std::abs(*original.front().minimum_elevation + 1200) < 0.01F &&
+          original.front().coverage && original.front().coverage->covered_area(0, 0, 2, 2) == 3,
+      "Declared Float32 no-data leaked into terrain or SRTM floor affected GeoTIFF input"
+  );
   std::map<std::filesystem::path, std::filesystem::file_time_type> timestamps;
   for (const auto &file : std::filesystem::directory_iterator(output)) {
     if (file.path().extension() == ".ptile") {
@@ -183,6 +192,22 @@ void check_uint16_range(
   const DestinationGrid grid{2600000, 1200000, 1, 2, RasterLayout::Level0, 0};
   SourceGrid source{};
   source.epsg_code = 2056U;
+  TerrainChunk excessive = chunk;
+  excessive.elevations[2] = 6153.5F;
+  bool range_rejected = false;
+  try {
+    (void)write_metal_tile_chunk(
+        root / "excessive-range.ptile",
+        excessive,
+        grid,
+        {0, 0},
+        source,
+        MetalTileCompression::None
+    );
+  } catch (const std::runtime_error &error) {
+    range_rejected = std::string(error.what()).find("6553.4") != std::string::npos;
+  }
+  require(range_rejected, "Writer silently discarded or clamped real excessive terrain relief");
   for (const auto compression : {MetalTileCompression::None, MetalTileCompression::Lz4}) {
     const auto path = root / (std::string("uint16-range") + metal_tile_suffix(compression));
     (void)write_metal_tile_chunk(path, chunk, grid, {0, 0}, source, compression);
@@ -280,6 +305,148 @@ void check_uint16_range(
   }
   require(rejected, "Loader did not reject legacy Float32 tiles with an encoding error");
 }
+
+// Use an actual HGT raster so discovery, GDAL decoding/masking, LOD generation,
+// coverage and uint16 encoding all participate in the no-data regression.
+void check_srtm_voids(
+    const std::filesystem::path &root,
+    id<MTLDevice> device,
+    id<MTLIOCommandQueue> queue
+) {
+  const auto input = root / "srtm-voids";
+  std::filesystem::create_directory(input);
+  constexpr uint32_t raster_side = 1201, side = 9;
+  std::vector<char> bytes(size_t(raster_side) * raster_side * 2U);
+  for (size_t i = 0; i < bytes.size(); i += 2U)
+    bytes[i] = static_cast<char>(0x80); // Standard -32768 outside the fixture patch.
+  std::array<int16_t, side * side> heights;
+  heights.fill(100);
+  heights[0] = -32768;
+  heights[2] = -32767;
+  heights[4] = -29102;
+  heights[6] = -7110;
+  heights[8] = -1001;
+  heights[4U * side + 4U] = -25459; // Interior void must propagate to coarse LODs.
+  heights[8U * side] = -1000;
+  heights[8U * side + 2U] = -430;
+  heights[8U * side + 4U] = 0;
+  heights[8U * side + 6U] = 4800;
+  for (uint32_t y = 0; y < side; ++y)
+    for (uint32_t x = 0; x < side; ++x) {
+      const auto value = static_cast<uint16_t>(heights[y * side + x]);
+      const size_t offset = (size_t(y) * raster_side + x) * 2U;
+      bytes[offset] = static_cast<char>(value >> 8U);
+      bytes[offset + 1U] = static_cast<char>(value & 0xffU);
+    }
+  write_bytes(input / "N00E000.hgt", bytes);
+  const auto catalogue = SourceCatalogue::discover(input, root / "unused-output");
+  const DestinationGrid grid{0,
+                             1,
+                             catalogue.grid().x_resolution,
+                             side - 1U,
+                             RasterLayout::Level0,
+                             -99999};
+  const auto plan = make_rechunk_plan(catalogue, grid);
+  const ChunkKey key{0, 0};
+  for (const auto sampling : {LodSampling::Point, LodSampling::Mean, LodSampling::Maximum}) {
+    const auto chunk = build_chunk(catalogue, plan, key, plan.contributors.at(key), sampling);
+    for (size_t i = 0; i < heights.size(); ++i) {
+      const bool valid = heights[i] >= -1000;
+      require(bool(chunk.covered[i]) == valid, "SRTM corrupt void remained covered");
+      if (valid)
+        require(chunk.elevations[i] == heights[i], "SRTM valid zero/negative height changed");
+    }
+    require(chunk.lod_variants.size() == 3U, "SRTM fixture omitted coarse LODs");
+    require(!chunk.lod_variants[0].covered[2U * 5U + 2U], "Interior void filled at LOD 2");
+    require(!chunk.lod_variants[1].covered[1U * 3U + 1U], "Interior void filled at LOD 3");
+    for (const auto &lod : chunk.lod_variants) {
+      require(!lod.covered.front(), "Boundary void lost at coarse LOD");
+      const size_t bottom_left = size_t(lod.sample_side - 1U) * lod.sample_side;
+      require(
+          lod.covered[bottom_left] && lod.elevations[bottom_left] == -1000,
+          "Valid negative boundary height lost at coarse LOD"
+      );
+    }
+    const auto path = root / ("srtm-voids-" + std::to_string(int(sampling)) + ".ptile");
+    const auto range = write_metal_tile_chunk(
+        path,
+        chunk,
+        grid,
+        key,
+        catalogue.grid(),
+        MetalTileCompression::None
+    );
+    require(
+        std::abs(range.minimum + 1000) < 0.01F && std::abs(range.maximum - 4800) < 0.01F,
+        "SRTM void polluted quantization or elevation bounds"
+    );
+    const auto header = read_metal_tile_header(path);
+    const auto coverage = read_metal_tile_coverage(path, header);
+    require(
+        coverage && !coverage->contains(3.5, 3.5) && coverage->contains(1.5, 1.5),
+        "SRTM void did not become a coverage hole"
+    );
+    const auto lods = read_metal_tile_lods(path, header);
+    for (size_t level = 0; level < lods.size(); ++level) {
+      const auto &lod = lods[level];
+      const auto &valid = level == 0 ? chunk.covered : chunk.lod_variants[level - 1U].covered;
+      const auto &values =
+          level == 0 ? chunk.elevations : chunk.lod_variants[level - 1U].elevations;
+      id<MTLBuffer> data = [device newBufferWithLength:lod.vertex_byte_count
+                                               options:MTLResourceStorageModeShared];
+      const MetalTileBufferLoad load{path, 0, nil, lod.vertex_offset, lod.vertex_byte_count};
+      load_metal_tiles_into_buffer(device, queue, std::span(&load, 1), data, data.length);
+      const auto *encoded = static_cast<const uint16_t *>(data.contents);
+      const uint32_t lod_side = lod.cell_count + 1U;
+      for (uint32_t y = 0; y < lod_side; ++y)
+        for (uint32_t x = 0; x < lod_side; ++x) {
+          const size_t from = size_t(y) * lod_side + x;
+          const auto code = encoded[size_t(lod_side - 1U - y) * lod_side + x];
+          require((code != 0) == bool(valid[from]), "SRTM no-data code lost at encoded LOD");
+          if (code)
+            require(
+                std::abs(float(lod.elevation_base_decimeters + code) / 10.0F - values[from]) <
+                    0.051F,
+                "SRTM valid elevation failed to round-trip"
+            );
+        }
+    }
+    const auto manifest = root / "srtm-voids-manifest.bin";
+    const std::array<TerrainManifestEntry, 1> entries = {
+        {{0, 0, range.maximum, range.minimum, coverage}}};
+    write_terrain_manifest(manifest, entries);
+    require(
+        read_terrain_manifest(manifest).front().coverage == coverage,
+        "Manifest lost SRTM void coverage"
+    );
+  }
+
+  // Rejected high-priority samples must leave room for an overlapping source.
+  const auto fallback = input / "fallback";
+  std::filesystem::create_directory(fallback);
+  for (uint32_t y = 0; y < side; ++y)
+    for (uint32_t x = 0; x < side; ++x) {
+      const size_t offset = (size_t(y) * raster_side + x) * 2U;
+      bytes[offset] = 0;
+      bytes[offset + 1U] = 50;
+    }
+  write_bytes(fallback / "N00E000.hgt", bytes);
+  const auto mosaic_catalogue = SourceCatalogue::discover(input, root / "unused-output");
+  const auto mosaic_plan = make_rechunk_plan(mosaic_catalogue, grid);
+  const auto mosaic = build_chunk(
+      mosaic_catalogue,
+      mosaic_plan,
+      key,
+      mosaic_plan.contributors.at(key),
+      LodSampling::Point
+  );
+  require(terrain_chunk_coverage(mosaic).full(), "Rejected SRTM void blocked fallback coverage");
+  for (size_t i = 0; i < heights.size(); ++i)
+    require(
+        mosaic.elevations[i] == (heights[i] < -1000 ? 50 : heights[i]),
+        "SRTM fallback failed to fill a void or replaced valid terrain"
+    );
+}
 } // namespace
 int main(int argc, const char *argv[]) {
   try {
@@ -342,6 +509,7 @@ int main(int argc, const char *argv[]) {
       id<MTLDevice> device = MTLCreateSystemDefaultDevice();
       auto queue = make_metal_io_queue(device);
       check_uint16_range(root, device, queue);
+      check_srtm_voids(root, device, queue);
       for (const auto compression : {MetalTileCompression::None, MetalTileCompression::Lz4}) {
         @autoreleasepool {
           const auto path = root / (std::string("uint16-lods") + metal_tile_suffix(compression));

@@ -8,9 +8,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace panorama::terrain {
@@ -211,6 +213,8 @@ make_rechunk_plan(const SourceCatalogue &catalogue, const DestinationGrid &desti
   return plan;
 }
 
+static const double kNoDataLimit = -2'000.0;
+
 TerrainChunk build_chunk(
     const SourceCatalogue &catalogue,
     const RechunkPlan &plan,
@@ -260,6 +264,7 @@ TerrainChunk build_chunk(
     std::vector<float> source_values(window_count);
     GdalDatasetPointer dataset = open_source(source.location);
     GDALRasterBand *band = dataset->GetRasterBand(1);
+    const bool srtm = std::string_view(dataset->GetDriver()->GetDescription()) == "SRTMHGT";
     if (band->RasterIO(
             GF_Read,
             static_cast<int>(column_start - indexed.column),
@@ -305,6 +310,8 @@ TerrainChunk build_chunk(
 
     const size_t destination_row_start = static_cast<size_t>(row_start - chunk_row_start);
     const size_t destination_column_start = static_cast<size_t>(column_start - chunk_column_start);
+    uint32_t invalid_srtm_count = 0;
+    double invalid_srtm_minimum = 0.0;
     for (uint32_t row = 0U; row < height; row++) {
       for (uint32_t column = 0U; column < width; column++) {
         const size_t source_offset = static_cast<size_t>(row) * width + column;
@@ -318,6 +325,18 @@ TerrainChunk build_chunk(
 
         const double elevation =
             static_cast<double>(source_values[source_offset]) * source.scale + source.offset;
+        // Some HGT datasets contain undeclared voids (-32767) and values
+        // interpolated towards them. Matching GDAL's -32768 alone misses these.
+        // SRTM measures land surfaces, so -1000 m is a conservative sanity floor
+        // that retains below-sea-level terrain. Apply it per source sample,
+        // before mosaicking/LOD generation, so adjacent tiles agree and another
+        // contributor can fill a rejected sample. This is not a generic DEM or
+        // bathymetry limit, nor a relaxation of the uint16 relief-range check.
+        if (srtm && elevation < kNoDataLimit) {
+          ++invalid_srtm_count;
+          invalid_srtm_minimum = std::min(invalid_srtm_minimum, elevation);
+          continue;
+        }
         if (!std::isfinite(elevation) ||
             elevation < static_cast<double>(std::numeric_limits<float>::lowest()) ||
             elevation > static_cast<double>(std::numeric_limits<float>::max())) {
@@ -329,6 +348,19 @@ TerrainChunk build_chunk(
         chunk.elevations[destination_offset] = static_cast<float>(elevation);
         chunk.covered[destination_offset] = 1U;
       }
+    }
+    if (invalid_srtm_count != 0U) {
+      std::fprintf(
+          stderr,
+          "Warning: treated %u SRTM samples below %.1f m as no-data "
+          "(minimum %.1f m) in %s, chunk r%lld c%lld.\n",
+          invalid_srtm_count,
+          kNoDataLimit,
+          invalid_srtm_minimum,
+          source.location.display_name.c_str(),
+          static_cast<long long>(key.row),
+          static_cast<long long>(key.column)
+      );
     }
   }
   build_lod_variants(chunk, lod_sampling, plan.grid.no_data);

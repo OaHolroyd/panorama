@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 
 #include "ray_projection.h"
+#include "terrain_transform.h"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -43,8 +44,9 @@ static_assert(sizeof(VisibilityMaskParameters) == 56);
 // Main-thread snapshot: MapKit world coordinates use a 2^28-wide Mercator map.
 struct VisibilityMapRegion {
   double x, y, width, height;
-  double observer_easting, observer_northing, max_distance;
-  uint32_t epsg;
+  LatLon observer;
+  double max_distance;
+  TerrainRenderFrame frame;
   bool operator==(const VisibilityMapRegion &) const = default;
 };
 

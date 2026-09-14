@@ -11,6 +11,8 @@ namespace panorama {
 /// distance/elevation/gradient buffers again without retracing any rays.
 struct TerrainPresentationSettings {
   /// Base colour, preset palette, sun direction, and ambient contribution.
+  /// Sun azimuth is clockwise from true north; the frame producer converts it
+  /// to the metric render frame before invoking the image renderer.
   SyntheticRenderOptions appearance;
   /// Fixed interval mapped across the palette for distance/elevation colour.
   ScalarColourRange colour_range;

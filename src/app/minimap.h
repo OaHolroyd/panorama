@@ -18,15 +18,15 @@
 /// Hover previews a terrain point; primary click selects it for viewing; a
 /// secondary click or Option-click requests observer movement.
 - (void)miniMapPanel:(MiniMapPanelView *)panel
-     didHoverEasting:(double)easting
-            northing:(double)northing;
+    didHoverLatitude:(double)latitude
+           longitude:(double)longitude;
 - (void)miniMapPanelDidEndHover:(MiniMapPanelView *)panel;
 - (void)miniMapPanel:(MiniMapPanelView *)panel
-    didSelectEasting:(double)easting
-            northing:(double)northing;
+    didSelectLatitude:(double)latitude
+            longitude:(double)longitude;
 - (void)miniMapPanel:(MiniMapPanelView *)panel
-    didRequestObserverMoveToEasting:(double)easting
-                           northing:(double)northing;
+    didRequestObserverMoveToLatitude:(double)latitude
+                           longitude:(double)longitude;
 @end
 
 /// Combined freely navigable map and terrain-point readout used by the viewer's
@@ -37,16 +37,15 @@
 @property(nonatomic, weak) id<MiniMapPanelViewSizeDelegate> sizeDelegate;
 @property(nonatomic, weak) id<MiniMapPanelViewInteractionDelegate> interactionDelegate;
 
-- (instancetype)initWithObserverEasting:(double)easting
-                               northing:(double)northing
-                        terrainEpsgCode:(uint32_t)epsgCode
-                        terrainCoverage:(const panorama::TerrainCoverage &)coverage
-               coverageInitiallyVisible:(bool)coverageVisible
-                            maxDistance:(double)maxDistance
-                          pointInfoView:(NSView *)pointInfoView
-                            metalDevice:(id<MTLDevice>)metalDevice
-                           commandQueue:(id<MTLCommandQueue>)commandQueue
-                                library:(id<MTLLibrary>)library;
+- (instancetype)initWithObserverLatitude:(double)latitude
+                               longitude:(double)longitude
+                         terrainCoverage:(const panorama::TerrainCoverage &)coverage
+                coverageInitiallyVisible:(bool)coverageVisible
+                             maxDistance:(double)maxDistance
+                           pointInfoView:(NSView *)pointInfoView
+                             metalDevice:(id<MTLDevice>)metalDevice
+                            commandQueue:(id<MTLCommandQueue>)commandQueue
+                                 library:(id<MTLLibrary>)library;
 
 /// Show or hide the map and information footer as one coupled surface.
 - (void)setMapAndPointInfoVisible:(bool)visible;
@@ -62,15 +61,18 @@
 
 /// Coalesce a coverage-mask update from a completed, immutable hit snapshot.
 /// Hidden panels discard it; map-only navigation reuses the visible snapshot.
-- (void)setVisibilityPoints:(id<MTLBuffer>)points image:(panorama::ImageSize)image;
+- (void)setVisibilityPoints:(id<MTLBuffer>)points
+                      image:(panorama::ImageSize)image
+                renderFrame:(panorama::TerrainRenderFrame)frame
+                   observer:(panorama::LatLon)observer;
 
 /// Move all observer-relative map graphics after an interactive relocation.
-- (void)setObserverEasting:(double)easting northing:(double)northing;
+- (void)setObserverLatitude:(double)latitude longitude:(double)longitude;
 /// Recenter on the observer without changing the current map scale.
 - (void)centerOnObserver;
 
 /// Display the hover or locked point using the viewer's blue/orange convention.
-- (void)setInspectedPointEasting:(double)easting northing:(double)northing locked:(bool)locked;
+- (void)setInspectedPointLatitude:(double)latitude longitude:(double)longitude locked:(bool)locked;
 - (void)clearInspectedPoint;
 
 @end

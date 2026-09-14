@@ -63,18 +63,26 @@ static void check_projection(id<MTLDevice> device, VisibilityMask &mask) {
         (0.5 - std::log(std::tan(std::numbers::pi / 4 + lat / 2)) / (2 * std::numbers::pi)) *
             268435456};
   };
-  const std::array<std::pair<uint32_t, panorama::Coord>, 3> observers = {{
+  const std::array<std::pair<uint32_t, panorama::Coord>, 6> observers = {{
       {2056, {2623452.4, 1100502.2}},
       {2154, {700000, 6600000}},
       {27700, {530000, 180000}},
+      {4326, {16.44, 43.17}},
+      {4326, {179.8, 10.0}},
+      {4326, {-179.8, 72.0}},
   }};
-  for (const auto &[epsg, observer] : observers) {
-    const auto crs = panorama::Crs::from_epsg(epsg);
+  for (const auto &[epsg, native_observer] : observers) {
+    const auto position = panorama::Crs::from_epsg(epsg).to_lat_lon(native_observer);
+    const auto frame = epsg == 4326 ? panorama::TerrainRenderFrame::local_aeqd(
+                                          panorama::offset_position(position, -50000, 100000)
+                                      )
+                                    : panorama::TerrainRenderFrame::fixed(epsg);
+    const auto observer = frame.project(position);
     // Include distant map centres: the former observer-local affine basis
     // drifts most noticeably when inspecting terrain far from the observer.
     for (const double offset : {0.0, 200000.0}) {
       const panorama::Coord centre = {observer.x + offset, observer.y + offset};
-      const auto geographic = crs.to_lat_lon(centre);
+      const auto geographic = frame.unproject(centre);
       const auto origin = mapPoint(geographic);
       for (const double span : {1000.0, 50000.0, 600000.0}) {
         const double mapSpan = span / std::cos(geographic.lat * std::numbers::pi / 180) *
@@ -83,10 +91,9 @@ static void check_projection(id<MTLDevice> device, VisibilityMask &mask) {
                                             origin[1] - mapSpan / 2,
                                             mapSpan,
                                             mapSpan,
-                                            observer.x,
-                                            observer.y,
+                                            position,
                                             600000,
-                                            epsg};
+                                            frame};
         const auto grid = make_visibility_projection_grid(region, 1040, 800);
         for (uint32_t row = 0; row + 1 < grid.size; ++row) {
           for (uint32_t col = 0; col + 1 < grid.size; ++col) {
@@ -96,7 +103,9 @@ static void check_projection(id<MTLDevice> device, VisibilityMask &mask) {
             const panorama::Coord terrain = {
                 observer.x + grid.easting + (col + tx) * grid.step_easting,
                 observer.y + grid.northing + (row + ty) * grid.step_northing};
-            const auto exact = mapPoint(crs.to_lat_lon(terrain));
+            auto exact = mapPoint(frame.unproject(terrain));
+            exact[0] +=
+                std::round((region.x + region.width / 2 - exact[0]) / 268435456) * 268435456;
             const uint32_t i = row * grid.size + col;
             for (size_t axis = 0; axis < 2; ++axis) {
               const double approximate = std::lerp(

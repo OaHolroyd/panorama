@@ -99,13 +99,15 @@ GpuTerrainFrameTiming render_terrain_frame(
       // All buffers/textures are tracked resources on one MTLCommandQueue.
       // Encoder boundaries preserve write/read dependencies, including declared
       // indirect BVH resources; no intermediate CPU wait is necessary.
+      auto appearance = settings.appearance;
+      appearance.sun_azimuth = trace.render_azimuth(appearance.sun_azimuth);
       image.render_synthetic(
           trace.surface_gradients(),
           trace.distances(),
           trace.ray_directions(),
           colour,
           shadows ? trace.shadow_visibility() : nil,
-          settings.appearance,
+          appearance,
           settings.colour_range,
           settings.use_surface_normals,
           timer,

@@ -26,6 +26,17 @@
 using namespace panorama;
 
 namespace {
+// Terrain fixtures are deliberately laid out in LV95 metres; the public API uses WGS84.
+LatLon lv95_position(double x, double y) { return Crs(CrsId::SwissLv95).to_lat_lon({x, y}); }
+LatLon lv95_position(Coord point) { return lv95_position(point.x, point.y); }
+ObserverLocation lv95_observer(double x, double y, double z) { return {lv95_position(x, y), z}; }
+Coord lv95_coordinate(ObserverLocation observer) {
+  return Crs(CrsId::SwissLv95).from_lat_lon(observer.position);
+}
+void move_lv95(ObserverLocation &observer, double x, double y) {
+  const auto point = lv95_coordinate(observer);
+  observer.position = lv95_position(point.x + x, point.y + y);
+}
 size_t pixel_count(ImageSize image) { return size_t(image.width) * image.height; }
 RayFieldRequest angular_field(ImageSize image, AngularProjection projection) {
   return {image, projection};
@@ -375,7 +386,7 @@ void benchmark(int argc, const char *argv[]) {
     );
   RaytraceConfig config{};
   config.tile_dir = argv[2];
-  config.observer = {2623452.4, 1100502.2, 3415.0};
+  config.observer = lv95_observer(2623452.4, 1100502.2, 3415.0);
   config.raytracer = arguments::parse_raytracer(argv[3]);
   config.bvh_cache_size_bytes = std::stoull(argv[4]) * 1048576ULL;
   config.tile_cache_size_bytes = 128ULL * 1048576ULL;
@@ -408,7 +419,7 @@ void benchmark(int argc, const char *argv[]) {
             CameraProjection{{std::numbers::pi / 180.0, 0, 0}, intrinsics, NoDistortion{}}
         );
       if (frame == 5) {
-        config.observer.easting += 1.0;
+        move_lv95(config.observer, 1.0, 0);
         require(session.relocate_observer(config.observer), "Benchmark relocation failed");
       }
       std::printf(
@@ -433,7 +444,7 @@ void benchmark_camera(int argc, const char *argv[]) {
   const bool shadows = std::string_view(argv[3]) == "gpu-shadows";
   require(shadows || std::string_view(argv[3]) == "gpu", "Choose gpu or gpu-shadows");
   RaytraceConfig config{argv[2],
-                        {2623452.4, 1100502.2, 3415},
+                        lv95_observer(2623452.4, 1100502.2, 3415),
                         21000,
                         0,
                         128ULL * 1048576,
@@ -482,7 +493,7 @@ void benchmark_camera(int argc, const char *argv[]) {
       // Warm pans, followed by movement and zoom to exercise plan invalidation.
       std::get<CameraProjection>(camera.projection).orientation.heading = 0.001 * frame;
       if (frame == 14) {
-        config.observer.easting += 1;
+        move_lv95(config.observer, 1, 0);
         require(session->relocate_observer(config.observer), "Benchmark relocation failed");
       }
       if (frame == 16)
@@ -640,7 +651,7 @@ void check_dataset_foundation(const std::filesystem::path &root) {
   };
   const auto datasets = discover_terrain_datasets(configs);
   require(datasets.size() == 2, "Dataset stack lost a configured dataset");
-  require(datasets[0].epsg_code == 2056U, "Navigation dataset CRS changed");
+  require(datasets[0].epsg_code == 2056U, "Primary dataset CRS changed");
   require(datasets[1].epsg_code == 4326U, "Fallback dataset CRS changed");
   require(datasets[1].config.vertical_offset_metres == -2.5, "Vertical offset changed");
   require(
@@ -656,7 +667,7 @@ void check_dataset_foundation(const std::filesystem::path &root) {
   );
   const TerrainRenderFrame fixed = select_terrain_render_frame(
       std::span<const TerrainDataset>(datasets).first(1),
-      {2600000, 1200000}
+      lv95_position(2600000, 1200000)
   );
   require(
       fixed.kind == TerrainRenderFrame::Kind::FixedEpsg && fixed.fixed_epsg == 2056U,
@@ -664,10 +675,21 @@ void check_dataset_foundation(const std::filesystem::path &root) {
   );
 
   const MetalTileHeader header = read_metal_tile_header(datasets[1].sources.front().path);
-  const TerrainRenderFrame frame = select_terrain_render_frame(datasets, {2600000.0, 1200000.0});
+  const TerrainRenderFrame frame =
+      select_terrain_render_frame(datasets, lv95_position(2600000.0, 1200000.0));
   require(
       frame.kind == TerrainRenderFrame::Kind::LocalAzimuthalEquidistant,
       "Mixed datasets did not select a local metric frame"
+  );
+  auto reversed = datasets;
+  std::reverse(reversed.begin(), reversed.end());
+  require(
+      select_terrain_render_frame(reversed, frame.anchor) == frame,
+      "Render axes depend on dataset order"
+  );
+  require(
+      select_terrain_render_frame(std::span(datasets).subspan(1), frame.anchor) == frame,
+      "Geographic-only terrain lost its WGS84 frame"
   );
   const std::array<Coord, 1> observer = {{{2600000.0, 1200000.0}}};
   const Coord local_observer = frame.project(2056U, observer).front();
@@ -750,8 +772,12 @@ void check_dataset_foundation(const std::filesystem::path &root) {
       transform.maximum_residual_metres
   );
 
-  const TerrainCatalogue combined =
-      TerrainCatalogue::discover(configs, {2600000.0, 1200000.0, 1000.0}, 200000.0F, 0U);
+  const TerrainCatalogue combined = TerrainCatalogue::discover(
+      configs,
+      lv95_observer(2600000.0, 1200000.0, 1000.0),
+      200000.0F,
+      0U
+  );
   require(combined.datasets().size() == 2U, "Combined catalogue lost dataset metadata");
   const auto &footprints = combined.coverage().datasets;
   require(footprints.size() == 2U, "Minimap coverage lost a configured dataset");
@@ -762,7 +788,7 @@ void check_dataset_foundation(const std::filesystem::path &root) {
       "Minimap coverage combined incompatible native grids or coordinate systems"
   );
   const TerrainCatalogue limited =
-      TerrainCatalogue::discover(configs, {2600045.0, 1199945.0, 1120.0}, 1.0F, 1U);
+      TerrainCatalogue::discover(configs, lv95_observer(2600045.0, 1199945.0, 1120.0), 1.0F, 1U);
   require(limited.sources().size() == 1U, "Coverage fixture did not limit the trace catalogue");
   for (size_t index = 0; index < footprints.size(); ++index) {
     require(
@@ -771,8 +797,12 @@ void check_dataset_foundation(const std::filesystem::path &root) {
         "Minimap coverage omitted available tiles outside the trace radius"
     );
   }
-  const TerrainCatalogue single =
-      TerrainCatalogue::discover(root / "quantized", {2600045.0, 1199945.0, 1120.0}, 1.0F, 1U);
+  const TerrainCatalogue single = TerrainCatalogue::discover(
+      root / "quantized",
+      lv95_observer(2600045.0, 1199945.0, 1120.0),
+      1.0F,
+      1U
+  );
   require(
       single.coverage().datasets.size() == 1U &&
           single.coverage().datasets.front().epsg_code == 2056U &&
@@ -810,8 +840,12 @@ void check_dataset_foundation(const std::filesystem::path &root) {
       TerrainDatasetConfig{root / "quantized", 0.0},
       TerrainDatasetConfig{root / "overlap", 0.0},
   };
-  const TerrainCatalogue owned =
-      TerrainCatalogue::discover(overlapping, {2600045.0, 1199945.0, 1120.0}, 1000.0F, 0U);
+  const TerrainCatalogue owned = TerrainCatalogue::discover(
+      overlapping,
+      lv95_observer(2600045.0, 1199945.0, 1120.0),
+      1000.0F,
+      0U
+  );
   require(
       std::none_of(
           owned.sources().begin(),
@@ -829,8 +863,15 @@ void check_dataset_foundation(const std::filesystem::path &root) {
 // Moving the hardware broad phase must not accumulate Float32 translations
 // in the exact callback metadata. Compare rebasing with fresh construction.
 void check_catalogue_relocation(const std::filesystem::path &root) {
-  RaytraceConfig
-      config{root / "quantized", {2600045, 1199945, 1120}, 600000, 0, 16384, 2, true, true, false};
+  RaytraceConfig config{root / "quantized",
+                        lv95_observer(2600045, 1199945, 1120),
+                        600000,
+                        0,
+                        16384,
+                        2,
+                        true,
+                        true,
+                        false};
   config.terrain_datasets = {{root / "quantized", 0}, {root / "distant", 0}};
   TileManager tiles(config);
   GpuRaytraceResources gpu(1, tiles.sources(), true, true, false, {false, false, false});
@@ -843,8 +884,8 @@ void check_catalogue_relocation(const std::filesystem::path &root) {
       {{0.0001, 0}, {30000, -10000}, {30001, -10000}, {40000, -10000}, {0, 0}}};
   for (size_t i = 0; i < moves.size(); ++i) {
     auto observer = config.observer;
-    observer.easting += moves[i].x;
-    observer.northing += moves[i].y;
+    move_lv95(observer, moves[i].x, 0);
+    move_lv95(observer, 0, moves[i].y);
     auto coverage = catalogue.acceleration(), candidates = catalogue.candidate_acceleration();
     const uint64_t generation = catalogue.generation();
     const bool rebuilt = catalogue.prepare(tiles, observer, parameters);
@@ -913,13 +954,18 @@ void check_prepared_dataset_stack(
       TerrainDatasetConfig{fallback, 0.0},
   };
   const auto datasets = discover_terrain_datasets(configs);
-  const TerrainRenderFrame frame = select_terrain_render_frame(datasets, {2623452.4, 1100502.2});
+  const TerrainRenderFrame frame =
+      select_terrain_render_frame(datasets, lv95_position(2623452.4, 1100502.2));
   const MetalTileHeader header = read_metal_tile_header(datasets[1].sources.front().path);
   const TerrainTileTransform transform = make_terrain_tile_transform(header, frame);
   const auto patches = make_terrain_transform_patches(header, frame);
   const auto started = std::chrono::steady_clock::now();
-  const TerrainCatalogue combined =
-      TerrainCatalogue::discover(configs, {2623452.4, 1100502.2, 3415.0}, 600000.0F, 0U);
+  const TerrainCatalogue combined = TerrainCatalogue::discover(
+      configs,
+      lv95_observer(2623452.4, 1100502.2, 3415.0),
+      600000.0F,
+      0U
+  );
   size_t combined_patches = 0U;
   for (const TerrainSource &source : combined.sources())
     combined_patches += source.transform_patches.size();
@@ -996,16 +1042,16 @@ void compare(
       // discontinuously. Never exempt hit masks or distance/elevation errors.
       bool on_patch_edge = false;
       if (real_grid != nullptr) {
-        const ObserverLocation observer = software.observer();
+        const Coord observer = software.render_frame().project(software.observer().position);
         const double edge_tolerance = std::max(0.05, 128.0 * FLT_EPSILON * expected[i]);
         const double x =
-            observer.easting + expected[i] * double(directions[i].x) - real_grid->lower_left_x;
+            observer.x + expected[i] * double(directions[i].x) - real_grid->lower_left_x;
         const double y =
-            observer.northing + expected[i] * double(directions[i].y) - real_grid->lower_left_y;
+            observer.y + expected[i] * double(directions[i].y) - real_grid->lower_left_y;
         const double actual_x =
-            observer.easting + actual[i] * double(directions[i].x) - real_grid->lower_left_x;
+            observer.x + actual[i] * double(directions[i].x) - real_grid->lower_left_x;
         const double actual_y =
-            observer.northing + actual[i] * double(directions[i].y) - real_grid->lower_left_y;
+            observer.y + actual[i] * double(directions[i].y) - real_grid->lower_left_y;
         on_patch_edge =
             std::abs(std::remainder(x, real_grid->cell_size)) <= edge_tolerance ||
             std::abs(std::remainder(y, real_grid->cell_size)) <= edge_tolerance ||
@@ -1053,7 +1099,7 @@ void compare(
 void check_mixed_priority(const std::filesystem::path &root) {
   const auto field = angular_field({129, 65}, {0.0, 2 * std::numbers::pi, -1.3, 0.1});
   RaytraceConfig reference{root / "quantized",
-                           {2600045.0, 1199945.0, 1120.0},
+                           lv95_observer(2600045.0, 1199945.0, 1120.0),
                            480.0F,
                            0U,
                            16384U,
@@ -1086,10 +1132,14 @@ void check_mixed_priority(const std::filesystem::path &root) {
       TerrainDatasetConfig{root / "quantized", 0.0},
       TerrainDatasetConfig{root / "partial-overlap", 0.0},
   };
-  const TerrainCatalogue partial =
-      TerrainCatalogue::discover(partial_configs, {2600045.0, 1199945.0, 1120.0}, 1000.0F, 0U);
-  const auto primary_location = partial.locate_source({2600100.0, 1199945.0});
-  const auto fallback_location = partial.locate_source({2600200.0, 1199945.0});
+  const TerrainCatalogue partial = TerrainCatalogue::discover(
+      partial_configs,
+      lv95_observer(2600045.0, 1199945.0, 1120.0),
+      1000.0F,
+      0U
+  );
+  const auto primary_location = partial.locate_source(lv95_position(2600100.0, 1199945.0));
+  const auto fallback_location = partial.locate_source(lv95_position(2600200.0, 1199945.0));
   require(
       primary_location.has_value() &&
           partial.sources()[primary_location->source_index].dataset_index == 0U,
@@ -1160,7 +1210,9 @@ void write_masked_fixture(
     float height,
     double x_min,
     double spacing,
-    MetalTileCompression compression
+    MetalTileCompression compression,
+    uint32_t epsg = 2056U,
+    double y_min = 1199840.0
 ) {
   write_flat_coverage_fixture(directory, x_min, spacing, 1000.0F);
   const auto old_path = directory / "flat_r0_c0.ptile";
@@ -1179,6 +1231,8 @@ void write_masked_fixture(
   const uint32_t count = coverage.full() ? 0U : uint32_t(coverage.rectangles.size());
   const uint64_t bytes = count * sizeof(TerrainCoverageRect);
   header.magic = kMetalTileLodMagic;
+  header.epsg_code = epsg;
+  header.lower_left_y = y_min;
   header.version = kMetalTileLodVersion;
   header.compression = compression;
   header.reserved = count;
@@ -1199,6 +1253,178 @@ void write_masked_fixture(
   );
   const std::array<TerrainManifestEntry, 1> entries = {{{0, 0, height, height, coverage}}};
   write_terrain_manifest(terrain_manifest_path(directory), entries);
+}
+
+void check_distant_point_sampling(const std::filesystem::path &root) {
+  const auto field = angular_field({9, 3}, {0, 6.3, -1.4, -1.3});
+  for (bool retained : {false, true}) {
+    @autoreleasepool {
+      const auto directory = root / (retained ? "sample-quantized" : "sample-expanded");
+      const auto near = directory / "near", primary = directory / "primary",
+                 fallback = directory / "fallback";
+      const auto compression = retained ? MetalTileCompression::Lz4 : MetalTileCompression::None;
+      write_masked_fixture(near, false, 1000, 2600000, 10, compression);
+      // Small geographic tiles on Hvar, over 600 km from the Swiss observer.
+      // All three datasets use r0/c0, exercising dataset identity in the sample cache.
+      constexpr double spacing = 1.0 / 3600.0;
+      write_masked_fixture(primary, true, 0, 16.44, spacing, compression, 4326, 43.17);
+      write_masked_fixture(fallback, false, 10, 16.44, spacing, compression, 4326, 43.17);
+      RaytraceConfig config{near,
+                            lv95_observer(2600045, 1199945, 1020),
+                            600000,
+                            0,
+                            16384,
+                            2,
+                            retained,
+                            true,
+                            false};
+      config.raytracer = Raytracer::MetalBvh;
+      config.terrain_datasets = {{near, 0}, {primary, 0}, {fallback, -2.5}};
+      const std::array<Coord, 3> geographic = {{{16.44 + 7.5 * spacing, 43.17 + 5.5 * spacing},
+                                                {16.44 + 9.5 * spacing, 43.17 + 5.5 * spacing},
+                                                {16.44 + 30 * spacing, 43.17 + 5.5 * spacing}}};
+      const auto points = transform_coordinates(4326, 2056, geographic);
+      const auto catalogue = TerrainCatalogue::discover(
+          config.terrain_datasets,
+          config.observer,
+          config.max_distance,
+          0
+      );
+      require(
+          catalogue.sources().size() == 1 && !catalogue.locate_source(lv95_position(points[0])),
+          "Distant sampling fixture was not excluded by the render radius"
+      );
+      TerrainTraceSession session(config, field, {true, true, true});
+      session.trace(field);
+      const auto tiles_before = session.tile_statistics();
+      const auto bvh_before = session.bvh_statistics();
+      const auto check = [&](Coord point, float height) {
+        const auto sampled = session.sample_terrain(lv95_position(point.x, point.y));
+        require(
+            sampled && std::abs(*sampled - height) < 0.001F,
+            "Distant sample lost coverage priority, native coordinates or vertical offset"
+        );
+      };
+      check(points[0], 7.5F);
+      const auto loaded = session.tile_statistics().bytes_loaded_with_metal_io;
+      require(
+          loaded == tiles_before.bytes_loaded_with_metal_io + 17U * 17U * sizeof(uint16_t),
+          "Distant sampling did not load exactly one LOD-1 payload"
+      );
+      check(points[0], 7.5F);
+      require(
+          session.tile_statistics().bytes_loaded_with_metal_io == loaded,
+          "Repeated distant sampling reread the same tile"
+      );
+      check(points[1], 0);
+      check(points[0], 7.5F);
+      const auto before_resident = session.tile_statistics().bytes_loaded_with_metal_io;
+      check(lv95_coordinate(config.observer), 1000);
+      require(
+          session.tile_statistics().bytes_loaded_with_metal_io == before_resident,
+          "Resident LOD-1 sample performed an unnecessary disk read"
+      );
+      require(
+          !session.sample_terrain(lv95_position(points[2].x, points[2].y)),
+          "Out-of-coverage point acquired invented terrain"
+      );
+      const auto tiles_after = session.tile_statistics();
+      const auto bvh_after = session.bvh_statistics();
+      require(
+          tiles_after.installations == tiles_before.installations &&
+              tiles_after.evictions == tiles_before.evictions &&
+              tiles_after.requests == tiles_before.requests &&
+              bvh_after.builds == bvh_before.builds &&
+              bvh_after.catalogue_builds == bvh_before.catalogue_builds,
+          "Map sampling changed rendering residency or built acceleration structures"
+      );
+      const ObserverLocation moved = lv95_observer(points[0].x, points[0].y, 27.5);
+      require(
+          !session.relocate_observer(moved),
+          "Distant relocation did not request a new session"
+      );
+      config.observer = moved;
+      TerrainTraceSession replacement(config, field, {true, true, true}, session.command_queue());
+      const auto ground = replacement.sample_terrain(moved.position);
+      require(
+          ground && std::abs(*ground - 7.5F) < 0.001F,
+          "Relocated session lost the requested destination"
+      );
+      replacement.trace(field);
+      const auto *distances = static_cast<const float *>(replacement.distances().contents);
+      require(
+          std::any_of(
+              distances,
+              distances + pixel_count(field.image),
+              [](float t) { return t > 0; }
+          ),
+          "Relocated destination did not render terrain"
+      );
+
+      {
+        auto single_config = config;
+        single_config.tile_dir = fallback;
+        single_config.terrain_datasets.clear();
+        TerrainTraceSession single(single_config, field, {true, true, true});
+        require(
+            single.observer().position == config.observer.position,
+            "Geographic-only startup reinterpreted the observer"
+        );
+        require(
+            single.sample_terrain(config.observer.position) == 10.0F,
+            "Geographic-only sampling failed"
+        );
+        single.trace(field);
+        const auto *hits = static_cast<const float *>(single.distances().contents);
+        require(
+            std::any_of(hits, hits + pixel_count(field.image), [](float t) { return t > 0; }),
+            "Geographic-only startup did not render terrain"
+        );
+      }
+
+      config.observer = lv95_observer(2600045, 1199945, 1020);
+      config.terrain_datasets.pop_back();
+      TerrainTraceSession no_fallback(config, field, {true, true, true});
+      require(
+          !no_fallback.sample_terrain(lv95_position(points[0].x, points[0].y)) &&
+              no_fallback.sample_terrain(lv95_position(points[1].x, points[1].y)) == 0.0F,
+          "Distant no-data hole confused with valid sea-level terrain"
+      );
+    }
+  }
+
+  // The legacy single-grid path also needs the complete native tile index,
+  // including tiles removed solely by --max-tiles rather than trace distance.
+  for (bool tile_limit : {false, true}) {
+    const Coord target{2600365, 1199945};
+    RaytraceConfig config{root / "quantized",
+                          lv95_observer(2600045, 1199945, 1120),
+                          tile_limit ? 1000.0F : 40.0F,
+                          tile_limit ? 1U : 0U,
+                          16384,
+                          2,
+                          true,
+                          true,
+                          false};
+    TerrainTraceSession session(config, field, {true, true, true});
+    const auto ground = session.sample_terrain(lv95_position(target.x, target.y));
+    require(
+        ground && *ground > 900 && *ground < 1100,
+        "Legacy point sampling was restricted to retained render tiles"
+    );
+    const ObserverLocation moved = lv95_observer(target.x, target.y, 1120);
+    require(!session.relocate_observer(moved), "Legacy target was already in the render catalogue");
+    config.observer = moved;
+    TerrainTraceSession reference(config, field, {true, true, true});
+    require(
+        reference.sample_terrain(lv95_position(target.x, target.y)) == ground,
+        "Distant sample differs from the same tile when resident"
+    );
+  }
+  std::puts(
+      "Distant map sampling: geographic priority, holes, offsets, cache reuse and relocation "
+      "passed."
+  );
 }
 
 // A void at the west side changes coverage rectangles across the entire tile.
@@ -1264,7 +1490,7 @@ void check_coverage_junctions(const std::filesystem::path &root) {
           {45.7 + 15.5 * 64.0 / 3600.0, 7.4 + 14.5 * 64.0 / 3600.0}
       );
       RaytraceConfig config{projected,
-                            {navigation.x, navigation.y, 2000},
+                            lv95_observer(navigation.x, navigation.y, 2000),
                             80000,
                             0,
                             16384,
@@ -1296,7 +1522,7 @@ void check_coverage_junctions(const std::filesystem::path &root) {
       TerrainTraceSession actual(config, field, {true, true, true});
       compare(expected, actual, field, 0.02F);
       auto relocated = config.observer;
-      relocated.easting -= 50;
+      move_lv95(relocated, -50, 0);
       require(
           expected.relocate_observer(relocated) && actual.relocate_observer(relocated),
           "Coverage junction rebase failed"
@@ -1361,8 +1587,15 @@ void check_empty_gaps(const std::filesystem::path &root, bool retained) {
     // a one-tile cache exercise every continuation and shadow-loading path.
     for (uint32_t mode = 0; mode < 4; ++mode) {
       @autoreleasepool {
-        RaytraceConfig
-            config{directory, {2600045, 1199945, 1020}, 500, 0, 16384, 2, retained, true, false};
+        RaytraceConfig config{directory,
+                              lv95_observer(2600045, 1199945, 1020),
+                              500,
+                              0,
+                              16384,
+                              2,
+                              retained,
+                              true,
+                              false};
         config.raytracer = mode < 2 ? Raytracer::Software : Raytracer::MetalBvh;
         config.use_tile_bvh = mode != 0;
         config.bvh_cache_size_bytes = mode == 3 ? (retained ? 14200U : 14800U) : 1048576U;
@@ -1423,7 +1656,7 @@ void check_empty_gaps(const std::filesystem::path &root, bool retained) {
         // its origin in the missing tile. It must still find the far caster.
         if (whole_tile) {
           require(
-              session.relocate_observer({2600149.8, 1199945, 1020}),
+              session.relocate_observer(lv95_observer(2600149.8, 1199945, 1020)),
               "Empty-gap observer relocation failed"
           );
           session.trace(near_field);
@@ -1458,7 +1691,7 @@ void check_empty_gaps(const std::filesystem::path &root, bool retained) {
     for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
       @autoreleasepool {
         RaytraceConfig config{directory,
-                              {whole_tile ? 2600145.0 : 2600045.0, 1199945, 1020},
+                              lv95_observer(whole_tile ? 2600145.0 : 2600045.0, 1199945, 1020),
                               40,
                               0,
                               16384,
@@ -1496,13 +1729,14 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
   const auto compression = retained ? MetalTileCompression::Lz4 : MetalTileCompression::None;
   write_masked_fixture(primary, true, 0.0F, 2600000.0, 10.0, compression);
   write_masked_fixture(fallback, false, 10.0F, 2600003.0, 20.0, compression);
-  RaytraceConfig config{primary, {2600045, 1199945, 20}, 500, 0, 16384, 2, retained, true, false};
+  RaytraceConfig
+      config{primary, lv95_observer(2600045, 1199945, 20), 500, 0, 16384, 2, retained, true, false};
   config.raytracer = Raytracer::MetalBvh;
   config.terrain_datasets = {{primary, 0}, {fallback, 0}};
   const auto catalogue =
       TerrainCatalogue::discover(config.terrain_datasets, config.observer, 500, 0);
-  const auto hole = catalogue.locate_source({2600075, 1199945});
-  const auto filled = catalogue.locate_source({2600095, 1199945});
+  const auto hole = catalogue.locate_source(lv95_position(2600075, 1199945));
+  const auto filled = catalogue.locate_source(lv95_position(2600095, 1199945));
   require(
       hole && filled && catalogue.sources()[hole->source_index].dataset_index == 1 &&
           catalogue.sources()[filled->source_index].dataset_index == 0,
@@ -1520,8 +1754,8 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
       config.bvh_cache_size_bytes = bounded ? (retained ? 14200U : 14800U) : 1048576U;
       TerrainTraceSession session(config, gap_field, {true, true, true});
       require(
-          std::abs(*session.sample_terrain(2600075, 1199945) - 10.0F) < 0.001F &&
-              std::abs(*session.sample_terrain(2600095, 1199945)) < 0.001F,
+          std::abs(*session.sample_terrain(lv95_position(2600075, 1199945)) - 10.0F) < 0.001F &&
+              std::abs(*session.sample_terrain(lv95_position(2600095, 1199945))) < 0.001F,
           "CPU sampling did not fall back through missing samples"
       );
       for (bool bilinear : {false, true}) {
@@ -1597,7 +1831,7 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
       if (bounded)
         require(session.bvh_statistics().evictions > 0, "Masked test did not exercise streaming");
       require(
-          session.relocate_observer({2600046, 1199946, 20}),
+          session.relocate_observer(lv95_observer(2600046, 1199946, 20)),
           "Masked observer relocation failed"
       );
       session.trace(gap_field);
@@ -1658,7 +1892,7 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
       zero_samples
   );
   config.tile_dir = primary;
-  config.observer = {2599885, 1199945, 20};
+  config.observer = lv95_observer(2599885, 1199945, 20);
   const auto beyond_gap = angular_field({9, 3}, {1.56, 1.58, std::atan(-0.084), std::atan(-0.083)});
   for (Raytracer backend : {Raytracer::Software, Raytracer::MetalBvh}) {
     @autoreleasepool {
@@ -1681,7 +1915,7 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
   config.terrain_datasets = {{config.tile_dir, 0}, {root / "geographic", 0}};
   const std::array<Coord, 1> geographic_observer = {{{7.0 + 4.5 / 3600, 46.0 - 5.5 / 3600}}};
   const Coord navigation = transform_coordinates(4326, 2056, geographic_observer).front();
-  config.observer = {navigation.x, navigation.y, 1120};
+  config.observer = lv95_observer(navigation.x, navigation.y, 1120);
   config.max_distance = 1000;
   config.bvh_cache_size_bytes = 1048576;
   config.raytracer = Raytracer::MetalBvh;
@@ -1689,7 +1923,7 @@ void check_valid_coverage(const std::filesystem::path &root, bool retained) {
     TerrainTraceSession session(config, edge_field, {true, true, true});
     require(session.crs().epsg_code() == 2056, "Geographic fallback changed the navigation CRS");
     require(
-        session.sample_terrain(navigation.x, navigation.y).has_value(),
+        session.sample_terrain(lv95_position(navigation.x, navigation.y)).has_value(),
         "Fallback observer lost its terrain"
     );
     session.trace(edge_field);
@@ -1725,7 +1959,8 @@ void check_misaligned_coverage(const std::filesystem::path &root) {
   write_flat_coverage_fixture(reference, 2600000.0, 40.0, 1000.0F);
   const auto far_field = angular_field({9, 3}, {1.5, 1.6, std::atan(-0.11), std::atan(-0.09)});
   const auto near_field = angular_field({9, 3}, {1.5, 1.6, std::atan(-0.21), std::atan(-0.19)});
-  RaytraceConfig config{reference, {2600045, 1199945, 1020}, 500, 0, 16384, 2, true, true, false};
+  RaytraceConfig
+      config{reference, lv95_observer(2600045, 1199945, 1020), 500, 0, 16384, 2, true, true, false};
   TerrainTraceSession expected(config, far_field, {true, true, true});
   expected.trace(far_field);
   const auto *distances = static_cast<const float *>(expected.distances().contents);
@@ -1776,7 +2011,7 @@ void check_misaligned_coverage(const std::filesystem::path &root) {
 
 void check_tile_selection(const std::filesystem::path &directory, bool retain, double spacing) {
   RaytraceConfig config{directory,
-                        {2600000.0 + 4.5 * spacing, 1200000.0 - 5.5 * spacing, 1120.0},
+                        lv95_observer(2600000.0 + 4.5 * spacing, 1200000.0 - 5.5 * spacing, 1120.0),
                         float(48.0 * spacing),
                         0U,
                         16384U,
@@ -1797,8 +2032,8 @@ void check_tile_selection(const std::filesystem::path &directory, bool retain, d
   shared.set_collision_options(false, true);
   compare(grid, shared, field, tolerance);
   auto moved = config.observer;
-  moved.easting -= 8 * spacing;
-  moved.northing += 3 * spacing;
+  move_lv95(moved, -8 * spacing, 0);
+  move_lv95(moved, 0, 3 * spacing);
   require(
       grid.relocate_observer(moved) && shared.relocate_observer(moved),
       "Tile selector relocation"
@@ -1819,7 +2054,7 @@ void check_tile_selection(const std::filesystem::path &directory, bool retain, d
       ) == 0,
       "Tile selector changed shadows"
   );
-  ObserverLocation corner{2600000, 1200000, 1120};
+  ObserverLocation corner = lv95_observer(2600000, 1200000, 1120);
   require(grid.relocate_observer(corner) && shared.relocate_observer(corner), "Corner relocation");
   compare(grid, shared, field, tolerance);
   grid.set_lod_scale(3);
@@ -1835,7 +2070,7 @@ void check_tile_selection(const std::filesystem::path &directory, bool retain, d
 
 void exercise(const std::filesystem::path &directory, bool retain, double spacing, uint32_t block) {
   RaytraceConfig config{directory,
-                        {2600000.0 + 4.5 * spacing, 1200000.0 - 5.5 * spacing, 1120.0},
+                        lv95_observer(2600000.0 + 4.5 * spacing, 1200000.0 - 5.5 * spacing, 1120.0),
                         float(48.0 * spacing),
                         0U,
                         16384U,
@@ -1881,8 +2116,8 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
   );
   const uint64_t builds_before_move = changed.builds;
   ObserverLocation moved = config.observer;
-  moved.easting -= 8 * spacing;
-  moved.northing += 3 * spacing;
+  move_lv95(moved, -8 * spacing, 0);
+  move_lv95(moved, 0, 3 * spacing);
   require(
       software.relocate_observer(moved) && hardware.relocate_observer(moved),
       "Relocation failed"
@@ -1922,8 +2157,15 @@ void exercise(const std::filesystem::path &directory, bool retain, double spacin
 
 void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
   auto field = angular_field({33, 17}, {0.0, 6.3, -1.3, 0.1});
-  RaytraceConfig
-      config{directory, {2600045.0, 1199945.0, 1120.0}, 40.0F, 0U, 16384U, 2U, true, true, false};
+  RaytraceConfig config{directory,
+                        lv95_observer(2600045.0, 1199945.0, 1120.0),
+                        40.0F,
+                        0U,
+                        16384U,
+                        2U,
+                        true,
+                        true,
+                        false};
   config.raytracer = Raytracer::MetalBvh;
   for (bool bilinear : {false, true}) {
     config.bilinear_collisions = bilinear;
@@ -1990,8 +2232,15 @@ void check_limits_and_optional_outputs(const std::filesystem::path &directory) {
 }
 
 void check_scene_misses(const std::filesystem::path &directory) {
-  RaytraceConfig
-      config{directory, {2600045.0, 1199945.0, 1120.0}, 480.0F, 0U, 16384U, 2U, true, true, false};
+  RaytraceConfig config{directory,
+                        lv95_observer(2600045.0, 1199945.0, 1120.0),
+                        480.0F,
+                        0U,
+                        16384U,
+                        2U,
+                        true,
+                        true,
+                        false};
   // A steep ray warms only nearby terrain. A wider view then contains both
   // resolvable resident hits and rays that must load previously unseen tiles.
   const auto narrow = angular_field({1, 1}, {0.0, 0.01, -1.55, -1.54});
@@ -2047,7 +2296,8 @@ void check_session_replacement(
   const auto field = pinhole ? camera_field(camera.image, camera.projection)
                              : angular_field({97, 33}, {0, 6.3, -1.3, 0.1});
   // One retained tile forces the same replacement path as leaving the viewer's catalogue.
-  RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 1, 16384, 2, true, true, false};
+  RaytraceConfig
+      config{directory, lv95_observer(2600045, 1199945, 1120), 480, 1, 16384, 2, true, true, false};
   config.raytracer = backend;
   const GpuTraceOutputRequirements outputs{true, true, true};
   const auto make_session = [&](id<MTLCommandQueue> queue = nil) {
@@ -2069,7 +2319,7 @@ void check_session_replacement(
   (void)render_terrain_frame(*session, &field, image, settings, {});
 
   for (const ObserverLocation observer :
-       {ObserverLocation{2599965, 1199975, 1120}, ObserverLocation{2600045, 1199945, 1120}}) {
+       {lv95_observer(2599965, 1199975, 1120), lv95_observer(2600045, 1199945, 1120)}) {
     @autoreleasepool {
       require(!session->relocate_observer(observer), "Fixture did not leave the catalogue");
       config.observer = observer;
@@ -2128,7 +2378,8 @@ RayFieldRequest camera_request(ImageSize image, bool tiny = false) {
 }
 
 void check_gpu_projection(const std::filesystem::path &directory) {
-  RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, true, false};
+  RaytraceConfig
+      config{directory, lv95_observer(2600045, 1199945, 1120), 480, 0, 16384, 2, true, true, false};
   TileManager tiles(config);
   GpuRaytraceResources resources(1U, tiles.sources(), true, true, false, {false, false, false});
   GpuCamera camera(resources.device(), resources.command_queue(), resources.library(), tiles);
@@ -2153,19 +2404,22 @@ void check_gpu_projection(const std::filesystem::path &directory) {
       const auto rays = generate(request);
       // Project GPU directions back into the image: this checks the geometric
       // contract without maintaining a second ray-generation implementation.
+      const auto axes = tiles.catalogue().render_basis(config.observer.position);
       for (size_t i = 0; i < rays.size(); ++i) {
         const auto &r = rays[i];
+        const double east = r.x * axes[0].x + r.y * axes[0].y;
+        const double north = r.x * axes[1].x + r.y * axes[1].y;
         require(std::abs(std::hypot(r.x, r.y) - 1) < 1e-5, "GPU horizontal ray is not unit length");
         require(
             std::abs(
-                r.x / r.y * p.intrinsics.focal_x + p.intrinsics.principal_x -
+                east / north * p.intrinsics.focal_x + p.intrinsics.principal_x -
                 (double(i % image.width) + .5)
             ) < .001,
             "GPU pinhole horizontal reprojection failed"
         );
         require(
             std::abs(
-                -r.slope / r.y * p.intrinsics.focal_y + p.intrinsics.principal_y -
+                -r.slope / north * p.intrinsics.focal_y + p.intrinsics.principal_y -
                 (double(i / image.width) + .5)
             ) < .001,
             "GPU pinhole vertical reprojection failed"
@@ -2200,7 +2454,7 @@ void check_gpu_projection(const std::filesystem::path &directory) {
                                tile_minimum_distance(
                                    tiles.catalogue().grid(),
                                    tiles.sources()[i].key,
-                                   config.observer
+                                   tiles.catalogue().render_coordinate(config.observer.position)
                                ) *
                                angle / tiles.origin_geometry().cell_size;
           const uint32_t lod = tiles.lod_for_source(i), maximum = tiles.sources()[i].lod_count;
@@ -2225,8 +2479,11 @@ void check_gpu_projection(const std::filesystem::path &directory) {
   camera.prepare(threshold, config.observer, 1, tiles);
   const float footprint = *static_cast<const float *>(camera.pixel_angle().contents);
   for (uint32_t i = 0; i < tiles.sources().size(); ++i) {
-    const double distance =
-        tile_minimum_distance(tiles.catalogue().grid(), tiles.sources()[i].key, config.observer);
+    const double distance = tile_minimum_distance(
+        tiles.catalogue().grid(),
+        tiles.sources()[i].key,
+        tiles.catalogue().render_coordinate(config.observer.position)
+    );
     if (distance == 0)
       continue;
     for (uint32_t level : {2U, 3U}) {
@@ -2247,9 +2504,10 @@ void check_gpu_projection(const std::filesystem::path &directory) {
     }
   }
   auto axis = camera_field({1, 1}, CameraProjection{{0, 0, 0}, {1, 1, .5, .5}, NoDistortion{}});
+  const auto axes = tiles.catalogue().render_basis(config.observer.position);
   auto ray = generate(axis).front();
   require(
-      ray.x == 0 && ray.y == 1 && ray.slope == 0 && std::isinf(ray.inverse_x),
+      std::abs(ray.x - axes[1].x) < 1e-6 && std::abs(ray.y - axes[1].y) < 1e-6 && ray.slope == 0,
       "Axis ray changed"
   );
   std::get<CameraProjection>(axis.projection).orientation = {std::numbers::pi / 2,
@@ -2257,7 +2515,8 @@ void check_gpu_projection(const std::filesystem::path &directory) {
                                                              0};
   ray = generate(axis).front();
   require(
-      std::abs(ray.x - 1) < 1e-6 && std::abs(ray.y) < 1e-6 && std::abs(ray.slope - 1) < 1e-6,
+      std::abs(ray.x - axes[0].x) < 1e-6 && std::abs(ray.y - axes[0].y) < 1e-6 &&
+          std::abs(ray.slope - 1) < 1e-6,
       "Camera heading/pitch changed"
   );
   const auto angular = angular_field(
@@ -2268,8 +2527,8 @@ void check_gpu_projection(const std::filesystem::path &directory) {
   const double x[] = {0, 1, 0, -1}, y[] = {1, 0, -1, 0};
   for (size_t i = 0; i < angular_rays.size(); ++i) {
     require(
-        std::abs(angular_rays[i].x - x[i % 4]) < 1e-6 &&
-            std::abs(angular_rays[i].y - y[i % 4]) < 1e-6 &&
+        std::abs(angular_rays[i].x - (x[i % 4] * axes[0].x + y[i % 4] * axes[1].x)) < 1e-6 &&
+            std::abs(angular_rays[i].y - (x[i % 4] * axes[0].y + y[i % 4] * axes[1].y)) < 1e-6 &&
             std::abs(angular_rays[i].slope - (i < 4 ? -1 : 1)) < 1e-6,
         "Angular pixel centres changed"
     );
@@ -2339,8 +2598,15 @@ void check_producer(
     bool partial = false,
     bool pinhole = false
 ) {
-  RaytraceConfig
-      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, bilinear, false};
+  RaytraceConfig config{directory,
+                        lv95_observer(2600045, 1199945, 1120),
+                        480,
+                        0,
+                        16384,
+                        2,
+                        true,
+                        bilinear,
+                        false};
   auto field = angular_field({129, 65}, {0, 6.3, -1.3, 0.1});
   if (partial)
     field = angular_field({1, 1}, {0, 0.01, -1.55, -1.54});
@@ -2385,7 +2651,7 @@ void check_producer(
     if (frame == 7)
       field = angular_field({161, 97}, {0.2, 6.5, -1.3, 0.1});
     if (frame == 8) {
-      const ObserverLocation moved{2599965, 1199975, 1120};
+      const ObserverLocation moved = lv95_observer(2599965, 1199975, 1120);
       require(
           reference.relocate_observer(moved) && trace.relocate_observer(moved),
           "Producer relocation failed"
@@ -2535,7 +2801,8 @@ void check_producer(
 // colour -> MetalFX chain, including native/reduced transitions and repair.
 void check_metalfx_producer(const std::filesystem::path &directory) {
   using namespace panorama::app;
-  RaytraceConfig config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, true, true, false};
+  RaytraceConfig
+      config{directory, lv95_observer(2600045, 1199945, 1120), 480, 0, 16384, 2, true, true, false};
   config.lod_scale = 1.5F;
   auto output = camera_request({257, 129}, false);
   TerrainTraceSession reference(config, output, {true, true, true});
@@ -2617,8 +2884,8 @@ void check_metalfx_producer(const std::filesystem::path &directory) {
     const auto field = metalfx_ray_request(output, resolution.trace);
     if (frame == 3) {
       require(
-          trace.relocate_observer({2599965, 1199975, 1120}) &&
-              reference.relocate_observer({2599965, 1199975, 1120}),
+          trace.relocate_observer(lv95_observer(2599965, 1199975, 1120)) &&
+              reference.relocate_observer(lv95_observer(2599965, 1199975, 1120)),
           "MetalFX observer relocation failed"
       );
     }
@@ -2710,8 +2977,15 @@ void check_shadow_reuse(
     bool bounded,
     bool retain
 ) {
-  RaytraceConfig
-      config{directory, {2600045, 1199945, 1120}, 480, 0, 16384, 2, retain, bilinear, false};
+  RaytraceConfig config{directory,
+                        lv95_observer(2600045, 1199945, 1120),
+                        480,
+                        0,
+                        16384,
+                        2,
+                        retain,
+                        bilinear,
+                        false};
   auto camera = camera_request({129, 65});
   auto field = camera_field(camera.image, camera.projection);
   TerrainTraceSession reference(config, field, {true, true, true});
@@ -2749,7 +3023,7 @@ void check_shadow_reuse(
   for (uint32_t frame = 0; frame < 8; ++frame) {
     // Odd frames repeat a view exactly; even frames exercise invalidation.
     if (frame == 2) {
-      config.observer.easting -= 1;
+      move_lv95(config.observer, -1, 0);
       require(
           reference.relocate_observer(config.observer) && trace.relocate_observer(config.observer),
           "Shadow reuse relocation failed"
@@ -2814,8 +3088,15 @@ void check_shadow_reuse(
 
 void check_streaming(const std::filesystem::path &directory) {
   const auto field = angular_field({129, 65}, {0, 2 * std::numbers::pi, -1.3, 0.1});
-  RaytraceConfig
-      config{directory, {2600045, 1199945, 1120}, 600000, 0, 16384, 2, true, true, false};
+  RaytraceConfig config{directory,
+                        lv95_observer(2600045, 1199945, 1120),
+                        600000,
+                        0,
+                        16384,
+                        2,
+                        true,
+                        true,
+                        false};
   config.use_tile_bvh = false;
   TerrainTraceSession software(config, field, {true, true, true});
   config.raytracer = Raytracer::MetalBvh;
@@ -2904,12 +3185,13 @@ int main(int argc, const char *argv[]) {
       const bool coverage_junctions =
           argc == 2 && std::string_view(argv[1]) == "--coverage-junctions";
       const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
+      const bool point_sampling = argc == 2 && std::string_view(argv[1]) == "--point-sampling";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
           !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage &&
           !valid_quantized && !valid_expanded && !coverage_junctions && !empty_quantized &&
-          !empty_expanded) {
+          !empty_expanded && !point_sampling) {
         RaytraceConfig config{argv[1],
-                              {2623452.4, 1100502.2, 3415.0},
+                              lv95_observer(2623452.4, 1100502.2, 3415.0),
                               21000.0F,
                               0U,
                               32U * 1024U * 1024U,
@@ -2968,7 +3250,9 @@ int main(int argc, const char *argv[]) {
         write_fixture(root / "partial-overlap", true, 10.0, 2056U, 2600080.0, 1200000.0, 100.0);
         write_fixture(root / "distant", true, 1000.0);
         check_dataset_foundation(root);
-        if (shadow_expanded || shadow_quantized) {
+        if (point_sampling) {
+          check_distant_point_sampling(root);
+        } else if (shadow_expanded || shadow_quantized) {
           for (bool bilinear : {false, true}) {
             for (bool bounded : {false, true}) {
               @autoreleasepool {

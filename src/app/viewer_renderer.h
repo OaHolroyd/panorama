@@ -24,6 +24,7 @@
 namespace panorama::app {
 
 inline constexpr uint64_t kBytesPerMiB = 1024ULL * 1024ULL;
+inline constexpr uint64_t kBytesPerGiB = 1024ULL * 1024ULL * 1024ULL;
 inline constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 inline constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
 inline constexpr double kDefaultVerticalFieldOfView = 70.0 * kDegreesToRadians;
@@ -50,19 +51,19 @@ struct ViewerSettings {
   std::filesystem::path tile_dir = "data/swissalti3d-10-level-0-metal-u16-none-lod-point";
   std::vector<TerrainDatasetConfig> terrain_datasets;
   std::filesystem::path peak_gazetteer = "data/gazetteers/peaks.csv";
-  uint64_t tile_cache_size_bytes = 2048ULL * kBytesPerMiB;
+  uint64_t tile_cache_size_bytes = 4ULL * kBytesPerGiB;
   uint32_t workers = 8U;
   float max_distance = 600'000.0F;
   float lod_scale = 1.5F;
   Raytracer raytracer = Raytracer::MetalBvh;
   uint32_t bvh_block_cells = 4U;
-  uint64_t bvh_cache_size_bytes = 2048ULL * kBytesPerMiB;
+  uint64_t bvh_cache_size_bytes = 8ULL * kBytesPerGiB;
   bool discard_quantized = false;
   // Temporarily enabled while diagnosing intermittent mixed-dataset stalls.
   bool trace_diagnostics = true;
   bool bilinear_collisions = false;
   bool c1_normals = true;
-  ObserverLocation observer = {2623452.4, 1100502.2, 3415.0};
+  ObserverLocation observer = {{46.1012605320838, 7.71604367731172}, 4515.0};
   ImageSize image = {1600U, 900U};
   MetalFxActivation metalfx_activation = MetalFxActivation::Disabled;
   MetalFxPreset metalfx_preset = MetalFxPreset::Balanced;
@@ -79,7 +80,7 @@ struct ViewerSettings {
               .colour_source = TerrainColourSource::Distance,
               .colourmap = PresetColourmap::Viewfinder,
           },
-      .colour_range = {0.0F, 100'000.0F},
+      .colour_range = {0.0F, 200'000.0F},
       .use_surface_normals = true,
   };
 };
@@ -90,21 +91,18 @@ struct PointInspection {
   bool hit;
   float distance;
   float elevation;
-  double easting;
-  double northing;
+  LatLon position;
   float slope_degrees;
   float aspect_degrees;
   bool map_selected;
 };
 
 struct MapCoordinate {
-  double easting;
-  double northing;
+  LatLon position;
 };
 
 struct TerrainPoint {
-  double easting;
-  double northing;
+  LatLon position;
   float elevation;
 };
 
@@ -151,6 +149,7 @@ struct PresentedFrame {
   uint64_t inspection_sequence;
   uint64_t inspection_request_token;
   ObserverLocation observer;
+  TerrainRenderFrame render_frame;
   std::optional<TerrainPoint> map_point;
   uint64_t map_point_sequence;
   uint64_t map_point_request_token;
@@ -174,6 +173,7 @@ format_local_daylight_time(CalendarDateTime date, double utcMinutes, NSTimeZone 
 [[nodiscard]] LockedPointProjection project_locked_point(
     TerrainPoint point,
     ObserverLocation observer,
+    const TerrainRenderFrame &render_frame,
     ImageSize image,
     double vertical_field_of_view,
     CameraOrientation orientation

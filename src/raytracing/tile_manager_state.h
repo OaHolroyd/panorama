@@ -184,8 +184,8 @@ struct TileManager::State {
   // Exact LOD-1 point inspection reuses resident data or one retained payload.
   /// Shared buffer for the most recently sampled nonresident source.
   id<MTLBuffer> sampled_vertices = nil;
-  /// Catalogue source currently stored in `sampled_vertices`.
-  std::optional<uint32_t> sampled_source_index;
+  /// Source from the complete immutable dataset index stored in `sampled_vertices`.
+  const TerrainSource *sampled_source = nullptr;
   /// Per-source encoding and quantization base for the retained payload.
   MetalTileHeader sampled_header = {};
 
@@ -217,7 +217,7 @@ struct TileManager::State {
   /// Rewrite only observer-relative coordinates after an in-catalogue move.
   void rebase_observer(ObserverLocation observer);
   /// Bilinearly sample exact LOD-1 terrain without changing render LOD policy.
-  [[nodiscard]] std::optional<float> sample_terrain(double easting, double northing);
+  [[nodiscard]] std::optional<float> sample_terrain(LatLon position);
   /// Return the complete Metal buffer ABI for a frontier dispatch.
   [[nodiscard]] TileManagerBindings bindings() const;
   /// Snapshot loader and atlas counters.

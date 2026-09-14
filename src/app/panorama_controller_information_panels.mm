@@ -92,13 +92,13 @@
                                                                     gpuMilliseconds]];
   _debugInfoLabel.stringValue = [NSString
       stringWithFormat:@"%@\nRevision     %8llu\n\n"
-                        "Easting    %11.2f m\nNorthing   %11.2f m\nElevation  %11.2f m\n\n"
+                        "Latitude    %11.2f m\nNorthing   %11.2f m\nElevation  %11.2f m\n\n"
                         "Heading      %8.2f°\nPitch        %8.2f°\nRoll         %8.2f°\n"
                         "V. FOV       %8.2f°\n\nResolution   %4u × %4u\nMax range  %10.0f m",
                        performance,
                        static_cast<unsigned long long>(revision),
-                       observer.easting,
-                       observer.northing,
+                       observer.position.lon,
+                       observer.position.lat,
                        observer.elevation,
                        heading,
                        orientation.pitch * panorama::app::kRadiansToDegrees,

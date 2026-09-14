@@ -24,11 +24,11 @@ GDAL_CONFIG := gdal-config
 # Mark its headers as system headers so third-party warnings do not obscure ours.
 GDAL_INCLUDE_DIR := $(patsubst -I%,%,$(shell $(GDAL_CONFIG) --cflags))
 GDAL_CFLAGS := -isystem $(GDAL_INCLUDE_DIR)
-GDAL_LIBS := $(shell $(GDAL_CONFIG) --libs)
+GDAL_LIBS := $(shell $(GDAL_CONFIG) --libs) $(shell pkg-config --libs proj)
 
 # Host compiler options.  -MMD/-MP generate makefile dependency files next to
 # each object, and ARC is required by the Objective-C++ Metal host code.
-CPPFLAGS := $(GDAL_CFLAGS)
+CPPFLAGS := $(GDAL_CFLAGS) $(shell pkg-config --cflags proj)
 PANORAMA_INCLUDES := -I$(PANORAMA_SRC_DIR) -I$(RAYTRACE_SRC_DIR) \
 	-I$(RENDERING_SRC_DIR) -I$(SHARED_SRC_DIR)
 PANORAMA_VIEWER_INCLUDES := -I$(PANORAMA_APP_SRC_DIR) $(PANORAMA_INCLUDES)
@@ -94,7 +94,7 @@ PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 DEPS := $(PANORAMA_OBJ:.o=.d) $(PANORAMA_VIEWER_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) \
 	$(SHARED_OBJ:.o=.d) $(OBJ_DIR)/metal-bvh-test.d $(OBJ_DIR)/terrain-manifest-test.d \
 	$(OBJ_DIR)/minimap-test.d $(OBJ_DIR)/metalfx-test.d \
-	$(OBJ_DIR)/peak-catalogue-test.d
+	$(OBJ_DIR)/peak-catalogue-test.d $(OBJ_DIR)/geographic-test.d
 
 .PHONY: all clean rebuild compile_commands FORCE
 
@@ -198,6 +198,7 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --edge-cases
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --mixed-coverage
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --point-sampling
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --coverage-junctions
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-quantized
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-expanded
@@ -212,7 +213,7 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 check-camera: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --camera
 
-$(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(METAL_LIB)
+$(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(OBJ_DIR)/raytracing/terrain_transform.o $(METAL_LIB)
 	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
 
 .PHONY: check-minimap
@@ -234,7 +235,8 @@ $(OBJ_DIR)/peak-catalogue-test: tests/peak_catalogue_test.mm $(OBJ_DIR)/app/peak
 check-labels: $(OBJ_DIR)/peak-catalogue-test
 	$(OBJ_DIR)/peak-catalogue-test
 
-$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o $(SHARED_OBJ)
+$(OBJ_DIR)/terrain-manifest-test: tests/terrain_manifest_test.mm $(OBJ_DIR)/tile-gen/metal_tile_writer.o \
+		$(OBJ_DIR)/tile-gen/rechunker.o $(OBJ_DIR)/tile-gen/source_catalogue.o $(SHARED_OBJ)
 	$(CXX) $(TILE_GEN_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
 
 .PHONY: check-manifest
@@ -243,3 +245,10 @@ check-manifest: $(OBJ_DIR)/terrain-manifest-test $(TILE_GEN_EXE)
 
 # Missing dependency files are harmless on the first build.
 -include $(DEPS)
+
+$(OBJ_DIR)/geographic-test: tests/geographic_test.mm $(OBJ_DIR)/raytracing/crs.o $(OBJ_DIR)/raytracing/terrain_transform.o $(OBJ_DIR)/app/coordinate_input.o $(OBJ_DIR)/app/solar_position.o
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) -framework Foundation $(LDLIBS)
+
+.PHONY: check-geographic
+check-geographic: $(OBJ_DIR)/geographic-test
+	$(OBJ_DIR)/geographic-test
