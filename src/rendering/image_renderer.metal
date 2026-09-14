@@ -456,7 +456,7 @@ kernel void present_colourmapped_synthetic_terrain(
   const uint index = position.y * output.get_width() + position.x;
   const float distance = distances[index];
   if (!(distance > 0.0F) || !isfinite(distance)) {
-    output.write(float4(0.0F, 0.0F, 0.0F, 1.0F), position);
+    output.write(float4(205.0F / 255.0F, 253.0F / 255.0F, 254.0F / 255.0F, 1.0F), position);
     return;
   }
   if (feature_outlines != 0U && feature_outline_mask.read(position).r >= 0.5F) {
