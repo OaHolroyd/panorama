@@ -33,8 +33,7 @@
   [self updateSettingsControlAvailability];
 
   [_timeZoneRequest cancel];
-  const panorama::LatLon geographic =
-      _renderer->terrain_crs().to_lat_lon({_observer.easting, _observer.northing});
+  const panorama::LatLon geographic = _observer.position;
   CLLocation *location = [[CLLocation alloc] initWithLatitude:geographic.lat
                                                     longitude:geographic.lon];
   _timeZoneRequest = [[MKReverseGeocodingRequest alloc] initWithLocation:location];
@@ -125,11 +124,8 @@
     return NO;
   }
 
-  const panorama::app::DaylightTimes daylightInfo = panorama::app::daylight_times(
-      _renderer->terrain_crs(),
-      {_observer.easting, _observer.northing},
-      *local
-  );
+  const panorama::app::DaylightTimes daylightInfo =
+      panorama::app::daylight_times(_observer.position, *local);
   NSString *timeZoneSummary =
       panorama::app::format_time_zone_summary(_observerTimeZone, utc.value());
   switch (daylightInfo.state) {
@@ -157,11 +153,8 @@
     break;
   }
 
-  const panorama::app::SolarPosition sun = panorama::app::solar_position(
-      _renderer->terrain_crs(),
-      {_observer.easting, _observer.northing},
-      utc.value()
-  );
+  const panorama::app::SolarPosition sun =
+      panorama::app::solar_position(_observer.position, utc.value());
   const double azimuthDegrees = sun.azimuth * panorama::app::kRadiansToDegrees;
   const double altitudeDegrees = sun.elevation * panorama::app::kRadiansToDegrees;
   _sunAzimuthControl.doubleValue = azimuthDegrees;

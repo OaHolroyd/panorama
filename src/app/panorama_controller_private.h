@@ -26,6 +26,7 @@
   panorama::ImageSize _image;
   panorama::TerrainPresentationSettings _presentation;
   panorama::ObserverLocation _observer;
+  panorama::TerrainRenderFrame _renderFrame;
   std::optional<panorama::app::PointInspection> _lockedPoint;
   std::optional<panorama::app::PointInspection> _mapHoverPoint;
   NSPopUpButton *_colourSourceControl;

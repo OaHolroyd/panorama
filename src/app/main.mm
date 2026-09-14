@@ -161,16 +161,15 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
   NSViewController *pointInfoController = [_controller makePointInfoViewController];
   const panorama::ObserverLocation observer = _renderer->observer();
   MiniMapPanelView *miniMapPanel =
-      [[MiniMapPanelView alloc] initWithObserverEasting:observer.easting
-                                               northing:observer.northing
-                                        terrainEpsgCode:_renderer->terrain_crs().epsg_code()
-                                        terrainCoverage:_renderer->terrain_coverage()
-                               coverageInitiallyVisible:_renderer->observer_used_fallback()
-                                            maxDistance:_renderer->max_distance()
-                                          pointInfoView:pointInfoController.view
-                                            metalDevice:_renderer->device()
-                                           commandQueue:_renderer->command_queue()
-                                                library:_renderer->library()];
+      [[MiniMapPanelView alloc] initWithObserverLatitude:observer.position.lat
+                                               longitude:observer.position.lon
+                                         terrainCoverage:_renderer->terrain_coverage()
+                                coverageInitiallyVisible:_renderer->observer_used_fallback()
+                                             maxDistance:_renderer->max_distance()
+                                           pointInfoView:pointInfoController.view
+                                             metalDevice:_renderer->device()
+                                            commandQueue:_renderer->command_queue()
+                                                 library:_renderer->library()];
   _overlayView = [[ViewerOverlayView alloc] initWithFrame:imageFrame
                                               contentView:imageContainer
                                              settingsView:_inspectorController.view

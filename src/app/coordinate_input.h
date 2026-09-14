@@ -10,7 +10,7 @@
 namespace panorama::app {
 
 /// Coordinate systems currently offered by the Position inspector. The
-/// dataset option means the projected CRS declared by the loaded terrain.
+/// dataset option means the native CRS declared by the loaded terrain.
 enum class CoordinateInputSystem : uint8_t {
   Wgs84,
   SwissLv95,
@@ -18,10 +18,9 @@ enum class CoordinateInputSystem : uint8_t {
   Terrain,
 };
 
-/// One user-entered location transformed into both WGS 84 and the active
-/// terrain grid. `source_name` describes the interpretation shown in the UI.
+/// One user-entered location transformed into WGS84. `source_name` describes the interpretation
+/// shown in the UI.
 struct ParsedCoordinateInput {
-  Coord projected;
   LatLon geographic;
   std::string source_name;
   CoordinateInputSystem system = CoordinateInputSystem::Wgs84;

@@ -424,7 +424,7 @@
   _sunAzimuthControl.continuous = YES;
   _sunAzimuthControl.numberOfTickMarks = 9;
   _sunAzimuthControl.allowsTickMarkValuesOnly = NO;
-  _sunAzimuthControl.toolTip = @"Clockwise from grid north";
+  _sunAzimuthControl.toolTip = @"Clockwise from true north";
   _sunAzimuthLabel = [NSTextField
       labelWithString:[NSString stringWithFormat:@"%.0f°", _sunAzimuthControl.doubleValue]];
   _sunAzimuthLabel.alignment = NSTextAlignmentRight;

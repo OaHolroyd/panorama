@@ -22,8 +22,8 @@ Building the project produces three executables:
 
 ## Getting started
 
-Install Clang/Xcode command-line tools, Metal, GDAL, and `clang-format`, then
-build all three programs:
+Install Clang/Xcode command-line tools, Metal, GDAL, PROJ, `pkg-config`, and
+`clang-format`, then build all three programs:
 
 ```sh
 make
@@ -78,11 +78,16 @@ the input directory to prepare OS data in the same way. Run
 `./panorama-tile-gen --help` for chunk-size, grid-origin, compression, and
 overwrite options.
 
-Observer eastings and northings are always expressed in the prepared dataset's
-projected CRS. The executable defaults describe the Swiss example, so supply
-British National Grid coordinates with `--easting`, `--northing`, and
-`--elevation` when using OS data. Uint16 Metal tiles remain quantized in the GPU
-atlas by default; `--discard-quantized` expands them to Float32 during loading.
+Observer inputs use WGS84 decimal degrees: `--latitude`, `--longitude`, and
+`--elevation` in metres, independent of which datasets are loaded or their order.
+For example, `--latitude 43.1729 --longitude 16.4412 --elevation 45` selects Hvar.
+Headings and sun azimuths are clockwise from true north. Movement uses metres on
+the WGS84 ellipsoid; the renderer retains local metric coordinates and each
+dataset's native grid. Elevation datums and per-dataset vertical offsets are
+unchanged. Existing ptiles do not need regeneration.
+
+Uint16 Metal tiles remain quantized in the GPU atlas by default;
+`--discard-quantized` expands them to Float32 during loading.
 
 The resulting directory can be opened interactively:
 

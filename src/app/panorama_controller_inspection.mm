@@ -22,16 +22,14 @@
 
 [[nodiscard]] static bool coordinate_has_terrain_coverage(
     const panorama::TerrainCoverage &coverage,
-    panorama::Coord coordinate
+    panorama::LatLon position
 ) {
+  const panorama::Coord coordinate{position.lon, position.lat};
   for (const auto &dataset : coverage.datasets) {
     try {
-      const auto native = panorama::transform_coordinates(
-                              coverage.datasets.front().epsg_code,
-                              dataset.epsg_code,
-                              std::span(&coordinate, 1U)
-      )
-                              .front();
+      const auto native =
+          panorama::transform_coordinates(4326U, dataset.epsg_code, std::span(&coordinate, 1U))
+              .front();
       const panorama::TileKey key = panorama::tile_key_at(dataset.grid, native.x, native.y);
       if (std::binary_search(dataset.tiles.begin(), dataset.tiles.end(), key))
         return true;
@@ -170,16 +168,16 @@
 }
 
 - (void)miniMapPanel:(MiniMapPanelView *)panel
-     didHoverEasting:(double)easting
-            northing:(double)northing {
+    didHoverLatitude:(double)latitude
+           longitude:(double)longitude {
   (void)panel;
   [self beginMinimapPointerOwnership];
   if (!_pointInspectionLocked && !_pointLockPending &&
       (_mapPointAction == panorama::app::MapPointAction::None ||
        _mapPointAction == panorama::app::MapPointAction::Hover)) {
-    [self requestMapPointEasting:easting
-                        northing:northing
-                          action:panorama::app::MapPointAction::Hover];
+    [self requestMapPointLatitude:latitude
+                        longitude:longitude
+                           action:panorama::app::MapPointAction::Hover];
   }
 }
 
@@ -191,14 +189,14 @@
   [self clearMapHover];
 }
 
-- (void)requestMapPointEasting:(double)easting
-                      northing:(double)northing
-                        action:(panorama::app::MapPointAction)action {
+- (void)requestMapPointLatitude:(double)latitude
+                      longitude:(double)longitude
+                         action:(panorama::app::MapPointAction)action {
   if (!_pointInspectionEnabled && action != panorama::app::MapPointAction::MoveObserver) {
     return;
   }
   _mapPointAction = action;
-  _mapPointRequestToken = _renderer->request_map_point({easting, northing});
+  _mapPointRequestToken = _renderer->request_map_point({{latitude, longitude}});
   if (action != panorama::app::MapPointAction::Hover) {
     [self setPointInfoStatus:action == panorama::app::MapPointAction::MoveObserver
                                  ? @"Moving observer…"
@@ -207,25 +205,25 @@
 }
 
 - (void)miniMapPanel:(MiniMapPanelView *)panel
-    didSelectEasting:(double)easting
-            northing:(double)northing {
+    didSelectLatitude:(double)latitude
+            longitude:(double)longitude {
   (void)panel;
   _coordinateMovePending = false;
   [self beginMinimapPointerOwnership];
-  [self requestMapPointEasting:easting
-                      northing:northing
-                        action:panorama::app::MapPointAction::Look];
+  [self requestMapPointLatitude:latitude
+                      longitude:longitude
+                         action:panorama::app::MapPointAction::Look];
 }
 
 - (void)miniMapPanel:(MiniMapPanelView *)panel
-    didRequestObserverMoveToEasting:(double)easting
-                           northing:(double)northing {
+    didRequestObserverMoveToLatitude:(double)latitude
+                           longitude:(double)longitude {
   (void)panel;
   _coordinateMovePending = false;
   [self beginMinimapPointerOwnership];
-  [self requestMapPointEasting:easting
-                      northing:northing
-                        action:panorama::app::MapPointAction::MoveObserver];
+  [self requestMapPointLatitude:latitude
+                      longitude:longitude
+                         action:panorama::app::MapPointAction::MoveObserver];
 }
 
 - (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point {
@@ -250,16 +248,15 @@
   }
   const panorama::app::PointInspection point = *_lockedPoint;
   const panorama::app::TerrainPoint target = {
-      point.easting,
-      point.northing,
+      point.position,
       point.elevation,
   };
   [self moveObserverToTerrainPoint:target];
 }
 
 - (void)lookAtTerrainPoint:(panorama::app::TerrainPoint)point {
-  const double east = point.easting - _observer.easting;
-  const double north = point.northing - _observer.northing;
+  const auto offset = _renderFrame.offset(_observer.position, point.position);
+  const double east = offset.x, north = offset.y;
   const double horizontal = std::hypot(east, north);
   if (!(horizontal > 0.0)) {
     return;
@@ -391,11 +388,15 @@
     break;
   case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Terrain):
     _coordinateInputControl.placeholderString =
-        _renderer->terrain_crs().id() == panorama::CrsId::FrenchLambert93 ? @"700000, 6600000"
-        : _renderer->terrain_crs().id() == panorama::CrsId::SwissLv95     ? @"2600000, 1200000"
-                                                                          : @"400000, 300000";
-    _coordinateInputControl.toolTip = [NSString
-        stringWithFormat:@"Easting, northing in %s metres", _renderer->terrain_crs().name()];
+        _renderer->terrain_crs().id() == panorama::CrsId::Wgs84             ? @"46.948, 7.447"
+        : _renderer->terrain_crs().id() == panorama::CrsId::FrenchLambert93 ? @"700000, 6600000"
+        : _renderer->terrain_crs().id() == panorama::CrsId::SwissLv95       ? @"2600000, 1200000"
+                                                                            : @"400000, 300000";
+    _coordinateInputControl.toolTip =
+        _renderer->terrain_crs().id() == panorama::CrsId::Wgs84
+            ? @"Latitude, longitude in decimal WGS84 degrees"
+            : [NSString stringWithFormat:@"Easting, northing in %s metres",
+                                         _renderer->terrain_crs().name()];
     break;
   default:
     throw std::logic_error("Unknown coordinate-system menu item");
@@ -438,7 +439,10 @@
       if (candidates.size() > 1U) {
         std::vector<panorama::app::ParsedCoordinateInput> covered;
         for (const auto &candidate : candidates) {
-          if (coordinate_has_terrain_coverage(_renderer->terrain_coverage(), candidate.projected)) {
+          if (coordinate_has_terrain_coverage(
+                  _renderer->terrain_coverage(),
+                  candidate.geographic
+              )) {
             covered.push_back(candidate);
           }
         }
@@ -501,9 +505,9 @@
   _coordinateStatusLabel.stringValue =
       [NSString stringWithFormat:@"%s • locating terrain…", parsed.source_name.c_str()];
   _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
-  [self requestMapPointEasting:parsed.projected.x
-                      northing:parsed.projected.y
-                        action:panorama::app::MapPointAction::MoveObserver];
+  [self requestMapPointLatitude:parsed.geographic.lat
+                      longitude:parsed.geographic.lon
+                         action:panorama::app::MapPointAction::MoveObserver];
 }
 
 - (void)setPointInfoStatus:(NSString *)status {
@@ -551,19 +555,19 @@
     return;
   }
   _observerInfoLabel.stringValue =
-      [NSString stringWithFormat:@"Observer  E %.0f • N %.0f • %s %.0f°\n%.1f m AGL • %.0f m AMSL",
-                                 _observer.easting,
-                                 _observer.northing,
+      [NSString stringWithFormat:@"Observer  %.5f°, %.5f° • %s %.0f°\n%.1f m AGL • %.0f m AMSL",
+                                 _observer.position.lat,
+                                 _observer.position.lon,
                                  direction,
                                  heading,
                                  _groundClearance,
                                  _observer.elevation];
   _observerInfoLabel.toolTip = [NSString
       stringWithFormat:
-          @"Observer: easting %.1f m, northing %.1f m, heading %.1f°, %.1f m above ground, "
+          @"Observer: latitude %.6f°, longitude %.6f°, heading %.1f°, %.1f m above ground, "
            "%.1f m above mean sea level",
-          _observer.easting,
-          _observer.northing,
+          _observer.position.lat,
+          _observer.position.lon,
           heading,
           _groundClearance,
           _observer.elevation];
@@ -664,24 +668,24 @@
     _debugPointInfoLabel.stringValue =
         [NSString stringWithFormat:@"Map selection\n"
                                     "Distance   %10.1f m\nElevation  %10.1f m\n"
-                                    "Easting    %10.1f m\nNorthing   %10.1f m",
+                                    "Latitude   %10.6f°\nLongitude  %10.6f°",
                                    point.distance,
                                    point.elevation,
-                                   point.easting,
-                                   point.northing];
+                                   point.position.lat,
+                                   point.position.lon];
     return;
   }
   _debugPointInfoLabel.stringValue =
       [NSString stringWithFormat:@"Pixel      %4u, %4u\n"
                                   "Distance   %10.1f m\nElevation  %10.1f m\n"
-                                  "Easting    %10.1f m\nNorthing   %10.1f m\n"
+                                  "Latitude   %10.6f°\nLongitude  %10.6f°\n"
                                   "Slope      %10.1f°\nAspect     %10.1f°",
                                  point.pixel.x,
                                  point.pixel.y,
                                  point.distance,
                                  point.elevation,
-                                 point.easting,
-                                 point.northing,
+                                 point.position.lat,
+                                 point.position.lon,
                                  point.slope_degrees,
                                  point.aspect_degrees];
 }
@@ -706,9 +710,9 @@
     [self setPointInfoStatus:@"No terrain intersection"];
     return;
   }
-  [_miniMapPanel setInspectedPointEasting:point.easting
-                                 northing:point.northing
-                                   locked:_pointInspectionLocked || _pointLockPending];
+  [_miniMapPanel setInspectedPointLatitude:point.position.lat
+                                 longitude:point.position.lon
+                                    locked:_pointInspectionLocked || _pointLockPending];
   _pointInfoHeading.stringValue = @"Distance";
   _pointInfoLabel.stringValue = format_point_distance(point.distance);
   [self setPointInfoSymbolsVisible:true
@@ -735,8 +739,9 @@
     return;
   }
   const panorama::app::LockedPointProjection projection = panorama::app::project_locked_point(
-      {point->easting, point->northing, point->elevation},
+      {point->position, point->elevation},
       _observer,
+      _renderFrame,
       image,
       verticalFieldOfView,
       orientation

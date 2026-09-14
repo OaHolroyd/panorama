@@ -199,15 +199,12 @@ discover_terrain_datasets(std::span<const TerrainDatasetConfig> configs) {
 }
 
 TerrainRenderFrame
-select_terrain_render_frame(std::span<const TerrainDataset> datasets, Coord navigation_observer) {
+select_terrain_render_frame(std::span<const TerrainDataset> datasets, LatLon observer) {
   if (datasets.empty())
     throw std::invalid_argument("Cannot select a render frame without terrain datasets");
   if (datasets.size() == 1U && epsg_uses_projected_metres(datasets.front().epsg_code))
     return TerrainRenderFrame::fixed(datasets.front().epsg_code);
-  const std::array<Coord, 1> observer = {navigation_observer};
-  const Coord geographic =
-      transform_coordinates(datasets.front().epsg_code, 4326U, observer).front();
-  return TerrainRenderFrame::local_aeqd({geographic.y, geographic.x});
+  return TerrainRenderFrame::local_aeqd(observer);
 }
 
 bool TileKey::operator<(const TileKey &other) const {
@@ -239,17 +236,17 @@ TileKey tile_key_at(const TileGrid &grid, double easting, double northing) {
   return {static_cast<int64_t>(row), static_cast<int64_t>(column)};
 }
 
-double tile_minimum_distance(const TileGrid &grid, TileKey key, const ObserverLocation &observer) {
+double tile_minimum_distance(const TileGrid &grid, TileKey key, Coord observer) {
   const double x_min = grid.origin_x + static_cast<double>(key.column) * grid.width;
   const double y_max = grid.origin_y - static_cast<double>(key.row) * grid.width;
   const double x_max = x_min + grid.width;
   const double y_min = y_max - grid.width;
-  const double dx = observer.easting < x_min   ? x_min - observer.easting
-                    : observer.easting > x_max ? observer.easting - x_max
-                                               : 0.0;
-  const double dy = observer.northing < y_min   ? y_min - observer.northing
-                    : observer.northing > y_max ? observer.northing - y_max
-                                                : 0.0;
+  const double dx = observer.x < x_min   ? x_min - observer.x
+                    : observer.x > x_max ? observer.x - x_max
+                                         : 0.0;
+  const double dy = observer.y < y_min   ? y_min - observer.y
+                    : observer.y > y_max ? observer.y - y_max
+                                         : 0.0;
   return std::hypot(dx, dy);
 }
 
@@ -545,10 +542,10 @@ TerrainCatalogue::TerrainCatalogue(
       legacy_sample_sources_(std::move(legacy_sample_sources)),
       render_frame_(std::move(render_frame)) {
   if (!datasets_.empty()) {
-    navigation_to_dataset_.reserve(datasets_.size());
+    geographic_to_dataset_.reserve(datasets_.size());
     for (const TerrainDataset &dataset : datasets_)
-      navigation_to_dataset_.push_back(
-          std::make_unique<CoordinateTransform>(datasets_.front().epsg_code, dataset.epsg_code)
+      geographic_to_dataset_.push_back(
+          std::make_unique<CoordinateTransform>(4326U, dataset.epsg_code)
       );
   }
   float maximum_elevation = std::numeric_limits<float>::lowest();
@@ -577,15 +574,14 @@ TerrainCatalogue TerrainCatalogue::discover(
     uint32_t max_tile_count,
     bool allow_observer_fallback
 ) {
-  if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing) ||
-      !std::isfinite(observer.elevation) || !std::isfinite(max_distance) || max_distance <= 0.0F)
+  if (!valid_lat_lon(observer.position) || !std::isfinite(observer.elevation) ||
+      !std::isfinite(max_distance) || max_distance <= 0.0F)
     throw std::invalid_argument("Combined terrain catalogue requires finite observer and range");
   std::vector<TerrainDataset> datasets = discover_terrain_datasets(configs);
-  const TerrainRenderFrame frame =
-      select_terrain_render_frame(datasets, {observer.easting, observer.northing});
-  const std::array<Coord, 1> observer_navigation = {{{observer.easting, observer.northing}}};
-  const Coord render_observer =
-      frame.project(datasets.front().epsg_code, observer_navigation).front();
+  const TerrainRenderFrame frame = select_terrain_render_frame(datasets, observer.position);
+  const std::array<Coord, 1> observer_geographic = {
+      {{observer.position.lon, observer.position.lat}}};
+  const Coord render_observer = frame.project(4326U, observer_geographic).front();
 
   struct Candidate {
     TerrainSource source;
@@ -595,8 +591,7 @@ TerrainCatalogue TerrainCatalogue::discover(
   std::vector<Candidate> candidates;
   for (const TerrainDataset &dataset : datasets) {
     const Coord native_observer =
-        transform_coordinates(datasets.front().epsg_code, dataset.epsg_code, observer_navigation)
-            .front();
+        transform_coordinates(4326U, dataset.epsg_code, observer_geographic).front();
     const TileKey observer_key = tile_key_at(dataset.grid, native_observer.x, native_observer.y);
     const MetalTileHeader representative = read_metal_tile_header(dataset.sources.front().path);
     for (const TerrainSource &available : dataset.sources) {
@@ -712,11 +707,10 @@ TerrainCatalogue TerrainCatalogue::discover(
     const std::array<Coord, 1> point = {
         {{dataset.grid.origin_x + (double(candidate.key.column) + column) * dataset.grid.width,
           dataset.grid.origin_y - (double(candidate.key.row + 1) - row) * dataset.grid.width}}};
-    const Coord navigation =
-        transform_coordinates(dataset.epsg_code, datasets.front().epsg_code, point).front();
+    const Coord navigation = transform_coordinates(dataset.epsg_code, 4326U, point).front();
     return discover(
         configs,
-        {navigation.x, navigation.y, observer.elevation},
+        {{navigation.y, navigation.x}, observer.elevation},
         max_distance,
         max_tile_count,
         false
@@ -768,7 +762,8 @@ TerrainCatalogue TerrainCatalogue::discover(
 ) {
   std::vector<TerrainDataset> datasets =
       discover_terrain_datasets(std::array<TerrainDatasetConfig, 1>{{{tile_dir, 0.0}}});
-  if (std::any_of(
+  if (!epsg_uses_projected_metres(datasets.front().epsg_code) ||
+      std::any_of(
           datasets.front().sources.begin(),
           datasets.front().sources.end(),
           [](const TerrainSource &source) { return bool(source.valid_cells); }
@@ -789,7 +784,9 @@ TerrainCatalogue TerrainCatalogue::discover(
   }
 
   ObserverLocation resolved_observer = observer;
-  TileKey origin_key = tile_key_at(grid, observer.easting, observer.northing);
+  const Crs native_crs = Crs::from_epsg(datasets.front().epsg_code);
+  Coord native_observer = native_crs.from_lat_lon(observer.position);
+  TileKey origin_key = tile_key_at(grid, native_observer.x, native_observer.y);
   const auto has_origin = [&] {
     const auto found = std::lower_bound(
         available_sources.begin(),
@@ -833,15 +830,14 @@ TerrainCatalogue TerrainCatalogue::discover(
       }
     }
     origin_key = fallback->key;
-    resolved_observer.easting =
-        grid.origin_x + (static_cast<double>(origin_key.column) + 0.5) * grid.width;
-    resolved_observer.northing =
-        grid.origin_y - (static_cast<double>(origin_key.row) + 0.5) * grid.width;
+    native_observer.x = grid.origin_x + (static_cast<double>(origin_key.column) + 0.5) * grid.width;
+    native_observer.y = grid.origin_y - (static_cast<double>(origin_key.row) + 0.5) * grid.width;
+    resolved_observer.position = native_crs.to_lat_lon(native_observer);
   }
   std::vector<TerrainSource> sources;
   for (const TerrainSource &source : available_sources) {
     if (source.key == origin_key ||
-        tile_minimum_distance(grid, source.key, resolved_observer) <= max_distance) {
+        tile_minimum_distance(grid, source.key, native_observer) <= max_distance) {
       sources.push_back(source);
     }
   }
@@ -873,7 +869,7 @@ TerrainCatalogue TerrainCatalogue::discover(
       resolved_observer,
       TerrainCoverage{{{grid, datasets.front().epsg_code, std::move(coverage_tiles)}}},
       {},
-      std::nullopt,
+      TerrainRenderFrame::fixed(datasets.front().epsg_code),
       std::move(available_sources)
   );
 }
@@ -897,16 +893,16 @@ std::optional<uint32_t> TerrainCatalogue::find_source(uint32_t dataset_index, Ti
   return found->second;
 }
 
-std::optional<TerrainLocation> TerrainCatalogue::locate_source(Coord navigation_coordinate) const {
+std::optional<TerrainLocation> TerrainCatalogue::locate_source(LatLon position) const {
   if (datasets_.empty()) {
-    const TileKey key = tile_key_at(grid_, navigation_coordinate.x, navigation_coordinate.y);
+    const Coord native = render_coordinate(position);
+    const TileKey key = tile_key_at(grid_, native.x, native.y);
     const auto source = find_source(key);
-    return source.has_value() ? std::optional<TerrainLocation>{{*source, navigation_coordinate}}
-                              : std::nullopt;
+    return source.has_value() ? std::optional<TerrainLocation>{{*source, native}} : std::nullopt;
   }
-  const std::array<Coord, 1> input = {navigation_coordinate};
+  const std::array<Coord, 1> input = {{{position.lon, position.lat}}};
   for (size_t dataset_index = 0; dataset_index < datasets_.size(); ++dataset_index) {
-    const Coord native = navigation_to_dataset_[dataset_index]->apply(input).front();
+    const Coord native = geographic_to_dataset_[dataset_index]->apply(input).front();
     const TileKey key = tile_key_at(datasets_[dataset_index].grid, native.x, native.y);
     if (const auto source = find_source(static_cast<uint32_t>(dataset_index), key)) {
       if (!covers_sample(sources_[*source], datasets_[dataset_index].grid, native))
@@ -917,20 +913,17 @@ std::optional<TerrainLocation> TerrainCatalogue::locate_source(Coord navigation_
   return std::nullopt;
 }
 
-std::optional<TerrainSampleLocation>
-TerrainCatalogue::locate_sample(Coord navigation_coordinate) const {
+std::optional<TerrainSampleLocation> TerrainCatalogue::locate_sample(LatLon position) const {
   if (datasets_.empty()) {
-    const auto *source = native_source(
-        legacy_sample_sources_,
-        tile_key_at(grid_, navigation_coordinate.x, navigation_coordinate.y)
-    );
-    return source ? std::optional<TerrainSampleLocation>{{source, navigation_coordinate}}
-                  : std::nullopt;
+    const Coord native = render_coordinate(position);
+    const auto *source =
+        native_source(legacy_sample_sources_, tile_key_at(grid_, native.x, native.y));
+    return source ? std::optional<TerrainSampleLocation>{{source, native}} : std::nullopt;
   }
-  const std::array<Coord, 1> input = {navigation_coordinate};
+  const std::array<Coord, 1> input = {{{position.lon, position.lat}}};
   for (size_t index = 0; index < datasets_.size(); ++index) {
     const auto &dataset = datasets_[index];
-    const Coord native = navigation_to_dataset_[index]->apply(input).front();
+    const Coord native = geographic_to_dataset_[index]->apply(input).front();
     const auto *source = dataset_source(dataset, tile_key_at(dataset.grid, native.x, native.y));
     if (source && covers_sample(*source, dataset.grid, native))
       return TerrainSampleLocation{source, native};
@@ -946,33 +939,18 @@ const TerrainRenderFrame &TerrainCatalogue::render_frame() const {
   return *render_frame_;
 }
 
-Coord TerrainCatalogue::render_coordinate(Coord navigation_coordinate) const {
-  if (!render_frame_.has_value() || datasets_.empty())
-    return navigation_coordinate;
-  const std::array<Coord, 1> coordinate = {navigation_coordinate};
-  return render_frame_->project(datasets_.front().epsg_code, coordinate).front();
+Coord TerrainCatalogue::render_coordinate(LatLon position) const {
+  const std::array<Coord, 1> points = {{{position.lon, position.lat}}};
+  return render_frame().project(4326U, points).front();
 }
 
-std::array<Coord, 2> TerrainCatalogue::render_basis(Coord navigation_coordinate) const {
-  if (!render_frame_.has_value() || datasets_.empty())
-    return {{{1.0, 0.0}, {0.0, 1.0}}};
-  const double step = epsg_uses_projected_metres(datasets_.front().epsg_code) ? 10.0 : 1e-4;
-  const std::array<Coord, 3> points = {
-      navigation_coordinate,
-      Coord{navigation_coordinate.x + step, navigation_coordinate.y},
-      Coord{navigation_coordinate.x, navigation_coordinate.y + step},
-  };
-  const auto rendered = render_frame_->project(datasets_.front().epsg_code, points);
-  std::array<Coord, 2> result;
-  for (size_t axis = 0; axis < result.size(); ++axis) {
-    const double dx = rendered[axis + 1U].x - rendered[0].x;
-    const double dy = rendered[axis + 1U].y - rendered[0].y;
-    const double length = std::hypot(dx, dy);
-    if (!(length > 0.0) || !std::isfinite(length))
-      throw std::runtime_error("Terrain render-frame basis is invalid");
-    result[axis] = {dx / length, dy / length};
-  }
-  return result;
+LatLon TerrainCatalogue::geographic_coordinate(Coord rendered) const {
+  const auto point = render_frame().unproject(4326U, std::span(&rendered, 1)).front();
+  return {point.y, point.x};
+}
+
+std::array<Coord, 2> TerrainCatalogue::render_basis(LatLon position) const {
+  return render_frame().basis(position);
 }
 
 } // namespace panorama

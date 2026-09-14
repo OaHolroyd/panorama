@@ -63,7 +63,7 @@ struct ViewerSettings {
   bool trace_diagnostics = true;
   bool bilinear_collisions = false;
   bool c1_normals = true;
-  ObserverLocation observer = {2621451.3, 1105565.9, 4515.0};
+  ObserverLocation observer = {{46.1012605320838, 7.71604367731172}, 4515.0};
   ImageSize image = {1600U, 900U};
   MetalFxActivation metalfx_activation = MetalFxActivation::Disabled;
   MetalFxPreset metalfx_preset = MetalFxPreset::Balanced;
@@ -91,21 +91,18 @@ struct PointInspection {
   bool hit;
   float distance;
   float elevation;
-  double easting;
-  double northing;
+  LatLon position;
   float slope_degrees;
   float aspect_degrees;
   bool map_selected;
 };
 
 struct MapCoordinate {
-  double easting;
-  double northing;
+  LatLon position;
 };
 
 struct TerrainPoint {
-  double easting;
-  double northing;
+  LatLon position;
   float elevation;
 };
 
@@ -152,6 +149,7 @@ struct PresentedFrame {
   uint64_t inspection_sequence;
   uint64_t inspection_request_token;
   ObserverLocation observer;
+  TerrainRenderFrame render_frame;
   std::optional<TerrainPoint> map_point;
   uint64_t map_point_sequence;
   uint64_t map_point_request_token;
@@ -175,6 +173,7 @@ format_local_daylight_time(CalendarDateTime date, double utcMinutes, NSTimeZone 
 [[nodiscard]] LockedPointProjection project_locked_point(
     TerrainPoint point,
     ObserverLocation observer,
+    const TerrainRenderFrame &render_frame,
     ImageSize image,
     double vertical_field_of_view,
     CameraOrientation orientation

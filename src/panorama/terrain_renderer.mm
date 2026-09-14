@@ -121,13 +121,15 @@ void write_png_outputs(const TerrainRenderOutputs &outputs, TerrainTraceSession 
             ? trace.elevations()
             : distances;
     render_and_write_png(timer, "synthetic.png", renderer, image, [&] {
+      auto appearance = outputs.synthetic_options;
+      appearance.sun_azimuth = trace.render_azimuth(appearance.sun_azimuth);
       renderer.render_synthetic(
           trace.surface_gradients(),
           distances,
           trace.ray_directions(),
           colour_values,
           outputs.synthetic_options.raytraced_shadows ? trace.shadow_visibility() : nil,
-          outputs.synthetic_options,
+          appearance,
           outputs.scalar_colour_range,
           true,
           timer

@@ -14,9 +14,9 @@ namespace {
 
 /// Reduce the prepared-file header to geometry needed throughout a session.
 [[nodiscard]] TileGeometry
-read_tile_geometry(const std::filesystem::path &path, uint32_t navigation_epsg) {
+read_tile_geometry(const std::filesystem::path &path, uint32_t input_epsg) {
   const MetalTileHeader header = read_metal_tile_header(path);
-  return {Crs::from_epsg(navigation_epsg ? navigation_epsg : header.epsg_code),
+  return {Crs::from_epsg(input_epsg ? input_epsg : header.epsg_code),
           header.maximum_elevation,
           header.cell_count,
           header.lower_left_x,
@@ -234,8 +234,8 @@ TileManager::TileManager(const RaytraceConfig &config) : state_(std::make_unique
                                         )
   );
   state.config.observer = state.catalogue->observer();
-  // Navigation remains in the first dataset's CRS even when its missing
-  // samples put the observer on a geographic fallback source.
+  // The dataset-coordinate input convenience uses the first dataset's CRS;
+  // canonical observer state remains WGS84 even on a fallback source.
   const auto &catalogue_datasets = state.catalogue->datasets();
   state.origin = std::make_unique<TileGeometry>(read_tile_geometry(
       state.catalogue->origin().path,
@@ -298,7 +298,7 @@ void TileManager::attach_gpu(id<MTLDevice> device, Timer &timer) {
 
 bool TileManager::relocate_observer(ObserverLocation observer) {
   State &state = *state_;
-  const auto location = state.catalogue->locate_source({observer.easting, observer.northing});
+  const auto location = state.catalogue->locate_source(observer.position);
   if (!location.has_value()) {
     return false;
   }
@@ -361,8 +361,8 @@ uint32_t TileManager::ensure_observer_resident(Timer &timer) {
   }
   return slot;
 }
-std::optional<float> TileManager::sample_terrain(double easting, double northing) {
-  return state_->sample_terrain(easting, northing);
+std::optional<float> TileManager::sample_terrain(LatLon position) {
+  return state_->sample_terrain(position);
 }
 void TileManager::stop() {
   if (state_ != nullptr) {

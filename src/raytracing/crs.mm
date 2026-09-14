@@ -1,13 +1,66 @@
 #include "crs.h"
 
+#include <geodesic.h>
 #include <ogr_spatialref.h>
 
 #include <cmath>
 #include <memory>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 
 namespace panorama {
+bool valid_lat_lon(LatLon p) {
+  return std::isfinite(p.lat) && std::isfinite(p.lon) && p.lat >= -90 && p.lat <= 90 &&
+         p.lon >= -180 && p.lon <= 180;
+}
+
+namespace {
+const geod_geodesic &wgs84_geodesic() {
+  static const geod_geodesic value = [] {
+    geod_geodesic result;
+    geod_init(&result, 6378137.0, 1.0 / 298.257223563);
+    return result;
+  }();
+  return value;
+}
+} // namespace
+
+Coord geographic_offset(LatLon origin, LatLon destination) {
+  if (!valid_lat_lon(origin) || !valid_lat_lon(destination))
+    throw std::invalid_argument("Invalid WGS84 position");
+  double distance, azimuth;
+  geod_inverse(
+      &wgs84_geodesic(),
+      origin.lat,
+      origin.lon,
+      destination.lat,
+      destination.lon,
+      &distance,
+      &azimuth,
+      nullptr
+  );
+  const double angle = azimuth * std::numbers::pi / 180.0;
+  return {distance * std::sin(angle), distance * std::cos(angle)};
+}
+
+LatLon offset_position(LatLon origin, double east, double north) {
+  if (!valid_lat_lon(origin) || !std::isfinite(east) || !std::isfinite(north))
+    throw std::invalid_argument("Invalid geographic movement");
+  LatLon result;
+  geod_direct(
+      &wgs84_geodesic(),
+      origin.lat,
+      origin.lon,
+      std::atan2(east, north) * 180.0 / std::numbers::pi,
+      std::hypot(east, north),
+      &result.lat,
+      &result.lon,
+      nullptr
+  );
+  return result;
+}
+
 namespace {
 
 constexpr uint32_t kWgs84Epsg = 4326;
@@ -27,8 +80,7 @@ constexpr uint32_t kWgs84Epsg = 4326;
 }
 
 [[nodiscard]] OGRSpatialReference local_aeqd_reference(LatLon anchor) {
-  if (!std::isfinite(anchor.lat) || !std::isfinite(anchor.lon) || anchor.lat < -90.0 ||
-      anchor.lat > 90.0)
+  if (!valid_lat_lon(anchor))
     throw std::invalid_argument("Azimuthal-equidistant anchor is invalid");
   OGRSpatialReference reference;
   if (reference.SetWellKnownGeogCS("WGS84") != OGRERR_NONE ||
@@ -174,6 +226,8 @@ Crs::Crs(CrsId id) : id_(id) {}
 
 Crs Crs::from_epsg(uint32_t epsg_code) {
   switch (epsg_code) {
+  case static_cast<uint32_t>(CrsId::Wgs84):
+    return Crs(CrsId::Wgs84);
   case static_cast<uint32_t>(CrsId::SwissLv95):
     return Crs(CrsId::SwissLv95);
   case static_cast<uint32_t>(CrsId::FrenchLambert93):
@@ -191,6 +245,8 @@ uint32_t Crs::epsg_code() const { return static_cast<uint32_t>(id_); }
 
 const char *Crs::name() const {
   switch (id_) {
+  case CrsId::Wgs84:
+    return "WGS84";
   case CrsId::SwissLv95:
     return "Swiss LV95";
   case CrsId::FrenchLambert93:

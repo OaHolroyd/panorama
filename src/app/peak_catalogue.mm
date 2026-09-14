@@ -64,7 +64,7 @@ namespace {
 
 } // namespace
 
-PeakCatalogue PeakCatalogue::load(const std::filesystem::path &path, const Crs &crs) {
+PeakCatalogue PeakCatalogue::load(const std::filesystem::path &path) {
   NSString *file = [NSString stringWithUTF8String:path.c_str()];
   NSError *error = nil;
   NSString *contents = [NSString stringWithContentsOfFile:file
@@ -82,8 +82,6 @@ PeakCatalogue PeakCatalogue::load(const std::filesystem::path &path, const Crs &
 
   PeakCatalogue result;
   result.peaks_.reserve(lines.count - 1);
-  std::vector<LatLon> coordinates;
-  coordinates.reserve(lines.count - 1);
   for (NSUInteger index = 1; index < lines.count; ++index) {
     NSString *line = lines[index];
     if (line.length == 0)
@@ -104,20 +102,13 @@ PeakCatalogue PeakCatalogue::load(const std::filesystem::path &path, const Crs &
       );
     if (columns[4].empty())
       throw std::runtime_error("Missing name on peak gazetteer line " + std::to_string(index + 1));
-    coordinates.push_back({latitude, longitude});
     result.peaks_.push_back(
         {static_cast<uint32_t>(result.peaks_.size()),
-         0.0,
-         0.0,
+         {latitude, longitude},
          static_cast<float>(elevation),
          static_cast<float>(prominence),
          columns[4]}
     );
-  }
-  const std::vector<Coord> projected = crs.from_lat_lon(coordinates);
-  for (size_t index = 0; index < projected.size(); ++index) {
-    result.peaks_[index].easting = projected[index].x;
-    result.peaks_[index].northing = projected[index].y;
   }
   return result;
 }

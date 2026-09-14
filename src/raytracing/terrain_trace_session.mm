@@ -37,9 +37,9 @@ void validate_configuration(const RaytraceConfig &config) {
   }
   if (datasets.size() > 1U && config.raytracer != Raytracer::MetalBvh)
     throw std::invalid_argument("Multiple terrain datasets require the Metal BVH raytracer");
-  if (!std::isfinite(config.observer.easting) || !std::isfinite(config.observer.northing) ||
-      !std::isfinite(config.observer.elevation) || !std::isfinite(config.max_distance) ||
-      config.max_distance <= 0.0F || !std::isfinite(config.lod_scale) || config.lod_scale < 0.0F) {
+  if (!valid_lat_lon(config.observer.position) || !std::isfinite(config.observer.elevation) ||
+      !std::isfinite(config.max_distance) || config.max_distance <= 0.0F ||
+      !std::isfinite(config.lod_scale) || config.lod_scale < 0.0F) {
     throw std::invalid_argument("Raytrace configuration must be finite");
   }
 }
@@ -154,6 +154,10 @@ struct TerrainTraceSession::State {
     // it can reuse the device selected by the primary tracing resources.
     tiles = std::make_unique<TileManager>(config);
     config.observer = tiles->catalogue().observer();
+    if (config.raytracer == Raytracer::Software &&
+        tiles->catalogue().render_frame().kind ==
+            TerrainRenderFrame::Kind::LocalAzimuthalEquidistant)
+      throw std::invalid_argument("Geographic terrain requires --raytracer metal-bvh");
     parameters = make_parameters(tiles->origin_geometry(), config, tiles->catalogue(), image);
 
     gpu = std::make_unique<GpuRaytraceResources>(
@@ -208,6 +212,9 @@ void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
   }
   if (state.config.raytracer == raytracer)
     return;
+  if (raytracer == Raytracer::Software && state.tiles->catalogue().render_frame().kind ==
+                                              TerrainRenderFrame::Kind::LocalAzimuthalEquidistant)
+    throw std::invalid_argument("Geographic and mixed terrain require the Metal BVH raytracer");
   if (raytracer == Raytracer::MetalBvh && !state.bvh) {
     state.bvh = std::make_unique<MetalBvhTrace>(
         *state.gpu,
@@ -225,8 +232,7 @@ void TerrainTraceSession::set_raytracer(Raytracer raytracer) {
 bool TerrainTraceSession::relocate_observer(ObserverLocation observer) {
   trace_activity::Scope activity("observer relocation");
   State &state = *state_;
-  if (!std::isfinite(observer.easting) || !std::isfinite(observer.northing) ||
-      !std::isfinite(observer.elevation)) {
+  if (!valid_lat_lon(observer.position) || !std::isfinite(observer.elevation)) {
     throw std::invalid_argument("Terrain relocation requires a finite observer");
   }
   if (!state.tiles->relocate_observer(observer)) {
@@ -535,10 +541,12 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
     return;
   }
 
-  const float direction_x = static_cast<float>(std::sin(sun_azimuth));
-  const float direction_y = static_cast<float>(std::cos(sun_azimuth));
+  const double azimuth = render_azimuth(sun_azimuth);
+  const float direction_x = static_cast<float>(std::sin(azimuth));
+  const float direction_y = static_cast<float>(std::cos(azimuth));
   const float slope = static_cast<float>(std::tan(sun_elevation));
   const TileGrid &grid = state.tiles->catalogue().grid();
+  const Coord rendered = state.tiles->catalogue().render_coordinate(state.config.observer.position);
   ShadowTraceParameters parameters = {
       state.parameters,
       {
@@ -548,8 +556,8 @@ void TerrainTraceSession::trace_shadows(double sun_azimuth, double sun_elevation
           direction_y == 0.0F ? std::numeric_limits<float>::infinity() : 1.0F / direction_y,
           slope,
       },
-      static_cast<float>(grid.origin_x - state.config.observer.easting),
-      static_cast<float>(grid.origin_y - state.config.observer.northing),
+      static_cast<float>(grid.origin_x - rendered.x),
+      static_cast<float>(grid.origin_y - rendered.y),
       static_cast<float>(grid.width),
       state.gpu->catalogue_hash_capacity(),
   };
@@ -630,15 +638,28 @@ ImageSize TerrainTraceSession::image() const { return state_->image; }
 
 Crs TerrainTraceSession::crs() const { return state_->tiles->origin_geometry().crs; }
 
+const TerrainRenderFrame &TerrainTraceSession::render_frame() const {
+  return state_->tiles->catalogue().render_frame();
+}
+LatLon TerrainTraceSession::collision_position(Coord relative) const {
+  const auto origin = render_frame().project(observer().position);
+  return render_frame().unproject(Coord{origin.x + relative.x, origin.y + relative.y});
+}
+double TerrainTraceSession::render_azimuth(double azimuth) const {
+  const auto basis = render_frame().basis(observer().position);
+  const double east = std::sin(azimuth), north = std::cos(azimuth);
+  return std::atan2(basis[0].x * east + basis[1].x * north, basis[0].y * east + basis[1].y * north);
+}
+
 ObserverLocation TerrainTraceSession::observer() const { return state_->config.observer; }
 
 const TerrainCoverage &TerrainTraceSession::terrain_coverage() const {
   return state_->tiles->catalogue().coverage();
 }
 
-std::optional<float> TerrainTraceSession::sample_terrain(double easting, double northing) {
+std::optional<float> TerrainTraceSession::sample_terrain(LatLon position) {
   trace_activity::Scope activity("full-resolution ground sampling");
-  return state_->tiles->sample_terrain(easting, northing);
+  return state_->tiles->sample_terrain(position);
 }
 
 TileManagerStatistics TerrainTraceSession::tile_statistics() const {

@@ -44,7 +44,7 @@ NSString *format_movement_speed(double metres_per_second) {
     _roamSpeed = panorama::app::kDefaultRoamSpeed;
     _cruiseSpeed = panorama::app::kDefaultCruiseSpeed;
     _aircraftAirspeed = _cruiseSpeed;
-    _roamDesiredPosition = {_observer.easting, _observer.northing};
+    _roamDesiredPosition = {_observer.position};
     _presentation = renderer->initial_presentation();
     _bilinearCollisions = renderer->initial_bilinear_collisions();
     _c1Normals = renderer->initial_c1_normals();

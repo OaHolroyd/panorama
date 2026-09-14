@@ -295,4 +295,30 @@ std::vector<TerrainCoveragePolygon> make_terrain_coverage_polygons(
   return result;
 }
 
+Coord TerrainRenderFrame::project(LatLon position) const {
+  const std::array<Coord, 1> points = {{{position.lon, position.lat}}};
+  return project(4326U, points).front();
+}
+LatLon TerrainRenderFrame::unproject(Coord position) const {
+  const auto point = unproject(4326U, std::span(&position, 1)).front();
+  return {point.y, point.x};
+}
+std::array<Coord, 2> TerrainRenderFrame::basis(LatLon position) const {
+  const auto north = offset_position(position, 0, 10);
+  const std::array<Coord, 2> points = {{{position.lon, position.lat}, {north.lon, north.lat}}};
+  const auto rendered = project(4326U, points);
+  const double dx = rendered[1].x - rendered[0].x, dy = rendered[1].y - rendered[0].y;
+  const double length = std::hypot(dx, dy);
+  if (!(length > 0) || !std::isfinite(length))
+    throw std::runtime_error("Could not establish true-north render axes");
+  return {{{dy / length, -dx / length}, {dx / length, dy / length}}};
+}
+Coord TerrainRenderFrame::offset(LatLon observer, LatLon point) const {
+  const std::array<Coord, 2> positions = {{{observer.lon, observer.lat}, {point.lon, point.lat}}};
+  const auto xy = project(4326U, positions);
+  const auto axes = basis(observer);
+  const double dx = xy[1].x - xy[0].x, dy = xy[1].y - xy[0].y;
+  return {dx * axes[0].x + dy * axes[0].y, dx * axes[1].x + dy * axes[1].y};
+}
+
 } // namespace panorama

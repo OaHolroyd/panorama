@@ -100,8 +100,7 @@ struct TerrainTileBvh::State {
     std::vector<BvhCoverageVertex> coverage_vertex_metadata;
     std::vector<BvhAffinePatch> candidate_patch_metadata;
     std::vector<BvhBounds> boxes, candidate_boxes;
-    const Coord render_observer =
-        manager.catalogue().render_coordinate({observer.easting, observer.northing});
+    const Coord render_observer = manager.catalogue().render_coordinate(observer.position);
     anchor = render_observer;
     displacement = {};
     const double k = parameters.curvature_coefficient;
@@ -119,7 +118,7 @@ struct TerrainTileBvh::State {
                     source.transform_patches.front().transform.bounds[0] - render_observer.x
                 )
               : static_cast<float>(
-                    grid.origin_x + double(source.key.column) * grid.width - observer.easting
+                    grid.origin_x + double(source.key.column) * grid.width - render_observer.x
                 );
       const float y =
           transformed
@@ -127,7 +126,7 @@ struct TerrainTileBvh::State {
                     source.transform_patches.front().transform.bounds[1] - render_observer.y
                 )
               : static_cast<float>(
-                    grid.origin_y - double(source.key.row + 1) * grid.width - observer.northing
+                    grid.origin_y - double(source.key.row + 1) * grid.width - render_observer.y
                 );
       const float width =
           transformed ? static_cast<float>(source.effective_cell_size_metres * geometry.cell_count)
@@ -513,13 +512,11 @@ bool TerrainTileBvh::prepare(
     const RaytraceParameters &parameters
 ) {
   State &state = *state_;
-  if (state.catalogue != nil && state.observer.easting == observer.easting &&
-      state.observer.northing == observer.northing &&
+  if (state.catalogue != nil && state.observer.position == observer.position &&
       state.curvature == parameters.curvature_coefficient &&
       state.maximum_distance >= parameters.max_distance)
     return false;
-  const Coord position =
-      manager.catalogue().render_coordinate({observer.easting, observer.northing});
+  const Coord position = manager.catalogue().render_coordinate(observer.position);
   if (state.catalogue != nil && state.anchored &&
       state.curvature == parameters.curvature_coefficient &&
       state.maximum_distance >= parameters.max_distance &&

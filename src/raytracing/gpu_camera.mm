@@ -93,7 +93,7 @@ void apply_render_basis(
     const TerrainCatalogue &catalogue,
     ObserverLocation observer
 ) {
-  const auto basis = catalogue.render_basis({observer.easting, observer.northing});
+  const auto basis = catalogue.render_basis(observer.position);
   if (camera.angular) {
     camera.forward[0] = checked_float(basis[1].x);
     camera.forward[1] = checked_float(basis[1].y);
@@ -218,8 +218,7 @@ GpuCamera::GpuCamera(
     s.anchor_x = grid.origin_x + double(origin.column) * grid.width;
     s.anchor_y = grid.origin_y - (double(origin.row) + 1) * grid.width;
   } else {
-    const Coord rendered =
-        catalogue.render_coordinate({catalogue.observer().easting, catalogue.observer().northing});
+    const Coord rendered = catalogue.render_coordinate(catalogue.observer().position);
     s.anchor_x = rendered.x;
     s.anchor_y = rendered.y;
   }
@@ -278,16 +277,14 @@ void GpuCamera::prepare(
   apply_render_basis(s.camera, tiles.catalogue(), observer);
   const bool footprint_changed = !s.footprint_valid || !same_projection(camera, s.cached);
   const bool plan_changed = footprint_changed || !s.plan_valid || scale != s.cached_scale ||
-                            observer.easting != s.cached_observer.easting ||
-                            observer.northing != s.cached_observer.northing;
+                            observer.position != s.cached_observer.position;
   if (plan_changed) {
     // A failed preparation must never leave a stale cache key usable.
     s.plan_valid = false;
     if (footprint_changed)
       s.footprint_valid = false;
-    Coord rendered{observer.easting, observer.northing};
-    if (!tiles.catalogue().datasets().empty())
-      rendered = tiles.catalogue().render_coordinate(rendered);
+    Coord rendered = tiles.catalogue().render_coordinate(observer.position);
+
     s.settings.observer_x = checked_float(rendered.x - s.anchor_x);
     s.settings.observer_y = checked_float(rendered.y - s.anchor_y);
     s.settings.scale = scale;

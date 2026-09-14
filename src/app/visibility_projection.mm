@@ -2,21 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <memory>
 #include <numbers>
-#include <ogr_spatialref.h>
 #include <stdexcept>
 
 namespace panorama::app {
 namespace {
 constexpr double world = 268435456.0;
 constexpr double circumference = 2.0 * std::numbers::pi * 6378137.0;
-struct DestroyTransform {
-  void operator()(OGRCoordinateTransformation *transform) const {
-    OCTDestroyCoordinateTransformation(transform);
-  }
-};
-using Transform = std::unique_ptr<OGRCoordinateTransformation, DestroyTransform>;
 } // namespace
 
 VisibilityProjectionGrid make_visibility_projection_grid(
@@ -24,16 +16,21 @@ VisibilityProjectionGrid make_visibility_projection_grid(
     uint32_t width,
     uint32_t height
 ) {
-  OGRSpatialReference terrain, mercator;
-  if (terrain.importFromEPSG(int(region.epsg)) != OGRERR_NONE ||
-      mercator.importFromEPSG(3857) != OGRERR_NONE)
-    throw std::runtime_error("Could not initialise minimap projection");
-  terrain.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
-  mercator.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
-  Transform forward(OGRCreateCoordinateTransformation(&terrain, &mercator));
-  Transform inverse(OGRCreateCoordinateTransformation(&mercator, &terrain));
-  if (!forward || !inverse)
-    throw std::runtime_error("Could not create minimap projection");
+  auto inverse = region.frame.projector(3857U);
+  auto forward = region.frame.unprojector(3857U);
+  const Coord observer = region.frame.project(region.observer);
+  const auto transform =
+      [](const CoordinateTransform &projection, std::vector<double> &x, std::vector<double> &y) {
+        std::vector<Coord> input;
+        input.reserve(x.size());
+        for (size_t i = 0; i < x.size(); ++i)
+          input.push_back({x[i], y[i]});
+        const auto output = projection.apply(input);
+        for (size_t i = 0; i < x.size(); ++i) {
+          x[i] = output[i].x;
+          y[i] = output[i].y;
+        }
+      };
 
   // Sample the displayed rectangle in one CRS call. Pad its terrain-space
   // envelope for curved edges, and restrict it to the trace's possible hits.
@@ -44,11 +41,12 @@ VisibilityProjectionGrid make_visibility_projection_grid(
       y.push_back((0.5 - (region.y + region.height * row / 8.0) / world) * circumference);
     }
   }
-  double left = region.observer_easting - region.max_distance;
-  double right = region.observer_easting + region.max_distance;
-  double bottom = region.observer_northing - region.max_distance;
-  double top = region.observer_northing + region.max_distance;
-  if (inverse->Transform(int(x.size()), x.data(), y.data())) {
+  double left = observer.x - region.max_distance;
+  double right = observer.x + region.max_distance;
+  double bottom = observer.y - region.max_distance;
+  double top = observer.y + region.max_distance;
+  try {
+    transform(inverse, x, y);
     const auto [xmin, xmax] = std::minmax_element(x.begin(), x.end());
     const auto [ymin, ymax] = std::minmax_element(y.begin(), y.end());
     const double dx = (*xmax - *xmin) * 0.05 + 1, dy = (*ymax - *ymin) * 0.05 + 1;
@@ -56,6 +54,8 @@ VisibilityProjectionGrid make_visibility_projection_grid(
     right = std::min(right, *xmax + dx);
     bottom = std::max(bottom, *ymin - dy);
     top = std::min(top, *ymax + dy);
+  } catch (const std::runtime_error &) {
+    // A map spanning the opposite hemisphere cannot bound this local frame.
   }
   if (right <= left || top <= bottom) {
     // The map is outside the observer's trace radius. A grid outside that
@@ -80,10 +80,11 @@ VisibilityProjectionGrid make_visibility_projection_grid(
         y.push_back(bottom + (top - bottom) * row / (fine - 1));
       }
     }
-    if (!forward->Transform(int(x.size()), x.data(), y.data()))
-      throw std::runtime_error("Could not project minimap visibility grid");
+    transform(forward, x, y);
     for (size_t i = 0; i < x.size(); ++i) {
-      x[i] = ((x[i] / circumference + 0.5) * world - region.x) * width / region.width;
+      double map_x = (x[i] / circumference + 0.5) * world;
+      map_x += std::round((region.x + 0.5 * region.width - map_x) / world) * world;
+      x[i] = (map_x - region.x) * width / region.width;
       y[i] = ((0.5 - y[i] / circumference) * world - region.y) * height / region.height;
     }
     double error = 0;
@@ -109,8 +110,8 @@ VisibilityProjectionGrid make_visibility_projection_grid(
       continue;
     if (!std::isfinite(error) || error > 0.5)
       throw std::runtime_error("Minimap projection exceeds half-pixel error budget");
-    VisibilityProjectionGrid grid = {left - region.observer_easting,
-                                     bottom - region.observer_northing,
+    VisibilityProjectionGrid grid = {left - observer.x,
+                                     bottom - observer.y,
                                      (right - left) / cells,
                                      (top - bottom) / cells,
                                      cells + 1,

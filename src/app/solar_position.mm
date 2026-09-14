@@ -11,7 +11,6 @@ namespace {
 
 constexpr double kDegreesToRadians = std::numbers::pi / 180.0;
 constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
-constexpr double kEarthRadiusMetres = 6'378'137.0;
 
 [[nodiscard]] bool leap_year(int year) {
   return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
@@ -108,8 +107,7 @@ std::optional<CalendarDateTime> parse_date_time(std::string_view date, std::stri
   return CalendarDateTime{*year, *month, *day, *hour, *minute};
 }
 
-SolarPosition solar_position(const Crs &crs, Coord observer, CalendarDateTime utc) {
-  const LatLon geographic = crs.to_lat_lon(observer);
+SolarPosition solar_position(LatLon geographic, CalendarDateTime utc) {
   const double latitude = geographic.lat * kDegreesToRadians;
   const double longitude = geographic.lon;
   const SolarEphemeris ephemeris = solar_ephemeris(utc);
@@ -136,32 +134,10 @@ SolarPosition solar_position(const Crs &crs, Coord observer, CalendarDateTime ut
       180.0
   );
 
-  // Astronomical azimuth is relative to true north. Project short true-east
-  // and true-north basis vectors through the terrain CRS so grid convergence
-  // is included in the direction sent to the renderer.
-  constexpr double basis_metres = 100.0;
-  const double latitude_step = basis_metres / kEarthRadiusMetres * kRadiansToDegrees;
-  const double longitude_step = latitude_step / std::cos(latitude);
-  const Coord projected_east = crs.from_lat_lon({geographic.lat, geographic.lon + longitude_step});
-  const Coord projected_north = crs.from_lat_lon({geographic.lat + latitude_step, geographic.lon});
-  const double azimuth = true_azimuth * kDegreesToRadians;
-  const double projected_x = (projected_east.x - observer.x) * std::sin(azimuth) +
-                             (projected_north.x - observer.x) * std::cos(azimuth);
-  const double projected_y = (projected_east.y - observer.y) * std::sin(azimuth) +
-                             (projected_north.y - observer.y) * std::cos(azimuth);
-  if (!std::isfinite(projected_x) || !std::isfinite(projected_y) ||
-      std::hypot(projected_x, projected_y) == 0.0) {
-    throw std::runtime_error("Could not project the astronomical sun direction");
-  }
-  double grid_azimuth = std::atan2(projected_x, projected_y);
-  if (grid_azimuth < 0.0) {
-    grid_azimuth += 2.0 * std::numbers::pi;
-  }
-  return {grid_azimuth, elevation};
+  return {true_azimuth * kDegreesToRadians, elevation};
 }
 
-DaylightTimes daylight_times(const Crs &crs, Coord observer, CalendarDateTime date) {
-  const LatLon geographic = crs.to_lat_lon(observer);
+DaylightTimes daylight_times(LatLon geographic, CalendarDateTime date) {
   const double latitude = geographic.lat * kDegreesToRadians;
   date.hour = 12;
   date.minute = 0;

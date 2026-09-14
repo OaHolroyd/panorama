@@ -160,6 +160,7 @@
     return;
   if (diagnostics::enabled)
     diagnostics::display.revision = frame.revision;
+  _renderFrame = frame.render_frame;
   diagnostics::display.mark("ui-update");
 
   if (frame.target_visibility_sequence != _displayedTargetVisibilitySequence) {
@@ -202,7 +203,7 @@
         }
       } else if (frame.roam_result->request_token == _roamRequestToken) {
         [self clearRoamKeys];
-        _roamDesiredPosition = {frame.observer.easting, frame.observer.northing};
+        _roamDesiredPosition = {frame.observer.position};
         const bool terrainCollision = std::isfinite(frame.roam_result->ground_elevation);
         if ([self isCruisingEnabled] && !_viewerPaused) {
           [self pauseCruiseForTerrainCollision:terrainCollision];
@@ -248,18 +249,16 @@
           }
         }
       } else {
-        const double distance = std::hypot(
-            frame.map_point->easting - _observer.easting,
-            frame.map_point->northing - _observer.northing
-        );
+        const auto offset =
+            frame.render_frame.offset(_observer.position, frame.map_point->position);
+        const double distance = std::hypot(offset.x, offset.y);
         panorama::app::PointInspection point = {
             .pixel = {},
             .revision = frame.revision,
             .hit = true,
             .distance = static_cast<float>(distance),
             .elevation = frame.map_point->elevation,
-            .easting = frame.map_point->easting,
-            .northing = frame.map_point->northing,
+            .position = frame.map_point->position,
             .slope_degrees = 0.0F,
             .aspect_degrees = 0.0F,
             .map_selected = true,
@@ -300,8 +299,7 @@
         _lockedPoint = frame.inspection;
         [self updatePointInfo:frame.inspection];
         const panorama::app::TerrainPoint target = {
-            frame.inspection->easting,
-            frame.inspection->northing,
+            frame.inspection->position,
             frame.inspection->elevation,
         };
         [self requestTargetVisibilityForPoint:target];
@@ -327,24 +325,22 @@
   } else if (frame.revision != 0U && frame.revision != _displayedRevision) {
     _window.titleVisibility = NSWindowTitleHidden;
     _displayedRevision = frame.revision;
-    const bool observerPositionMoved = frame.observer.easting != _observer.easting ||
-                                       frame.observer.northing != _observer.northing;
+    const bool observerPositionMoved = frame.observer.position.lon != _observer.position.lon ||
+                                       frame.observer.position.lat != _observer.position.lat;
     const bool observerMoved =
         observerPositionMoved || frame.observer.elevation != _observer.elevation;
     _observer = frame.observer;
     if (observerMoved) {
       if (_viewerPaused || (![self isCruisingEnabled] && ![self hasPressedRoamKey])) {
-        _roamDesiredPosition = {_observer.easting, _observer.northing};
+        _roamDesiredPosition = {_observer.position};
       }
-      [_miniMapPanel setObserverEasting:_observer.easting northing:_observer.northing];
+      [_miniMapPanel setObserverLatitude:_observer.position.lat longitude:_observer.position.lon];
       if (acceptedRoamMove) {
         [_miniMapPanel centerOnObserver];
       }
       if (_pointInspectionLocked && _lockedPoint.has_value()) {
-        _lockedPoint->distance = static_cast<float>(std::hypot(
-            _lockedPoint->easting - _observer.easting,
-            _lockedPoint->northing - _observer.northing
-        ));
+        const auto offset = frame.render_frame.offset(_observer.position, _lockedPoint->position);
+        _lockedPoint->distance = static_cast<float>(std::hypot(offset.x, offset.y));
         [self updatePointInfo:_lockedPoint];
       } else {
         [self updatePointInfo:std::nullopt];
@@ -366,10 +362,13 @@
     [self updateLockedPointIndicatorWithOrientation:frame.orientation
                                 verticalFieldOfView:frame.vertical_field_of_view
                                               image:frame.output_image];
+    [_miniMapPanel setVisibilityPoints:frame.visibility_points
+                                 image:frame.image
+                           renderFrame:frame.render_frame
+                              observer:frame.observer.position];
     [_miniMapPanel setCameraOrientation:frame.orientation
                     verticalFieldOfView:frame.vertical_field_of_view
                                   image:frame.output_image];
-    [_miniMapPanel setVisibilityPoints:frame.visibility_points image:frame.image];
     [self updateMiniMapTelemetry];
     if (_metalfxStatusLabel != nil) {
       _metalfxStatusLabel.stringValue =
