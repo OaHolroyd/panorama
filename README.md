@@ -1,448 +1,101 @@
 # Panorama
 
-Panorama is a GPU-accelerated terrain ray tracer and renderer for macOS. It
-turns digital terrain model (DTM) data into panoramic distance and height maps,
-surface-normal diagnostics, and shaded terrain images. The tracing and image
-presentation run on the GPU, making it practical to generate large panoramas
-automatically or explore the terrain interactively.
+Panorama is a GPU-accelerated terrain renderer for macOS. It turns digital
+terrain models into shaded panoramas, distance maps, and elevation maps. Explore
+terrain in the interactive viewer, with a minimap, location search, peak labels,
+and astronomical lighting, or render PNGs from the command line.
 
-## Executables
+This project is inspired by Jonathan de Ferranti's original [panoramas](https://viewfinderpanoramas.org/panoramas.html).
 
-Building the project produces three executables:
+## Build
 
-- `panorama-tile-gen` prepares aligned DTM GeoTIFF, raw SRTM HGT, and Arc/Info
-  ASC inputs for tracing. ASC files may be loose or retained in ZIP archives.
-  It writes compact uint16 Metal tiles with optional compression for GPU loading.
-- `panorama` is the batch renderer. It traces an angular panorama or a pinhole
-  camera view and writes diagnostic PNGs and, optionally, a shaded synthetic
-  terrain image.
-- `panorama-app` is the interactive viewer. It retains terrain and GPU state
-  while the observer looks around, changes rendering settings, or interacts
-  with the minimap.
-
-## Getting started
-
-Install Clang/Xcode command-line tools, Metal, GDAL, PROJ, `pkg-config`, and
-`clang-format`, then build all three programs:
+Requires macOS 26 or later, Xcode with the Metal shader toolchain, and GDAL,
+PROJ, and `pkg-config`. After cloning the repository, install the dependencies
+and build:
 
 ```sh
-make
+brew install gdal proj pkg-config
+make -j
 ```
 
-### Download terrain data
+This produces `panorama-app` (interactive viewer), `panorama` (batch renderer),
+and `panorama-tile-gen` (terrain preparation).
 
-For Switzerland, download the free [swissALTI3D dataset](https://www.swisstopo.admin.ch/en/height-model-swissalti3d)
-from swisstopo. Select the 2 m, Cloud Optimized GeoTIFF (COG) product in the
-LV95/LN02 coordinate system and extract the required 1 km tiles into one source
-directory, for example `downloads/swissalti3d`. A 0.5 m product is also available but at anything beyond the nearest detail this resolution is excessive so the 2 m version is recommended.
+## Prepare terrain
 
-For Great Britain, download the free [OS Terrain 50 grid](https://osdatahub.os.uk/downloads/open/Terrain50)
-from the Ordnance Survey Data Hub. Terrain 50 has fairly coarse 50 m spacing;
-the more detailed 5 m OS Terrain 5 product is paid. The downloaded Terrain 50
-ZIP files can be placed below one input directory and passed directly to
-`panorama-tile-gen`, which reads each contained `.asc` with its `.prj`, `.gml`,
-and GDAL sidecars without extracting the archive. Extracted ASC packages are
-also supported, provided their sidecars remain beside the raster.
+Download elevation data, for example
+[swissALTI3D](https://www.swisstopo.admin.ch/en/height-model-swissalti3d)
+(2 m GeoTIFF, LV95/LN02) or
+[OS Terrain 50](https://osdatahub.os.uk/downloads/open/Terrain50).
+The generator accepts GeoTIFF, SRTM `.hgt`, and Arc/Info `.asc` files, including
+ASC packages inside ZIP archives. Keep ASC sidecars beside their rasters; ZIPs
+can be used directly.
 
-All input rasters supplied to one tile-generation run must use the same
-projected or geographic CRS, resolution, pixel registration, and aligned sample
-grid. Tile generation rechunks the data without reprojecting or resampling it.
-
-For SRTM, place the raw `.hgt` files below one input directory; nested
-directories are supported. The filename supplies each tile's one-degree WGS 84
-bounds, while its 3601- or 1201-sample side selects one- or three-arcsecond
-spacing. HGT elevations are decoded as signed, big-endian 16-bit metres and the
-standard `-32768` void value is treated as no-data. HGT samples below -1000 m
-are also treated as no-data, with a warning: this land-elevation sanity check
-catches undeclared void values and severely negative interpolation artifacts.
-These samples remain coverage holes in the generated tiles; valid negative
-elevations and sea-level zero are retained. Native geographic SRTM tiles
-can be combined with projected terrain through the Metal BVH raytracer.
-
-### Prepare tracing tiles
-
-The generator writes uint16 Metal tiles with quantized decimetre elevations.
-Uncompressed tiles provide a compact, fast-loading representation. Existing
-Float32 `.ptile` files must be regenerated from their source rasters. Generate
-the tiles with:
+Place the source files under an input directory and generate tracing tiles:
 
 ```sh
 ./panorama-tile-gen \
-  --input downloads/swissalti3d \
-  --output data/swissalti3d-2m-metal \
-  --compression none
+  --input downloads/terrain \
+  --output data/terrain
 ```
 
-Use the directory containing the Terrain 50 ZIP or extracted ASC packages as
-the input directory to prepare OS data in the same way. Run
-`./panorama-tile-gen --help` for chunk-size, grid-origin, compression, and
-overwrite options.
+Each generation run requires inputs with the same coordinate system,
+resolution, pixel registration, and aligned sample grid; it does not reproject
+or resample them.
+The output contains compact `.ptile` terrain tiles and a coverage manifest.
 
-Observer inputs use WGS84 decimal degrees: `--latitude`, `--longitude`, and
-`--elevation` in metres, independent of which datasets are loaded or their order.
-For example, `--latitude 43.1729 --longitude 16.4412 --elevation 45` selects Hvar.
-Headings and sun azimuths are clockwise from true north. Movement uses metres on
-the WGS84 ellipsoid; the renderer retains local metric coordinates and each
-dataset's native grid. Elevation datums and per-dataset vertical offsets are
-unchanged. Existing ptiles do not need regeneration.
+## Run
 
-Uint16 Metal tiles remain quantized in the GPU atlas by default;
-`--discard-quantized` expands them to Float32 during loading.
-
-The resulting directory can be opened interactively:
+Open the prepared terrain in the viewer:
 
 ```sh
-./panorama-app --tile-dir data/swissalti3d-2m-metal
+./panorama-app --tile-dir data/terrain
 ```
 
-or rendered non-interactively:
+Or render a shaded image and diagnostic PNGs into the current directory:
 
 ```sh
-./panorama \
-  --tile-dir data/swissalti3d-2m-metal \
+./panorama --tile-dir data/terrain \
+  --latitude 46.1 --longitude 7.7 --elevation 4500 \
   --synthetic-output
 ```
 
-## Interactive viewer
+Choose an observer within your terrain coverage. Latitude and longitude use
+WGS 84 decimal degrees; elevation is in metres above sea level. Run any of the
+three programs with `--help` for options.
 
-The viewer and CLI generate ray directions/slopes and select terrain LOD on
-the GPU, including angular panoramas and Brown–Conrady camera distortion. Pixel footprint and LOD plans are cached across camera rotations;
-movement, zoom, resolution or LOD changes update the relevant GPU plan. The CPU
-receives per-source LOD decisions for loading and BVH preparation. Missing terrain
-and shadows still finish before a frame is published; the viewer displays only
-complete frames.
+### Multiple datasets
 
-Use `./panorama-app --trace-diagnostics` to log frame wall latency, GPU producer
-time, submission count, and whether streaming was needed. Resident frames encode
-primary tracing, shadows, colouring and (when the minimap is visible) collision
-point projection into one command.
-GPU producer time excludes synchronous BVH preparation and streaming work;
-wall latency includes them. See [the BVH performance investigation](todo/bvh-performance-investigation.md)
-for measurements, cache guidance and a repeatable camera benchmark.
-`Camera preparation` lines separately report GPU LOD-plan wall/device time and
-cumulative plan/footprint updates. Ray generation is included in the producer's
-GPU time on the resident path. Plan preparation is included in frame wall time.
-
-The Camera inspector exposes MetalFX activation (`Disabled`, `Pan/move only`,
-or `Always`) and an independent preset (`Off`, `Quality`, `Balanced`, or
-`Performance`). The resolution control selects rendered pixels per logical
-window point and displays the resulting viewer image size. Native copies the
-current screen's backing scale (normally 2 px/pt on Retina). Quality, Balanced
-and Performance trace at 75%, 50% and 33% of that viewer size respectively,
-then spatially upscale into a private texture before presentation.
-Pan/move only returns to a native trace 200 ms after interaction stops, including
-panning, zoom, roaming and cruise movement.
-Paused movement settles back to native resolution. The default is Disabled with
-Balanced remembered; activation and preset changes persist across launches.
-Devices without MetalFX keep rendering natively and show that state in the
-inspector. The drawable follows live window resizing; the presentation
-pass stretches the last completed frame while rendering retains its current
-resource size. When resizing ends, the viewer calculates the final image size
-from the settled logical size and selected density, then renders one correctly
-sized frame. Reduced images use the GPU ray-generation and LOD planner, retain
-the configured field of view after resolution rounding, and share the BVH shadow
-terrain cache. Inspection and minimap visibility still use completed trace data.
-Scaler configuration failure falls back to a native trace.
-
-For intermittent viewer stalls, capture `./panorama-app --trace-diagnostics >
-diagnostics.log 2>&1` (with your usual options). Frame lines include elapsed
-timestamps and cumulative BVH cache counts. An independent monitor prints
-`Health` lines every second, including process footprint, Metal allocations,
-thermal state, and the current worker/display/minimap stage and its age. These
-continue even while the render worker or UI thread is blocked. Submission,
-completion, presentation, stale-frame rejection and missing-drawable counts are
-cumulative. On the display path, `refreshed` counts snapshots replaced with newer
-frames after drawable acquisition; `stale` counts resolution mismatches rejected
-before encoding.
-`Frame shadows` reports newly cached shadow casters, BVH repair passes, their GPU
-time and capacity fallbacks. Warm shadow views should need no repair or terrain I/O.
-`Frame phases` separates preparation, primary/shadow streaming repair and producer
-waits. `Frame work` reports per-frame BVH builds/evictions, scene size, streaming
-passes and terrain I/O. Its detail GPU time covers synchronous traversal;
-resident producer GPU time remains on the main `Frame` line. Cache hits count
-streaming tile lookups, not individual GPU accesses. `Health` also samples the
-innermost terrain stage, and `Slow stage` records inclusive wall durations over
-100 ms (nested durations overlap). This instrumentation is enabled only by
-`--trace-diagnostics`, apart from the inexpensive per-frame phase timers.
-Display revisions distinguish new camera images from repeated
-presentations. `idle` means that path is outside its instrumented callback, not
-necessarily that the whole UI is responsive. Keep capturing for about ten seconds
-after the slowdown begins before closing the app.
-
-Primary scene repair retains completed pixels and compacts unresolved rays into
-a GPU work list. Newly loaded tiles retry only that list, retaining the previous
-closest-hit bound. `Frame work` reports repair passes/rays and generated mipmaps.
-BVH admission loads vertices and builds acceleration structures without generating
-maximum mipmaps. The software renderer and software shadow fallback generate any
-missing mipmaps on demand, reusing them until their atlas slot is overwritten.
-
-The minimap retains the camera cone and visible-terrain coverage. Coverage uses a
-compute-generated bitmap displayed by MapKit, with no separate transparent Metal
-view. Map panning and zooming reuse the latest collision snapshot. Updates are
-bounded to one active job and one replaceable pending job; hiding the map stops
-new collision projection and mask work, drops pending results and releases the
-visibility buffers once active work drains. Reopening requests a fresh trace even
-when the camera is stationary.
-
-With diagnostics enabled, `Minimap mask` reports worker time (including CRS-grid
-preparation and image creation) and GPU time. `Minimap publish` reports latency
-from requesting the bitmap to handing it to MapKit; this excludes MapKit's own
-subsequent drawing/composition. In the minimap `Health` line, `refreshed` counts
-collision snapshot encodes, `submitted/completed` counts mask commands,
-`presented` counts image publications, and `stale` counts cancelled generations.
-These should stop increasing after hiding the map and draining active work.
-
-The BVH backend automatically reuses a resident scene hierarchy to trace across
-cached tiles in one GPU pass. Uncached candidates fall back to bounded streaming.
-For the default full-detail Swiss view, use `--bvh-cache-mib 2048` to keep its
-working set resident, or `--lod-scale 1` to fit coarser distant terrain within
-the default cache. Repeated views then avoid per-tile submissions and CPU ray
-grouping; cold views and cache misses still incur loading/building work.
-
-The viewer defaults to the `metal-bvh` terrain backend and LOD scale `1.5` to
-reduce distant-terrain cache pressure. Use `--lod-scale 0` for full detail.
-In Viewer Settings →
-Terrain, the Raytracer selector switches between Mipmap and BVH and redraws the
-current view. The Raytracer menu provides the same choices. Mipmap uses the
-`software` backend; both executables also accept
-`--raytracer software|metal-bvh`, `--bvh-block-cells N` (default `4`), and
-`--bvh-cache-mib N` (default `512`). The batch
-renderer keeps `software` as its default. For example:
+You can combine datasets with different coordinate systems and resolutions.
+Prepare each separately using matching tile-size, LOD, and compression settings,
+then repeat `--terrain` in priority order. For example, combine detailed
+swissALTI3D coverage with SRTM `.hgt` data for the surrounding region:
 
 ```sh
-./panorama --raytracer metal-bvh --bvh-cache-mib 512 \
-  --max-distance 600000 --lod-scale 0 --synthetic-output
+./panorama-tile-gen --input downloads/swissalti3d --output data/swissalti3d --compression none
+./panorama-tile-gen --input downloads/srtm --output data/srtm --compression none
+./panorama-app --terrain data/swissalti3d --terrain data/srtm
 ```
 
-Both raytracers share a session-owned inter-tile BVH on devices supporting
-Metal ray tracing. It uses conservative manifest elevation bounds to select
-candidate tiles; Mipmap then traverses each selected tile's maximum hierarchy,
-while BVH uses its detailed surface acceleration. The shared catalogue survives
-camera turns, image resizing, and backend switches, and rebuilds after XY or LOD
-changes. Mipmap retains grid selection on devices without Metal ray-tracing
-support. Rays cross coverage gaps as empty space. Sharing the catalogue alone did not
-improve Mipmap timings in the tested M2 view; performance depends on the camera
-and device.
+Swiss terrain takes priority; SRTM fills coverage gaps and extends the view
+beyond it. The batch renderer also accepts repeated `--terrain` options.
 
-Metal BVH streams full-resolution tiles on demand; LOD is optional. Detailed tile
-BVHs and their immutable vertices are cached by tile and LOD. Rays retain their
-progress across batches, including when a frame's terrain exceeds the cache. Tiles are scheduled in outward grid shells to avoid
-rebuilding the same tile for successive groups of rays within a frame. Streaming
-selection and CPU grouping use only unfinished rays, preserving completed pixels
-when a sparse remainder needs more terrain.
+### Peak labelling
 
-Primary repair requests missing terrain before proving coverage continuity to a
-provisional height-discontinuity hit. Unverified steps cannot shorten later rays;
-completed hits retain the same gap checks. Coverage, ownership and blocker lists
-use nested XY bounds to skip unreachable polygons while preserving their order
-and exact boundary tests. Tile bounds generation and BVH construction share one
-GPU submission; compaction still waits for the resulting size.
+Optional peak search and labels use a UTF-8 CSV with the header
+`Lat,Lon,Elevation,Prom,Name`. Put it at `data/gazetteers/peaks.csv` or pass
+`--peak-gazetteer PATH` to the viewer. Terrain and gazetteer data are ignored by
+Git. Apple Maps search and observer time-zone lookup require internet access.
 
-`--bvh-cache-mib` bounds the requested Metal storage for detailed BVHs, owned
-vertices, block metadata, bounds, and peak build/compaction workspace. It is
-**additional to** `--tile-cache-mib`; ray/output buffers, the small catalogue
-BVH, batch instance structures (at most 64 tiles), and driver allocation overhead
-are separate. A cache must fit at least one tile plus its build workspace;
-otherwise the error reports the required bytes. Eviction occurs only after GPU
-work completes, discarding obsolete LODs first and then the least recently used
-tiles. Primary hits and shadow occluders refresh usage; repair protects these
-tiles and newly admitted terrain while allowing unrelated cached tiles to leave.
-Statistics report resident bytes, peak reservation, builds,
-cache hits, and evictions. A small cache increases construction costs, particularly
-between viewer frames.
+## Development
 
-Detailed bounds use a fixed tile-centred curvature anchor. Metal instance
-transforms apply XY translation and Z shear for the current observer, preserving
-horizontal ray distance without rebuilding the cached terrain. Observer movement
-updates the small catalogue and batch instance hierarchies; LOD changes select
-separate cache entries. GPU traversal, tile loading/building, and instance setup
-are reported separately beneath inclusive `BVH streaming trace` time.
-Actual speed and compaction savings depend on the GPU. Devices without Metal
-ray-tracing support can use the software backend. The viewer traces shadows
-against the resident BVH scene. Missing shadow casters are requested by the GPU,
-loaded into the ordinary detailed BVH cache at the selected LOD, and retained for
-later frames. Shadow repair pins the current scene and its new casters, with
-exact software streaming as a fallback if they cannot fit within the cache budget.
-It repairs incomplete primary or shadow results before publishing the image.
-The batch renderer retains the software shadow traversal.
+See [src/README.md](src/README.md) for the source architecture. Build with
+`make DEBUG=1`; run `make check-geographic check-search` for core checks or
+`make check-bvh check-camera` for GPU tests.
 
-For a headless shadow-cache check with the viewer's 600 km range and 1.5 LOD,
-run `obj/release/metal-bvh-test --benchmark-camera TILE_DIR gpu-shadows`.
-This logs caster loads, repair passes and terrain I/O through warm pans, movement
-and zoom. `make check-bvh` also checks shadow reuse and bounded-cache fallback
-against software visibility, using retained/expanded uint16 terrain and both collision modes.
-
-`make check-bvh` runs Metal API validation and software/BVH comparisons on
-generated terrain, including retained and expanded uint16, directories without manifests,
-partial blocks, coverage gaps, range clipping, resizing, relocation, backend
-switching, cold and resident shadows, producer fallback, and forced cache eviction.
-`make check-camera` checks projection/reprojection, angular pixel centres, inverse
-lens distortion, LOD bounds and footprint decisions,
-checks projection-cache reuse, and exercises complete GPU-camera producers through
-streaming repair, resizing, relocation, shadows, and backend changes.
-For a headless 1600×900 benchmark including GPU ray preparation, LOD and complete
-rendering (without shadows or minimap), run:
+To enable automatic source formatting on commit:
 
 ```sh
-obj/release/metal-bvh-test --benchmark-camera data/swissalti3d-10-level-0-metal-u16-none-lod-point gpu
-```
-
-`make check-minimap` compares compute coverage with the former point rasterizer
-and a CPU reference under Metal validation. It checks invalid hits, duplicate
-opacity, backing dimensions, image lifetime, horizontal-distance reconstruction,
-and projection accuracy in all three supported terrain CRSs.
-`make check-metalfx` verifies activation/preset combinations, rounded camera
-calibration, inspection coordinates and scaler output lifetime. Where supported,
-it also runs the complete GPU ray/LOD, BVH terrain/shadow and MetalFX producer
-under Metal validation, comparing with software terrain rendering through native
-and reduced resolutions, observer movement, repair and appearance-only frames.
-
-`make check-manifest` validates manifest versions, bounds across all LODs,
-raw/compressed tile scans, and generator upgrades of existing version-1 manifests
-without rewriting tiles.
-The test executable also accepts a Swiss prepared-tile directory, optional range
-in metres (default 21000), and BVH cache in MiB (default 512):
-
-```sh
-obj/release/metal-bvh-test data/swissalti3d-10-level-0-metal-u16-none-lod-point 600000 64
-```
-
-The real-terrain check requires identical hit masks and bounded distance and
-elevation errors. Patch-local normals can differ at the existing collision
-solver's cell-edge tolerance; away from those edges, the comparison allows only
-half-precision rounding. BVH step diagnostics count procedural candidates;
-evaluation diagnostics count precise cell tests.
-
-`panorama-tile-gen` writes version-5 uint16 tiles. Encoded zero denotes a missing
-sample; codes 1–65535 represent valid heights, including actual zero and negative
-elevations. The decimetre lattice is unchanged, with a maximum per-LOD height
-span of 6553.4 m. A terrain cell is usable only when all four corner samples are
-valid, for both triangle and bilinear interpolation.
-
-Usable-cell rectangles are stored after each tile's LOD table and in its
-version-3 `panorama-terrain-manifest.bin`. The catalogue reads this metadata
-without loading heights, allowing later `--terrain` sources to fill missing
-coverage in earlier sources. Cells crossing a priority boundary remain
-candidates; priority is checked at the actual collision position. Partial tiles
-stay at native resolution, and missing neighbours are excluded from normal
-reconstruction. Primary and shadow rays cross gaps in the combined coverage as
-empty space, continuing to known terrain beyond them up to the configured range.
-Known terrain that is not resident still loads before its visibility is resolved.
-
-Manifest elevation bounds enclose all stored LODs and ignore missing samples.
-Re-running generation without `--overwrite` repairs absent or older manifests
-from existing tiles. Legacy version-4 uint16 files remain readable with their
-original all-codes-valid interpretation. Recovering coverage from their padded
-zeros requires regenerating them from the original rasters with `--overwrite`
-or into a new directory; a manifest upgrade alone cannot recover that mask.
-
-Build the project, then launch the interactive viewer with:
-
-```sh
-make
-./panorama-app --tile-dir data/swissalti3d-2m-metal
-```
-
-Drag with the mouse or use the arrow/WASD keys to change heading and pitch;
-scroll to zoom. The trailing tabbed inspector separates viewer controls from
-observer positioning. The Viewer tab controls resolution, lighting,
-distance/elevation colourmaps and scaling, and optional multiscale feature
-outlines.
-
-The Movement tab can switch from this Browse behaviour to
-keyboard Roam mode. In Roam mode, WASD moves relative to the current heading;
-turning can use either the arrow keys or pointer motion over the panorama.
-Mouse turning replaces click-and-drag rotation while selected and has its own
-sensitivity control. Movement can maintain either a fixed height above terrain
-or an absolute altitude. Speed and the maximum observer-update rate are
-configurable; movement requests are coalesced when terrain rendering completes
-more slowly than the selected rate. Press Space to pause navigation and free
-the pointer for other controls; a visible badge remains until Space resumes it.
-Cruise mode moves forward continuously along the mouse-controlled heading;
-its logarithmic speed control spans 3.6 km/h to 36,000 km/h, and W/S adjusts
-the speed multiplicatively. It opens paused in Flight mode, which holds
-absolute altitude and uses camera pitch to climb or descend; Terrain mode
-instead maintains a fixed AGL clearance.
-Cruise steering acts as a virtual joystick: the central HUD's fixed boresight
-is neutral, cursor displacement controls continuous yaw and pitch rates, and a
-small central dead zone prevents drift. Its compass ribbon, pitch ladder, and
-artificial horizon show the current view attitude; Aircraft mode also adds a
-bank indicator.
-The optional Aircraft toggle changes horizontal steering into coordinated
-banked turns. Its speed setting becomes a trim speed, while climbs lose
-airspeed and dives gain it; pausing restores a wings-level attitude.
-If Flight mode meets terrain, forward motion is held. Drag to steer or climb,
-use W/S to adjust speed, then press Space to resume.
-
-Astronomical lighting uses the observer's local date and time. Adjust the time
-slider or type a 24-hour `HH:MM` time (00:00–23:59) into the field beside the date,
-above the slider.
-Press Return or leave the field to apply the time; the slider and minute-step
-buttons stay in sync with the entered value. Invalid times leave lighting unchanged.
-
-The minimap and terrain-point inspection are enabled by default; the map
-toolbar button hides or reveals them as one feature. Hover either the panorama
-or map to preview a point. Right-click the panorama to lock its current point;
-left-click the minimap to lock a map point and turn the camera toward it. The
-map can always be panned and zoomed. The location button recentres it on the
-observer without changing scale, while the scope button toggles following the
-panorama mouseover point. Following pauses while the pointer is over the map.
-A locked point can be used as the new observer location with **Move here**.
-Option-click the minimap, or use its secondary-click menu, to move immediately.
-Map inspection and relocation can use any covered point in the configured
-datasets, including points beyond the current rendering distance. Distant map
-queries load only the target tile; relocation builds a render catalogue around
-the destination.
-
-The magnifying glass beside the map toggle expands into a location search bar.
-Search tries WGS 84 `latitude, longitude` first, then other recognised coordinate
-formats, names in the loaded peak catalogue, and Apple Maps local search. Peak
-and place suggestions appear as you type a name; incomplete coordinate input
-stays in coordinate mode. Peak matches ignore case and accents, with exact names
-before prefixes and substrings, and nearer peaks first when names are duplicated.
-Use Up/Down and Return, or click a suggestion, to move at the configured eye
-height. Selecting a peak automatically snaps to the highest full-resolution
-terrain sample within 100 metres of its catalogue location. Coordinate and
-Apple Maps destinations use their supplied locations. Escape, the clear button,
-or clicking outside search closes the bar.
-Locations without loaded terrain coverage show an error and leave the observer
-in place. Apple place search and suggestions require a network connection;
-coordinates and peaks work locally.
-
-Coordinate search accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
-easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
-`NG907598`, or `190716, 859877`. Prefixes such as `WGS84`, `LV95`, `BNG`, and
-`DATASET` select a coordinate system explicitly.
-
-The Movement tab's eye-height controls set the retained height above the terrain
-for jumps and vertical adjustments. **Snap to summit**, below Eye height, moves
-to the highest full-resolution terrain sample within 100 metres of the current
-observer, keeping the configured eye height. Equal-height results prefer the
-nearest point, so flat ground leaves the observer in place. The search includes
-neighboring prepared tiles and ignores missing terrain. The expand button
-changes map size; the grid button overlays the complete prepared-tile coverage.
-If the requested startup observer is outside that coverage, the viewer opens on
-a central available tile with the coverage overlay already enabled.
-
-Peak labels are optional. Supply a local UTF-8 CSV with the header
-`Lat,Lon,Elevation,Prom,Name` through `--peak-gazetteer`, or put it at
-`data/gazetteers/peaks.csv`. Gazetteers are deliberately ignored by Git, so a
-local comprehensive catalogue remains private and survives normal repository
-updates.
-
-Collapse or reveal the inspector with the `sidebar.right` toolbar button. Run
-`./panorama-app --help` for observer, image-size, and field-of-view options.
-The Viewfinder colourmap reproduces the indexed distance palette published by
-[Viewfinder Panoramas](https://viewfinderpanoramas.org/panoramas.html).
-
-## Development setup
-
-After cloning, enable the repository's development hooks:
-
-```sh
+brew install clang-format
 git config core.hooksPath .githooks
 ```
-
-The pre-commit hook formats staged source files with `.clang-format`, then
-stages the formatting changes before the commit is created. It refuses
-partially staged source files to avoid including unstaged work accidentally.
