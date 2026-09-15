@@ -79,24 +79,6 @@ constexpr double kFallbackEyeHeight = 2.0;
   return value;
 }
 
-/// Parse a positive image dimension with optional thousands separators.
-[[nodiscard]] std::optional<uint32_t> parse_image_dimension(NSString *input) {
-  NSString *normalised = [[input stringByReplacingOccurrencesOfString:@"," withString:@""]
-      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-  const char *characters = normalised.UTF8String;
-  if (characters == nullptr || characters[0] == '\0') {
-    return std::nullopt;
-  }
-
-  const std::string_view text(characters);
-  uint32_t value = 0U;
-  const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-  if (error != std::errc() || end != text.data() + text.size() || value == 0U) {
-    return std::nullopt;
-  }
-  return value;
-}
-
 /// Avoid populating the editor through NSTextField.doubleValue, whose
 /// formatting follows the user's locale and may use commas as decimal marks.
 [[nodiscard]] NSString *format_range_value(double value) {
@@ -234,8 +216,8 @@ void print_usage(const char *program) {
       "  --latitude D          observer latitude in WGS84 degrees (default: 46.1012605320838)\n"
       "  --longitude D         observer longitude in WGS84 degrees (default: 7.71604367731172)\n"
       "  --elevation M         fixed observer elevation (default: 4515)\n"
-      "  --image-width N       internal render width (default: 1600)\n"
-      "  --image-height N      internal render height (default: 900)\n"
+      "  --image-width N       initial drawable width in pixels (default: 1600)\n"
+      "  --image-height N      initial drawable height in pixels (default: 900)\n"
       "  --vertical-fov D      vertical camera field of view in degrees (default: 70)\n"
       "  --heading D           initial heading clockwise from true north (default: 0)\n"
       "  --pitch D             initial pitch above the horizon (default: 0)\n"
@@ -314,9 +296,9 @@ void print_usage(const char *program) {
     } else if (option == "--elevation") {
       settings.observer.elevation = arguments::parse_finite_double(value, option);
     } else if (option == "--image-width") {
-      settings.image.width = arguments::parse_uint32(value, option, false);
+      settings.initial_drawable_size.width = arguments::parse_uint32(value, option, false);
     } else if (option == "--image-height") {
-      settings.image.height = arguments::parse_uint32(value, option, false);
+      settings.initial_drawable_size.height = arguments::parse_uint32(value, option, false);
     } else if (option == "--vertical-fov") {
       const double degrees = arguments::parse_finite_double(value, option);
       if (degrees <= 0.0 || degrees >= 180.0) {
@@ -336,7 +318,8 @@ void print_usage(const char *program) {
       throw std::invalid_argument("Unknown option: " + std::string(option));
     }
   }
-  const uint64_t pixels = static_cast<uint64_t>(settings.image.width) * settings.image.height;
+  const uint64_t pixels = static_cast<uint64_t>(settings.initial_drawable_size.width) *
+                          settings.initial_drawable_size.height;
   if (pixels == 0U || pixels > std::numeric_limits<uint32_t>::max()) {
     throw std::out_of_range("Viewer image dimensions exceed the Metal ray-index range");
   }
@@ -501,11 +484,15 @@ public:
   explicit ViewerRendererImpl(ViewerSettings settings)
       : settings_(std::move(settings)), requested_orientation_(settings_.orientation),
         requested_vertical_field_of_view_(settings_.vertical_field_of_view),
-        requested_image_(settings_.image), requested_presentation_(settings_.presentation),
+        requested_image_(settings_.initial_drawable_size),
+        requested_presentation_(settings_.presentation),
         presented_vertical_field_of_view_(settings_.vertical_field_of_view),
-        presented_image_(settings_.image) {
-    RayFieldRequest initial_field =
-        make_view(settings_.image, settings_.orientation, settings_.vertical_field_of_view);
+        presented_image_(settings_.initial_drawable_size) {
+    RayFieldRequest initial_field = make_view(
+        settings_.initial_drawable_size,
+        settings_.orientation,
+        settings_.vertical_field_of_view
+    );
     const auto traceConfig =
         [&](ObserverLocation observer, bool allowFallback, bool bilinear, bool c1Normals) {
           return RaytraceConfig{
@@ -592,7 +579,7 @@ public:
         device_,
         display_queue_,
         library_,
-        settings_.image,
+        settings_.initial_drawable_size,
         GpuPresentationRequirements{
             .scalar_diagnostics = false,
             .normal_diagnostics = false,
@@ -607,7 +594,7 @@ public:
     fullscreen_presentation_ = std::make_unique<FullscreenPresentation>(device_, library_);
     visibility_ = std::make_unique<GpuVisibilityPointProjector>(device_, library_);
     current_field_ = std::move(initial_field);
-    current_output_image_ = settings_.image;
+    current_output_image_ = settings_.initial_drawable_size;
     current_observer_ = settings_.observer;
     current_orientation_ = settings_.orientation;
     current_vertical_field_of_view_ = settings_.vertical_field_of_view;
@@ -622,7 +609,11 @@ public:
       diagnostics_ = std::make_unique<diagnostics::Monitor>(device_);
     }
     worker_ = std::thread([this] { render_loop(); });
-    request_view(settings_.orientation, settings_.vertical_field_of_view, settings_.image);
+    request_view(
+        settings_.orientation,
+        settings_.vertical_field_of_view,
+        settings_.initial_drawable_size
+    );
   }
 
   ViewerRendererImpl(const ViewerRendererImpl &) = delete;
@@ -963,7 +954,9 @@ public:
   [[nodiscard]] id<MTLDevice> device() const override { return device_; }
   [[nodiscard]] id<MTLCommandQueue> command_queue() const override { return display_queue_; }
   [[nodiscard]] id<MTLLibrary> library() const override { return library_; }
-  [[nodiscard]] ImageSize initial_image() const override { return settings_.image; }
+  [[nodiscard]] ImageSize initial_drawable_size() const override {
+    return settings_.initial_drawable_size;
+  }
   [[nodiscard]] ObserverLocation observer() const override {
     std::lock_guard<std::mutex> lock(mutex_);
     return presented_observer_;

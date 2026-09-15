@@ -19,7 +19,6 @@
   __weak NSWindow *_window;
   __weak PanoramaView *_panoramaView;
   __weak ViewerOverlayView *_overlayView;
-  __weak AspectFitContainerView *_aspectFitView;
   __weak MiniMapPanelView *_miniMapPanel;
   panorama::CameraOrientation _orientation;
   double _verticalFieldOfView;
@@ -43,10 +42,9 @@
   NSTextField *_zoomValueLabel;
   NSSlider *_panningSensitivityControl;
   NSTextField *_panningSensitivityLabel;
-  NSTextField *_imageWidthControl;
-  NSTextField *_imageHeightControl;
-  NSButton *_aspectLockControl;
-  NSButton *_matchWindowControl;
+  NSTextField *_resolutionScaleControl;
+  NSTextField *_viewerSizeLabel;
+  NSButton *_nativeResolutionControl;
   NSButton *_invertMousePanningControl;
   NSButton *_bilinearCollisionControl;
   NSButton *_normalLightingControl;
@@ -142,7 +140,7 @@
   uint64_t _inspectionRequestToken;
   panorama::app::MapPointAction _mapPointAction;
   panorama::app::PointerOwner _pointerOwner;
-  double _lockedAspectRatio;
+  double _renderPixelsPerPoint;
   double _panningSensitivity;
   double _groundClearance;
   double _roamAltitude;
@@ -167,7 +165,6 @@
   bool _cruiseSteeringActive;
   bool _bilinearCollisions;
   bool _c1Normals;
-  bool _updatingResolutionControls;
   panorama::app::MetalFxActivation _metalfxActivation;
   panorama::app::MetalFxPreset _metalfxPreset;
   panorama::app::PeakLabelMode _peakLabelMode;
@@ -186,7 +183,6 @@
 - (void)zoomWithScrollDelta:(double)delta precise:(bool)precise;
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView
-             aspectFitView:(AspectFitContainerView *)aspectFitView
               miniMapPanel:(MiniMapPanelView *)miniMapPanel;
 - (void)inspectLocationX:(double)x y:(double)y;
 - (void)invalidatePanoramaHover;
@@ -232,7 +228,6 @@
 - (void)updateSettingsControlAvailability;
 - (void)setVerticalFieldOfViewDegrees:(double)degrees;
 - (void)updateZoomControls;
-- (void)updateAspectLockAppearance;
 - (void)scheduleRoamTimer;
 - (void)roamTimerFired:(NSTimer *)timer;
 - (void)clearRoamKeys;
@@ -248,6 +243,8 @@
 - (BOOL)publishAstronomicalLighting;
 - (BOOL)publishTerrainControls;
 - (BOOL)commitResolutionControls;
+- (void)updateViewerSizeForDrawableSize:(CGSize)size render:(BOOL)render;
+- (void)useNativeResolution:(id)sender;
 - (void)metalfxChanged:(id)sender;
 - (void)peakLabelsChanged:(id)sender;
 - (void)requestMetalFxInteraction;

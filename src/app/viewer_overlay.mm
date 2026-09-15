@@ -4,59 +4,6 @@
 #include <cmath>
 #include <cstdio>
 
-/// Letterbox the render view at its current output aspect ratio without
-/// imposing a fitting size on its parent. The parent can therefore resize
-/// freely, and a resolution change can update the ratio without distorting the
-/// Metal output.
-@interface AspectFitContainerView () {
-  NSView *_renderView;
-  CGFloat _aspectRatio;
-}
-@end
-
-@implementation AspectFitContainerView
-
-- (instancetype)initWithFrame:(NSRect)frame
-                   renderView:(NSView *)renderView
-                  aspectRatio:(CGFloat)aspectRatio {
-  self = [super initWithFrame:frame];
-  if (self != nil) {
-    _renderView = renderView;
-    _aspectRatio = aspectRatio;
-    self.wantsLayer = YES;
-    self.layer.backgroundColor = NSColor.blackColor.CGColor;
-    [self addSubview:_renderView];
-  }
-  return self;
-}
-
-- (void)setAspectRatio:(CGFloat)aspectRatio {
-  if (aspectRatio <= 0.0 || std::abs(aspectRatio - _aspectRatio) <= 1e-9) {
-    return;
-  }
-  _aspectRatio = aspectRatio;
-  [self setNeedsLayout:YES];
-}
-
-- (void)layout {
-  [super layout];
-  const NSRect bounds = self.bounds;
-  CGFloat width = bounds.size.width;
-  CGFloat height = width / _aspectRatio;
-  if (height > bounds.size.height) {
-    height = bounds.size.height;
-    width = height * _aspectRatio;
-  }
-  _renderView.frame = NSMakeRect(
-      bounds.origin.x + (bounds.size.width - width) * 0.5,
-      bounds.origin.y + (bounds.size.height - height) * 0.5,
-      width,
-      height
-  );
-}
-
-@end
-
 /// A flipped document view keeps the first inspector section at the top when
 /// its intrinsic height grows beyond the scroll view's visible area.
 @implementation InspectorDocumentView

@@ -292,6 +292,11 @@ static void stroke_hud_path(NSBezierPath *path, CGFloat foregroundWidth) {
 
 @implementation PanoramaView
 
+- (void)viewDidEndLiveResize {
+  [super viewDidEndLiveResize];
+  [self.panoramaController panoramaDrawableSizeDidSettle:self.drawableSize];
+}
+
 - (void)ensurePeakLabelOverlay {
   if (_peakLabelOverlay != nil) {
     return;

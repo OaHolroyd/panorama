@@ -125,15 +125,21 @@ GPU time on the resident path. Plan preparation is included in frame wall time.
 
 The Camera inspector exposes MetalFX activation (`Disabled`, `Pan/move only`,
 or `Always`) and an independent preset (`Off`, `Quality`, `Balanced`, or
-`Performance`). Quality, Balanced and Performance trace at 75%, 50% and 33%
-of the configured output dimensions respectively, then spatially upscale into a
-private texture before presentation. Pan/move only returns to a native trace 200
-ms after interaction stops, including panning, zoom, roaming and cruise movement.
+`Performance`). The resolution control selects rendered pixels per logical
+window point and displays the resulting viewer image size. Native copies the
+current screen's backing scale (normally 2 px/pt on Retina). Quality, Balanced
+and Performance trace at 75%, 50% and 33% of that viewer size respectively,
+then spatially upscale into a private texture before presentation.
+Pan/move only returns to a native trace 200 ms after interaction stops, including
+panning, zoom, roaming and cruise movement.
 Paused movement settles back to native resolution. The default is Disabled with
-Balanced remembered; activation and preset changes persist across launches. Devices without MetalFX keep rendering natively and show that state
-in the inspector. The drawable follows live window resizing; the presentation
+Balanced remembered; activation and preset changes persist across launches.
+Devices without MetalFX keep rendering natively and show that state in the
+inspector. The drawable follows live window resizing; the presentation
 pass stretches the last completed frame while rendering retains its current
-resource size. Reduced images use the GPU ray-generation and LOD planner, retain
+resource size. When resizing ends, the viewer calculates the final image size
+from the settled logical size and selected density, then renders one correctly
+sized frame. Reduced images use the GPU ray-generation and LOD planner, retain
 the configured field of view after resolution rounding, and share the BVH shadow
 terrain cache. Inspection and minimap visibility still use completed trace data.
 Scaler configuration failure falls back to a native trace.

@@ -692,4 +692,8 @@
   _panningSensitivityLabel.stringValue = [NSString stringWithFormat:@"%.0f", _panningSensitivity];
 }
 
+- (void)panoramaDrawableSizeDidSettle:(CGSize)size {
+  [self updateViewerSizeForDrawableSize:size render:YES];
+}
+
 @end

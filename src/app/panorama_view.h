@@ -24,6 +24,7 @@
 - (void)rotateForCurrentZoomHeading:(double)heading pitch:(double)pitch;
 - (void)adjustCruiseSpeedBy:(double)delta;
 - (void)setRoamKey:(panorama::app::RoamKey)key pressed:(BOOL)pressed;
+- (void)panoramaDrawableSizeDidSettle:(CGSize)size;
 @end
 
 @interface PanoramaView : MTKView

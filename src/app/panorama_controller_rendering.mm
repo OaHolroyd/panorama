@@ -18,6 +18,31 @@
 #include <utility>
 #include <vector>
 
+namespace {
+[[nodiscard]] std::optional<panorama::ImageSize>
+viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
+  if (!std::isfinite(pointSize.width) || !std::isfinite(pointSize.height) ||
+      !std::isfinite(pixelsPerPoint) || pointSize.width <= 0.0 || pointSize.height <= 0.0 ||
+      pixelsPerPoint <= 0.0) {
+    return std::nullopt;
+  }
+  const double width = std::round(pointSize.width * pixelsPerPoint);
+  const double height = std::round(pointSize.height * pixelsPerPoint);
+  if (width < 1.0 || height < 1.0 || width > std::numeric_limits<uint32_t>::max() ||
+      height > std::numeric_limits<uint32_t>::max()) {
+    return std::nullopt;
+  }
+  const panorama::ImageSize image = {
+      static_cast<uint32_t>(width),
+      static_cast<uint32_t>(height),
+  };
+  if (static_cast<uint64_t>(image.width) * image.height > std::numeric_limits<uint32_t>::max()) {
+    return std::nullopt;
+  }
+  return image;
+}
+} // namespace
+
 @implementation PanoramaController (Rendering)
 
 - (void)updateSettingsControlAvailability {
@@ -92,36 +117,46 @@
   return YES;
 }
 
-/// Resize only after both text fields form a valid Metal image size. Invalid
-/// edits remain visible in red so the user can correct them without dismissing
-/// an alert or losing the partially entered value.
+/// Commit a render density after verifying that it produces a valid image at
+/// the window's current logical size.
 - (BOOL)commitResolutionControls {
-  const std::optional<uint32_t> width =
-      panorama::app::parse_image_dimension(_imageWidthControl.stringValue);
-  const std::optional<uint32_t> height =
-      panorama::app::parse_image_dimension(_imageHeightControl.stringValue);
-  const uint64_t pixelCount =
-      width.has_value() && height.has_value() ? static_cast<uint64_t>(*width) * *height : 0U;
-  const BOOL valid =
-      width.has_value() && height.has_value() && pixelCount <= std::numeric_limits<uint32_t>::max();
-  _imageWidthControl.textColor = valid ? NSColor.controlTextColor : NSColor.systemRedColor;
-  _imageHeightControl.textColor = valid ? NSColor.controlTextColor : NSColor.systemRedColor;
-  NSString *resolutionError =
-      valid ? nil
-            : @"Width and height must be positive whole numbers whose product fits in the "
-               "32-bit Metal ray-index range.";
-  _imageWidthControl.toolTip = resolutionError;
-  _imageHeightControl.toolTip = resolutionError;
+  const std::optional<double> pixelsPerPoint =
+      panorama::app::parse_range_value(_resolutionScaleControl.stringValue);
+  const NSSize pointSize = [_panoramaView convertSizeFromBacking:_panoramaView.drawableSize];
+  const std::optional<panorama::ImageSize> image =
+      pixelsPerPoint.has_value() ? viewer_image_size(pointSize, *pixelsPerPoint) : std::nullopt;
+  const BOOL valid = pixelsPerPoint.has_value() && image.has_value();
+  _resolutionScaleControl.textColor = valid ? NSColor.controlTextColor : NSColor.systemRedColor;
+  _resolutionScaleControl.toolTip =
+      valid ? @"Rendered pixels per macOS logical point"
+            : @"Enter a positive pixel density that produces a supported viewer size.";
   if (!valid) {
     return NO;
   }
-  const panorama::ImageSize next_image = {*width, *height};
-  if (next_image != _image) {
-    _image = next_image;
-    _inspectionRequestToken = _renderer->request_inspection(std::nullopt);
-    _renderer->request_view(_orientation, _verticalFieldOfView, _image);
-  }
+  _renderPixelsPerPoint = *pixelsPerPoint;
+  [self updateViewerSizeForDrawableSize:_panoramaView.drawableSize render:YES];
   return YES;
+}
+
+/// Recalculate the rendered image from logical window size and the selected
+/// density. During live resize this only updates the label; the completed
+/// texture continues through the inexpensive fullscreen presentation pass.
+- (void)updateViewerSizeForDrawableSize:(CGSize)size render:(BOOL)render {
+  const NSSize pointSize = [_panoramaView convertSizeFromBacking:size];
+  const std::optional<panorama::ImageSize> nextImage =
+      viewer_image_size(pointSize, _renderPixelsPerPoint);
+  if (!nextImage.has_value()) {
+    _viewerSizeLabel.stringValue = @"Unsupported size";
+    return;
+  }
+  _viewerSizeLabel.stringValue =
+      [NSString stringWithFormat:@"%u × %u px", nextImage->width, nextImage->height];
+  if (!render || *nextImage == _image) {
+    return;
+  }
+  _image = *nextImage;
+  _inspectionRequestToken = _renderer->request_inspection(std::nullopt);
+  _renderer->request_view(_orientation, _verticalFieldOfView, _image);
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -137,10 +172,6 @@
   diagnostics::display.mark("snapshot");
   panorama::app::PresentedFrame frame = _renderer->presented_frame();
   diagnostics::display.mark("layout");
-  if (frame.texture != nil && frame.output_image.width != 0U && frame.output_image.height != 0U) {
-    [_aspectFitView setAspectRatio:static_cast<CGFloat>(frame.output_image.width) /
-                                   static_cast<CGFloat>(frame.output_image.height)];
-  }
   diagnostics::display.mark("drawable");
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (drawable == nil) {
@@ -396,8 +427,7 @@
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
-  (void)view;
-  (void)size;
+  [self updateViewerSizeForDrawableSize:size render:!view.inLiveResize];
 }
 
 @end

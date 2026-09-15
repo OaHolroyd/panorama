@@ -70,50 +70,32 @@
   panningSensitivitySetting.alignment = NSLayoutAttributeCenterY;
   panningSensitivitySetting.spacing = 6.0;
 
-  _imageWidthControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
-  _imageWidthControl.stringValue = [NSString stringWithFormat:@"%u", _image.width];
-  _imageWidthControl.delegate = self;
-  _imageHeightControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
-  _imageHeightControl.stringValue = [NSString stringWithFormat:@"%u", _image.height];
-  _imageHeightControl.delegate = self;
-  // Leave comfortable edit padding around common four-digit dimensions such
-  // as 1920 and 1024 instead of sizing the fields to their initial values.
-  [_imageWidthControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
-  [_imageHeightControl.widthAnchor constraintEqualToConstant:56.0].active = YES;
-  NSTextField *resolutionSeparator = [NSTextField labelWithString:@"×"];
+  _resolutionScaleControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _resolutionScaleControl.stringValue = panorama::app::format_range_value(_renderPixelsPerPoint);
+  _resolutionScaleControl.delegate = self;
+  _resolutionScaleControl.alignment = NSTextAlignmentRight;
+  _resolutionScaleControl.toolTip = @"Rendered pixels per macOS logical point";
+  [_resolutionScaleControl.widthAnchor constraintEqualToConstant:48.0].active = YES;
+  NSTextField *resolutionUnit = [NSTextField labelWithString:@"px/pt"];
 
-  _aspectLockControl = [[NSButton alloc] initWithFrame:NSZeroRect];
-  _aspectLockControl.buttonType = NSButtonTypeToggle;
-  _aspectLockControl.state = NSControlStateValueOn;
-  _aspectLockControl.title = @"";
-  _aspectLockControl.bordered = NO;
-  _aspectLockControl.imagePosition = NSImageOnly;
-  _aspectLockControl.target = self;
-  _aspectLockControl.action = @selector(aspectLockChanged:);
-  _aspectLockControl.toolTip = @"Keep width and height at the current aspect ratio";
-  [_aspectLockControl setAccessibilityLabel:@"Lock aspect ratio"];
-  [_aspectLockControl.widthAnchor constraintEqualToConstant:20.0].active = YES;
-  [self updateAspectLockAppearance];
+  _nativeResolutionControl = [NSButton buttonWithTitle:@"Native"
+                                                target:self
+                                                action:@selector(useNativeResolution:)];
+  _nativeResolutionControl.toolTip = @"Use the current screen's native backing scale";
 
   NSStackView *resolutionSetting = [NSStackView stackViewWithViews:@[
-    _imageWidthControl,
-    resolutionSeparator,
-    _imageHeightControl,
-    _aspectLockControl,
+    _resolutionScaleControl,
+    resolutionUnit,
+    _nativeResolutionControl,
   ]];
   resolutionSetting.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   resolutionSetting.alignment = NSLayoutAttributeCenterY;
   resolutionSetting.spacing = 4.0;
-
-  _matchWindowControl = [NSButton buttonWithTitle:@"Match Window"
-                                           target:self
-                                           action:@selector(matchWindowResolution:)];
-  _matchWindowControl.image =
-      [NSImage imageWithSystemSymbolName:@"arrow.left.and.right"
-                accessibilityDescription:@"Match horizontal resolution to window"];
-  _matchWindowControl.imagePosition = NSImageLeading;
-  _matchWindowControl.toolTip =
-      @"Change horizontal resolution to match the window; keep vertical resolution fixed";
+  _viewerSizeLabel = [NSTextField
+      labelWithString:[NSString stringWithFormat:@"%u × %u px", _image.width, _image.height]];
+  _viewerSizeLabel.font = [NSFont monospacedDigitSystemFontOfSize:NSFont.smallSystemFontSize
+                                                           weight:NSFontWeightRegular];
+  _viewerSizeLabel.textColor = NSColor.secondaryLabelColor;
 
   _metalfxActivationControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   [_metalfxActivationControl addItemsWithTitles:@[ @"Disabled", @"Pan/move only", @"Always" ]];
@@ -582,7 +564,7 @@
                                          controls:@[
                                            make_row(@"FOV", zoomSetting),
                                            make_row(@"Resolution", resolutionSetting),
-                                           _matchWindowControl,
+                                           make_row(@"Viewer size", _viewerSizeLabel),
                                            make_row(@"MetalFX", _metalfxActivationControl),
                                            make_row(@"Preset", _metalfxPresetControl),
                                            _metalfxStatusLabel,

@@ -10,7 +10,6 @@
                           window:(NSWindow *)window;
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView
-             aspectFitView:(AspectFitContainerView *)aspectFitView
               miniMapPanel:(MiniMapPanelView *)miniMapPanel;
 @end
 
