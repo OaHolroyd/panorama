@@ -342,21 +342,19 @@ make_view(ImageSize image, CameraOrientation orientation, double vertical_field_
       }};
 }
 
-/// Reproject a sampled terrain location through the viewer's ideal pinhole
-/// camera. The curvature adjustment reconstructs the apparent vertical ray
-/// displacement used when the original terrain collision was recorded.
-[[nodiscard]] static LockedPointProjection project_offset(
-    Coord offset,
-    double elevation_difference,
+struct PointProjectionCamera {
+  ImageSize image;
+  CameraIntrinsics intrinsics;
+  double forward_east, forward_north, forward_up;
+  double right_east, right_north, right_up;
+  double up_east, up_north, up_up;
+};
+
+[[nodiscard]] static PointProjectionCamera make_point_projection_camera(
     ImageSize image,
     double vertical_field_of_view,
     CameraOrientation orientation
 ) {
-  const double east = offset.x, north = offset.y;
-  const double horizontal_distance = std::hypot(east, north);
-  const double up =
-      elevation_difference - kCurvatureCoefficient * horizontal_distance * horizontal_distance;
-
   const double sin_heading = std::sin(orientation.heading);
   const double cos_heading = std::cos(orientation.heading);
   const double sin_pitch = std::sin(orientation.pitch);
@@ -376,11 +374,39 @@ make_view(ImageSize image, CameraOrientation orientation, double vertical_field_
   const double camera_up_north = sin_roll * sin_heading + cos_roll * pitched_up_north;
   const double camera_up_up = cos_roll * cos_pitch;
 
-  const double forward = east * forward_east + north * forward_north + up * forward_up;
-  const double right = east * right_east + north * right_north + up * right_up;
-  const double down = -(east * camera_up_east + north * camera_up_north + up * camera_up_up);
-  const CameraIntrinsics intrinsics =
-      CameraIntrinsics::from_vertical_field_of_view(image, vertical_field_of_view);
+  return {
+      image,
+      CameraIntrinsics::from_vertical_field_of_view(image, vertical_field_of_view),
+      forward_east,
+      forward_north,
+      forward_up,
+      right_east,
+      right_north,
+      right_up,
+      camera_up_east,
+      camera_up_north,
+      camera_up_up,
+  };
+}
+
+/// Reproject a sampled terrain location through the viewer's ideal pinhole
+/// camera. The curvature adjustment reconstructs the apparent vertical ray
+/// displacement used when the original terrain collision was recorded.
+[[nodiscard]] static LockedPointProjection project_offset(
+    Coord offset,
+    double elevation_difference,
+    double horizontal_distance,
+    const PointProjectionCamera &camera
+) {
+  const double east = offset.x, north = offset.y;
+  const double up =
+      elevation_difference - kCurvatureCoefficient * horizontal_distance * horizontal_distance;
+  const double forward =
+      east * camera.forward_east + north * camera.forward_north + up * camera.forward_up;
+  const double right = east * camera.right_east + north * camera.right_north + up * camera.right_up;
+  const double down = -(east * camera.up_east + north * camera.up_north + up * camera.up_up);
+  const auto &intrinsics = camera.intrinsics;
+  const ImageSize image = camera.image;
 
   double pixel_x = intrinsics.principal_x;
   double pixel_y = intrinsics.principal_y;
@@ -411,6 +437,21 @@ make_view(ImageSize image, CameraOrientation orientation, double vertical_field_
     direction_y = 0.0;
   }
   return {false, pixel_x, pixel_y, direction_x, direction_y};
+}
+
+[[nodiscard]] static LockedPointProjection project_offset(
+    Coord offset,
+    double elevation_difference,
+    ImageSize image,
+    double vertical_field_of_view,
+    CameraOrientation orientation
+) {
+  return project_offset(
+      offset,
+      elevation_difference,
+      std::hypot(offset.x, offset.y),
+      make_point_projection_camera(image, vertical_field_of_view, orientation)
+  );
 }
 
 LockedPointProjection project_locked_point(
@@ -1014,13 +1055,15 @@ private:
       return result;
     }
     const auto *distances = static_cast<const float *>(trace_->distances().contents);
-    if (distances == nullptr) {
+    const auto *elevations = static_cast<const float *>(trace_->elevations().contents);
+    const auto *rays = static_cast<const RayDirection *>(trace_->ray_directions().contents);
+    if (distances == nullptr || elevations == nullptr || rays == nullptr) {
       return result;
     }
     size_t within_range = 0U;
     size_t onscreen = 0U;
     size_t sampled = 0U;
-    double best_margin = -std::numeric_limits<double>::infinity();
+    double best_margin_squared = std::numeric_limits<double>::infinity();
     const auto &frame = trace_->render_frame();
     if (!peak_render_frame_ || *peak_render_frame_ != frame) {
       std::vector<Coord> positions;
@@ -1032,6 +1075,16 @@ private:
     }
     const Coord observer = frame.project(current_observer_.position);
     const auto axes = frame.basis(current_observer_.position);
+    const PointProjectionCamera camera = make_point_projection_camera(
+        current_output_image_,
+        current_vertical_field_of_view_,
+        current_orientation_
+    );
+    const double angular_pixel = current_vertical_field_of_view_ / current_field_.image.height;
+    const double angular_pixel_tangent = std::tan(angular_pixel);
+    constexpr double search_size_metres = 50.0;
+    const int image_width = static_cast<int>(current_field_.image.width);
+    const int image_height = static_cast<int>(current_field_.image.height);
     size_t index = 0;
     for (const PeakRecord &peak : peak_catalogue_->peaks()) {
       const Coord projected = projected_peaks_[index++];
@@ -1047,13 +1100,8 @@ private:
         continue;
       }
       ++within_range;
-      const LockedPointProjection projection = project_offset(
-          offset,
-          peak.elevation - current_observer_.elevation,
-          current_output_image_,
-          current_vertical_field_of_view_,
-          current_orientation_
-      );
+      const LockedPointProjection projection =
+          project_offset(offset, peak.elevation - current_observer_.elevation, horizontal, camera);
       if (!projection.onscreen) {
         continue;
       }
@@ -1067,36 +1115,61 @@ private:
         continue;
       }
       ++sampled;
-      const double angular_pixel = current_vertical_field_of_view_ / current_field_.image.height;
-      // Gazetteer summits and the rendered DEM need not identify the same
-      // horizontal sample, especially once LOD coarsening is active. Preserve
-      // a modest metre-scale allowance when high output resolution makes the
-      // angular pixel footprint very small.
-      const double tolerance = std::max(100.0, 2.0 * horizontal * std::tan(angular_pixel));
-      float farthest = 0.0F;
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-          const int x = static_cast<int>(pixel->x) + dx;
-          const int y = static_cast<int>(pixel->y) + dy;
-          if (x < 0 || y < 0 || x >= static_cast<int>(current_field_.image.width) ||
-              y >= static_cast<int>(current_field_.image.height)) {
-            continue;
-          }
-          const float distance = distances
-              [static_cast<size_t>(y) * current_field_.image.width + static_cast<size_t>(x)];
-          if (std::isfinite(distance)) {
-            farthest = std::max(farthest, distance);
+      // work out the size of the search area in pixels
+      const double pixel_size = horizontal * angular_pixel_tangent;
+      // A radius covering the whole image needs no further growth.
+      const int search_size = static_cast<int>(std::clamp(
+          search_size_metres / pixel_size,
+          1.0,
+          double(std::max(image_width, image_height))
+      ));
+      const double tolerance = std::max(search_size_metres, 2.0 * pixel_size);
+      const double tolerance_squared = tolerance * tolerance;
+      const int centre_x = static_cast<int>(pixel->x);
+      const int centre_y = static_cast<int>(pixel->y);
+      const int min_x = centre_x - std::min(search_size, centre_x);
+      const int max_x = centre_x + std::min(search_size, image_width - 1 - centre_x);
+      const int min_y = centre_y - std::min(search_size, centre_y);
+      const int max_y = centre_y + std::min(search_size, image_height - 1 - centre_y);
+
+      // Match the actual terrain hit to the peak in three dimensions. Equal
+      // ranges alone can belong to a different ridge or to a lower hillside.
+      double peak_margin_squared = std::numeric_limits<double>::infinity();
+      InspectionPixel peak_pixel = {0, 0};
+      for (int y = min_y; y <= max_y; ++y) {
+        size_t sample_index =
+            static_cast<size_t>(y) * current_field_.image.width + static_cast<size_t>(min_x);
+        for (int x = min_x; x <= max_x; ++x, ++sample_index) {
+          const float distance = distances[sample_index];
+
+          if (distance > 0.0F && std::isfinite(distance) &&
+              std::isfinite(elevations[sample_index])) {
+            const RayDirection &ray = rays[sample_index];
+            // Ray x/y and delta_x/y are in the same retained metric frame.
+            const double dx = static_cast<double>(distance) * ray.x - delta_x;
+            const double dy = static_cast<double>(distance) * ray.y - delta_y;
+            const double dz = static_cast<double>(elevations[sample_index]) - peak.elevation;
+            const double margin_squared = dx * dx + dy * dy + dz * dz;
+            if (margin_squared < peak_margin_squared) {
+              peak_margin_squared = margin_squared;
+              peak_pixel.x = x;
+              peak_pixel.y = y;
+            }
           }
         }
       }
-      best_margin = std::max(best_margin, static_cast<double>(farthest) + tolerance - horizontal);
-      if (farthest + tolerance < horizontal) {
+
+      best_margin_squared = std::min(best_margin_squared, peak_margin_squared);
+      if (peak_margin_squared > tolerance_squared) {
         continue;
       }
+
       result.peaks.push_back(
           {peak.id,
-           projection.pixel_x,
-           projection.pixel_y,
+           (static_cast<double>(peak_pixel.x) + 0.5) / current_field_.image.width *
+               current_output_image_.width,
+           (static_cast<double>(peak_pixel.y) + 0.5) / current_field_.image.height *
+               current_output_image_.height,
            horizontal,
            peak.prominence,
            peak.elevation,
@@ -1106,6 +1179,9 @@ private:
     std::ranges::sort(result.peaks, [](const VisiblePeak &left, const VisiblePeak &right) {
       if (left.prominence != right.prominence) {
         return left.prominence > right.prominence;
+      }
+      if (left.elevation != right.elevation) {
+        return left.elevation > right.elevation;
       }
       if (left.distance != right.distance) {
         return left.distance < right.distance;
@@ -1122,7 +1198,7 @@ private:
           sampled,
           onscreen,
           within_range,
-          best_margin
+          std::sqrt(best_margin_squared)
       );
     }
     return result;
