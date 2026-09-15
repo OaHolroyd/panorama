@@ -172,6 +172,13 @@
 - (void)requestMapPointLatitude:(double)latitude
                       longitude:(double)longitude
                          action:(panorama::app::MapPointAction)action {
+  [self requestMapPointLatitude:latitude longitude:longitude action:action summitRadius:0.0];
+}
+
+- (void)requestMapPointLatitude:(double)latitude
+                      longitude:(double)longitude
+                         action:(panorama::app::MapPointAction)action
+                   summitRadius:(double)summitRadius {
   if (!_pointInspectionEnabled && action != panorama::app::MapPointAction::MoveObserver) {
     return;
   }
@@ -181,7 +188,7 @@
     completion(@"Location move cancelled");
   }
   _mapPointAction = action;
-  _mapPointRequestToken = _renderer->request_map_point({{latitude, longitude}});
+  _mapPointRequestToken = _renderer->request_map_point({{latitude, longitude}}, summitRadius);
   if (action != panorama::app::MapPointAction::Hover) {
     [self setPointInfoStatus:action == panorama::app::MapPointAction::MoveObserver
                                  ? @"Moving observer…"
@@ -225,11 +232,46 @@
 
 - (void)moveObserverToLocation:(panorama::LatLon)location
                     completion:(void (^)(NSString *error))completion {
+  [self moveObserverToLocation:location snapToSummit:NO completion:completion];
+}
+
+- (void)moveObserverToLocation:(panorama::LatLon)location
+                  snapToSummit:(BOOL)snapToSummit
+                    completion:(void (^)(NSString *error))completion {
   [self requestMapPointLatitude:location.lat
                       longitude:location.lon
-                         action:panorama::app::MapPointAction::MoveObserver];
+                         action:panorama::app::MapPointAction::MoveObserver
+                   summitRadius:snapToSummit ? panorama::app::kSummitSearchRadiusMetres : 0.0];
   _locationMoveRequestToken = _mapPointRequestToken;
   _locationMoveCompletion = [completion copy];
+}
+
+- (void)snapToSummit:(id)sender {
+  (void)sender;
+  if (![self commitGroundClearanceControl]) {
+    return;
+  }
+  [self clearRoamKeys];
+  _snapToSummitControl.enabled = NO;
+  _snapToSummitStatusLabel.stringValue = @"Finding summit within 100 m…";
+  _snapToSummitStatusLabel.textColor = NSColor.secondaryLabelColor;
+  __weak PanoramaController *weakSelf = self;
+  [self moveObserverToLocation:_observer.position
+                  snapToSummit:YES
+                    completion:^(NSString *error) {
+                      PanoramaController *controller = weakSelf;
+                      if (controller == nil) {
+                        return;
+                      }
+                      controller->_snapToSummitControl.enabled = YES;
+                      controller->_snapToSummitStatusLabel.stringValue =
+                          error != nil ? error : @"Moved to summit";
+                      controller->_snapToSummitStatusLabel.textColor =
+                          error != nil ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
+                      if (error != nil) {
+                        NSBeep();
+                      }
+                    }];
 }
 
 - (void)moveToLockedPoint:(id)sender {
@@ -267,7 +309,9 @@
   _pointInspectionLocked = false;
   _pointLockPending = false;
   _pointerOwner = panorama::app::PointerOwner::None;
-  _mapPointAction = panorama::app::MapPointAction::None;
+  if (_mapPointAction != panorama::app::MapPointAction::MoveObserver) {
+    _mapPointAction = panorama::app::MapPointAction::None;
+  }
   _lockedPoint.reset();
   [self clearTargetVisibility];
   [_miniMapPanel clearInspectedPoint];

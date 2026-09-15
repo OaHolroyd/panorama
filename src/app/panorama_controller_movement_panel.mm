@@ -232,10 +232,22 @@
   heightRow.alignment = NSLayoutAttributeCenterY;
   heightRow.spacing = 8.0;
 
-  InspectorSectionView *observerSection =
-      [[InspectorSectionView alloc] initWithTitle:@"Observer"
-                                         controls:@[ heightRow ]
-                                      defaultsKey:@"panorama.inspector.observer.expanded"];
+  _snapToSummitControl = [NSButton buttonWithTitle:@"Snap to summit"
+                                            target:self
+                                            action:@selector(snapToSummit:)];
+  _snapToSummitControl.imagePosition = NSImageLeading;
+  _snapToSummitControl.toolTip =
+      @"Move to the highest terrain within 100 metres, retaining eye height";
+  NSView *summitRow = makeMovementRow(@"", _snapToSummitControl);
+  _snapToSummitStatusLabel = [NSTextField wrappingLabelWithString:@""];
+  _snapToSummitStatusLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  _snapToSummitStatusLabel.textColor = NSColor.secondaryLabelColor;
+  [_snapToSummitStatusLabel.widthAnchor constraintEqualToConstant:268.0].active = YES;
+
+  InspectorSectionView *observerSection = [[InspectorSectionView alloc]
+      initWithTitle:@"Observer"
+           controls:@[ heightRow, summitRow, _snapToSummitStatusLabel ]
+        defaultsKey:@"panorama.inspector.observer.expanded"];
   NSStackView *settings =
       [NSStackView stackViewWithViews:@[ heading, movementSection, observerSection ]];
   settings.orientation = NSUserInterfaceLayoutOrientationVertical;

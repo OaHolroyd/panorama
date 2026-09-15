@@ -981,6 +981,96 @@ std::optional<TerrainSampleLocation> TerrainCatalogue::locate_sample(LatLon posi
 
 const std::vector<TerrainDataset> &TerrainCatalogue::datasets() const { return datasets_; }
 
+std::vector<LatLon> TerrainCatalogue::sample_grid_points(LatLon centre, double radius) const {
+  if (!valid_lat_lon(centre) || !std::isfinite(radius) || radius < 0) {
+    throw std::invalid_argument("Terrain neighbourhood requires a valid position and radius");
+  }
+  std::vector<Coord> boundary;
+  for (double north : {-radius, 0.0, radius}) {
+    for (double east : {-radius, 0.0, radius}) {
+      const auto point = offset_position(centre, east, north);
+      boundary.push_back({point.lon, point.lat});
+    }
+  }
+  std::vector<LatLon> points;
+  const auto append_dataset = [&](const TileGrid &grid,
+                                  uint32_t epsg,
+                                  uint32_t cells,
+                                  const std::vector<TerrainSource> &sources) {
+    const double spacing = grid.width / cells;
+    auto native_boundary = transform_coordinates(4326U, epsg, boundary);
+    // Unwrap geographic grids around the centre so crossing the date line
+    // does not turn a 100-metre neighbourhood into a world-sized box.
+    const auto unwrap = [&](double longitude) {
+      return centre.lon + std::remainder(longitude - centre.lon, 360.0);
+    };
+    double min_x = std::numeric_limits<double>::infinity(), min_y = min_x;
+    double max_x = -min_x, max_y = -min_x;
+    for (auto point : native_boundary) {
+      if (epsg == 4326U) {
+        point.x = unwrap(point.x);
+      }
+      min_x = std::min(min_x, point.x);
+      max_x = std::max(max_x, point.x);
+      min_y = std::min(min_y, point.y);
+      max_y = std::max(max_y, point.y);
+    }
+    // One extra native cell conservatively covers projection curvature. The
+    // final geodesic distance test, rather than this box, defines the radius.
+    min_x -= spacing;
+    max_x += spacing;
+    min_y -= spacing;
+    max_y += spacing;
+    CoordinateTransform to_geographic(epsg, 4326U);
+    for (const auto &source : sources) {
+      const double left = grid.origin_x + static_cast<double>(source.key.column) * grid.width;
+      const double bottom = grid.origin_y - static_cast<double>(source.key.row + 1) * grid.width;
+      const double search_left =
+          epsg == 4326U ? unwrap(left + grid.width / 2) - grid.width / 2 : left;
+      if (search_left > max_x || search_left + grid.width < min_x || bottom > max_y ||
+          bottom + grid.width < min_y) {
+        continue;
+      }
+      const auto index = [&](double value) {
+        return static_cast<uint32_t>(std::clamp(value, 0.0, static_cast<double>(cells)));
+      };
+      const uint32_t x0 = index(std::ceil((min_x - search_left) / spacing));
+      const uint32_t x1 = index(std::floor((max_x - search_left) / spacing));
+      const uint32_t y0 = index(std::ceil((min_y - bottom) / spacing));
+      const uint32_t y1 = index(std::floor((max_y - bottom) / spacing));
+      std::vector<Coord> vertices;
+      for (uint32_t y = y0; y <= y1; ++y) {
+        for (uint32_t x = x0; x <= x1; ++x) {
+          vertices.push_back({left + x * spacing, bottom + y * spacing});
+        }
+      }
+      for (const auto geographic : to_geographic.apply(vertices)) {
+        const LatLon point{geographic.y, geographic.x};
+        if (!valid_lat_lon(point)) {
+          continue;
+        }
+        const auto offset = geographic_offset(centre, point);
+        if (std::hypot(offset.x, offset.y) <= radius) {
+          points.push_back(point);
+        }
+      }
+    }
+  };
+  if (datasets_.empty()) {
+    append_dataset(
+        grid_,
+        coverage_.datasets.front().epsg_code,
+        read_metal_tile_header(origin().path).cell_count,
+        legacy_sample_sources_
+    );
+  } else {
+    for (const auto &dataset : datasets_) {
+      append_dataset(dataset.grid, dataset.epsg_code, dataset.cell_count, dataset.sources);
+    }
+  }
+  return points;
+}
+
 const TerrainRenderFrame &TerrainCatalogue::render_frame() const {
   if (!render_frame_.has_value()) {
     throw std::logic_error("Legacy terrain catalogue has no explicit render frame");

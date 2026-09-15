@@ -99,6 +99,12 @@ struct TerrainSampleLocation {
   Coord native_coordinate;
 };
 
+/// An absolute terrain elevation at a geographic position.
+struct TerrainSample {
+  LatLon position;
+  float elevation;
+};
+
 /// Discover an ordered stack and enforce the payload/atlas layout shared by
 /// all datasets. Native CRS and cell spacing may differ.
 [[nodiscard]] std::vector<TerrainDataset>
@@ -165,6 +171,9 @@ public:
   /// Resolve a sampling point across all available tiles, including those
   /// outside the render radius or tile-count limit, with valid-coverage priority.
   [[nodiscard]] std::optional<TerrainSampleLocation> locate_sample(LatLon position) const;
+  /// Full-resolution grid vertices within a geodesic metre radius, across the
+  /// complete dataset index. Points are grouped by tile to reuse sampling I/O.
+  [[nodiscard]] std::vector<LatLon> sample_grid_points(LatLon centre, double radius) const;
   [[nodiscard]] const std::vector<TerrainDataset> &datasets() const;
   [[nodiscard]] const TerrainRenderFrame &render_frame() const;
   [[nodiscard]] Coord render_coordinate(LatLon position) const;

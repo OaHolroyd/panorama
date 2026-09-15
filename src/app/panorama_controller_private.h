@@ -99,6 +99,8 @@
   NSTextField *_groundClearanceControl;
   NSButton *_groundClearanceDecreaseControl;
   NSButton *_groundClearanceIncreaseControl;
+  NSButton *_snapToSummitControl;
+  NSTextField *_snapToSummitStatusLabel;
   NSSegmentedControl *_movementModeControl;
   NSSegmentedControl *_roamTurningModeControl;
   NSView *_roamTurningModeRow;
@@ -207,6 +209,7 @@
 - (void)moveObserverToTerrainPoint:(panorama::app::TerrainPoint)point;
 - (void)moveToLockedPoint:(id)sender;
 - (void)adjustGroundClearance:(NSButton *)sender;
+- (void)snapToSummit:(id)sender;
 - (BOOL)commitGroundClearanceControl;
 - (void)movementModeChanged:(id)sender;
 - (void)roamTurningModeChanged:(id)sender;

@@ -105,6 +105,8 @@ struct TerrainPoint {
   float elevation;
 };
 
+inline constexpr double kSummitSearchRadiusMetres = 100.0;
+
 enum class MapPointAction : uint8_t { None, Hover, Look, MoveObserver };
 enum class RoamKey : uint8_t { Forward, Backward, Left, Right };
 enum class RoamAltitudeMode : uint8_t { FollowTerrain, HoldAltitude };
@@ -190,7 +192,8 @@ public:
   virtual void request_lod_scale(float) = 0;
   virtual void request_collision_settings(bool, bool) = 0;
   virtual uint64_t request_inspection(std::optional<InspectionLocation>) = 0;
-  virtual uint64_t request_map_point(MapCoordinate) = 0;
+  /// Zero samples the exact coordinate; a positive radius finds nearby summit terrain.
+  virtual uint64_t request_map_point(MapCoordinate, double summit_radius = 0.0) = 0;
   virtual uint64_t request_target_visibility(std::optional<TerrainPoint>) = 0;
   virtual void request_observer_at(TerrainPoint, double) = 0;
   virtual void request_ground_clearance(double) = 0;

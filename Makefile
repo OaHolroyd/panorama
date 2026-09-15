@@ -199,6 +199,7 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --mixed-coverage
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --point-sampling
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --summit
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --coverage-junctions
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-quantized
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-expanded
@@ -212,6 +213,10 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 .PHONY: check-camera
 check-camera: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --camera
+
+.PHONY: check-summit
+check-summit: $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --summit
 
 $(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(OBJ_DIR)/raytracing/terrain_transform.o $(METAL_LIB)
 	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)

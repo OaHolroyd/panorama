@@ -395,7 +395,10 @@ and place suggestions appear as you type a name; incomplete coordinate input
 stays in coordinate mode. Peak matches ignore case and accents, with exact names
 before prefixes and substrings, and nearer peaks first when names are duplicated.
 Use Up/Down and Return, or click a suggestion, to move at the configured eye
-height. Escape, the clear button, or clicking outside search closes the bar.
+height. Selecting a peak automatically snaps to the highest full-resolution
+terrain sample within 100 metres of its catalogue location. Coordinate and
+Apple Maps destinations use their supplied locations. Escape, the clear button,
+or clicking outside search closes the bar.
 Locations without loaded terrain coverage show an error and leave the observer
 in place. Apple place search and suggestions require a network connection;
 coordinates and peaks work locally.
@@ -406,7 +409,11 @@ easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
 `DATASET` select a coordinate system explicitly.
 
 The Movement tab's eye-height controls set the retained height above the terrain
-for jumps and vertical adjustments. The expand button
+for jumps and vertical adjustments. **Snap to summit**, below Eye height, moves
+to the highest full-resolution terrain sample within 100 metres of the current
+observer, keeping the configured eye height. Equal-height results prefer the
+nearest point, so flat ground leaves the observer in place. The search includes
+neighboring prepared tiles and ignores missing terrain. The expand button
 changes map size; the grid button overlays the complete prepared-tile coverage.
 If the requested startup observer is outside that coverage, the viewer opens on
 a central available tile with the coverage overlay already enabled.

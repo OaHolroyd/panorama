@@ -979,6 +979,27 @@ std::optional<float> TileManager::State::sample_terrain(LatLon position) {
                                   : std::nullopt;
 }
 
+std::optional<TerrainSample> TileManager::State::find_summit(LatLon centre, double radius) {
+  auto points = catalogue->sample_grid_points(centre, radius);
+  points.insert(points.begin(), centre);
+  std::optional<TerrainSample> summit;
+  double nearest = std::numeric_limits<double>::infinity();
+  for (const auto point : points) {
+    const auto elevation = sample_terrain(point);
+    if (!elevation) {
+      continue;
+    }
+    const auto offset = geographic_offset(centre, point);
+    const double distance = std::hypot(offset.x, offset.y);
+    if (!summit || *elevation > summit->elevation ||
+        (*elevation == summit->elevation && distance < nearest)) {
+      summit = TerrainSample{point, *elevation};
+      nearest = distance;
+    }
+  }
+  return summit;
+}
+
 void TileManager::ensure_mipmaps(Timer &timer) {
   State &state = *state_;
   std::map<uint32_t, std::vector<uint32_t>> slots_by_lod;

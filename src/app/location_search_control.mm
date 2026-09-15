@@ -528,9 +528,14 @@ using namespace panorama::app;
 }
 
 - (void)moveToLocation:(LatLon)location token:(uint64_t)token {
-  [self setStatus:@"Locating terrain…" error:NO];
+  [self moveToLocation:location snapToSummit:NO token:token];
+}
+
+- (void)moveToLocation:(LatLon)location snapToSummit:(BOOL)snapToSummit token:(uint64_t)token {
+  [self setStatus:snapToSummit ? @"Finding summit within 100 m…" : @"Locating terrain…" error:NO];
   __weak LocationSearchControl *weakSelf = self;
   [_controller moveObserverToLocation:location
+                         snapToSummit:snapToSummit
                            completion:^(NSString *error) {
                              LocationSearchControl *control = weakSelf;
                              if (control == nil || control->_queryToken != token) {
@@ -577,7 +582,7 @@ using namespace panorama::app;
     const PeakRecord &peak =
         _renderer->peak_catalogue()->at(_peakMatches[static_cast<size_t>(row)]);
     _field.stringValue = [NSString stringWithUTF8String:peak.name.c_str()];
-    [self moveToLocation:peak.position token:token];
+    [self moveToLocation:peak.position snapToSummit:YES token:token];
     return;
   }
   MKLocalSearchRequest *request;

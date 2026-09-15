@@ -787,11 +787,15 @@ public:
   }
 
   /// Sample the actual terrain under a minimap coordinate on the render worker.
-  uint64_t request_map_point(MapCoordinate coordinate) override {
+  uint64_t request_map_point(MapCoordinate coordinate, double summit_radius) override {
+    if (!std::isfinite(summit_radius) || summit_radius < 0.0) {
+      throw std::invalid_argument("Summit search radius must be finite and nonnegative");
+    }
     uint64_t token = 0U;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       requested_map_coordinate_ = coordinate;
+      requested_summit_radius_ = summit_radius;
       requested_map_point_token_++;
       token = requested_map_point_token_;
       map_point_pending_ = true;
@@ -1257,6 +1261,7 @@ private:
       uint64_t inspection_token = 0U;
       ObserverLocation observer = {};
       MapCoordinate map_coordinate = {};
+      double summit_radius = 0.0;
       uint64_t map_point_token = 0U;
       MapCoordinate roam_coordinate = {};
       RoamAltitudeMode roam_altitude_mode = RoamAltitudeMode::FollowTerrain;
@@ -1300,6 +1305,7 @@ private:
         observer = requested_observer_;
         map_point_requested = map_point_pending_;
         map_coordinate = requested_map_coordinate_;
+        summit_radius = requested_summit_radius_;
         map_point_token = requested_map_point_token_;
         roam_requested = roam_pending_;
         roam_coordinate = requested_roam_coordinate_;
@@ -1626,8 +1632,12 @@ private:
           if (map_point_requested) {
             // Map inspection uses exact LOD-1 sampling even when the current
             // render selected a coarser terrain variant for this source.
-            if (const std::optional<float> elevation =
-                    trace_->sample_terrain(map_coordinate.position)) {
+            if (summit_radius > 0.0) {
+              if (const auto summit = trace_->find_summit(map_coordinate.position, summit_radius)) {
+                map_point = TerrainPoint{summit->position, summit->elevation};
+              }
+            } else if (const std::optional<float> elevation =
+                           trace_->sample_terrain(map_coordinate.position)) {
               map_point = TerrainPoint{
                   map_coordinate.position,
                   *elevation,
@@ -1790,6 +1800,7 @@ private:
   RoamAltitudeMode requested_roam_altitude_mode_ = RoamAltitudeMode::FollowTerrain;
   double requested_roam_height_ = 0.0;
   ObserverLocation requested_observer_ = {};
+  double requested_summit_radius_ = 0.0;
   std::optional<TerrainPoint> requested_target_;
   CameraOrientation presented_orientation_ = {};
   double presented_vertical_field_of_view_ = 0.0;

@@ -28,6 +28,9 @@
 @interface PanoramaController (LocationSearch)
 - (void)moveObserverToLocation:(panorama::LatLon)location
                     completion:(void (^)(NSString *error))completion;
+- (void)moveObserverToLocation:(panorama::LatLon)location
+                  snapToSummit:(BOOL)snapToSummit
+                    completion:(void (^)(NSString *error))completion;
 @end
 
 @interface PanoramaController (Rendering) <MTKViewDelegate>
