@@ -36,8 +36,11 @@ NSString *format_movement_speed(double metres_per_second) {
     _observer = renderer->observer();
     _orientation = renderer->initial_orientation();
     _verticalFieldOfView = renderer->initial_vertical_field_of_view();
-    _image = renderer->initial_image();
-    _lockedAspectRatio = static_cast<double>(_image.width) / _image.height;
+    _image = renderer->initial_drawable_size();
+    const CGFloat initialPointWidth = window.contentView.bounds.size.width;
+    _renderPixelsPerPoint = initialPointWidth > 0.0
+                                ? static_cast<double>(_image.width) / initialPointWidth
+                                : std::max(1.0, static_cast<double>(window.backingScaleFactor));
     _panningSensitivity = 8.0;
     _groundClearance = renderer->ground_clearance();
     _roamAltitude = _observer.elevation;
@@ -116,11 +119,9 @@ NSString *format_movement_speed(double metres_per_second) {
 
 - (void)attachPanoramaView:(PanoramaView *)panoramaView
                overlayView:(ViewerOverlayView *)overlayView
-             aspectFitView:(AspectFitContainerView *)aspectFitView
               miniMapPanel:(MiniMapPanelView *)miniMapPanel {
   _panoramaView = panoramaView;
   _overlayView = overlayView;
-  _aspectFitView = aspectFitView;
   _miniMapPanel = miniMapPanel;
   _miniMapPanel.interactionDelegate = self;
 

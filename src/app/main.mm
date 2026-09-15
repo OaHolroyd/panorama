@@ -115,11 +115,17 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   (void)notification;
-  const panorama::ImageSize image = _renderer->initial_image();
+  const panorama::ImageSize image = _renderer->initial_drawable_size();
   constexpr CGFloat kInspectorWidth = 300.0;
   constexpr NSSize kDebugSize = {240.0, 430.0};
-  const NSRect windowFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
-  const NSRect imageFrame = NSMakeRect(0.0, 0.0, image.width, image.height);
+  NSScreen *screen = NSScreen.mainScreen;
+  const CGFloat backingScale = screen != nil ? screen.backingScaleFactor : 1.0;
+  const NSSize initialContentSize =
+      NSMakeSize(image.width / backingScale, image.height / backingScale);
+  const NSRect windowFrame =
+      NSMakeRect(0.0, 0.0, initialContentSize.width, initialContentSize.height);
+  const NSRect imageFrame =
+      NSMakeRect(0.0, 0.0, initialContentSize.width, initialContentSize.height);
   _window = [[NSWindow alloc]
       initWithContentRect:windowFrame
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -138,16 +144,6 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
   view.preferredFramesPerSecond = 30;
   view.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
   _controller = [[PanoramaController alloc] initWithRenderer:_renderer.get() window:_window];
-
-  // Keep the traced ray field and Metal drawable at the same aspect ratio when
-  // the inspector, window, or requested resolution changes; otherwise AppKit
-  // scales the drawable non-uniformly and distorts terrain.
-  const CGFloat imageAspect =
-      static_cast<CGFloat>(image.width) / static_cast<CGFloat>(image.height);
-  AspectFitContainerView *imageContainer =
-      [[AspectFitContainerView alloc] initWithFrame:imageFrame
-                                         renderView:view
-                                        aspectRatio:imageAspect];
 
   NSViewController *settingsController = [_controller makeSettingsViewController];
   settingsController.title = @"Viewer";
@@ -171,16 +167,13 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
                                             commandQueue:_renderer->command_queue()
                                                  library:_renderer->library()];
   _overlayView = [[ViewerOverlayView alloc] initWithFrame:imageFrame
-                                              contentView:imageContainer
+                                              contentView:view
                                              settingsView:_inspectorController.view
                                            inspectorWidth:kInspectorWidth
                                                 debugView:debugController.view
                                                 debugSize:kDebugSize
                                              mapPanelView:miniMapPanel];
-  [_controller attachPanoramaView:view
-                      overlayView:_overlayView
-                    aspectFitView:imageContainer
-                     miniMapPanel:miniMapPanel];
+  [_controller attachPanoramaView:view overlayView:_overlayView miniMapPanel:miniMapPanel];
 
   NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"panorama.toolbar"];
   toolbar.delegate = self;

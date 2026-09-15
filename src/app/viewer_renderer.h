@@ -63,7 +63,7 @@ struct ViewerSettings {
   bool bilinear_collisions = false;
   bool c1_normals = true;
   ObserverLocation observer = {{46.1012605320838, 7.71604367731172}, 4515.0};
-  ImageSize image = {1600U, 900U};
+  ImageSize initial_drawable_size = {1600U, 900U};
   MetalFxActivation metalfx_activation = MetalFxActivation::Disabled;
   MetalFxPreset metalfx_preset = MetalFxPreset::Balanced;
   double vertical_field_of_view = kDefaultVerticalFieldOfView;
@@ -161,7 +161,6 @@ struct PresentedFrame {
 
 [[nodiscard]] ViewerSettings parse_arguments(int argc, const char *argv[]);
 [[nodiscard]] std::optional<double> parse_range_value(NSString *input);
-[[nodiscard]] std::optional<uint32_t> parse_image_dimension(NSString *input);
 [[nodiscard]] NSString *format_range_value(double value);
 [[nodiscard]] NSString *format_clock_minutes(double value);
 [[nodiscard]] std::optional<CalendarDateTime>
@@ -202,7 +201,7 @@ public:
   [[nodiscard]] virtual id<MTLDevice> device() const = 0;
   [[nodiscard]] virtual id<MTLCommandQueue> command_queue() const = 0;
   [[nodiscard]] virtual id<MTLLibrary> library() const = 0;
-  [[nodiscard]] virtual ImageSize initial_image() const = 0;
+  [[nodiscard]] virtual ImageSize initial_drawable_size() const = 0;
   [[nodiscard]] virtual ObserverLocation observer() const = 0;
   [[nodiscard]] virtual Crs terrain_crs() const = 0;
   [[nodiscard]] virtual const TerrainCoverage &terrain_coverage() const = 0;

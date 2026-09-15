@@ -4,14 +4,6 @@
 
 #import <AppKit/AppKit.h>
 
-/// Letterboxes the Metal view at the selected render aspect ratio.
-@interface AspectFitContainerView : NSView
-- (instancetype)initWithFrame:(NSRect)frame
-                   renderView:(NSView *)renderView
-                  aspectRatio:(CGFloat)aspectRatio;
-- (void)setAspectRatio:(CGFloat)aspectRatio;
-@end
-
 @interface InspectorDocumentView : NSView
 @end
 
