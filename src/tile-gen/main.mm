@@ -43,8 +43,8 @@ struct Options {
   uint32_t max_tiles = 0U;
   bool overwrite = false;
   bool dry_run = false;
-  MetalTileCompression compression = MetalTileCompression::Lz4;
-  LodSampling lod_sampling = LodSampling::None;
+  MetalTileCompression compression = MetalTileCompression::None;
+  LodSampling lod_sampling = LodSampling::Point;
 };
 
 /// Print the stable command-line contract without constructing any GDAL state.
@@ -74,9 +74,9 @@ void print_usage(const char *program) {
       "  --origin-y Y        destination grid northern origin (default: 0)\n"
       "  --resolution R      output spacing (default: source resolution)\n"
       "  --nodata VALUE      finite output no-data fill value (default: 0)\n"
-      "  --lod NAME          none, point, mean, or max (default: none)\n"
+      "  --lod NAME          none, point, mean, or max (default: point)\n"
       "  --compression NAME  none, zlib, lz4, lzma, or lzbitmap\n"
-      "                      (default: lz4)\n"
+      "                      (default: none)\n"
       "  --max-tiles N       stop after N output chunks; zero is unlimited\n"
       "  --overwrite         replace existing output chunks\n"
       "  --dry-run           inspect metadata and report the plan without writing\n"

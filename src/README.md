@@ -1,309 +1,300 @@
 # Source architecture
 
-Panorama turns prepared digital terrain model (DTM) tiles into distance,
-elevation, normal, shadow, and colour images. The expensive work is performed
-by Metal kernels. The software backend alternates between GPU traversal and
-host-side scheduling while terrain tiles are loaded asynchronously. The Metal
-BVH backend streams cached tile acceleration structures, with a shared manifest BVH
-selecting tiles and Metal instance transforms applying observer curvature.
-
-This document follows a request from an executable down to the terrain kernels.
+Panorama turns prepared digital terrain model tiles into distance, elevation,
+normal, shadow, and colour images. Metal kernels perform ray generation,
+terrain traversal, and image presentation. The batch renderer and AppKit viewer
+share the same tracing session and terrain-loading code.
 
 ## Source directories
 
-- `panorama/` implements the batch command. It parses a projection and output
-  request, performs one trace, presents the selected products, and writes PNGs.
-- `app/` implements the persistent AppKit viewer. Its render worker coalesces
-  interaction into the newest requested frame and reuses one tracing session
-  across camera movement and appearance-only changes.
-- `raytracing/` owns ray projection, catalogue discovery, asynchronous tile
-  residency, host frontier scheduling, Metal dispatch, and terrain kernels.
-- `rendering/` converts completed trace buffers into diagnostic or shaded
-  images. Presentation changes do not retrace terrain unless shadows or camera
-  geometry changed.
-- `tile-gen/` reads source DEMs and writes the prepared `.ptile` format used by
-  ray tracing.
-- `shared/` contains the `.ptile` format, manifest, and argument utilities used
-  by more than one executable.
+- `panorama/`: batch arguments, projection requests, rendering, and PNG output.
+- `app/`: AppKit controls, the persistent render worker, navigation, location
+  search, peak labels, astronomical lighting, and the MapKit minimap.
+- `raytracing/`: coordinate frames, GPU camera/LOD planning, terrain catalogues,
+  tile residency, software frontiers, and Metal BVH traversal.
+- `rendering/`: diagnostic and shaded image kernels, the complete GPU frame
+  producer, minimap visibility kernels, and PNG encoding.
+- `tile-gen/`: source-raster discovery, rechunking, and prepared-tile generation.
+- `shared/`: tile and manifest formats, valid-cell coverage, GDAL helpers, and
+  argument utilities.
 
 ## Request flow
 
-The batch and interactive entry points converge on `TerrainTraceSession`:
+Both entry points converge on `TerrainTraceSession`:
 
 ```mermaid
 flowchart TD
-    CLI[panorama/main.mm] --> RP[Describe projection]
-    RP --> RT[render_terrain]
+    CLI[panorama/main.mm] --> RT[render_terrain]
     RT --> SESSION[TerrainTraceSession]
-
     APP[app/main.mm] --> VR[ViewerRenderer worker]
-    VR --> ARP[Describe projection]
-    ARP --> SESSION
+    VR --> PRODUCER[render_terrain_frame]
+    PRODUCER --> SESSION
 
-    SESSION --> TM[TileManager]
+    SESSION --> TM[TileManager and TerrainCatalogue]
     SESSION --> CAM[GpuCamera: rays, footprint and LOD]
-    CAM --> GPU[GpuRaytraceResources]
-    SESSION --> HF[HostFrontier per trace]
-    GPU --> MK[raytrace.metal kernels]
-    TM --> MK
-    HF --> TM
-    SESSION --> BVH[MetalBvhTrace]
-    TM --> CACHE[Bounded immutable tile BVH cache]
-    CACHE --> BVH
+    SESSION --> GPU[GpuRaytraceResources]
+    CAM --> GPU
+    GPU --> CATALOGUE[TerrainTileBvh: coverage and candidates]
+    SESSION --> HF[HostFrontier]
+    HF --> GPU
+    GPU --> MIPMAP[raytrace.metal]
+    SESSION --> BVH[MetalBvhTrace and detailed tile cache]
+    BVH --> CATALOGUE
     BVH --> HW[metal_bvh_trace.metal]
 ```
 
-`RayFieldRequest` describes an angular or calibrated camera projection. Both
-entry points use GPU kernels to generate horizontal directions, slopes, pixel
-footprints and source LOD decisions; no CPU ray vectors or LOD implementation
-are retained. Brown–Conrady lens inversion also runs on the GPU. The CLI creates a
-short-lived session. The viewer retains its session so the catalogue, tile
-atlas, worker threads, and Metal pipelines survive changes in heading, pitch,
-field of view, and observer location.
+`RayFieldRequest` describes an angular panorama or calibrated camera projection.
+`gpu_camera.metal` generates horizontal ray directions and slopes, including
+Brown–Conrady lens inversion, and selects source LODs on the GPU. Projection
+footprints and LOD plans are cached: rotations reuse them; projection, image
+size, observer position, or LOD-scale changes update the relevant plan.
 
-## Session setup
+The batch renderer creates a short-lived session. The viewer retains its
+catalogue, atlas, workers, pipelines, and detailed BVH cache across frames.
 
-`TerrainTraceSession` establishes objects in an order that avoids circular
-ownership:
+## Prepared terrain and coordinate frames
 
-1. `TileManager` discovers `.ptile` files, creates the immutable
-   `TerrainCatalogue`, reads the reference tile geometry, and starts with LOD 1
-   until GPU decisions are installed.
-2. `GpuRaytraceResources` selects the Metal device, compiles the Float32 or
-   retained-uint16 pipelines, allocates per-ray buffers, and uploads a compact
-   tile-key-to-source hash table.
-3. `TileManager::attach_gpu` allocates its atlas on that device, synchronously
-   installs the observer tile in slot zero, builds its maximum-elevation
-   mipmap, and starts loading workers.
-4. `GpuCamera` prepares the projection and installs GPU-selected source LODs.
-   Ray generation runs before primary tracing on the same command queue.
+`SourceCatalogue` discovers GeoTIFF, SRTM HGT, and Arc/Info ASC rasters,
+including ASC members of ZIP archives. `rechunker.mm` reads overlapping source
+windows without reprojection or resampling. Each generation run requires one
+compatible CRS, resolution, pixel registration, and aligned sample grid.
 
-The catalogue is immutable for the session. A viewer relocation inside that
-catalogue only rebases resident tile coordinates and recalculates LOD choices.
-Moving beyond it causes the app to construct a replacement session.
+`metal_tile_writer.mm` writes version-5 uint16 tiles with independently
+addressable LOD payloads. Code zero denotes no-data; valid elevations decode as
+`(base + code) / 10` metres. A cell is usable only when all four corners are
+valid. Coverage rectangles follow the LOD table. The version-3
+`panorama-terrain-manifest.bin` records tile coordinates, elevation bounds
+across all stored LODs, and usable-cell coverage.
 
-## Metal BVH primary tracing
+`TerrainCatalogue` discovers an ordered dataset stack. Earlier datasets own
+overlapping valid terrain; later datasets fill gaps. Datasets may differ in CRS
+and spacing, but their tile cell counts, mipmap/LOD layouts, sample types, and
+compression must match. Configured vertical offsets apply to heights and bounds.
 
-`MetalBvhTrace` shares the session's device, queue, ray buffers, and output ABI.
-It copies each selected LOD from `TileManager` before allowing that atlas slot
-to be reused. Each cached BVH owns its vertices independently of atlas eviction
-and software shadow passes. Float32 and retained uint16 use the same block metadata
-with byte offsets and per-tile quantization bases.
+Public observer locations use WGS 84 `LatLon` and absolute elevation.
+`crs.mm` supplies GDAL/PROJ transforms and geodesic movement. A single
+projected-metre dataset can retain its native metric frame; geographic terrain
+and multi-dataset stacks use a fixed local azimuthal-equidistant frame.
+True-north camera and sun directions are converted into that frame's local
+basis at the observer.
 
-Each primitive covers up to `bvh_block_cells` cells per axis. The bounds kernel
-scans the block's actual vertices and conservatively encloses elevation minus
-effective-Earth curvature. The intersection function repeats an inclusive slab
-test before any terrain access, then walks only the block's cells using the
-shared collision and normal helpers in `terrain_intersection.metalh`. The ray
-remains `(dx, dy, slope)` with horizontal-distance parameterization. A successful
-hit is checked against catalogue coverage so missing tiles terminate rays just
-as they do in the software frontier.
+`terrain_transform.mm` subdivides transformed terrain into affine geometry
+patches, targeting a 0.25 m horizontal residual. Coverage uses separately
+tessellated polygons with shared projected edge vertices. It determines valid
+intervals and priority; it does not supply a collision surface. Partial or
+priority-clipped sources retain native resolution so coarse geometry cannot
+expand across an ownership boundary.
 
-The backend builds a primitive acceleration structure, reads back its compacted
-size, and completes copy-and-compact before releasing build storage. All
-indirect intersection-table resources are declared on every trace encoder.
-Submissions finish synchronously before parameters, outputs, or cache entries may
-change. The shared `TerrainTileBvh` contains one conservative manifest box per tile.
-Version 2 manifests carry minima and maxima over all LODs; missing bounds use
-conservative finite columns.
+Geographic terrain and multiple datasets require `Raytracer::MetalBvh`.
+The software backend, shown as Mipmap in the viewer, supports a single
+projected-metre dataset.
 
-After terrain has been cached, a persistent instance hierarchy references all
-resident tiles at their currently selected LODs. One compute dispatch traces
-the entire resident scene and queries the catalogue for uncached candidates
-before accepting a hit (or sky). A potentially closer uncached tile defers that
-ray to streaming; completed resident rays keep their outputs. A GPU counter
-lets a fully resolved frame return after one submission, without scanning or
-grouping ray continuations on the CPU. The scene is reused across heading,
-pitch, zoom, resolution, height-only and collision/normal option changes.
+## Session setup and relocation
 
-Cold and unresolved rays use the bounded streaming path. Candidate rays wait
-in source buckets. Processing outward Manhattan grid shells gathers all
-incoming rays before loading a source, so even a one-tile cache does not
-repeatedly build that source within a frame. Cache insertions/evictions and
-observer XY/LOD changes invalidate the resident scene. All scene references
-are released before detailed tile eviction; the next trace lazily rebuilds
-the hierarchy from the current cache.
+`TerrainTraceSession::State` establishes ownership in this order:
 
-Detailed tile bounds enclose `h(u,v) - k*(u*u+v*v)` around the tile centre.
-For centre offset `a = tile_centre - observer`, each Metal instance maps
-`(u,v,z)` to `(u+a.x, v+a.y, z-2*k*dot(a,(u,v))-k*dot(a,a))`.
-The callback tests the local AABB but uses the original world ray in the shared
-collision solver, preserving its horizontal parameter and normal convention.
-XY movement rebuilds only small catalogue and scene/batch instance hierarchies. Cached
-tile BVHs are keyed by source and LOD and survive observer changes.
+1. `TileManager` creates the catalogue, reads reference geometry, and starts
+   with LOD 1 before a GPU plan is installed.
+2. `GpuRaytraceResources` selects or inherits a Metal device/command queue,
+   compiles traversal pipelines for retained uint16 or expanded Float32 atlas
+   data, and allocates ray outputs and catalogue lookup buffers.
+3. `TileManager::attach_gpu` allocates the atlas, loads the initial observer
+   tile into slot zero, and starts preparation workers. Maximum mipmaps remain
+   unbuilt until requested by software traversal.
+4. A BVH session creates `MetalBvhTrace`; `GpuCamera` prepares the projection
+   and installs GPU-selected LODs. Ray generation precedes primary traversal.
 
-Admission reserves terrain buffers, original/compacted acceleration structures,
-and build scratch before loading. LRU entries are evicted only between completed
-submissions. The independent `bvh_cache_size_bytes` budget excludes ray-sized
-work/output buffers and the small upper hierarchies. Resident-scene hierarchy,
-instance/resource metadata and source residency flags are reported separately
-as `scene_bytes`; the hierarchy's instance count is bounded by cached tiles.
-A cache smaller than one
-tile's peak build requirement is rejected with the required byte count.
-Timing separates GPU traversal, tile loading/building, and instance setup under
-the inclusive streaming trace, so cold construction cannot masquerade as tracing.
-Per-frame diagnostics also report scene builds, scene passes and fallback-ray
-counts. The existing cache-hit counter counts streaming acquisitions; a warm
-scene can resolve all rays without any such acquisitions.
-The viewer's `render_terrain_frame` encodes resident primary rays, shadows,
-colouring and dependent visibility projection into one producer command.
-Shadow rays use an affine change from their collision origin into the primary
-scene's curvature frame. Their callbacks still solve collisions relative to
-the shadow origin. A missing candidate triggers software shadow streaming;
-an already known occluder is sufficient to prove shadow. Cold shadow dispatches
-cover every image pixel, independently of the last primary streaming batch size.
-Primary view and configuration changes invalidate cached shadow visibility.
+Catalogue source indices remain fixed for the session. Relocation within the
+retained render catalogue rebases metadata and recalculates camera/LOD plans
+while keeping terrain payloads and workers. A move outside it creates a
+replacement session on the same device and command queue.
 
-Failed producers restore the previous output target before another frame begins.
-The viewer also rolls back a completed target if later inspection fails before
-publication. After acquiring a drawable, display callbacks refresh their snapshot
-under the publication mutex and hold it through blit encoding and commit. This
-places presentation ahead of any subsequent reuse of that texture on the shared
-queue without adding a GPU wait. A newer frame arriving during drawable acquisition
-does not abandon an encoded presentation. Both Metal view callbacks use local
-autorelease pools to release temporary drawable references promptly. Replacement
-trace sessions inherit that same queue and its device when
-the observer leaves the retained catalogue; presentation resources remain valid.
+The catalogue also retains a complete sampling index beyond the render radius
+and tile-count limit. Ground sampling and summit lookup can therefore resolve
+a destination before the viewer builds a render catalogue around it.
 
-Producer results remain unpublished until both missing-ray counters have been
-checked. A fallback repairs tracing and regenerates the image before publication.
-Producer timing covers its completed command buffers; synchronous hierarchy
-preparation and streaming are included only in wall latency. The software shadow
-frontier remains available through the ordinary synchronous session interface.
+## Metal BVH tracing
 
-## One primary tracing pass
+`MetalBvhTrace` owns a bounded cache of detailed tile acceleration structures.
+Each entry is identified by source and selected LOD and owns its immutable
+vertices independently of atlas eviction. Quantized uint16 and expanded
+Float32 atlas data use the same block/intersection machinery.
 
-Each ray begins in the observer tile. A GPU pass traces only the segments whose
-terrain is currently resident:
+Each primitive covers up to `bvh_block_cells` cells per axis.
+`build_terrain_bvh_bounds` encloses terrain with curvature guards;
+`terrain_intersection.metalh` supplies exact bilinear or split-triangle
+collisions and surface gradients. Transformed entries also carry their affine
+patch geometry and vertical offset.
+
+The session-owned `TerrainTileBvh` separates coverage traversal from
+height-bounded candidate traversal. For transformed terrain it uses coverage,
+ownership, and blocker polygons plus fine candidate patches. Nested XY bounds
+accelerate these lists while preserving polygon priority and boundary checks.
+
+A persistent instance hierarchy traces all resident detailed tiles in one
+scene dispatch. The GPU checks for potentially closer, uncached terrain before
+accepting a hit or sky. Missing source requests and unresolved rays are recorded
+on the GPU. Repair admits those sources and retries only unresolved rays,
+preserving completed pixels and provisional closest-hit bounds.
+Coverage continuity is verified before accepting a provisional hit at a height
+discontinuity; crossing an empty gap does not create a terrain intersection.
+
+When the working set cannot fit, bounded streaming processes remaining source
+groups in spatial shells. Native grids use Manhattan shells; transformed
+catalogues use conservative metric distance shells. Already completed rays
+remain complete through fallback.
+
+Detailed bounds use a fixed curvature anchor. Instance transforms apply
+observer-relative XY translation, Z shear, and dataset vertical offsets;
+intersection callbacks preserve horizontal ray-distance parameterization.
+Moving the observer can update catalogue metadata and instance structures
+without rebuilding immutable detailed terrain.
+
+`bvh_cache_size_bytes` bounds detailed vertices, block/transform metadata,
+acceleration structures, and peak build/compaction workspace. It is separate
+from the tile atlas and ray outputs. Scene and catalogue allocations are
+reported separately. Admission evicts unpinned least-recently-used entries only
+between completed GPU commands; primary hits and shadow occluders are protected
+during repair. A budget that cannot fit one tile and its build workspace fails
+with the required size.
+
+## Software frontier and tile residency
+
+The software backend traverses resident tile segments and lets `HostFrontier`
+schedule continuations:
 
 ```mermaid
 flowchart TD
     A[Active RayWorkItem buffer] --> B[trace_tile_frontier]
-    B --> C[trace_tile_frontier_impl]
-    C -->|collision| D[Distance / elevation / gradient outputs]
-    C -->|leaves tile| E[Continuation distance]
-    E --> F[emit_tile_frontier]
-    F -->|catalogue maximum proves clear| F
-    F -->|next required source| G[DeferredRayWork buffer]
-    G --> H[HostFrontier]
+    B -->|collision| C[Distance / elevation / gradient outputs]
+    B -->|leaves tile| D[Continuation distance]
+    D --> E[emit_bvh_tile_frontier or emit_tile_frontier]
+    E -->|next required source| F[DeferredRayWork buffer]
+    F --> H[HostFrontier]
     H -->|source resident| A
     H -->|source absent| I[TileManager request]
-    I --> J[Worker and prepared queue]
+    I --> J[Preparation worker and queue]
     J --> K[Atlas installation]
     K --> H
 ```
 
-`GpuRaytraceResources::trace_frontier` encodes `trace_tile_frontier` and
-`emit_bvh_tile_frontier` into the same command buffer. The first kernel traverses
-one resident tile and writes either a collision or the distance at which the
-ray leaves it. The second kernel selects the next conservative candidate using
-`TerrainTileBvh`, then emits one `DeferredRayWork` for detailed traversal.
-`GpuRaytraceResources` owns this catalogue; both backends share its construction,
-curvature bounds, tile intersection callback, selection helper, and coverage-gap
-checks. Function tables remain pipeline-local, and no detailed surface BVHs are
-built for Mipmap. Unsupported devices use `emit_tile_frontier` grid walking;
-`RaytraceConfig::use_tile_bvh = false` also selects that reference path in tests.
+`GpuRaytraceResources::trace_frontier` encodes traversal and emission in one
+command buffer. On devices supporting Metal ray tracing, emission uses the
+shared `TerrainTileBvh`; other devices use grid walking. Tests can select the
+grid reference with `RaytraceConfig::use_tile_bvh = false`. Mipmap does not
+build detailed surface BVHs.
 
-After the command completes, `HostFrontier` groups those continuations by
-catalogue source. It activates resident work near the closest outstanding
-segment and asks `TileManager` for missing sources. The distance window keeps
-independent rays progressing together and limits LRU churn. A ray has at most
-one active or deferred segment at any time; debug builds validate this
-invariant.
+After a pass, `HostFrontier` groups deferred work by source, activates resident
+segments near the closest outstanding distance, and requests missing sources.
+Its distance window limits atlas churn. Debug builds validate that each ray
+has at most one active or deferred segment.
 
-## TileManager lifecycle
-
-`TileManager` owns everything concerning terrain files and residency.
-`HostFrontier` knows only source indices, atlas slots, and installed variants.
+`TileManager` requests are deduplicated by `TileVariant`:
 
 ```mermaid
 stateDiagram-v2
     [*] --> Unrequested
-    Unrequested --> Queued: request source + selected LOD
+    Unrequested --> Queued: request source and selected LOD
     Queued --> Queued: improve priority
     Queued --> Loading: worker pops request
-    Loading --> Prepared: header/LOD read and file opened
+    Loading --> Prepared: metadata read and file opened
     Prepared --> Resident: payload installed in atlas
     Resident --> Unrequested: LRU eviction
 ```
 
-Requests are deduplicated by `TileVariant`, which is a source index plus a
-one-based terrain LOD. Workers perform control-plane work—reading metadata,
-selecting the LOD record, and opening a Metal file handle—then place a compact
-`PreparedTile` in a bounded queue. The render thread installs prepared tiles
-only between completed GPU passes, so an atlas slot is never overwritten while
-a kernel can read it.
+Workers read metadata, select a LOD record, and open a Metal file handle, then
+place a `PreparedTile` in a bounded queue. The render thread installs selected
+payload ranges via Metal I/O between completed GPU passes, choosing an unused
+or unpinned LRU slot. Compressed unaligned ranges use staging where required.
 
-Installation prefers an unused slot and otherwise chooses the least recently
-used unpinned slot. Metal I/O copies only the selected LOD byte range. Uint16
-data either remains quantized or is converted to Float32 by a compute kernel.
-The manager then builds a conservative maximum-elevation mipmap and publishes
-the slot mapping and lifecycle transition together. Compressed inputs use a
-staging copy when Metal I/O cannot begin directly at an unaligned LOD offset;
-uncompressed aligned ranges retain the direct path.
+Uint16 data remains quantized by default; expansion converts it to Float32 on
+the GPU. Slots retain a common LOD-1 stride. Installation publishes residency
+and marks maximum mipmaps unbuilt. `ensure_mipmaps` batches required reductions
+by LOD for software primary/shadow traversal; detailed BVH admission needs
+vertices without generating maximum mipmaps.
 
-Terrain-point inspection also belongs to `TileManager`. It samples an existing
-resident LOD-1 slot when possible; otherwise it retains one separately loaded
-LOD-1 payload. This shares catalogue lookup and Metal-I/O resources with
-tracing without forcing coarse render tiles to be refined merely for a cursor
-query.
+Inside a tile, `trace_tile_frontier_impl` combines 2D DDA with maximum-elevation
+rejection. It descends to level 1 for an exact bilinear or split-triangle cell
+intersection and climbs back to coarser levels when clear. Missing cells are
+empty space.
 
-## Traversal inside a tile
+## Shadows and complete frame production
 
-The public kernels `trace_tile_frontier` and
-`trace_tile_frontier_quantized` select the atlas representation and call the
-templated `trace_tile_frontier_impl` in `raytracing/raytrace.metal`.
+BVH shadows reuse the resident detailed scene and cache. Shadow rays originate
+at primary collision points with a self-intersection bias and are transformed
+into the scene's curvature frame. The GPU requests missing potential casters;
+repair loads them and retries before visibility is accepted. Known occluders
+can prove shadow without loading every remaining candidate.
 
-The implementation combines two structures:
+If pinned terrain cannot fit, transformed catalogues use bounded BVH shadow
+streaming. The single-grid path can fall back to
+`GpuTerrainShadowResources` and `HostFrontier`, using
+`initialise_shadow_rays`, `trace_shadow_tile_frontier`, and
+`emit_shadow_tile_frontier`. Both paths share existing terrain-loading
+resources rather than maintaining a second shadow terrain cache.
 
-- a 2D DDA advances the ray through aligned terrain blocks; and
-- a maximum-elevation mipmap rejects blocks that lie completely below the
-  curvature-adjusted ray.
+`TerrainTraceSession` invalidates reusable shadow visibility when primary
+geometry or sun direction changes. Both batch and viewer use its shadow API.
 
-Traversal starts coarse for an incoming tile. A possible intersection descends
-the mipmap until level 1, where the ray is intersected exactly with the cell's
-bilinear surface. Clear neighboring blocks allow traversal to climb back to
-coarser levels. The selected terrain LOD changes cell size and available
-mipmap depth but retains a common atlas-slot stride.
+`rendering/gpu_terrain_frame.mm` coordinates the viewer's complete producer.
+Resident primary rays, shadows, colouring, optional MetalFX upscaling, and
+dependent minimap point projection can share one command buffer. It checks
+primary and shadow completion counters, repairs missing terrain, and regenerates
+dependent images before publication. Failed image frames are cancelled.
 
-The return value is deliberately a continuation distance rather than a tile
-identifier. The frontier emitter owns tile selection and catalogue lookup;
-the host later maps its source index to whichever atlas slot currently holds
-the selected variant.
+Producer GPU timing covers completed producer commands. Synchronous camera/BVH
+preparation and streaming repair contribute to wall latency and separate work
+timers.
 
-## Shadow tracing
+## Viewer coordination and presentation
 
-Hard shadows reuse the same manager and host-frontier lifecycle:
+`ViewerRenderer` coalesces requests on a render worker and publishes completed
+textures and inspection results under a mutex. Unpublished image/MetalFX
+targets can be rolled back if later work fails. After drawable acquisition,
+`submit_presentation` refreshes the frame snapshot and holds publication locked
+through fullscreen encoding and commit. Shared command-queue ordering keeps
+presentation ahead of the texture's next write without an extra GPU wait.
 
-1. `initialise_shadow_rays` reconstructs eligible collision positions, applies
-   a self-intersection bias, and emits their starting sources.
-2. `HostFrontier` requests and activates terrain exactly as for primary rays.
-3. `trace_shadow_tile_frontier` invokes the same traversal template in
-   any-hit mode. Its first collision clears the visibility byte.
-4. `emit_shadow_tile_frontier` continues an unblocked ray from its individual
-   collision origin rather than the shared camera origin.
+`PanoramaController` is split into source files for rendering, navigation,
+inspection, lighting, text editing, and inspector panels. Search uses
+`location_search.mm` and `coordinate_input.mm` for coordinate recognition and
+peak matching, then MapKit completion/search for places. Request tokens discard
+superseded results.
 
-Thus an off-screen or nonresident ridge can cast a shadow without maintaining
-a second terrain cache.
+Terrain moves use asynchronous map-point sampling on the render worker and
+retain eye height. Only catalogue peak selections request automatic 100 m
+summit snapping; the Movement panel exposes the same operation manually.
+`TileManager::find_summit` checks full-resolution grid vertices within a
+geodesic radius plus the centre, ignores missing coverage, applies dataset
+priority/offsets, and prefers the nearest equal-height result.
 
-## Presentation
+Astronomical lighting uses `solar_position.mm` with observer-local date/time
+converted to UTC. Observer time zones come from MapKit reverse geocoding;
+nonexistent daylight-saving times are rejected. The date/time fields, time
+slider, and minute buttons share the same lighting publication path.
 
-Tracing produces shared Metal buffers for horizontal collision distance and,
-when requested, elevation, packed surface gradients, and shadow visibility.
-`GpuImageRenderer` combines those buffers with colour and lighting settings in
-`rendering/image_renderer.metal`. The viewer can rerun presentation without
-changing the terrain frontier; the CLI reads the resulting textures back and
-encodes PNG files.
+The minimap receives immutable collision-point snapshots from
+`GpuVisibilityPointProjector`. `visibility_projection.mm` maps the retained
+metric frame into MapKit coordinates; `VisibilityMask` renders coverage on a
+serial worker. One active job and one replaceable pending request bound work.
+Generation checks discard stale images; hiding the map stops new projection
+and mask work. MapKit displays the resulting bitmap.
 
-## Important invariants
+`GpuImageRenderer` turns shared distance, elevation, packed-gradient, and
+visibility buffers into diagnostic or shaded textures using
+`rendering/image_renderer.metal`. The viewer can recolour a completed trace
+without primary traversal; shadow changes may require new shadow work.
+The batch renderer reads textures back and uses `png_writer.mm` to encode PNGs.
 
-- Catalogue source indices remain stable for a session.
-- Each ray has no more than one active or deferred segment.
-- Atlas installation occurs only after the preceding GPU command completes.
-- Active slots receive fresh LRU stamps before their pass; installation waits
-  until that pass has completed.
-- LOD is part of tile identity; two LODs of one source are distinct variants.
-- Maximum mipmaps are conservative rejection bounds, not collision surfaces.
-- Exact collisions use the vertices belonging to the resident LOD.
-- GPU ABI structs are mirrored explicitly between C++ headers and Metal; keep
-  field order, width, and alignment synchronized when changing them.
+## Invariants
+
+- Catalogue source indices stay stable within a session.
+- Each software-frontier ray has at most one active or deferred segment.
+- Payload installation and cache eviction cannot overwrite resources in use.
+- LOD is part of tile identity; different LODs are distinct variants.
+- Maximum mipmaps are rejection bounds; collisions use selected-LOD vertices.
+- Coverage and dataset priority define where terrain exists; missing data is
+  traversed as empty space, with known nonresident terrain resolved before
+  accepting visibility.
+- Published frames have complete primary and shadow results.
+- GPU ABI structs mirror C++ and Metal field order, width, and alignment.
