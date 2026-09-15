@@ -13,7 +13,7 @@ and astronomical lighting, or render PNGs from the command line.
     src="https://github.com/user-attachments/assets/cd13e6be-541d-45aa-ae31-976e7c08f444"
   />
   <br>
-  <em>Example panorama from the summit of the Weisshorn, rendered from swissALTI3D 2m and SRTM 1' data. From here we can see as far as the Maritime Alps 220 km away on the French/Italian border.</em>
+  <em>Example panorama from the summit of the Weisshorn, rendered from swissALTI3D 2m and SRTM 1′ data. From here, we can see as far as the Maritime Alps, 220 km away on the French–Italian border.</em>
 </p>
 
 This project is inspired by Jonathan de Ferranti's original [panoramas](https://viewfinderpanoramas.org/panoramas.html).
