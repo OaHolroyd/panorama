@@ -983,6 +983,9 @@ public:
   }
   [[nodiscard]] bool metalfx_supported() const override { return metalfx_->supported(); }
   [[nodiscard]] bool peak_labels_available() const override { return peak_catalogue_.has_value(); }
+  [[nodiscard]] const PeakCatalogue *peak_catalogue() const override {
+    return peak_catalogue_ ? &*peak_catalogue_ : nullptr;
+  }
   [[nodiscard]] bool initial_bilinear_collisions() const override {
     return settings_.bilinear_collisions;
   }

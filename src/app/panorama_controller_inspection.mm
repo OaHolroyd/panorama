@@ -196,6 +196,11 @@
   if (!_pointInspectionEnabled && action != panorama::app::MapPointAction::MoveObserver) {
     return;
   }
+  if (_locationMoveCompletion != nil) {
+    void (^completion)(NSString *) = _locationMoveCompletion;
+    _locationMoveCompletion = nil;
+    completion(@"Location move cancelled");
+  }
   _mapPointAction = action;
   _mapPointRequestToken = _renderer->request_map_point({{latitude, longitude}});
   if (action != panorama::app::MapPointAction::Hover) {
@@ -239,6 +244,16 @@
   [self setPointInfoStatus:@"Moving observer…"];
   [self requestMetalFxInteraction];
   _renderer->request_observer_at(point, _groundClearance);
+}
+
+- (void)moveObserverToLocation:(panorama::LatLon)location
+                    completion:(void (^)(NSString *error))completion {
+  _coordinateMovePending = false;
+  [self requestMapPointLatitude:location.lat
+                      longitude:location.lon
+                         action:panorama::app::MapPointAction::MoveObserver];
+  _locationMoveRequestToken = _mapPointRequestToken;
+  _locationMoveCompletion = [completion copy];
 }
 
 - (void)moveToLockedPoint:(id)sender {

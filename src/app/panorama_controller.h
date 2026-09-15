@@ -25,6 +25,11 @@
 @interface PanoramaController (TextEditing) <NSTextFieldDelegate>
 @end
 
+@interface PanoramaController (LocationSearch)
+- (void)moveObserverToLocation:(panorama::LatLon)location
+                    completion:(void (^)(NSString *error))completion;
+@end
+
 @interface PanoramaController (Rendering) <MTKViewDelegate>
 @end
 

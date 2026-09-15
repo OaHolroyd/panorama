@@ -159,6 +159,8 @@
   bool _pointLockPending;
   bool _lockedPointOccluded;
   bool _coordinateMovePending;
+  uint64_t _locationMoveRequestToken;
+  void (^_locationMoveCompletion)(NSString *error);
   bool _invertMousePanning;
   bool _viewerPaused;
   bool _cruiseRecovery;

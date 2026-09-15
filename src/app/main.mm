@@ -1,3 +1,4 @@
+#include "location_search_control.h"
 #include "minimap.h"
 #include "panorama_controller.h"
 #include "panorama_view.h"
@@ -16,6 +17,7 @@
 
 static NSToolbarItemIdentifier const kDebugToolbarItemIdentifier = @"panorama.debug-info";
 static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.minimap";
+static NSToolbarItemIdentifier const kSearchToolbarItemIdentifier = @"panorama.search";
 
 @interface PanoramaAppDelegate : NSObject <NSApplicationDelegate, NSToolbarDelegate> {
 @private
@@ -24,6 +26,7 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
   PanoramaController *_controller;
   NSTabViewController *_inspectorController;
   ViewerOverlayView *_overlayView;
+  LocationSearchControl *_searchControl;
 }
 - (instancetype)initWithSettings:(panorama::app::ViewerSettings)settings;
 @end
@@ -43,6 +46,7 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
   (void)toolbar;
   return @[
     kMapToolbarItemIdentifier,
+    kSearchToolbarItemIdentifier,
     NSToolbarFlexibleSpaceItemIdentifier,
     kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
@@ -55,6 +59,7 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
     NSToolbarFlexibleSpaceItemIdentifier,
     NSToolbarSpaceItemIdentifier,
     kMapToolbarItemIdentifier,
+    kSearchToolbarItemIdentifier,
     kDebugToolbarItemIdentifier,
     NSToolbarToggleInspectorItemIdentifier,
   ];
@@ -65,6 +70,9 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
     willBeInsertedIntoToolbar:(BOOL)willBeInserted {
   (void)toolbar;
   (void)willBeInserted;
+  if ([itemIdentifier isEqualToString:kSearchToolbarItemIdentifier]) {
+    return [_searchControl makeToolbarItemWithIdentifier:itemIdentifier];
+  }
   const BOOL isInspector = [itemIdentifier isEqualToString:NSToolbarToggleInspectorItemIdentifier];
   const BOOL isDebug = [itemIdentifier isEqualToString:kDebugToolbarItemIdentifier];
   const BOOL isMap = [itemIdentifier isEqualToString:kMapToolbarItemIdentifier];
@@ -174,6 +182,9 @@ static NSToolbarItemIdentifier const kMapToolbarItemIdentifier = @"panorama.mini
                                                 debugSize:kDebugSize
                                              mapPanelView:miniMapPanel];
   [_controller attachPanoramaView:view overlayView:_overlayView miniMapPanel:miniMapPanel];
+  _searchControl = [[LocationSearchControl alloc] initWithRenderer:_renderer.get()
+                                                        controller:_controller
+                                                            window:_window];
 
   NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"panorama.toolbar"];
   toolbar.delegate = self;

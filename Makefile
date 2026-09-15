@@ -94,7 +94,7 @@ PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 DEPS := $(PANORAMA_OBJ:.o=.d) $(PANORAMA_VIEWER_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) \
 	$(SHARED_OBJ:.o=.d) $(OBJ_DIR)/metal-bvh-test.d $(OBJ_DIR)/terrain-manifest-test.d \
 	$(OBJ_DIR)/minimap-test.d $(OBJ_DIR)/metalfx-test.d \
-	$(OBJ_DIR)/peak-catalogue-test.d $(OBJ_DIR)/geographic-test.d
+	$(OBJ_DIR)/peak-catalogue-test.d $(OBJ_DIR)/geographic-test.d $(OBJ_DIR)/location-search-test.d
 
 .PHONY: all clean rebuild compile_commands FORCE
 
@@ -252,3 +252,10 @@ $(OBJ_DIR)/geographic-test: tests/geographic_test.mm $(OBJ_DIR)/raytracing/crs.o
 .PHONY: check-geographic
 check-geographic: $(OBJ_DIR)/geographic-test
 	$(OBJ_DIR)/geographic-test
+
+$(OBJ_DIR)/location-search-test: tests/location_search_test.mm $(OBJ_DIR)/app/location_search.o $(OBJ_DIR)/app/coordinate_input.o $(OBJ_DIR)/app/peak_catalogue.o $(OBJ_DIR)/raytracing/crs.o
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) -framework Foundation $(LDLIBS)
+
+.PHONY: check-search
+check-search: $(OBJ_DIR)/location-search-test
+	$(OBJ_DIR)/location-search-test

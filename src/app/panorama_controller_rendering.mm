@@ -268,6 +268,12 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
           action == panorama::app::MapPointAction::MoveObserver && _coordinateMovePending;
       _mapPointAction = panorama::app::MapPointAction::None;
       _coordinateMovePending = false;
+      void (^locationCompletion)(NSString *) = nil;
+      if (_locationMoveCompletion != nil &&
+          frame.map_point_request_token == _locationMoveRequestToken) {
+        locationCompletion = _locationMoveCompletion;
+        _locationMoveCompletion = nil;
+      }
       if (!frame.map_point.has_value()) {
         _mapHoverPoint.reset();
         if (action == panorama::app::MapPointAction::Hover) {
@@ -318,6 +324,9 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
           [self updatePointInfo:point];
           [self lookAtTerrainPoint:*frame.map_point];
         }
+      }
+      if (locationCompletion != nil) {
+        locationCompletion(frame.map_point ? nil : @"No terrain coverage at this location");
       }
     }
   }

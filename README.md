@@ -387,6 +387,20 @@ Map inspection and relocation can use any covered point in the configured
 datasets, including points beyond the current rendering distance. Distant map
 queries load only the target tile; relocation builds a render catalogue around
 the destination.
+
+The magnifying glass beside the map toggle expands into a location search bar.
+Search tries WGS 84 `latitude, longitude` first, then other recognised coordinate
+formats, names in the loaded peak catalogue, and Apple Maps local search. Peak
+and place suggestions appear as you type a name; incomplete coordinate input
+stays in coordinate mode. Peak matches ignore case and accents, with exact names
+before prefixes and substrings, and nearer peaks first when names are duplicated.
+Use Up/Down and Return, or click a suggestion, to move at the configured eye
+height. Escape, the clear button, or clicking outside search closes the bar.
+Locations without loaded terrain coverage show an error and leave the observer
+in place. Apple place
+search and suggestions require a network connection; coordinates and peaks work
+locally.
+
 The Position tab also accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
 easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
 `NG907598`, or `190716, 859877`. Its coordinate-system menu defaults to Auto,

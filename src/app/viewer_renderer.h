@@ -214,6 +214,8 @@ public:
   [[nodiscard]] virtual MetalFxPreset initial_metalfx_preset() const = 0;
   [[nodiscard]] virtual bool metalfx_supported() const = 0;
   [[nodiscard]] virtual bool peak_labels_available() const = 0;
+  /// Immutable catalogue loaded at startup, also available when labels are off.
+  [[nodiscard]] virtual const PeakCatalogue *peak_catalogue() const = 0;
   [[nodiscard]] virtual bool initial_bilinear_collisions() const = 0;
   [[nodiscard]] virtual bool initial_c1_normals() const = 0;
   [[nodiscard]] virtual CameraOrientation initial_orientation() const = 0;
