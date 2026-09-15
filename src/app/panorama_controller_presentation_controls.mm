@@ -35,7 +35,7 @@
     [self commitResolutionControls];
   } else if (field == _minimumControl || field == _maximumControl) {
     [self publishTerrainControls];
-  } else if (field == _astronomicalDateControl) {
+  } else if (field == _astronomicalDateControl || field == _astronomicalTimeTextControl) {
     [self astronomicalInputChanged:field];
   } else if (field == _groundClearanceControl) {
     [self commitGroundClearanceControl];

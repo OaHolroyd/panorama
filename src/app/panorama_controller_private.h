@@ -61,7 +61,7 @@
   NSSegmentedControl *_sunModeControl;
   NSTextField *_astronomicalDateControl;
   NSSlider *_astronomicalTimeControl;
-  NSTextField *_astronomicalTimeLabel;
+  NSTextField *_astronomicalTimeTextControl;
   NSButton *_astronomicalTimeDecreaseControl;
   NSButton *_astronomicalTimeIncreaseControl;
   NSTextField *_daylightTimesLabel;

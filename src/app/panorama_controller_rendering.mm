@@ -67,6 +67,7 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
   const BOOL astronomicalTimeEnabled = normalLighting && !manualSun && hasObserverTimeZone;
   _astronomicalDateControl.enabled = astronomicalTimeEnabled;
   _astronomicalTimeControl.enabled = astronomicalTimeEnabled;
+  _astronomicalTimeTextControl.enabled = astronomicalTimeEnabled;
   _astronomicalTimeDecreaseControl.enabled =
       astronomicalTimeEnabled && _astronomicalTimeControl.doubleValue > 0.0;
   _astronomicalTimeIncreaseControl.enabled =

@@ -79,7 +79,7 @@
                 [calendar components:NSCalendarUnitHour | NSCalendarUnitMinute fromDate:now];
             const double minutes = static_cast<double>(components.hour * 60 + components.minute);
             strongSelf->_astronomicalTimeControl.doubleValue = minutes;
-            strongSelf->_astronomicalTimeLabel.stringValue =
+            strongSelf->_astronomicalTimeTextControl.stringValue =
                 panorama::app::format_clock_minutes(minutes);
             strongSelf->_astronomicalControlsUseObserverTime = true;
           }
@@ -104,9 +104,28 @@
     return NO;
   }
 
-  const char *date = _astronomicalDateControl.stringValue.UTF8String;
-  NSString *timeValue = panorama::app::format_clock_minutes(_astronomicalTimeControl.doubleValue);
+  NSString *timeValue = [_astronomicalTimeTextControl.stringValue
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
   const char *time = timeValue.UTF8String;
+  // Validate time independently so a date error does not prevent the slider
+  // and text field from agreeing on a valid, newly entered clock time.
+  const auto clock = panorama::app::parse_date_time(
+      "01-01-2000",
+      time == nullptr ? std::string_view{} : std::string_view(time)
+  );
+  _astronomicalTimeTextControl.textColor =
+      clock.has_value() ? NSColor.controlTextColor : NSColor.systemRedColor;
+  _astronomicalTimeTextControl.toolTip =
+      @"Observer-local time in 24-hour HH:MM format (00:00–23:59)";
+  if (!clock.has_value()) {
+    [self setDaylightStatus:@"Enter a valid 24-hour HH:MM time (00:00–23:59)"];
+    return NO;
+  }
+  _astronomicalTimeControl.doubleValue = clock->hour * 60 + clock->minute;
+  _astronomicalTimeTextControl.stringValue = timeValue;
+  [self updateSettingsControlAvailability];
+
+  const char *date = _astronomicalDateControl.stringValue.UTF8String;
   const std::optional<panorama::app::CalendarDateTime> local = panorama::app::parse_date_time(
       date == nullptr ? std::string_view{} : std::string_view(date),
       time == nullptr ? std::string_view{} : std::string_view(time)
@@ -120,6 +139,8 @@
   const std::optional<panorama::app::CalendarDateTime> utc =
       panorama::app::local_date_time_to_utc(*local, _observerTimeZone);
   if (!utc.has_value()) {
+    _astronomicalTimeTextControl.textColor = NSColor.systemRedColor;
+    _astronomicalTimeTextControl.toolTip = @"This local time does not exist on the selected date";
     [self setDaylightStatus:@"This local time does not exist"];
     return NO;
   }
@@ -208,7 +229,8 @@
 
 - (void)astronomicalTimeChanged:(NSSlider *)sender {
   sender.doubleValue = std::round(sender.doubleValue);
-  _astronomicalTimeLabel.stringValue = panorama::app::format_clock_minutes(sender.doubleValue);
+  _astronomicalTimeTextControl.stringValue =
+      panorama::app::format_clock_minutes(sender.doubleValue);
   [self updateSettingsControlAvailability];
   if (_sunModeControl.selectedSegment == 1) {
     [self publishAstronomicalLighting];
@@ -222,7 +244,7 @@
       _astronomicalTimeControl.maxValue
   );
   _astronomicalTimeControl.doubleValue = minutes;
-  _astronomicalTimeLabel.stringValue = panorama::app::format_clock_minutes(minutes);
+  _astronomicalTimeTextControl.stringValue = panorama::app::format_clock_minutes(minutes);
   [self updateSettingsControlAvailability];
   if (_sunModeControl.selectedSegment == 1) {
     [self publishAstronomicalLighting];

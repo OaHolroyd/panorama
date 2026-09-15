@@ -374,6 +374,12 @@ airspeed and dives gain it; pausing restores a wings-level attitude.
 If Flight mode meets terrain, forward motion is held. Drag to steer or climb,
 use W/S to adjust speed, then press Space to resume.
 
+Astronomical lighting uses the observer's local date and time. Adjust the time
+slider or type a 24-hour `HH:MM` time (00:00–23:59) into the field beside the date,
+above the slider.
+Press Return or leave the field to apply the time; the slider and minute-step
+buttons stay in sync with the entered value. Invalid times leave lighting unchanged.
+
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama
 or map to preview a point. Right-click the panorama to lock its current point;

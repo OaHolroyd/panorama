@@ -87,6 +87,14 @@ int main() {
         {43.17, 16.44},
         1e-5
     );
+    for (const auto time : {"00:00", "09:05", "12:30", "23:59"}) {
+      require(parse_date_time("20-03-2026", time).has_value(), "Valid 24-hour time rejected");
+    }
+    for (const auto time : {"24:00", "12:60", "-0:30", "09:-0", "9:05", "12:30 PM", "", "noon"}) {
+      require(!parse_date_time("20-03-2026", time), "Invalid 24-hour time accepted");
+    }
+    const auto typedTime = parse_date_time("20-03-2026", "09:05");
+    require(typedTime->hour == 9 && typedTime->minute == 5, "Typed time lost hours or minutes");
     const auto noon = solar_position({40, 0}, {2026, 3, 20, 12, 0});
     require(
         noon.azimuth > 3.0 && noon.azimuth < 3.2 && noon.elevation > .8,
