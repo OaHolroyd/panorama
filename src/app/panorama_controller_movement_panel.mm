@@ -18,9 +18,9 @@
 #include <utility>
 #include <vector>
 
-@implementation PanoramaController (PositioningPanel)
+@implementation PanoramaController (MovementPanel)
 
-- (NSViewController *)makePositioningViewController {
+- (NSViewController *)makeMovementViewController {
   NSViewController *viewController = [[NSViewController alloc] init];
   NSScrollView *scrollView =
       [[NSScrollView alloc] initWithFrame:NSMakeRect(0.0, 0.0, 270.0, 400.0)];
@@ -32,94 +32,8 @@
   scrollView.scrollerStyle = NSScrollerStyleOverlay;
   viewController.view = scrollView;
 
-  NSTextField *heading = [NSTextField labelWithString:@"Position & Movement"];
+  NSTextField *heading = [NSTextField labelWithString:@"Movement"];
   heading.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-
-  _coordinateSystemControl = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-  [_coordinateSystemControl addItemWithTitle:@"Auto"];
-  _coordinateSystemControl.lastItem.tag = -1;
-  [_coordinateSystemControl.menu addItem:NSMenuItem.separatorItem];
-  [_coordinateSystemControl addItemWithTitle:@"Latitude / longitude"];
-  _coordinateSystemControl.lastItem.tag =
-      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Wgs84);
-  [_coordinateSystemControl addItemWithTitle:@"Swiss LV95"];
-  _coordinateSystemControl.lastItem.tag =
-      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::SwissLv95);
-  [_coordinateSystemControl addItemWithTitle:@"OS National Grid"];
-  _coordinateSystemControl.lastItem.tag =
-      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::BritishNationalGrid);
-  [_coordinateSystemControl.menu addItem:NSMenuItem.separatorItem];
-  [_coordinateSystemControl
-      addItemWithTitle:[NSString
-                           stringWithFormat:@"Dataset grid — %s", _renderer->terrain_crs().name()]];
-  _coordinateSystemControl.lastItem.tag =
-      static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Terrain);
-  _coordinateSystemControl.target = self;
-  _coordinateSystemControl.action = @selector(coordinateSystemChanged:);
-  _coordinateSystemControl.toolTip =
-      @"Auto detects the coordinate system; choose one explicitly to resolve ambiguity";
-  // Cap the row at the inspector's 268-point content width. Pop-up buttons use
-  // their longest menu item as an intrinsic width; without this constraint the
-  // dataset-grid title can force the whole inset stack beyond the panel edge.
-  [_coordinateSystemControl.widthAnchor constraintEqualToConstant:178.0].active = YES;
-  NSTextField *coordinateSystemLabel = [NSTextField labelWithString:@"System"];
-  [coordinateSystemLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
-  NSStackView *coordinateSystemRow =
-      [NSStackView stackViewWithViews:@[ coordinateSystemLabel, _coordinateSystemControl ]];
-  coordinateSystemRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-  coordinateSystemRow.alignment = NSLayoutAttributeCenterY;
-  coordinateSystemRow.spacing = 8.0;
-
-  _coordinateInputControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
-  _coordinateInputControl.delegate = self;
-  _coordinateInputControl.placeholderString = @"Enter or paste a coordinate";
-  _coordinateInputControl.toolTip = @"The coordinate system will be detected automatically";
-  _coordinateInputControl.target = self;
-  _coordinateInputControl.action = @selector(moveToCoordinate:);
-  [_coordinateInputControl.widthAnchor constraintEqualToConstant:178.0].active = YES;
-  NSTextField *coordinateLabel = [NSTextField labelWithString:@"Coordinate"];
-  [coordinateLabel.widthAnchor constraintEqualToConstant:82.0].active = YES;
-  NSStackView *coordinateRow =
-      [NSStackView stackViewWithViews:@[ coordinateLabel, _coordinateInputControl ]];
-  coordinateRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-  coordinateRow.alignment = NSLayoutAttributeCenterY;
-  coordinateRow.spacing = 8.0;
-
-  _coordinateStatusLabel = [NSTextField labelWithString:@"Format will be detected automatically"];
-  _coordinateStatusLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
-  _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
-  _coordinateStatusLabel.maximumNumberOfLines = 2;
-  _coordinateStatusLabel.lineBreakMode = NSLineBreakByWordWrapping;
-  [_coordinateStatusLabel.widthAnchor constraintEqualToConstant:268.0].active = YES;
-
-  _coordinateMoveControl = [NSButton buttonWithTitle:@"Move"
-                                              target:self
-                                              action:@selector(moveToCoordinate:)];
-  _coordinateMoveControl.image = [NSImage imageWithSystemSymbolName:@"location.fill"
-                                           accessibilityDescription:@"Move observer to coordinate"];
-  _coordinateMoveControl.imagePosition = NSImageLeading;
-  _coordinateMoveControl.enabled = NO;
-  NSView *coordinateSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
-  [coordinateSpacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
-                               forOrientation:NSLayoutConstraintOrientationHorizontal];
-  [coordinateSpacer
-      setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                               forOrientation:NSLayoutConstraintOrientationHorizontal];
-  NSStackView *coordinateActionRow =
-      [NSStackView stackViewWithViews:@[ coordinateSpacer, _coordinateMoveControl ]];
-  coordinateActionRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-  coordinateActionRow.alignment = NSLayoutAttributeCenterY;
-  [coordinateActionRow.widthAnchor constraintEqualToConstant:268.0].active = YES;
-
-  InspectorSectionView *destinationSection =
-      [[InspectorSectionView alloc] initWithTitle:@"Destination"
-                                         controls:@[
-                                           coordinateSystemRow,
-                                           coordinateRow,
-                                           _coordinateStatusLabel,
-                                           coordinateActionRow,
-                                         ]
-                                      defaultsKey:@"panorama.inspector.destination.expanded"];
 
   const auto makeMovementRow = [](NSString *title, NSView *control) {
     NSTextField *label = [NSTextField labelWithString:title];
@@ -318,12 +232,24 @@
   heightRow.alignment = NSLayoutAttributeCenterY;
   heightRow.spacing = 8.0;
 
-  InspectorSectionView *observerSection =
-      [[InspectorSectionView alloc] initWithTitle:@"Observer"
-                                         controls:@[ heightRow ]
-                                      defaultsKey:@"panorama.inspector.observer.expanded"];
-  NSStackView *settings = [NSStackView
-      stackViewWithViews:@[ heading, destinationSection, movementSection, observerSection ]];
+  _snapToSummitControl = [NSButton buttonWithTitle:@"Snap to summit"
+                                            target:self
+                                            action:@selector(snapToSummit:)];
+  _snapToSummitControl.imagePosition = NSImageLeading;
+  _snapToSummitControl.toolTip =
+      @"Move to the highest terrain within 100 metres, retaining eye height";
+  NSView *summitRow = makeMovementRow(@"", _snapToSummitControl);
+  _snapToSummitStatusLabel = [NSTextField wrappingLabelWithString:@""];
+  _snapToSummitStatusLabel.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  _snapToSummitStatusLabel.textColor = NSColor.secondaryLabelColor;
+  [_snapToSummitStatusLabel.widthAnchor constraintEqualToConstant:268.0].active = YES;
+
+  InspectorSectionView *observerSection = [[InspectorSectionView alloc]
+      initWithTitle:@"Observer"
+           controls:@[ heightRow, summitRow, _snapToSummitStatusLabel ]
+        defaultsKey:@"panorama.inspector.observer.expanded"];
+  NSStackView *settings =
+      [NSStackView stackViewWithViews:@[ heading, movementSection, observerSection ]];
   settings.orientation = NSUserInterfaceLayoutOrientationVertical;
   settings.alignment = NSLayoutAttributeLeading;
   settings.spacing = 18.0;
@@ -347,13 +273,8 @@
     [settings.trailingAnchor constraintEqualToAnchor:document.trailingAnchor],
     [settings.bottomAnchor constraintLessThanOrEqualToAnchor:document.bottomAnchor],
   ]];
-  [self coordinateSystemChanged:_coordinateSystemControl];
   [self updateRoamControls];
   return viewController;
 }
-
-/// Build the read-only diagnostics displayed over the leading side of the
-/// rendered scene. Camera values change with completed revisions; inspected
-/// point details update independently as hover samples arrive.
 
 @end

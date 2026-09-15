@@ -22,6 +22,10 @@ constexpr double kRadiansToDegrees = 180.0 / std::numbers::pi;
 }
 
 [[nodiscard]] std::optional<int> parse_digits(std::string_view text) {
+  if (text.empty() ||
+      !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+    return std::nullopt;
+  }
   int value = 0;
   const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
   if (error != std::errc{} || end != text.data() + text.size()) {

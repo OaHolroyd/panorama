@@ -680,6 +680,11 @@ std::optional<float> TerrainTraceSession::sample_terrain(LatLon position) {
   return state_->tiles->sample_terrain(position);
 }
 
+std::optional<TerrainSample> TerrainTraceSession::find_summit(LatLon centre, double radius) {
+  trace_activity::Scope activity("full-resolution summit sampling");
+  return state_->tiles->find_summit(centre, radius);
+}
+
 TileManagerStatistics TerrainTraceSession::tile_statistics() const {
   return state_->tiles->statistics();
 }

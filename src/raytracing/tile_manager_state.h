@@ -218,6 +218,7 @@ struct TileManager::State {
   void rebase_observer(ObserverLocation observer);
   /// Bilinearly sample exact LOD-1 terrain without changing render LOD policy.
   [[nodiscard]] std::optional<float> sample_terrain(LatLon position);
+  [[nodiscard]] std::optional<TerrainSample> find_summit(LatLon centre, double radius);
   /// Return the complete Metal buffer ABI for a frontier dispatch.
   [[nodiscard]] TileManagerBindings bindings() const;
   /// Snapshot loader and atlas counters.

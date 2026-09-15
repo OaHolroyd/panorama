@@ -25,6 +25,14 @@
 @interface PanoramaController (TextEditing) <NSTextFieldDelegate>
 @end
 
+@interface PanoramaController (LocationSearch)
+- (void)moveObserverToLocation:(panorama::LatLon)location
+                    completion:(void (^)(NSString *error))completion;
+- (void)moveObserverToLocation:(panorama::LatLon)location
+                  snapToSummit:(BOOL)snapToSummit
+                    completion:(void (^)(NSString *error))completion;
+@end
+
 @interface PanoramaController (Rendering) <MTKViewDelegate>
 @end
 
@@ -32,8 +40,8 @@
 - (NSViewController *)makeSettingsViewController;
 @end
 
-@interface PanoramaController (PositioningPanel)
-- (NSViewController *)makePositioningViewController;
+@interface PanoramaController (MovementPanel)
+- (NSViewController *)makeMovementViewController;
 @end
 
 @interface PanoramaController (InformationPanels)

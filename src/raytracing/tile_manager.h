@@ -133,6 +133,9 @@ public:
   /// A resident LOD-1 atlas slot is used when possible; otherwise the manager
   /// loads and retains one LOD-1 payload through its existing Metal-I/O queue.
   [[nodiscard]] std::optional<float> sample_terrain(LatLon position);
+  /// Highest full-resolution terrain sample in a metre radius. Includes the
+  /// centre, ignores missing terrain, and prefers the closest equal-height point.
+  [[nodiscard]] std::optional<TerrainSample> find_summit(LatLon centre, double radius);
   /// Signal every worker and join it; safe to call repeatedly.
   void stop();
 

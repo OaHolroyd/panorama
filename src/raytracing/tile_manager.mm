@@ -368,6 +368,10 @@ uint32_t TileManager::ensure_observer_resident(Timer &timer) {
 std::optional<float> TileManager::sample_terrain(LatLon position) {
   return state_->sample_terrain(position);
 }
+
+std::optional<TerrainSample> TileManager::find_summit(LatLon centre, double radius) {
+  return state_->find_summit(centre, radius);
+}
 void TileManager::stop() {
   if (state_ != nullptr) {
     state_->stop_workers();

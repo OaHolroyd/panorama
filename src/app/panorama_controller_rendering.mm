@@ -67,6 +67,7 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
   const BOOL astronomicalTimeEnabled = normalLighting && !manualSun && hasObserverTimeZone;
   _astronomicalDateControl.enabled = astronomicalTimeEnabled;
   _astronomicalTimeControl.enabled = astronomicalTimeEnabled;
+  _astronomicalTimeTextControl.enabled = astronomicalTimeEnabled;
   _astronomicalTimeDecreaseControl.enabled =
       astronomicalTimeEnabled && _astronomicalTimeControl.doubleValue > 0.0;
   _astronomicalTimeIncreaseControl.enabled =
@@ -264,10 +265,13 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
     if (frame.map_point_request_token == _mapPointRequestToken &&
         _mapPointAction != panorama::app::MapPointAction::None) {
       const panorama::app::MapPointAction action = _mapPointAction;
-      const bool coordinateMove =
-          action == panorama::app::MapPointAction::MoveObserver && _coordinateMovePending;
       _mapPointAction = panorama::app::MapPointAction::None;
-      _coordinateMovePending = false;
+      void (^locationCompletion)(NSString *) = nil;
+      if (_locationMoveCompletion != nil &&
+          frame.map_point_request_token == _locationMoveRequestToken) {
+        locationCompletion = _locationMoveCompletion;
+        _locationMoveCompletion = nil;
+      }
       if (!frame.map_point.has_value()) {
         _mapHoverPoint.reset();
         if (action == panorama::app::MapPointAction::Hover) {
@@ -278,10 +282,6 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
         } else {
           NSBeep();
           [self setPointInfoStatus:@"No terrain coverage"];
-          if (coordinateMove) {
-            _coordinateStatusLabel.stringValue = @"No terrain coverage at that coordinate";
-            _coordinateStatusLabel.textColor = NSColor.systemRedColor;
-          }
         }
       } else {
         const auto offset =
@@ -305,9 +305,6 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
                                       verticalFieldOfView:frame.vertical_field_of_view
                                                     image:frame.output_image];
         } else if (action == panorama::app::MapPointAction::MoveObserver) {
-          if (coordinateMove) {
-            [self updateCoordinateInputValidation];
-          }
           [self moveObserverToTerrainPoint:*frame.map_point];
         } else {
           _mapHoverPoint.reset();
@@ -318,6 +315,9 @@ viewer_image_size(CGSize pointSize, double pixelsPerPoint) {
           [self updatePointInfo:point];
           [self lookAtTerrainPoint:*frame.map_point];
         }
+      }
+      if (locationCompletion != nil) {
+        locationCompletion(frame.map_point ? nil : @"No terrain coverage at this location");
       }
     }
   }

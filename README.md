@@ -349,7 +349,7 @@ observer positioning. The Viewer tab controls resolution, lighting,
 distance/elevation colourmaps and scaling, and optional multiscale feature
 outlines.
 
-The Position tab's Movement section can switch from this Browse behaviour to
+The Movement tab can switch from this Browse behaviour to
 keyboard Roam mode. In Roam mode, WASD moves relative to the current heading;
 turning can use either the arrow keys or pointer motion over the panorama.
 Mouse turning replaces click-and-drag rotation while selected and has its own
@@ -374,6 +374,12 @@ airspeed and dives gain it; pausing restores a wings-level attitude.
 If Flight mode meets terrain, forward motion is held. Drag to steer or climb,
 use W/S to adjust speed, then press Space to resume.
 
+Astronomical lighting uses the observer's local date and time. Adjust the time
+slider or type a 24-hour `HH:MM` time (00:00–23:59) into the field beside the date,
+above the slider.
+Press Return or leave the field to apply the time; the slider and minute-step
+buttons stay in sync with the entered value. Invalid times leave lighting unchanged.
+
 The minimap and terrain-point inspection are enabled by default; the map
 toolbar button hides or reveals them as one feature. Hover either the panorama
 or map to preview a point. Right-click the panorama to lock its current point;
@@ -387,14 +393,33 @@ Map inspection and relocation can use any covered point in the configured
 datasets, including points beyond the current rendering distance. Distant map
 queries load only the target tile; relocation builds a render catalogue around
 the destination.
-The Position tab also accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
+
+The magnifying glass beside the map toggle expands into a location search bar.
+Search tries WGS 84 `latitude, longitude` first, then other recognised coordinate
+formats, names in the loaded peak catalogue, and Apple Maps local search. Peak
+and place suggestions appear as you type a name; incomplete coordinate input
+stays in coordinate mode. Peak matches ignore case and accents, with exact names
+before prefixes and substrings, and nearer peaks first when names are duplicated.
+Use Up/Down and Return, or click a suggestion, to move at the configured eye
+height. Selecting a peak automatically snaps to the highest full-resolution
+terrain sample within 100 metres of its catalogue location. Coordinate and
+Apple Maps destinations use their supplied locations. Escape, the clear button,
+or clicking outside search closes the bar.
+Locations without loaded terrain coverage show an error and leave the observer
+in place. Apple place search and suggestions require a network connection;
+coordinates and peaks work locally.
+
+Coordinate search accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
 easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
-`NG907598`, or `190716, 859877`. Its coordinate-system menu defaults to Auto,
-which uses distinctive syntax and prepared-terrain coverage to resolve the
-input. If several interpretations remain plausible, it names them and waits
-for an explicit menu selection. Prefixes such as `WGS84`, `LV95`, `BNG`, and
-`DATASET` are also accepted in Auto mode. Eye-height controls set the retained
-height above the terrain for jumps and vertical adjustments. The expand button
+`NG907598`, or `190716, 859877`. Prefixes such as `WGS84`, `LV95`, `BNG`, and
+`DATASET` select a coordinate system explicitly.
+
+The Movement tab's eye-height controls set the retained height above the terrain
+for jumps and vertical adjustments. **Snap to summit**, below Eye height, moves
+to the highest full-resolution terrain sample within 100 metres of the current
+observer, keeping the configured eye height. Equal-height results prefer the
+nearest point, so flat ground leaves the observer in place. The search includes
+neighboring prepared tiles and ignores missing terrain. The expand button
 changes map size; the grid button overlays the complete prepared-tile coverage.
 If the requested startup observer is outside that coverage, the viewer opens on
 a central available tile with the coverage overlay already enabled.

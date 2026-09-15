@@ -29,25 +29,16 @@
   _renderer->request_peak_labels_enabled(_peakLabelMode != panorama::app::PeakLabelMode::Off);
 }
 
-- (void)controlTextDidChange:(NSNotification *)notification {
-  NSTextField *changed = notification.object;
-  if (changed == _coordinateInputControl) {
-    [self updateCoordinateInputValidation];
-  }
-}
-
 - (void)controlTextDidEndEditing:(NSNotification *)notification {
   NSTextField *field = notification.object;
   if (field == _resolutionScaleControl) {
     [self commitResolutionControls];
   } else if (field == _minimumControl || field == _maximumControl) {
     [self publishTerrainControls];
-  } else if (field == _astronomicalDateControl) {
+  } else if (field == _astronomicalDateControl || field == _astronomicalTimeTextControl) {
     [self astronomicalInputChanged:field];
   } else if (field == _groundClearanceControl) {
     [self commitGroundClearanceControl];
-  } else if (field == _coordinateInputControl) {
-    [self updateCoordinateInputValidation];
   }
 }
 

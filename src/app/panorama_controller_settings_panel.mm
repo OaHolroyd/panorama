@@ -293,6 +293,7 @@
   _astronomicalDateControl.placeholderString = @"DD-MM-YYYY";
   _astronomicalDateControl.delegate = self;
   _astronomicalDateControl.toolTip = @"Gregorian date in DD-MM-YYYY format";
+  [_astronomicalDateControl setAccessibilityLabel:@"Local date in DD-MM-YYYY format"];
 
   NSCalendar *utcCalendar =
       [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
@@ -310,10 +311,20 @@
   _astronomicalTimeControl.numberOfTickMarks = 7;
   _astronomicalTimeControl.allowsTickMarkValuesOnly = NO;
   _astronomicalTimeControl.toolTip = @"Observer-local time at one-minute resolution";
-  _astronomicalTimeLabel =
-      [NSTextField labelWithString:panorama::app::format_clock_minutes(initialUtcMinutes)];
-  _astronomicalTimeLabel.alignment = NSTextAlignmentRight;
-  [_astronomicalTimeLabel.widthAnchor constraintEqualToConstant:39.0].active = YES;
+  _astronomicalTimeTextControl = [[NSTextField alloc] initWithFrame:NSZeroRect];
+  _astronomicalTimeTextControl.stringValue = panorama::app::format_clock_minutes(initialUtcMinutes);
+  _astronomicalTimeTextControl.placeholderString = @"HH:MM";
+  _astronomicalTimeTextControl.alignment = NSTextAlignmentCenter;
+  _astronomicalTimeTextControl.delegate = self;
+  _astronomicalTimeTextControl.toolTip =
+      @"Observer-local time in 24-hour HH:MM format (00:00–23:59)";
+  [_astronomicalTimeTextControl setAccessibilityLabel:@"Local time in 24-hour format"];
+  [_astronomicalTimeTextControl.widthAnchor constraintEqualToConstant:60.0].active = YES;
+  NSStackView *astronomicalDateTimeFields =
+      [NSStackView stackViewWithViews:@[ _astronomicalDateControl, _astronomicalTimeTextControl ]];
+  astronomicalDateTimeFields.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  astronomicalDateTimeFields.alignment = NSLayoutAttributeCenterY;
+  astronomicalDateTimeFields.spacing = 8.0;
   _astronomicalTimeDecreaseControl = [NSButton buttonWithTitle:@"−"
                                                         target:self
                                                         action:@selector(adjustAstronomicalTime:)];
@@ -338,7 +349,6 @@
     _astronomicalTimeDecreaseControl,
     _astronomicalTimeControl,
     _astronomicalTimeIncreaseControl,
-    _astronomicalTimeLabel,
   ]];
   astronomicalTimeSlider.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   astronomicalTimeSlider.alignment = NSLayoutAttributeCenterY;
@@ -396,6 +406,8 @@
   astronomicalTimeSetting.orientation = NSUserInterfaceLayoutOrientationVertical;
   astronomicalTimeSetting.alignment = NSLayoutAttributeLeading;
   astronomicalTimeSetting.spacing = 3.0;
+  [astronomicalTimeSlider.widthAnchor constraintEqualToAnchor:astronomicalTimeSetting.widthAnchor]
+      .active = YES;
 
   _sunAzimuthControl = [NSSlider
       sliderWithValue:_presentation.appearance.sun_azimuth * panorama::app::kRadiansToDegrees
@@ -537,20 +549,20 @@
   NSView *lodScaleRow = make_row(@"LOD scale", lodScaleSetting);
 
   NSView *sunModeRow = make_row(@"Sun", _sunModeControl);
-  NSView *dateRow = make_row(@"Date", _astronomicalDateControl);
-  NSView *timeRow = make_row(@"Local time", astronomicalTimeSetting);
+  NSView *dateTimeRow = make_row(@"Date / time", astronomicalDateTimeFields);
+  NSView *timeRow = make_row(@"", astronomicalTimeSetting);
   NSView *azimuthRow = make_row(@"Azimuth", sunAzimuthSetting);
   NSView *altitudeRow = make_row(@"Altitude", sunAltitudeSetting);
   NSView *skyStrengthRow = make_row(@"Sky strength", skyStrengthSetting);
   NSView *skyDetailRow = make_row(@"Sky detail", skyDetailSetting);
   NSView *diffusivityRow = make_row(@"Sun strength", diffusivitySetting);
   _manualSunRows = @[ azimuthRow, altitudeRow ];
-  _astronomicalSunRows = @[ dateRow, timeRow ];
+  _astronomicalSunRows = @[ dateTimeRow, timeRow ];
   _normalLightingRows = @[
     _c1NormalsControl,
     _raytracedShadowsControl,
     sunModeRow,
-    dateRow,
+    dateTimeRow,
     timeRow,
     azimuthRow,
     altitudeRow,
@@ -594,7 +606,7 @@
                                            _c1NormalsControl,
                                            _raytracedShadowsControl,
                                            sunModeRow,
-                                           dateRow,
+                                           dateTimeRow,
                                            timeRow,
                                            azimuthRow,
                                            altitudeRow,
@@ -603,6 +615,9 @@
                                            diffusivityRow,
                                          ]
                                       defaultsKey:@"panorama.inspector.lighting.expanded"];
+  [astronomicalTimeSetting.widthAnchor
+      constraintEqualToAnchor:astronomicalDateTimeFields.widthAnchor]
+      .active = YES;
 
   NSStackView *settings = [[NSStackView alloc] initWithFrame:NSZeroRect];
   for (NSView *view in @[ heading, cameraSection, terrainSection, lightingSection ]) {

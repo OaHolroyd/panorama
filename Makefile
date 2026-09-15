@@ -94,7 +94,7 @@ PANORAMA_DEFINES := -DPANORAMA_METALLIB_PATH=\"$(METAL_LIB)\"
 DEPS := $(PANORAMA_OBJ:.o=.d) $(PANORAMA_VIEWER_OBJ:.o=.d) $(TILE_GEN_OBJ:.o=.d) \
 	$(SHARED_OBJ:.o=.d) $(OBJ_DIR)/metal-bvh-test.d $(OBJ_DIR)/terrain-manifest-test.d \
 	$(OBJ_DIR)/minimap-test.d $(OBJ_DIR)/metalfx-test.d \
-	$(OBJ_DIR)/peak-catalogue-test.d $(OBJ_DIR)/geographic-test.d
+	$(OBJ_DIR)/peak-catalogue-test.d $(OBJ_DIR)/geographic-test.d $(OBJ_DIR)/location-search-test.d
 
 .PHONY: all clean rebuild compile_commands FORCE
 
@@ -199,6 +199,7 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --streaming
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --mixed-coverage
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --point-sampling
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --summit
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --coverage-junctions
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-quantized
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --empty-expanded
@@ -212,6 +213,10 @@ check-bvh: $(OBJ_DIR)/metal-bvh-test
 .PHONY: check-camera
 check-camera: $(OBJ_DIR)/metal-bvh-test
 	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --camera
+
+.PHONY: check-summit
+check-summit: $(OBJ_DIR)/metal-bvh-test
+	MTL_DEBUG_LAYER=1 $(OBJ_DIR)/metal-bvh-test --summit
 
 $(OBJ_DIR)/minimap-test: tests/minimap_test.mm $(OBJ_DIR)/app/visibility_mask.o $(OBJ_DIR)/app/visibility_projection.o $(OBJ_DIR)/raytracing/crs.o $(OBJ_DIR)/raytracing/terrain_transform.o $(METAL_LIB)
 	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(PANORAMA_DEFINES) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) $(FRAMEWORKS) $(LDLIBS)
@@ -252,3 +257,10 @@ $(OBJ_DIR)/geographic-test: tests/geographic_test.mm $(OBJ_DIR)/raytracing/crs.o
 .PHONY: check-geographic
 check-geographic: $(OBJ_DIR)/geographic-test
 	$(OBJ_DIR)/geographic-test
+
+$(OBJ_DIR)/location-search-test: tests/location_search_test.mm $(OBJ_DIR)/app/location_search.o $(OBJ_DIR)/app/coordinate_input.o $(OBJ_DIR)/app/peak_catalogue.o $(OBJ_DIR)/raytracing/crs.o
+	$(CXX) $(PANORAMA_VIEWER_INCLUDES) $(CPPFLAGS) $(COMMON_FLAGS) $(WARNINGS) $(OPT_FLAGS) -o $@ $(filter %.mm %.o,$^) -framework Foundation $(LDLIBS)
+
+.PHONY: check-search
+check-search: $(OBJ_DIR)/location-search-test
+	$(OBJ_DIR)/location-search-test

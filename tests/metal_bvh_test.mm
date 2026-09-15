@@ -1294,6 +1294,182 @@ void write_masked_fixture(
   write_terrain_manifest(terrain_manifest_path(directory), entries);
 }
 
+struct SummitFixtureVertex {
+  uint32_t x;
+  uint32_t y;
+  float elevation;
+};
+
+void write_summit_fixture(
+    const std::filesystem::path &directory,
+    std::span<const SummitFixtureVertex> peaks,
+    uint32_t tile_count = 1,
+    uint32_t epsg = 2056U,
+    double left = 2600000,
+    double bottom = 1199840,
+    double spacing = 10
+) {
+  std::filesystem::create_directories(directory);
+  for (uint32_t column = 0; column < tile_count; ++column) {
+    constexpr uint32_t cells = 16;
+    std::vector<uint16_t> heights(17 * 17, 10000);
+    for (const auto peak : peaks) {
+      if (peak.x >= column * cells && peak.x <= (column + 1) * cells) {
+        heights[peak.y * 17 + peak.x - column * cells] = uint16_t(std::lround(peak.elevation * 10));
+      }
+    }
+    const float maximum = float(*std::max_element(heights.begin(), heights.end())) / 10;
+    const MetalTileLod lod = {1,
+                              cells,
+                              5,
+                              0,
+                              maximum,
+                              0,
+                              kMetalTileLodHeaderSize + sizeof(MetalTileLod),
+                              heights.size() * sizeof(uint16_t)};
+    const MetalTileHeader header = {kLegacyMetalTileLodMagic,
+                                    4,
+                                    kMetalTileLodHeaderSize,
+                                    MetalTileCompression::None,
+                                    epsg,
+                                    cells,
+                                    5,
+                                    maximum,
+                                    MetalTileSampleType::Uint16Decimeters,
+                                    0,
+                                    0,
+                                    0,
+                                    column,
+                                    left + column * cells * spacing,
+                                    bottom,
+                                    spacing,
+                                    lod.vertex_offset,
+                                    lod.vertex_byte_count,
+                                    1,
+                                    sizeof(MetalTileLod),
+                                    kMetalTileLodHeaderSize,
+                                    sizeof(MetalTileLod)};
+    std::vector<std::byte> payload(lod.vertex_byte_count);
+    std::memcpy(payload.data(), heights.data(), payload.size());
+    write_metal_tile_lods(
+        directory / ("summit_r0_c" + std::to_string(column) + ".ptile"),
+        header,
+        std::span(&lod, 1),
+        payload
+    );
+  }
+}
+
+void check_summit_sampling(const std::filesystem::path &root) {
+  const auto field = angular_field({9, 3}, {0, 6.3, -1.4, -1.3});
+  const auto circle = root / "summit-circle";
+  const std::array<SummitFixtureVertex, 2> spikes = {{{13, 4, 1200}, {13, 13, 1800}}};
+  write_summit_fixture(circle, spikes);
+  const auto crossing = root / "summit-crossing";
+  const std::array<SummitFixtureVertex, 1> crossing_spike = {{{18, 8, 1400}}};
+  write_summit_fixture(crossing, crossing_spike, 2);
+  const auto geographic = root / "summit-geographic";
+  const std::array<SummitFixtureVertex, 1> geographic_spike = {{{7, 8, 1300}}};
+  constexpr double geographic_spacing = 1.0 / 3600.0;
+  write_summit_fixture(geographic, geographic_spike, 1, 4326, 16.44, 43.17, geographic_spacing);
+  const auto primary = root / "summit-masked", fallback = root / "summit-fallback";
+  write_masked_fixture(primary, true, 1000, 2600000, 10, MetalTileCompression::Lz4);
+  write_masked_fixture(fallback, false, 1010, 2600000, 10, MetalTileCompression::Lz4);
+  const auto hidden = root / "summit-hidden";
+  write_masked_fixture(hidden, false, 2000, 2600000, 10, MetalTileCompression::None);
+  for (bool quantized : {false, true}) {
+    @autoreleasepool {
+      RaytraceConfig config{circle,
+                            lv95_observer(2600040, 1199880, 1020),
+                            1000,
+                            0,
+                            16384,
+                            2,
+                            quantized,
+                            true,
+                            false};
+      config.raytracer = Raytracer::MetalBvh;
+      // A much higher overlapping fallback must not win over the primary dataset.
+      config.terrain_datasets = {{circle, -50}, {hidden, 0}, {geographic, 0}};
+      TerrainTraceSession session(config, field, {true, true, true});
+      const auto before = session.tile_statistics();
+      const auto summit = session.find_summit(config.observer.position, 100);
+      // Regional CRS round trips differ by millimetres. The bilinear height
+      // at the resulting WGS84 position remains within one stored decimetre.
+      require(
+          summit && std::abs(summit->elevation - 1150) < .1F,
+          "Summit search lost circle clipping, dataset priority or vertical offsets"
+      );
+      require(
+          std::hypot(
+              geographic_offset(summit->position, lv95_position(2600130, 1199880)).x,
+              geographic_offset(summit->position, lv95_position(2600130, 1199880)).y
+          ) < .01,
+          "Summit search missed the finest-grid maximum"
+      );
+      require(
+          !session.find_summit(lv95_position(2601000, 1199880), 100),
+          "Summit search invented terrain outside coverage"
+      );
+      const auto unchanged = session.find_summit(config.observer.position, 0);
+      require(
+          unchanged && unchanged->position == config.observer.position,
+          "Zero-radius summit search moved the observer"
+      );
+      const auto plateau = session.find_summit(lv95_position(2600020, 1199960), 5);
+      require(
+          plateau && plateau->position == lv95_position(2600020, 1199960),
+          "Flat summit search moved away from the current location"
+      );
+      const auto distant_centre =
+          LatLon{43.17 + 8 * geographic_spacing, 16.44 + 5 * geographic_spacing};
+      const auto distant = session.find_summit(distant_centre, 100);
+      require(
+          distant && std::abs(distant->elevation - 1300) < .01F &&
+              !session.relocate_observer({distant->position, distant->elevation + 20}),
+          "Geographic summit search was restricted to the render catalogue"
+      );
+      const auto after = session.tile_statistics();
+      require(
+          after.installations == before.installations && after.evictions == before.evictions &&
+              after.requests == before.requests,
+          "Summit search changed rendering residency"
+      );
+
+      config.tile_dir = crossing;
+      config.observer = lv95_observer(2600150, 1199920, 1020);
+      config.terrain_datasets.clear(); // Also exercise the legacy single-grid sampling index.
+      TerrainTraceSession boundary_session(config, field, {true, true, true});
+      const auto boundary = boundary_session.find_summit(config.observer.position, 100);
+      require(
+          boundary && std::abs(boundary->elevation - 1400) < .1F,
+          "Summit search did not cross the tile boundary"
+      );
+
+      config.tile_dir = primary;
+      config.observer = lv95_observer(2600045, 1199945, 1020);
+      config.terrain_datasets = {{primary, 0}, {fallback, -2.5}};
+      TerrainTraceSession masked_session(config, field, {true, true, true});
+      const auto masked = masked_session.find_summit(config.observer.position, 100);
+      require(
+          masked && std::abs(masked->elevation - 1007.5F) < .01F,
+          "Summit search did not fall back through missing samples"
+      );
+      bool invalid_rejected = false;
+      try {
+        (void)masked_session.find_summit(config.observer.position, -1);
+      } catch (const std::invalid_argument &) {
+        invalid_rejected = true;
+      }
+      require(invalid_rejected, "Summit search accepted a negative radius");
+    }
+  }
+  std::puts(
+      "Summit sampling: circle, grid maxima, ties, boundaries, priority, offsets, holes and "
+      "distant geography passed."
+  );
+}
+
 void check_distant_point_sampling(const std::filesystem::path &root) {
   const auto field = angular_field({9, 3}, {0, 6.3, -1.4, -1.3});
   for (bool retained : {false, true}) {
@@ -3269,10 +3445,11 @@ int main(int argc, const char *argv[]) {
           argc == 2 && std::string_view(argv[1]) == "--coverage-junctions";
       const bool mixed_coverage = argc == 2 && std::string_view(argv[1]) == "--mixed-coverage";
       const bool point_sampling = argc == 2 && std::string_view(argv[1]) == "--point-sampling";
+      const bool summit_sampling = argc == 2 && std::string_view(argv[1]) == "--summit";
       if (argc >= 2 && !edge_cases && !streaming && !producer && !tile_selection && !camera &&
           !shadow_expanded && !shadow_quantized && !metalfx && !mixed_coverage &&
           !valid_quantized && !valid_expanded && !coverage_junctions && !empty_quantized &&
-          !empty_expanded && !point_sampling) {
+          !empty_expanded && !point_sampling && !summit_sampling) {
         RaytraceConfig config{argv[1],
                               lv95_observer(2623452.4, 1100502.2, 3415.0),
                               21000.0F,
@@ -3335,7 +3512,9 @@ int main(int argc, const char *argv[]) {
         write_fixture(root / "partial-overlap", true, 10.0, 2056U, 2600080.0, 1200000.0, 100.0);
         write_fixture(root / "distant", true, 1000.0);
         check_dataset_foundation(root);
-        if (point_sampling) {
+        if (summit_sampling) {
+          check_summit_sampling(root);
+        } else if (point_sampling) {
           check_distant_point_sampling(root);
         } else if (shadow_expanded || shadow_quantized) {
           for (bool bilinear : {false, true}) {
