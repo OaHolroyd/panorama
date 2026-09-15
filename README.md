@@ -78,7 +78,8 @@ swissALTI3D coverage with SRTM `.hgt` data for the surrounding region:
 ```
 
 Swiss terrain takes priority; SRTM fills coverage gaps and extends the view
-beyond it. The batch renderer also accepts repeated `--terrain` options.
+beyond it. For batch rendering, use the same `--terrain` options with
+`--raytracer metal-bvh`.
 
 ### Peak labelling
 
