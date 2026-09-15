@@ -80,14 +80,14 @@ struct PeakLabelLayout {
     // Prefer successively higher placements so labels can rise clear of a
     // crowded mountain skyline. Side and lower placements remain fallbacks
     // for peaks close to the top of the view.
-    const std::array<NSPoint, 7> origins = {
+    const std::array<NSPoint, 3> origins = {
         NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 12.0),
         NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 40.0),
         NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 72.0),
-        NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 108.0),
-        NSMakePoint(anchor.x + 12.0, anchor.y - size.height * 0.5),
-        NSMakePoint(anchor.x - size.width - 12.0, anchor.y - size.height * 0.5),
-        NSMakePoint(anchor.x - size.width * 0.5, anchor.y - size.height - 12.0),
+        // NSMakePoint(anchor.x - size.width * 0.5, anchor.y + 108.0),
+        // NSMakePoint(anchor.x + 12.0, anchor.y - size.height * 0.5),
+        // NSMakePoint(anchor.x - size.width - 12.0, anchor.y - size.height * 0.5),
+        // NSMakePoint(anchor.x - size.width * 0.5, anchor.y - size.height - 12.0),
     };
     std::optional<NSRect> placement;
     for (const NSPoint origin : origins) {

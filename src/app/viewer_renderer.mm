@@ -1020,7 +1020,7 @@ private:
     size_t within_range = 0U;
     size_t onscreen = 0U;
     size_t sampled = 0U;
-    double best_margin = -std::numeric_limits<double>::infinity();
+    double best_margin = std::numeric_limits<double>::infinity();
     const auto &frame = trace_->render_frame();
     if (!peak_render_frame_ || *peak_render_frame_ != frame) {
       std::vector<Coord> positions;
@@ -1068,35 +1068,63 @@ private:
       }
       ++sampled;
       const double angular_pixel = current_vertical_field_of_view_ / current_field_.image.height;
-      // Gazetteer summits and the rendered DEM need not identify the same
-      // horizontal sample, especially once LOD coarsening is active. Preserve
-      // a modest metre-scale allowance when high output resolution makes the
-      // angular pixel footprint very small.
-      const double tolerance = std::max(100.0, 2.0 * horizontal * std::tan(angular_pixel));
-      float farthest = 0.0F;
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
+
+      // work out the size of the search area in pixels
+      const double pixel_size = horizontal * std::tan(angular_pixel);
+      const double search_size_metres = 100.0;
+      const int search_size = std::max(1, static_cast<int>(search_size_metres / pixel_size));
+      const double tolerance = std::max(search_size_metres, 2.0 * pixel_size);
+      const auto *elevations = static_cast<const float *>(trace_->elevations().contents);
+      const auto *rays = static_cast<const RayDirection *>(trace_->ray_directions().contents);
+      if (elevations == nullptr || rays == nullptr) {
+        continue;
+      }
+
+      // Match the actual terrain hit to the peak in three dimensions. Equal
+      // ranges alone can belong to a different ridge or to a lower hillside.
+      double peak_margin = std::numeric_limits<double>::infinity();
+      InspectionPixel peak_pixel = {0, 0};
+      for (int dy = -search_size; dy <= search_size; ++dy) {
+        for (int dx = -search_size; dx <= search_size; ++dx) {
           const int x = static_cast<int>(pixel->x) + dx;
           const int y = static_cast<int>(pixel->y) + dy;
           if (x < 0 || y < 0 || x >= static_cast<int>(current_field_.image.width) ||
               y >= static_cast<int>(current_field_.image.height)) {
             continue;
           }
-          const float distance = distances
-              [static_cast<size_t>(y) * current_field_.image.width + static_cast<size_t>(x)];
-          if (std::isfinite(distance)) {
-            farthest = std::max(farthest, distance);
+          const size_t sample_index =
+              static_cast<size_t>(y) * current_field_.image.width + static_cast<size_t>(x);
+          const float distance = distances[sample_index];
+
+          if (distance > 0.0F && std::isfinite(distance) &&
+              std::isfinite(elevations[sample_index])) {
+            const RayDirection &ray = rays[sample_index];
+            // Ray x/y and delta_x/y are in the same retained metric frame.
+            const double margin = std::hypot(
+                static_cast<double>(distance) * ray.x - delta_x,
+                static_cast<double>(distance) * ray.y - delta_y,
+                static_cast<double>(elevations[sample_index]) - peak.elevation
+            );
+            if (margin < peak_margin) {
+              peak_margin = margin;
+              peak_pixel.x = x;
+              peak_pixel.y = y;
+            }
           }
         }
       }
-      best_margin = std::max(best_margin, static_cast<double>(farthest) + tolerance - horizontal);
-      if (farthest + tolerance < horizontal) {
+
+      best_margin = std::min(best_margin, peak_margin);
+      if (peak_margin > tolerance) {
         continue;
       }
+
       result.peaks.push_back(
           {peak.id,
-           projection.pixel_x,
-           projection.pixel_y,
+           (static_cast<double>(peak_pixel.x) + 0.5) / current_field_.image.width *
+               current_output_image_.width,
+           (static_cast<double>(peak_pixel.y) + 0.5) / current_field_.image.height *
+               current_output_image_.height,
            horizontal,
            peak.prominence,
            peak.elevation,
@@ -1106,6 +1134,9 @@ private:
     std::ranges::sort(result.peaks, [](const VisiblePeak &left, const VisiblePeak &right) {
       if (left.prominence != right.prominence) {
         return left.prominence > right.prominence;
+      }
+      if (left.elevation != right.elevation) {
+        return left.elevation > right.elevation;
       }
       if (left.distance != right.distance) {
         return left.distance < right.distance;
