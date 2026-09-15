@@ -37,8 +37,8 @@
 - (NSViewController *)makeSettingsViewController;
 @end
 
-@interface PanoramaController (PositioningPanel)
-- (NSViewController *)makePositioningViewController;
+@interface PanoramaController (MovementPanel)
+- (NSViewController *)makeMovementViewController;
 @end
 
 @interface PanoramaController (InformationPanels)

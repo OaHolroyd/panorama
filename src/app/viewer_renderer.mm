@@ -226,7 +226,7 @@ void print_usage(const char *program) {
       "Viewer controls:\n"
       "  Browse: drag or use WASD/arrow keys to look around; scroll to zoom.\n"
       "  Roam: use WASD to move; turn with arrow keys or mouse motion.\n"
-      "        Configure movement and turning in the Position tab.\n"
+      "        Configure movement and turning in the Movement tab.\n"
       "  Cruise: move continuously; cursor displacement steers and W/S changes speed.\n"
       "          Optional Aircraft dynamics adds banked turns and energy exchange.\n"
       "  Press Space to pause or resume interactive viewer movement.\n"

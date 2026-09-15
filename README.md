@@ -349,7 +349,7 @@ observer positioning. The Viewer tab controls resolution, lighting,
 distance/elevation colourmaps and scaling, and optional multiscale feature
 outlines.
 
-The Position tab's Movement section can switch from this Browse behaviour to
+The Movement tab can switch from this Browse behaviour to
 keyboard Roam mode. In Roam mode, WASD moves relative to the current heading;
 turning can use either the arrow keys or pointer motion over the panorama.
 Mouse turning replaces click-and-drag rotation while selected and has its own
@@ -397,18 +397,16 @@ before prefixes and substrings, and nearer peaks first when names are duplicated
 Use Up/Down and Return, or click a suggestion, to move at the configured eye
 height. Escape, the clear button, or clicking outside search closes the bar.
 Locations without loaded terrain coverage show an error and leave the observer
-in place. Apple place
-search and suggestions require a network connection; coordinates and peaks work
-locally.
+in place. Apple place search and suggestions require a network connection;
+coordinates and peaks work locally.
 
-The Position tab also accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
+Coordinate search accepts decimal WGS 84 `latitude, longitude`, Swiss LV95
 easting/northing, and OS National Grid coordinates such as `NG 90716 59877`,
-`NG907598`, or `190716, 859877`. Its coordinate-system menu defaults to Auto,
-which uses distinctive syntax and prepared-terrain coverage to resolve the
-input. If several interpretations remain plausible, it names them and waits
-for an explicit menu selection. Prefixes such as `WGS84`, `LV95`, `BNG`, and
-`DATASET` are also accepted in Auto mode. Eye-height controls set the retained
-height above the terrain for jumps and vertical adjustments. The expand button
+`NG907598`, or `190716, 859877`. Prefixes such as `WGS84`, `LV95`, `BNG`, and
+`DATASET` select a coordinate system explicitly.
+
+The Movement tab's eye-height controls set the retained height above the terrain
+for jumps and vertical adjustments. The expand button
 changes map size; the grid button overlays the complete prepared-tile coverage.
 If the requested startup observer is outside that coverage, the viewer opens on
 a central available tile with the coverage overlay already enabled.

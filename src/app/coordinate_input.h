@@ -9,7 +9,7 @@
 
 namespace panorama::app {
 
-/// Coordinate systems currently offered by the Position inspector. The
+/// Coordinate systems recognised by the location search and input parser. The
 /// dataset option means the native CRS declared by the loaded terrain.
 enum class CoordinateInputSystem : uint8_t {
   Wgs84,
@@ -35,10 +35,9 @@ struct ParsedCoordinateInput {
     CoordinateInputSystem system
 );
 
-/// Return every plausible interpretation for Auto mode. Distinctive syntax or
+/// Return every plausible interpretation for automatic parsing. Distinctive syntax or
 /// an explicit prefix produces one candidate; a bare numeric pair may produce
-/// several candidates for the inspector to disambiguate using terrain coverage
-/// or a user selection.
+/// several candidates in coordinate-search fallback order.
 [[nodiscard]] std::vector<ParsedCoordinateInput>
 detect_coordinate_inputs(std::string_view input, const Crs &terrain_crs);
 

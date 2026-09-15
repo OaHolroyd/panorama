@@ -2,7 +2,6 @@
 
 #include "panorama_controller.h"
 
-#include "coordinate_input.h"
 #include "metalfx_upscaler.h"
 
 #import <MapKit/MapKit.h>
@@ -100,11 +99,6 @@
   NSTextField *_groundClearanceControl;
   NSButton *_groundClearanceDecreaseControl;
   NSButton *_groundClearanceIncreaseControl;
-  NSPopUpButton *_coordinateSystemControl;
-  NSTextField *_coordinateInputControl;
-  NSTextField *_coordinateStatusLabel;
-  NSButton *_coordinateMoveControl;
-  std::optional<panorama::app::ParsedCoordinateInput> _coordinateDestination;
   NSSegmentedControl *_movementModeControl;
   NSSegmentedControl *_roamTurningModeControl;
   NSView *_roamTurningModeRow;
@@ -158,7 +152,6 @@
   bool _pointInspectionLocked;
   bool _pointLockPending;
   bool _lockedPointOccluded;
-  bool _coordinateMovePending;
   uint64_t _locationMoveRequestToken;
   void (^_locationMoveCompletion)(NSString *error);
   bool _invertMousePanning;
@@ -234,9 +227,6 @@
 - (void)roamTimerFired:(NSTimer *)timer;
 - (void)clearRoamKeys;
 - (BOOL)hasPressedRoamKey;
-- (void)coordinateSystemChanged:(id)sender;
-- (void)moveToCoordinate:(id)sender;
-- (BOOL)updateCoordinateInputValidation;
 - (void)bilinearCollisionChanged:(NSButton *)sender;
 - (void)c1NormalsChanged:(NSButton *)sender;
 - (void)resolveObserverTimeZone;
@@ -252,7 +242,7 @@
 - (void)requestMetalFxInteraction;
 - (void)settleMetalFx:(NSTimer *)timer;
 - (NSViewController *)makeSettingsViewController;
-- (NSViewController *)makePositioningViewController;
+- (NSViewController *)makeMovementViewController;
 - (NSViewController *)makeDebugViewController;
 - (NSViewController *)makePointInfoViewController;
 - (void)updatePointInfo:(std::optional<panorama::app::PointInspection>)inspection;

@@ -155,12 +155,12 @@ static NSToolbarItemIdentifier const kSearchToolbarItemIdentifier = @"panorama.s
 
   NSViewController *settingsController = [_controller makeSettingsViewController];
   settingsController.title = @"Viewer";
-  NSViewController *positioningController = [_controller makePositioningViewController];
-  positioningController.title = @"Position";
+  NSViewController *movementController = [_controller makeMovementViewController];
+  movementController.title = @"Movement";
   _inspectorController = [[NSTabViewController alloc] init];
   _inspectorController.tabStyle = NSTabViewControllerTabStyleSegmentedControlOnTop;
   [_inspectorController addChildViewController:settingsController];
-  [_inspectorController addChildViewController:positioningController];
+  [_inspectorController addChildViewController:movementController];
   NSViewController *debugController = [_controller makeDebugViewController];
   NSViewController *pointInfoController = [_controller makePointInfoViewController];
   const panorama::ObserverLocation observer = _renderer->observer();

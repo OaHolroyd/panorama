@@ -20,27 +20,6 @@
 
 @implementation PanoramaController (MiniMapInteraction)
 
-[[nodiscard]] static bool coordinate_has_terrain_coverage(
-    const panorama::TerrainCoverage &coverage,
-    panorama::LatLon position
-) {
-  const panorama::Coord coordinate{position.lon, position.lat};
-  for (const auto &dataset : coverage.datasets) {
-    try {
-      const auto native =
-          panorama::transform_coordinates(4326U, dataset.epsg_code, std::span(&coordinate, 1U))
-              .front();
-      const panorama::TileKey key = panorama::tile_key_at(dataset.grid, native.x, native.y);
-      if (std::binary_search(dataset.tiles.begin(), dataset.tiles.end(), key)) {
-        return true;
-      }
-    } catch (const std::out_of_range &) {
-      // Try the remaining datasets when this point is outside a native grid.
-    }
-  }
-  return false;
-}
-
 /// Keep the compact point footer readable without sacrificing useful precision
 /// for nearby terrain samples.
 [[nodiscard]] static NSString *format_point_distance(double metres) {
@@ -214,7 +193,6 @@
     didSelectLatitude:(double)latitude
             longitude:(double)longitude {
   (void)panel;
-  _coordinateMovePending = false;
   [self beginMinimapPointerOwnership];
   [self requestMapPointLatitude:latitude
                       longitude:longitude
@@ -225,7 +203,6 @@
     didRequestObserverMoveToLatitude:(double)latitude
                            longitude:(double)longitude {
   (void)panel;
-  _coordinateMovePending = false;
   [self beginMinimapPointerOwnership];
   [self requestMapPointLatitude:latitude
                       longitude:longitude
@@ -248,7 +225,6 @@
 
 - (void)moveObserverToLocation:(panorama::LatLon)location
                     completion:(void (^)(NSString *error))completion {
-  _coordinateMovePending = false;
   [self requestMapPointLatitude:location.lat
                       longitude:location.lon
                          action:panorama::app::MapPointAction::MoveObserver];
@@ -379,151 +355,6 @@
   }
   _renderer->request_ground_clearance(_groundClearance);
   return YES;
-}
-
-- (void)coordinateSystemChanged:(id)sender {
-  (void)sender;
-  const NSInteger tag = _coordinateSystemControl.selectedItem.tag;
-  switch (tag) {
-  case -1:
-    _coordinateInputControl.placeholderString = @"Enter or paste a coordinate";
-    _coordinateInputControl.toolTip = @"The coordinate system will be detected automatically";
-    break;
-  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Wgs84):
-    _coordinateInputControl.placeholderString = @"46.948, 7.447";
-    _coordinateInputControl.toolTip = @"Latitude, longitude in decimal WGS 84 degrees";
-    break;
-  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::SwissLv95):
-    _coordinateInputControl.placeholderString = @"2600000, 1200000";
-    _coordinateInputControl.toolTip = @"LV95 easting, northing in metres";
-    break;
-  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::BritishNationalGrid):
-    _coordinateInputControl.placeholderString = @"NG 90716 59877";
-    _coordinateInputControl.toolTip =
-        @"OS grid reference, or British National Grid easting, northing in metres";
-    break;
-  case static_cast<NSInteger>(panorama::app::CoordinateInputSystem::Terrain):
-    _coordinateInputControl.placeholderString =
-        _renderer->terrain_crs().id() == panorama::CrsId::Wgs84             ? @"46.948, 7.447"
-        : _renderer->terrain_crs().id() == panorama::CrsId::FrenchLambert93 ? @"700000, 6600000"
-        : _renderer->terrain_crs().id() == panorama::CrsId::SwissLv95       ? @"2600000, 1200000"
-                                                                            : @"400000, 300000";
-    _coordinateInputControl.toolTip =
-        _renderer->terrain_crs().id() == panorama::CrsId::Wgs84
-            ? @"Latitude, longitude in decimal WGS84 degrees"
-            : [NSString stringWithFormat:@"Easting, northing in %s metres",
-                                         _renderer->terrain_crs().name()];
-    break;
-  default:
-    throw std::logic_error("Unknown coordinate-system menu item");
-  }
-  [self updateCoordinateInputValidation];
-}
-
-- (BOOL)updateCoordinateInputValidation {
-  if (_coordinateSystemControl == nil || _coordinateInputControl == nil ||
-      _coordinateStatusLabel == nil || _coordinateMoveControl == nil) {
-    return NO;
-  }
-  _coordinateDestination.reset();
-  NSString *input = [_coordinateInputControl.stringValue
-      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-  if (input.length == 0U) {
-    _coordinateInputControl.textColor = NSColor.controlTextColor;
-    const NSInteger tag = _coordinateSystemControl.selectedItem.tag;
-    _coordinateStatusLabel.stringValue =
-        tag == -1
-            ? @"Format will be detected automatically"
-            : [NSString
-                  stringWithFormat:@"Enter coordinates as %s",
-                                   tag == static_cast<NSInteger>(
-                                              panorama::app::CoordinateInputSystem::Terrain
-                                          )
-                                       ? _renderer->terrain_crs().name()
-                                       : _coordinateSystemControl.titleOfSelectedItem.UTF8String];
-    _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
-    _coordinateMoveControl.enabled = NO;
-    return NO;
-  }
-
-  try {
-    panorama::app::ParsedCoordinateInput parsed;
-    const NSInteger tag = _coordinateSystemControl.selectedItem.tag;
-    if (tag == -1) {
-      std::vector<panorama::app::ParsedCoordinateInput> candidates =
-          panorama::app::detect_coordinate_inputs(input.UTF8String, _renderer->terrain_crs());
-      if (candidates.size() > 1U) {
-        std::vector<panorama::app::ParsedCoordinateInput> covered;
-        for (const auto &candidate : candidates) {
-          if (coordinate_has_terrain_coverage(
-                  _renderer->terrain_coverage(),
-                  candidate.geographic
-              )) {
-            covered.push_back(candidate);
-          }
-        }
-        if (!covered.empty()) {
-          candidates = std::move(covered);
-        }
-      }
-      if (candidates.size() > 1U) {
-        NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:candidates.size()];
-        for (const auto &candidate : candidates) {
-          [names addObject:[NSString stringWithUTF8String:candidate.source_name.c_str()]];
-        }
-        NSString *possibilities = [names componentsJoinedByString:@" or "];
-        _coordinateStatusLabel.stringValue =
-            [NSString stringWithFormat:@"Could be %@ — choose a system above", possibilities];
-        _coordinateStatusLabel.textColor = NSColor.systemOrangeColor;
-        _coordinateInputControl.textColor = NSColor.controlTextColor;
-        _coordinateInputControl.toolTip = _coordinateStatusLabel.stringValue;
-        _coordinateMoveControl.enabled = NO;
-        return NO;
-      }
-      parsed = candidates.front();
-    } else {
-      parsed = panorama::app::parse_coordinate_input(
-          input.UTF8String,
-          _renderer->terrain_crs(),
-          static_cast<panorama::app::CoordinateInputSystem>(tag)
-      );
-    }
-    _coordinateDestination = parsed;
-    NSString *source = [NSString stringWithUTF8String:parsed.source_name.c_str()];
-    _coordinateStatusLabel.stringValue = [NSString stringWithFormat:@"%@ • %.5f°, %.5f°",
-                                                                    source,
-                                                                    parsed.geographic.lat,
-                                                                    parsed.geographic.lon];
-    _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
-    _coordinateInputControl.textColor = NSColor.controlTextColor;
-    _coordinateInputControl.toolTip = _coordinateStatusLabel.stringValue;
-    _coordinateMoveControl.enabled = YES;
-    return YES;
-  } catch (const std::exception &exception) {
-    NSString *error = [NSString stringWithUTF8String:exception.what()];
-    _coordinateStatusLabel.stringValue = error;
-    _coordinateStatusLabel.textColor = NSColor.systemRedColor;
-    _coordinateInputControl.textColor = NSColor.systemRedColor;
-    _coordinateInputControl.toolTip = error;
-    _coordinateMoveControl.enabled = NO;
-    return NO;
-  }
-}
-
-- (void)moveToCoordinate:(id)sender {
-  (void)sender;
-  if (![self updateCoordinateInputValidation] || !_coordinateDestination.has_value()) {
-    NSBeep();
-    return;
-  }
-  const panorama::app::ParsedCoordinateInput parsed = *_coordinateDestination;
-  _coordinateMovePending = true;
-  _coordinateStatusLabel.stringValue =
-      [NSString stringWithFormat:@"%s • locating terrain…", parsed.source_name.c_str()];
-  _coordinateStatusLabel.textColor = NSColor.secondaryLabelColor;
-  [self requestMapPointLatitude:parsed.geographic.lat
-                      longitude:parsed.geographic.lon
-                         action:panorama::app::MapPointAction::MoveObserver];
 }
 
 - (void)setPointInfoStatus:(NSString *)status {
